@@ -918,3 +918,350 @@ def test_fresh_reconnect_rejects_delayed_events_from_replaced_source():
     assert result["newDoneAppliedToRegistry"] is True, (
         "the new source's done must be recorded in the new registry"
     )
+# ---------------------------------------------------------------------------
+# Ownership-generation regression matrix (maintainer re-gate item 6, #6381).
+#
+# The tests above prove the required reattach paths and the replaced-source
+# terminal path. The matrix below pins the *discriminator* those fixes rely on:
+# every transport callback must be authorized by TRANSPORT-GENERATION ownership,
+# never by the (session_id, stream_id) pair. Every test here:
+#
+#   1. installs generation A for a pair through the production path;
+#   2. forces the fresh-reconnect path (old transport closed -> not reusable), so
+#      production SUPERSEDES A and wires generation B for the SAME pair;
+#   3. delivers that family's event through the SUPERSEDED transport and proves
+#      the newer transport's state is untouched;
+#   4. proves the family is actually wired on BOTH transports, and that the
+#      CURRENT generation still reaches the same sink — so a silent no-op can
+#      never pass vacuously.
+#
+# Mutation evidence (each row must fail when ownership is weakened): replacing
+# `_isCurrentCapability()` with a pair-only comparison
+#
+#     function _isCurrentCapability(capability){
+#       if(!capability) return true;
+#       const live=LIVE_STREAMS[capability.sessionId];
+#       return !!(live&&live.streamId===capability.streamId);
+#     }
+#
+# makes the superseded-generation rows below fail (the stale callback reaches
+# its sink / clears the current transport's trackers). Same when the capability
+# check is dropped from `_ownsActiveStreamOrBackground()`.
+# ---------------------------------------------------------------------------
+
+_SIDE_EFFECT_GENERATION_DRIVER = textwrap.dedent("""\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+// Recorders that replace the harness stubs: the three side-effect sinks the
+// families under test write to.
+var __statusCalls = [];
+var __infoCalls = [];
+var __bgTaskCalls = [];
+setComposerStatus = function(msg){ __statusCalls.push(String(msg)); };
+console.info = function(){
+  __infoCalls.push(Array.prototype.slice.call(arguments).map(function(x){ return String(x); }).join(' '));
+};
+_handleBgTaskCompleteEvent = function(){ __bgTaskCalls.push('bg_task_complete'); };
+
+(async () => {
+  // Phase 1 — generation A installs through the production listener path.
+  attachLiveStream(SID, STREAM_ID, [], {});
+  const sourceA = __esCreated[0];
+
+  // Phase 2 — the SAME (session_id, stream_id) pair gets a new transport: the
+  // closed transport cannot be reused, so production supersedes generation A and
+  // wires generation B for the identical pair.
+  sourceA.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await new Promise((resolve) => setTimeout(resolve, 0)); // preflight + _wireSSE
+  const sourceB = __esCreated[1];
+
+  __results.generationAInstalled = !!sourceA;
+  __results.generationBInstalled = __esCreated.length === 2 && !!sourceB && sourceB !== sourceA;
+  __results.currentTransportIsB = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  __results.pairUnchanged = !!(
+    LIVE_STREAMS[SID] && LIVE_STREAMS[SID].streamId === STREAM_ID &&
+    LIVE_STREAMS[SID].capability && LIVE_STREAMS[SID].capability.sessionId === SID
+  );
+
+  const EVENTS = {
+    title_status:     {status:'generated', title:'Renamed', session_id: SID},
+    context_status:   {prefill:{status:'loaded', label:'session recall'}, session_id: SID},
+    bg_task_complete: {task_id:'bg-1', session_id: SID},
+    warning:          {type:'generic', message:'degraded but running', session_id: SID},
+  };
+  const SINKS = {
+    title_status:'info',
+    context_status:'status',
+    bg_task_complete:'bg',
+    warning:'status',
+  };
+
+  __results.registeredOnA = {};
+  __results.registeredOnB = {};
+  for (const type of Object.keys(EVENTS)) {
+    __results.registeredOnA[type] = (sourceA._handlers[type] || []).length;
+    __results.registeredOnB[type] = (sourceB._handlers[type] || []).length;
+  }
+
+  function _delta(fn){
+    const before = { status: __statusCalls.length, info: __infoCalls.length, bg: __bgTaskCalls.length };
+    let threw = null;
+    try { fn(); } catch (err) { threw = String((err && err.message) || err); }
+    return {
+      status: __statusCalls.length - before.status,
+      info: __infoCalls.length - before.info,
+      bg: __bgTaskCalls.length - before.bg,
+      threw: threw,
+    };
+  }
+
+  // Phase 3 — every family delivered by the SUPERSEDED generation is a no-op.
+  __results.superseded = {};
+  for (const type of Object.keys(EVENTS)) {
+    const row = _delta(function(){ sourceA.dispatch(type, EVENTS[type]); });
+    row.sink = SINKS[type];
+    row.sinkCalls = row[SINKS[type]];
+    __results.superseded[type] = row;
+  }
+
+  // Phase 4 — the CURRENT generation delivers the same events (wiring control).
+  __results.current = {};
+  for (const type of Object.keys(EVENTS)) {
+    const row = _delta(function(){ sourceB.dispatch(type, EVENTS[type]); });
+    row.sink = SINKS[type];
+    row.sinkCalls = row[SINKS[type]];
+    __results.current[type] = row;
+  }
+
+  process.stdout.write(JSON.stringify(__results) + '\\n', () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+""")
+
+
+def _assert_side_effect_row(result: dict, family: str, sink: str) -> None:
+    """Superseded generation must not reach the family's sink; the current
+    generation must (wiring control, so a no-op cannot pass vacuously)."""
+    assert result["generationAInstalled"] is True, "generation A must install"
+    assert result["generationBInstalled"] is True, (
+        "the fresh-reconnect path must supersede generation A with a NEW "
+        "EventSource for the same session+stream pair"
+    )
+    assert result["currentTransportIsB"] is True, (
+        "LIVE_STREAMS[activeSid] must own generation B"
+    )
+    assert result["pairUnchanged"] is True, (
+        "the discriminator must be the transport generation: session_id and "
+        "stream_id are identical in both generations"
+    )
+    assert result["registeredOnA"][family] >= 1, (
+        f"the superseded transport must have the '{family}' listener registered "
+        "(otherwise the no-op assertion would be vacuous)"
+    )
+    assert result["registeredOnB"][family] >= 1, (
+        f"the current transport must have the '{family}' listener registered"
+    )
+    assert result["superseded"][family]["threw"] is None, (
+        f"the superseded '{family}' callback must be rejected by the ownership "
+        f"guard, not crash: {result['superseded'][family]['threw']}"
+    )
+    assert result["superseded"][family][sink] == 0, (
+        f"a '{family}' event from the SUPERSEDED transport (identical "
+        f"session_id+stream_id) must not reach its side-effect sink "
+        f"({sink}); generation ownership must reject it"
+    )
+    assert result["current"][family][sink] >= 1, (
+        f"the CURRENT transport's '{family}' event must still reach the same "
+        f"sink ({sink})"
+    )
+
+
+def test_title_status_from_superseded_transport_never_reaches_its_sink():
+    """title_status (generation-fenced, side-effect only) must be ignored when
+    the delivering transport has been superseded for the same pair."""
+    result = _run_harness(_SIDE_EFFECT_GENERATION_DRIVER)
+    _assert_side_effect_row(result, "title_status", "info")
+
+
+def test_context_status_from_superseded_transport_never_reaches_its_sink():
+    """context_status must be ignored when the delivering transport has been
+    superseded for the same pair."""
+    result = _run_harness(_SIDE_EFFECT_GENERATION_DRIVER)
+    _assert_side_effect_row(result, "context_status", "status")
+
+
+def test_bg_task_complete_from_superseded_transport_never_reaches_its_sink():
+    """bg_task_complete must be ignored when the delivering transport has been
+    superseded for the same pair."""
+    result = _run_harness(_SIDE_EFFECT_GENERATION_DRIVER)
+    _assert_side_effect_row(result, "bg_task_complete", "bg")
+
+
+def test_warning_from_superseded_transport_never_reaches_its_sink():
+    """warning must be ignored when the delivering transport has been superseded
+    for the same pair."""
+    result = _run_harness(_SIDE_EFFECT_GENERATION_DRIVER)
+    _assert_side_effect_row(result, "warning", "status")
+
+
+_TERMINAL_GENERATION_DRIVER = textwrap.dedent("""\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+(async () => {
+  attachLiveStream(SID, STREAM_ID, [], {});
+  const sourceA = __esCreated[0];
+  sourceA.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await new Promise((resolve) => setTimeout(resolve, 0)); // preflight + _wireSSE
+  const sourceB = __esCreated[1];
+  const registryB = window._liveAnchorRegistries.get(STREAM_ID);
+
+  __results.generationBInstalled = __esCreated.length === 2 && !!sourceB && sourceB !== sourceA;
+  __results.currentTransportIsB = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  __results.registered = {
+    apperror: (sourceA._handlers['apperror'] || []).length,
+    cancel: (sourceA._handlers['cancel'] || []).length,
+  };
+
+  function _snapshot(){
+    const reg = window._liveAnchorRegistries.get(STREAM_ID);
+    return {
+      hiddenEntry: !!_STREAM_WAS_HIDDEN[SID],
+      backgroundEntry: !!_STREAM_NOTIFICATION_BACKGROUND[SID],
+      activeStreamId: String(S.activeStreamId || ''),
+      registryIsB: reg === registryB,
+      registryEvents: (reg && reg.anchor && Array.isArray(reg.anchor.activity_events))
+        ? reg.anchor.activity_events.length : -1,
+      sourceBOpen: sourceB.readyState === EventSource.OPEN,
+      currentTransportIsB: !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB),
+    };
+  }
+
+  // Precondition for the whole matrix: the trackers the terminal paths drop must
+  // exist BEFORE the stale dispatch, or the assertions below prove nothing.
+  _STREAM_WAS_HIDDEN[SID] = {streamId: STREAM_ID, wasHidden: true};
+  _STREAM_NOTIFICATION_BACKGROUND[SID] = {streamId: STREAM_ID, wasBackgrounded: true};
+  S.activeStreamId = STREAM_ID;
+  __results.before = _snapshot();
+
+  __results.superseded = {};
+  const TERMINAL = [
+    ['apperror', {type:'error', message:'boom', session_id: SID}],
+    ['cancel', {status:'cancelled', session_id: SID}],
+  ];
+  for (const pair of TERMINAL) {
+    const type = pair[0];
+    let threw = null;
+    try { sourceA.dispatch(type, pair[1]); } catch (err) { threw = String((err && err.message) || err); }
+    const snap = _snapshot();
+    snap.threw = threw;
+    __results.superseded[type] = snap;
+    // Reset the shared trackers so each family starts from the same state.
+    _STREAM_WAS_HIDDEN[SID] = {streamId: STREAM_ID, wasHidden: true};
+    _STREAM_NOTIFICATION_BACKGROUND[SID] = {streamId: STREAM_ID, wasBackgrounded: true};
+    S.activeStreamId = STREAM_ID;
+  }
+
+  process.stdout.write(JSON.stringify(__results) + '\\n', () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+""")
+
+
+def _assert_terminal_row(result: dict, family: str) -> None:
+    """A terminal event from the superseded generation must not settle, clear,
+    or replace anything the newer transport owns."""
+    before = result["before"]
+    after = result["superseded"][family]
+    assert result["generationBInstalled"] is True, (
+        "the fresh-reconnect path must supersede generation A"
+    )
+    assert result["currentTransportIsB"] is True, (
+        "LIVE_STREAMS[activeSid] must own generation B"
+    )
+    assert result["registered"][family] >= 1, (
+        f"the superseded transport must have the '{family}' listener registered "
+        "(otherwise the no-op assertion would be vacuous)"
+    )
+    assert before["hiddenEntry"] is True and before["backgroundEntry"] is True, (
+        "precondition: the hidden/notification trackers must exist before the "
+        "stale terminal event, so their survival is meaningful"
+    )
+    assert after["threw"] is None, (
+        f"the superseded '{family}' callback must be rejected by the ownership "
+        f"guard, not crash: {after['threw']}"
+    )
+    assert after["hiddenEntry"] is True, (
+        f"the superseded '{family}' must not drop the current transport's hidden "
+        "tracker (#4416 state belongs to the live transport)"
+    )
+    assert after["backgroundEntry"] is True, (
+        f"the superseded '{family}' must not drop the current transport's "
+        "notification-background tracker"
+    )
+    assert after["activeStreamId"] == before["activeStreamId"] == "test-stream", (
+        f"the superseded '{family}' must not settle the CURRENT turn "
+        "(S.activeStreamId must stay set)"
+    )
+    assert after["registryIsB"] is True, (
+        f"the superseded '{family}' must not replace the current registry"
+    )
+    assert after["registryEvents"] == before["registryEvents"], (
+        f"the superseded '{family}' must not write the current registry"
+    )
+    assert after["sourceBOpen"] is True and after["currentTransportIsB"] is True, (
+        f"the superseded '{family}' must leave the CURRENT transport open and owned"
+    )
+
+
+def test_apperror_from_superseded_transport_does_not_settle_current_transport():
+    """A stale apperror must not clear INFLIGHT/trackers or settle the newer
+    transport that owns the same session+stream pair."""
+    result = _run_harness(_TERMINAL_GENERATION_DRIVER)
+    _assert_terminal_row(result, "apperror")
+
+
+def test_cancel_from_superseded_transport_does_not_settle_current_transport():
+    """A stale cancel must not clear trackers or settle the newer transport that
+    owns the same session+stream pair."""
+    result = _run_harness(_TERMINAL_GENERATION_DRIVER)
+    _assert_terminal_row(result, "cancel")
