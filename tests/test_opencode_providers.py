@@ -35,6 +35,22 @@ def test_opencode_go_in_provider_display():
     assert config._PROVIDER_DISPLAY["opencode-go"] == "OpenCode Go"
 
 
+def test_opencode_free_registration_and_aliases():
+    assert config._PROVIDER_DISPLAY["opencode-free"] == "OpenCode Free"
+    assert config._resolve_provider_alias("free") == "opencode-free"
+    assert config._resolve_provider_alias("opencode_free") == "opencode-free"
+    assert config._resolve_provider_alias("opencode") == "opencode-zen"
+    assert config._resolve_provider_alias("opencode-free-tier") == "opencode-free-tier"
+
+
+def test_opencode_free_has_exact_curated_models():
+    assert [m["id"] for m in config._PROVIDER_MODELS["opencode-free"]] == [
+        "x-preview-f-free", "hy3-free", "laguna-s-2.1-free",
+        "nemotron-3-ultra-free", "nemotron-3.5-lightning-free",
+        "muse-spark-1.2-contributor-free",
+    ]
+
+
 def test_opencode_zen_in_provider_models():
     assert "opencode-zen" in config._PROVIDER_MODELS
     ids = [m["id"] for m in config._PROVIDER_MODELS["opencode-zen"]]

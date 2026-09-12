@@ -16,10 +16,14 @@ from api.config import (
     DEFAULT_MODEL,
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
+    _OPENCODE_FREE_MODEL_IDS,
     _HERMES_FOUND,
     invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _canonicalise_provider_id,
+    _strip_opencode_free_provider_prefix,
+    provider_is_keyless,
     _get_config_path,
     get_available_models,
     get_config,
@@ -94,6 +98,16 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_base_url": "https://api.openai.com/v1",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("openai", [])),
+        "category": "easy_start",
+    },
+    "opencode-free": {
+        "label": "OpenCode Free",
+        "env_var": "",
+        "default_model": "x-preview-f-free",
+        "requires_base_url": False,
+        "key_optional": True,
+        "keyless": True,
+        "models": list(_PROVIDER_MODELS.get("opencode-free", [])),
         "category": "easy_start",
     },
     # ── Open / self-hosted ─────────────────────────────────────────────
@@ -292,6 +306,8 @@ def _normalize_model_for_provider(provider: str, model: str) -> str:
     clean = (model or "").strip()
     if not clean:
         return ""
+    if provider == "opencode-free":
+        return _strip_opencode_free_provider_prefix(clean)
     if provider in {"anthropic", "openai"} and clean.startswith(provider + "/"):
         return clean.split("/", 1)[1]
     return clean
@@ -558,7 +574,8 @@ def probe_provider_endpoint(
 def _extract_current_provider(cfg: dict) -> str:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        provider = str(model_cfg.get("provider") or "").strip().lower()
+        raw_provider = str(model_cfg.get("provider") or "").strip()
+        provider = _canonicalise_provider_id(raw_provider)
         if provider:
             return provider
     return ""
@@ -725,7 +742,12 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
 
     if provider_configured:
         meta = _SUPPORTED_PROVIDER_SETUPS.get(provider, {})
-        if provider in _SUPPORTED_PROVIDER_SETUPS:
+        if provider == "opencode-free":
+            provider_ready = (
+                _strip_opencode_free_provider_prefix(model)
+                in _OPENCODE_FREE_MODEL_IDS
+            )
+        elif provider in _SUPPORTED_PROVIDER_SETUPS:
             # key_optional providers (lmstudio, ollama, custom) are ready as
             # soon as the user has saved a provider+model+base_url; an api_key
             # is allowed but not required.  The agent runtime substitutes a
@@ -842,6 +864,7 @@ def _build_setup_catalog(cfg: dict) -> dict:
                 # keyless (lmstudio, ollama, custom).  Frontend uses this to
                 # show a "(optional)" hint and allow Continue without a key.
                 "key_optional": bool(meta.get("key_optional")),
+                "is_keyless": bool(provider_is_keyless(provider_id)),
                 "models": list(meta.get("models", [])),
                 "category": meta.get("category", "easy_start"),
                 "quick": meta.get("quick", False),
@@ -990,7 +1013,8 @@ def apply_onboarding_setup(body: dict) -> dict:
         save_settings({"onboarding_completed": True})
         return get_onboarding_status()
 
-    provider = str(body.get("provider") or "").strip().lower()
+    raw_provider = str(body.get("provider") or "").strip()
+    provider = _canonicalise_provider_id(raw_provider)
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
@@ -1003,6 +1027,11 @@ def apply_onboarding_setup(body: dict) -> dict:
         return get_onboarding_status()
     if not model:
         raise ValueError("model is required")
+    if (
+        provider == "opencode-free"
+        and _strip_opencode_free_provider_prefix(model) not in _OPENCODE_FREE_MODEL_IDS
+    ):
+        raise ValueError("opencode-free only supports its six curated free models")
 
     provider_meta = _SUPPORTED_PROVIDER_SETUPS[provider]
     if provider_meta.get("requires_base_url"):
@@ -1030,7 +1059,9 @@ def apply_onboarding_setup(body: dict) -> dict:
     env_path = _get_active_hermes_home() / ".env"
     env_values = _load_env_file(env_path)
 
-    if not api_key and not _provider_api_key_present(provider, cfg, env_values):
+    if provider_is_keyless(provider):
+        api_key = ""
+    elif not api_key and not _provider_api_key_present(provider, cfg, env_values):
         # Providers that may run keyless (lmstudio, ollama, custom — gated by
         # `key_optional` in _SUPPORTED_PROVIDER_SETUPS) are allowed to onboard
         # with no api_key. OAuth-capable wizard providers (currently Anthropic
@@ -1049,6 +1080,17 @@ def apply_onboarding_setup(body: dict) -> dict:
     model_cfg["provider"] = provider
     model_cfg["default"] = _normalize_model_for_provider(provider, model)
 
+    if provider_is_keyless(provider):
+        # A provider switch reuses the existing model mapping. Remove every
+        # credential-shaped field so stale paid-provider state cannot reach the
+        # keyless Agent runtime on a later request.
+        for key in (
+            "api_key", "key_env", "api_key_env", "env_var", "token",
+            "auth_token", "access_token", "refresh_token", "authorization",
+            "credentials", "credential",
+        ):
+            model_cfg.pop(key, None)
+
     if provider_meta.get("requires_base_url"):
         model_cfg["base_url"] = base_url
     elif provider_meta.get("default_base_url"):
@@ -1059,7 +1101,7 @@ def apply_onboarding_setup(body: dict) -> dict:
     cfg["model"] = model_cfg
     _save_yaml_config(config_path, cfg)
 
-    if api_key:
+    if api_key and provider_meta.get("env_var"):
         _write_env_file(env_path, {provider_meta["env_var"]: api_key})
 
     # Reload the hermes_cli provider/config cache so the next streaming call

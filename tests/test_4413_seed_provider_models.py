@@ -156,6 +156,30 @@ class TestAliasedProviderMerge:
             "Adding vendors is a maintainer curation decision (#4413)."
         )
 
+    def test_curated_free_provider_is_enriched_only_for_allowlist(self, restore_providers):
+        removed_id = "muse-spark-1.2-contributor-free"
+        _PROVIDER_MODELS["opencode-free"] = [
+            model for model in _PROVIDER_MODELS["opencode-free"] if model["id"] != removed_id
+        ]
+        fake_pm = {
+            "opencode-free": [removed_id, "agent-added-free-model"],
+            "new-core-only": ["bad"],
+        }
+        with _patch_core_pm(fake_pm):
+            _seed_provider_models_from_core()
+        free_ids = [m["id"] for m in _PROVIDER_MODELS["opencode-free"]]
+        assert "agent-added-free-model" not in free_ids
+        assert removed_id in free_ids
+        assert free_ids == [
+            "x-preview-f-free",
+            "hy3-free",
+            "laguna-s-2.1-free",
+            "nemotron-3-ultra-free",
+            "nemotron-3.5-lightning-free",
+            "muse-spark-1.2-contributor-free",
+        ]
+        assert "new-core-only" not in _PROVIDER_MODELS
+
 
 # ── Test 3: exception narrowing ─────────────────────────────────────────────
 

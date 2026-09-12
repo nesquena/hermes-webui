@@ -10966,6 +10966,7 @@ async function loadProvidersPanel(){
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
     const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
+    (data.providers||[]).filter(p=>p.is_keyless&&!providers.includes(p)).forEach(p=>providers.push(p));
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -11386,6 +11387,7 @@ function _buildProviderCard(p){
   // Use the is_oauth flag from the backend — it reflects _OAUTH_PROVIDERS in providers.py.
   // key_source can be 'oauth' (hermes auth), 'config_yaml' (token in config.yaml), or 'none'.
   const isOauth=p.is_oauth===true;
+  const isKeyless=p.is_keyless===true;
   // models_total reflects the complete catalog (e.g. 396 for a large-tier
   // Nous Portal account). The "models" array may be trimmed to a featured
   // subset for UI scannability — fall back to its length only when the
@@ -11393,7 +11395,9 @@ function _buildProviderCard(p){
   const modelCount=Number.isFinite(p.models_total)
     ? p.models_total
     : (Array.isArray(p.models) ? p.models.length : 0);
-  const sourceLabel=p.key_source==='oauth'
+  const sourceLabel=isKeyless
+    ? t('providers_status_keyless')
+    : p.key_source==='oauth'
     ? t('providers_status_oauth')
     : p.key_source==='config_yaml'
       ? t('providers_status_configured')||'Configured'
@@ -11412,13 +11416,23 @@ function _buildProviderCard(p){
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
     </div>
-    ${p.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    ${(p.has_key||isKeyless)?`<span class="provider-card-badge">${esc(isKeyless?t('providers_status_keyless'):t('providers_status_configured'))}</span>`:''}
     <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
   `;
   card.appendChild(header);
 
   const body=document.createElement('div');
   body.className='provider-card-body';
+
+  if(isKeyless){
+    const hint=document.createElement('div');
+    hint.className='provider-card-hint';
+    hint.textContent=t('providers_keyless_hint');
+    body.appendChild(hint);
+    card.appendChild(body);
+    header.addEventListener('click',()=>card.classList.toggle('open'));
+    return card;
+  }
 
   if(isOauth){
     const hint=document.createElement('div');

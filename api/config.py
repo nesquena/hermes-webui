@@ -1194,6 +1194,7 @@ _PROVIDER_DISPLAY = {
     "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
+    "opencode-free": "OpenCode Free",
     "lmstudio": "LM Studio",
     "mistralai": "Mistral",
     "qwen": "Qwen",
@@ -1236,6 +1237,8 @@ _PROVIDER_ALIASES = {
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
     "opencode": "opencode-zen",
+    "free": "opencode-free",
+    "opencode_free": "opencode-free",
     "grok": "xai",
     "x-ai": "xai",
     "x.ai": "xai",
@@ -1260,6 +1263,47 @@ _PROVIDER_ALIASES = {
     # OpenAI-compat path. See #1384.
     "local": "custom",
 }
+
+_OPENCODE_FREE_MODEL_IDS = frozenset({
+    "x-preview-f-free",
+    "hy3-free",
+    "laguna-s-2.1-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "muse-spark-1.2-contributor-free",
+})
+
+
+def _strip_opencode_free_provider_prefix(model_id: object) -> str:
+    """Return the bare curated id from a portal-qualified free model id."""
+    model = str(model_id or "").strip()
+    lowered = model.lower()
+    if lowered.startswith("opencode-free/"):
+        return model.split("/", 1)[1]
+    if lowered.startswith("@opencode-free:"):
+        return model.split(":", 1)[1]
+    return model
+
+
+def _curated_opencode_free_models(models: object) -> list[dict]:
+    """Keep every free-provider catalog projection on the fixed six-model contract."""
+    if not isinstance(models, (list, tuple)):
+        return []
+    return [
+        copy.deepcopy(model)
+        for model in models
+        if isinstance(model, dict)
+        and _strip_opencode_free_provider_prefix(model.get("id")) in _OPENCODE_FREE_MODEL_IDS
+    ]
+
+
+def _sanitize_opencode_free_default(model_id: object, provider_id: object) -> str:
+    """Drop persisted free-provider defaults outside the curated catalog."""
+    model = str(model_id or "").strip()
+    if _canonicalise_provider_id(provider_id) != "opencode-free":
+        return model
+    candidate = _strip_opencode_free_provider_prefix(model)
+    return model if candidate in _OPENCODE_FREE_MODEL_IDS else ""
 
 
 def _get_anthropic_fallback_env_vars() -> tuple[str, ...]:
@@ -1313,6 +1357,24 @@ def _resolve_provider_alias(name: str) -> str:
     except Exception:
         pass
     return _PROVIDER_ALIASES.get(raw, name)
+
+
+def provider_is_keyless(provider_id: str) -> bool:
+    """Return the Agent-owned keyless capability for a canonical provider."""
+    # Normalize before consulting either metadata source.  Agent aliases can
+    # use underscore or mixed-case spellings, while the WebUI tables are
+    # lowercase hyphenated slugs.
+    raw = str(provider_id or "").strip().lower().replace("_", "-")
+    canonical = str(_resolve_provider_alias(raw) or "").strip().lower().replace("_", "-")
+    try:
+        from hermes_cli.providers import HERMES_OVERLAYS
+
+        overlay = HERMES_OVERLAYS.get(canonical)
+        if overlay is not None:
+            return bool(getattr(overlay, "keyless", False))
+    except (ImportError, AttributeError, TypeError):
+        pass
+    return canonical == "opencode-free"
 
 
 def _is_known_model_provider(provider_id: str) -> bool:
@@ -1860,6 +1922,14 @@ _PROVIDER_MODELS = {
         {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
         {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
     ],
+    "opencode-free": [
+        {"id": "x-preview-f-free", "label": "Ox Alpha"},
+        {"id": "hy3-free", "label": "Hy3"},
+        {"id": "laguna-s-2.1-free", "label": "Laguna S 2.1"},
+        {"id": "nemotron-3-ultra-free", "label": "Nemotron 3 Ultra"},
+        {"id": "nemotron-3.5-lightning-free", "label": "Nemotron 3.5 Lightning"},
+        {"id": "muse-spark-1.2-contributor-free", "label": "Muse Spark 1.2 Contributor"},
+    ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:
     #   https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
@@ -1956,7 +2026,6 @@ def _seed_provider_models_from_core() -> None:
     for provider_id, core_models in _core_pm.items():
         if not isinstance(core_models, list):
             continue
-
         # Resolve the core's provider_id to the WebUI's key for this provider.
         webui_key = provider_id
         webui_list = _PROVIDER_MODELS.get(provider_id)
@@ -1999,6 +2068,11 @@ def _seed_provider_models_from_core() -> None:
         }
         for mid in core_models:
             if not isinstance(mid, str) or not mid.strip():
+                continue
+            if (
+                _canonicalise_provider_id(provider_id) == "opencode-free"
+                and mid.strip() not in _OPENCODE_FREE_MODEL_IDS
+            ):
                 continue
             normed = mid.strip().replace("-", ".").lower()
             if normed not in existing_ids:
@@ -2599,8 +2673,10 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
             bare_model = f"{extra}:{bare_model}"
     elif (provider_hint not in _PROVIDER_MODELS
             and provider_hint not in _PROVIDER_DISPLAY
-            and not provider_hint.startswith("custom:")):
+            and not provider_hint.lower().startswith("custom:")):
         provider_hint, bare_model = inner.split(":", 1)
+    if _canonicalise_provider_id(provider_hint) == "opencode-free":
+        provider_hint = "opencode-free"
     return bare_model, provider_hint
 
 
@@ -2772,6 +2848,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # vLLM, TabbyAPI) actually use. See #1384.
     if isinstance(config_provider, str) and config_provider.strip().lower() == "local":
         config_provider = "custom"
+    if _canonicalise_provider_id(config_provider) == "opencode-free":
+        config_provider = "opencode-free"
 
     def _finalize(model: object, provider: object, base_url: object) -> tuple:
         """Point-of-return collision guard.
@@ -2787,6 +2865,15 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         the one whose endpoint we resolved. No-op for bare ``custom`` and every
         non-custom provider.
         """
+        if _canonicalise_provider_id(provider) == "opencode-free":
+            candidate = str(model or "").strip()
+            if candidate.lower().startswith("opencode-free/"):
+                candidate = candidate.split("/", 1)[1]
+            if candidate not in _OPENCODE_FREE_MODEL_IDS:
+                raise ValueError(
+                    "opencode-free only supports its six curated free models"
+                )
+            base_url = None
         if isinstance(provider, str) and provider.startswith("custom:"):
             _unique_custom_provider_entry(
                 cfg.get('custom_providers', []),
@@ -2955,6 +3042,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 continue
             if target in _configured_model_ids(pdef.get('models')):
                 p_base_url = str(pdef.get('base_url') or '').strip()
+                if _canonicalise_provider_id(slug) == "opencode-free":
+                    return _finalize(model_id, "opencode-free", None)
                 return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
@@ -2999,6 +3088,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
+        canonical_prefix = _canonicalise_provider_id(prefix)
+        if canonical_prefix == "opencode-free":
+            return _finalize(
+                f"{canonical_prefix}/{bare}", canonical_prefix, None
+            )
         # OpenRouter always needs the full provider/model path (e.g. openrouter/free,
         # anthropic/claude-sonnet-4.6). Never strip the prefix for OpenRouter.
         if config_provider == "openrouter":
@@ -3011,7 +3105,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # fired in the prefix==config_provider case, causing HTTP 404 from the
         # portal which requires the full provider/model id (#2177; sibling of
         # #854 / #894 for Nous, where this guard was originally added).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "opencode-free", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
             return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
@@ -4859,8 +4953,14 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # not the prefixed form). The Settings picker handles the resulting
         # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
         # matcher — see `static/panels.js` (#895).
-        persisted_model = str(resolved_model or selected_model).strip()
         persisted_provider = str(requested_provider or resolved_provider or previous_provider or "").strip()
+        if _canonicalise_provider_id(persisted_provider) == "opencode-free":
+            persisted_provider = "opencode-free"
+        persisted_model = str(resolved_model or selected_model).strip()
+        if persisted_provider == "opencode-free":
+            persisted_model = _sanitize_opencode_free_default(persisted_model, persisted_provider)
+            if not persisted_model:
+                raise ValueError("opencode-free only supports its six curated free models")
         provider_override_won = bool(requested_provider and requested_provider != str(resolved_provider or "").strip())
         # Never persist the bogus ``local`` value — see #1384. The auto-detect
         # block in ``_build_available_models_uncached`` was rewriting unknown
@@ -5487,7 +5587,9 @@ def _minimal_static_models_catalog() -> dict:
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
+        default_model = _sanitize_opencode_free_default(
+            get_effective_default_model(cfg), active_provider
+        )
         groups: list[dict] = []
         if default_model:
             try:
@@ -5557,7 +5659,9 @@ def _static_models_catalog_without_live_probes() -> dict:
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
+        default_model = _sanitize_opencode_free_default(
+            get_effective_default_model(cfg), active_provider
+        )
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -5569,6 +5673,8 @@ def _static_models_catalog_without_live_probes() -> dict:
             pid = _canonicalise_provider_id(provider_id)
             mid = str(model_id or "").strip()
             if not pid or not mid:
+                return
+            if pid == "opencode-free" and mid not in _OPENCODE_FREE_MODEL_IDS:
                 return
             configured_model_ids.setdefault(pid, [])
             if mid not in configured_model_ids[pid]:
@@ -5622,6 +5728,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                         has_local_signal = True
                     if has_local_signal:
                         detected_providers.add(canonical)
+
+        if provider_is_keyless("opencode-free"):
+            detected_providers.add("opencode-free")
 
         for provider_id in set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY):
             canonical = _canonicalise_provider_id(provider_id)
@@ -5741,10 +5850,12 @@ def _static_models_catalog_without_live_probes() -> dict:
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+            if pid != "opencode-free" and isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 raw_models = _configured_model_options(provider_cfg["models"])
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+            if pid == "opencode-free":
+                raw_models = _curated_opencode_free_models(raw_models)
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
             # and rarely ship a `models:` allowlist in providers.<slug>, so
             # the static catalog above would render them as empty groups that
@@ -5761,7 +5872,11 @@ def _static_models_catalog_without_live_probes() -> dict:
                     _fallback = getattr(_plugin_profile, "fallback_models", ()) or ()
                     raw_models = [{"id": str(mid), "label": str(mid)} for mid in _fallback]
             for model_id in configured_model_ids.get(pid, []):
-                if model_id and not any(m.get("id") == model_id for m in raw_models):
+                if (
+                    pid != "opencode-free"
+                    and model_id
+                    and not any(m.get("id") == model_id for m in raw_models)
+                ):
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
@@ -5779,7 +5894,10 @@ def _static_models_catalog_without_live_probes() -> dict:
                     }
                 )
 
-        if default_model:
+        if default_model and not (
+            active_provider == "opencode-free"
+            and default_model not in _OPENCODE_FREE_MODEL_IDS
+        ):
             all_model_ids = {
                 str(model.get("id") or "")
                 for group in groups
@@ -5791,7 +5909,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                     (group for group in groups if group.get("provider_id") == active_provider),
                     None,
                 )
-                if target_group is not None:
+                if (
+                    target_group is not None
+                    and not (
+                        active_provider == "opencode-free"
+                        and default_model not in _OPENCODE_FREE_MODEL_IDS
+                    )
+                ):
                     target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
                 elif groups:
                     groups.append(
@@ -6393,11 +6517,21 @@ def _load_models_cache_from_disk() -> dict | None:
         # disk save path does not persist `aliases`, so reconstruct them from
         # current config to keep the /api/models.aliases contract intact (a
         # disk-cache hit must not silently drop `/model <alias>` resolution).
+        default_model = _sanitize_opencode_free_default(
+            cache["default_model"], cache["active_provider"]
+        )
+        groups = copy.deepcopy(cache["groups"])
+        for group in groups:
+            if _canonicalise_provider_id(group.get("provider_id")) == "opencode-free":
+                for bucket_name in ("models", "extra_models"):
+                    group[bucket_name] = _curated_opencode_free_models(
+                        group.get(bucket_name)
+                    )
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
-            "default_model": cache["default_model"],
+            "default_model": default_model,
             "configured_model_badges": cache["configured_model_badges"],
-            "groups": cache["groups"],
+            "groups": groups,
             "aliases": (
                 cache["aliases"]
                 if isinstance(cache.get("aliases"), dict)
@@ -6461,11 +6595,21 @@ def _load_stale_models_cache_from_disk() -> dict | None:
             # duration of the over-budget stale fallback. Reconstruct from
             # current config, mirroring the live/static catalog alias build.
             aliases = _model_aliases_from_config()
+        default_model = _sanitize_opencode_free_default(
+            cache["default_model"], cache["active_provider"]
+        )
+        groups = copy.deepcopy(cache["groups"])
+        for group in groups:
+            if _canonicalise_provider_id(group.get("provider_id")) == "opencode-free":
+                for bucket_name in ("models", "extra_models"):
+                    group[bucket_name] = _curated_opencode_free_models(
+                        group.get(bucket_name)
+                    )
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
-            "default_model": cache["default_model"],
+            "default_model": default_model,
             "configured_model_badges": cache["configured_model_badges"],
-            "groups": cache["groups"],
+            "groups": groups,
             "aliases": aliases,
         })
     except Exception:
@@ -6729,6 +6873,12 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     pid = str(provider_id or "").strip()
     if not pid:
         return []
+    if _canonicalise_provider_id(pid) == "opencode-free":
+        return [
+            str(entry["id"])
+            for entry in _PROVIDER_MODELS["opencode-free"]
+            if isinstance(entry, dict) and entry.get("id")
+        ]
     try:
         from hermes_cli.models import provider_model_ids as _provider_model_ids
     except Exception:
@@ -6772,6 +6922,8 @@ def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> lis
         seen.add(mid_s)
         label = formatter(mid_s) if formatter else _get_label_for_model(mid_s, [])
         models.append({"id": mid_s, "label": label})
+    if _canonicalise_provider_id(provider_id) == "opencode-free":
+        return _curated_opencode_free_models(models)
     return models
 
 
@@ -7047,6 +7199,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
+
+        default_model = _sanitize_opencode_free_default(default_model, active_provider)
 
         # 3. Detect available providers.
         detected_providers = set()
@@ -7713,6 +7867,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _pid_norm.startswith("custom:") and _pid_norm not in _named_custom_slugs:
                     detected_providers.discard(_pid)
 
+        if provider_is_keyless("opencode-free"):
+            detected_providers.add("opencode-free")
+
         # Filter providers if providers.only_configured is set
         providers_cfg = cfg.get("providers", {})
         only_show_configured = providers_cfg.get("only_configured", False) if isinstance(providers_cfg, dict) else False
@@ -7731,6 +7888,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
             # Only show providers that are both detected and configured
             detected_providers = detected_providers.intersection(configured_providers)
+            if provider_is_keyless("opencode-free"):
+                detected_providers.add("opencode-free")
 
         # Post-collection dedup: re-canonicalise every entry so any path that
         # added a non-canonical id (mixed-case from auth-store, raw config-key,
@@ -7775,6 +7934,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 allow_empty: bool = False,
             ) -> None:
                 picker_models = copy.deepcopy(raw_models or [])
+                if _canonicalise_provider_id(provider_id) == "opencode-free":
+                    picker_models = _curated_opencode_free_models(picker_models)
                 if _is_openai_family_provider(provider_id):
                     for _model in picker_models:
                         if not isinstance(_model, dict):
@@ -8146,6 +8307,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _uses_models_as_settings_map = pid == "copilot"
                     if (
                         not _uses_models_as_settings_map
+                        and pid != "opencode-free"
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
@@ -8169,7 +8331,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
 
-                    detected_models = auto_detected_models_by_provider.get(pid, [])
+                    if pid == "opencode-free":
+                        raw_models = _curated_opencode_free_models(raw_models)
+
+                    detected_models = (
+                        [] if pid == "opencode-free"
+                        else auto_detected_models_by_provider.get(pid, [])
+                    )
                     if detected_models and not raw_models:
                         raw_models = copy.deepcopy(detected_models)
                     _append_picker_group(provider_name, pid, raw_models)
@@ -8266,7 +8434,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     for bucket_name in ("models", "extra_models")
                     for m in g.get(bucket_name, [])
                 }
-                if _norm_model_id(default_model) not in all_ids_norm:
+                if (
+                    _norm_model_id(default_model) not in all_ids_norm
+                    and not (
+                        active_provider == "opencode-free"
+                        and default_model not in _OPENCODE_FREE_MODEL_IDS
+                    )
+                ):
                     label = _get_label_for_model(default_model, groups)
                     target_display = (
                         _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
