@@ -3777,6 +3777,9 @@ def _strip_xml_tool_calls(text: str) -> str:
     return s.strip()
 
 
+_MAX_GENERATED_TITLE_WORDS = 12
+
+
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
     s = _strip_thinking_markup(text or '')
@@ -3787,10 +3790,14 @@ def _sanitize_generated_title(text: str) -> str:
         flags=re.IGNORECASE,
     )
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
-    s = s.strip(" \t\r\n\"'`*_~")
+    # Check the untrimmed candidate first so wrapping quotes remain available
+    # to the quoted-alternatives guard below.
+    if _looks_invalid_generated_title(s):
+        return ''
+    s = s.strip().strip("\"'`*_~").strip()
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
-    if _is_bad_new_title(s):
+    if _is_bad_new_title(s) or len(s.split()) > _MAX_GENERATED_TITLE_WORDS:
         return ''
     return s[:80]
 
@@ -3807,6 +3814,18 @@ def _looks_invalid_generated_title(text: str) -> bool:
         return True
     return bool(
         re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?(?:title should|something like|good title|a good title|options\s*:|maybe\s+)',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(r'\b3-8 words\b|\btopic label\b', s, flags=re.IGNORECASE)
+        or re.search(
+            r'["“][^"”\n]+["”]\s+or\s+["“][^"”\n]+["”]',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(r'^\s*[-*•]\s*["“][^"”\n]+["”]', s)
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
@@ -4496,6 +4515,45 @@ def _safe_text_value(value) -> str:
     return str(value or '').strip()
 
 
+_TITLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "session_title",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _extract_title_text(content: str) -> str:
+    """Extract a title from strict, fenced, or loosely embedded JSON."""
+    raw = str(content or '').strip()
+    if not raw:
+        return ''
+    fenced = re.match(r'^```(?:json)?\s*(.*?)\s*```$', raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        raw = fenced.group(1).strip()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and isinstance(parsed.get('title'), str):
+            return parsed['title'].strip()
+        return ''
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if match:
+        try:
+            return json.loads(f'"{match.group(1)}"').strip()
+        except ValueError:
+            return match.group(1).strip()
+    return raw
+
+
 def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
     """Return (content, empty_status) from an OpenAI-compatible response."""
     suffix = '_aux' if aux else ''
@@ -4505,7 +4563,9 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         message = _safe_obj_value(choice, 'message')
         content = _safe_text_value(_safe_obj_value(message, 'content'))
         if content:
-            return content, ''
+            title_text = _extract_title_text(content)
+            if title_text:
+                return title_text, ''
         finish_reason = _safe_text_value(_safe_obj_value(choice, 'finish_reason')).lower()
         reasoning = (
             _safe_text_value(_safe_obj_value(message, 'reasoning'))
@@ -4560,6 +4620,7 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
+    schema_extra = {"response_format": _TITLE_RESPONSE_FORMAT}
     reasoning_extra = {}
     if not _route_rejects_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
@@ -4569,6 +4630,8 @@ def generate_title_raw_via_aux(
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
         last_status = 'llm_error_aux'
+        attempted = 0
+        schema_unavailable = False
         for idx, prompt in enumerate(prompts):
             messages = [
                 {"role": "system", "content": prompt},
@@ -4577,22 +4640,37 @@ def generate_title_raw_via_aux(
             budgets = [base_max_tokens]
             try:
                 for budget_idx, max_tokens in enumerate(budgets):
-                    resp = call_llm(
-                        task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.2,
-                        timeout=_timeout,
-                        extra_body=reasoning_extra or None,
-                    )
-                    raw, empty_status = _extract_title_response(resp, aux=True)
-                    if raw:
-                        return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
-                    last_status = empty_status or 'llm_empty_aux'
+                    modes = ('compatibility',) if schema_unavailable else ('schema', 'compatibility')
+                    for mode in modes:
+                        try:
+                            attempted += 1
+                            resp = call_llm(
+                                task='title_generation',
+                                provider=provider or None,
+                                model=model or None,
+                                base_url=base_url or None,
+                                api_key=api_key or None,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=0.2,
+                                timeout=_timeout,
+                                extra_body=(schema_extra if mode == 'schema' else (reasoning_extra or None)),
+                            )
+                        except Exception as e:
+                            last_status = 'llm_error_aux'
+                            if mode == 'schema':
+                                schema_unavailable = True
+                                logger.debug("Aux title schema attempt %s failed: %s", idx + 1, e)
+                                continue
+                            raise
+                        raw, empty_status = _extract_title_response(resp, aux=True)
+                        if raw:
+                            return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
+                        last_status = empty_status or 'llm_empty_aux'
+                        if mode == 'schema' and last_status == 'llm_empty_aux':
+                            schema_unavailable = True
+                            continue
+                        break
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
             except Exception as e:
@@ -4687,6 +4765,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         # (#4161). MiniMax still needs reasoning_split, which the
                         # profile path does not add.
                         _tg_extra = dict(api_kwargs.get('extra_body') or {})
+                        _tg_extra['response_format'] = _TITLE_RESPONSE_FORMAT
                         if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
                             _tg_extra['reasoning_split'] = True
                         if _tg_extra:
