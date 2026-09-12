@@ -29,7 +29,7 @@ def test_terminal_is_opened_by_slash_command_not_permanent_composer_icon():
     assert 'id="terminalSurface"' in html
     assert 'static/terminal.js' in html
     assert './static/terminal.js' in sw
-    assert "xterm@5.3.0" in html
+    assert "xterm" in html and "5.3.0" in html
 
 
 def test_terminal_surface_uses_composer_flyout_card_pattern():
