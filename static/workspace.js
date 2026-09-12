@@ -628,6 +628,9 @@ async function _workspacePathExists(path){
 
 async function openArtifactPath(path){
   if(!path) return;
+  // User-initiated file open from chat (workspace:// link or artifact click):
+  // clear any prior dismissal so the panel auto-opens to show this file.
+  if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
   switchWorkspacePanelTab('files');
   // Normalize backslash separators to '/' first — Windows absolute paths
   // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the

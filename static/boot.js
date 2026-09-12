@@ -154,6 +154,14 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
 
 // Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+// When the user deliberately closes the panel (e.g. tapping the chat box to
+// type on mobile), the on-screen keyboard fires a viewport resize which
+// re-runs syncWorkspacePanelState(). That used to see the still-visible
+// preview + 'closed' mode and force the panel back open — intrusive while
+// typing. This flag records the deliberate close so the resize sync leaves
+// the panel alone; the preview DOM (file + scroll position) stays intact so
+// reopening restores exactly where the user was reading.
+let _workspacePanelUserDismissed=false;
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
@@ -265,7 +273,10 @@ function _setWorkspacePanelMode(mode){
 function syncWorkspacePanelState(){
   const hasPreview=_hasWorkspacePreviewVisible();
   if(hasPreview){
-    if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+    // Only auto-promote closed→preview when the user did NOT deliberately
+    // dismiss the panel (chat-tap close on mobile). The keyboard resize that
+    // follows typing would otherwise force the panel back open mid-reply.
+    if(_workspacePanelMode==='closed'&&!_workspacePanelUserDismissed) _setWorkspacePanelMode('preview');
     else syncWorkspacePanelUI();
     return;
   }
@@ -282,6 +293,9 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
+  // Explicit user reopen — clear the dismissal flag so future previews
+  // auto-open the panel again normally.
+  _workspacePanelUserDismissed=false;
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -291,11 +305,18 @@ function openWorkspacePanel(mode='browse'){
 }
 
 function closeWorkspacePanel(){
+  // Deliberate user close — mark dismissal so the next resize sync does NOT
+  // force the panel back open. The preview (file + scroll position) stays in
+  // the DOM and is restored when the user reopens the panel.
+  _workspacePanelUserDismissed=true;
   _setWorkspacePanelMode('closed');
 }
 
 function ensureWorkspacePreviewVisible(){
-  if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+  if(_workspacePanelMode==='closed'){
+    _workspacePanelUserDismissed=false;
+    _setWorkspacePanelMode('preview');
+  }
   else syncWorkspacePanelUI();
 }
 
@@ -600,6 +621,10 @@ function closeMobileWorkspacePanelFromChat(e){
   if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
   const panel=document.querySelector('.rightpanel');
   if(panel&&panel.contains(e.target)) return;
+  // Deliberate close (see closeWorkspacePanel): the keyboard-triggered
+  // resize must not force the panel back open in preview mode while the
+  // user is typing. The preview (file + scroll position) stays intact in
+  // the DOM and is restored when the user reopens the panel.
   closeWorkspacePanel();
 }
 function toggleWorkspacePanel(force){
