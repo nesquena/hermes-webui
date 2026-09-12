@@ -699,8 +699,12 @@ Default toolset list (hardcoded fallback):
     browser, clarify, code_execution, cronjob, delegation, file,
     image_gen, memory, session_search, skills, terminal, todo, tts, vision, web
 
-The web UI always runs with the full CLI toolset. There is no per-session toolset
-restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
+The web UI uses the CLI toolset as the default, but a session may persist an
+`enabled_toolsets` override. When that override changes, the WebUI invalidates
+the Hermes session's persisted system-prompt and resolved-tool cache pins before
+saving the new override. This fail-closed ordering ensures that a failed cache
+invalidation cannot make a new toolset durable while the Agent still restores
+the previous prompt or tool list.
 
 ---
 
