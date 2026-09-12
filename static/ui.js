@@ -6055,7 +6055,7 @@ let _lastMessageRenderAt=-Infinity;
 function _recentMessageRenderArtifactWindow(ms){
   return performance.now()-_lastMessageRenderAt<(ms||1400);
 }
-function _cancelBottomSettle(){ _cancelMessageJumpScroll(); _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
+function _cancelBottomSettle(){ _cancelMessageJumpScroll(); _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); if(typeof _tailFollowStop==='function') _tailFollowStop(); }
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
   _lastMessageTouchScrollIntentMs=performance.now();
@@ -7181,6 +7181,9 @@ function _settleMessageScrollToBottom(force, explicit){
   // scrollTop once via rAF (batches multiple resize callbacks per frame into
   // a single write). After 300ms of no resize events, the observer disconnects.
   const token=++_bottomSettleToken;
+  // A settle owns the tail from here on; stop the streaming glide so the two
+  // writers can never fight frame-by-frame.
+  if(typeof _tailFollowStop==='function') _tailFollowStop();
   cancelAnimationFrame(_settleRAF);
   if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
   clearTimeout(_settleTimer);
@@ -7263,6 +7266,102 @@ function _settleFinalScroll(token){
   _scrollPinned=true;
   _deferClearProgrammaticScroll();
 }
+// ---------------------------------------------------------------------------
+// Continuous tail-follow ("glide") for a live streaming turn.
+//
+// A streamed answer grows a couple of words per render tick, but the scroll
+// position only has to move when a line WRAPS. Snapping scrollTop to
+// scrollHeight on every tick therefore paints nothing for several ticks and
+// then one discrete ~1-line jump — the stutter readers see while the answer
+// types itself. The same path also rebuilt the ResizeObserver settle
+// (disconnect + `new ResizeObserver` + observe + two timers) on every tick,
+// i.e. ~30 observer teardown/rebuild cycles a second on a transcript that can
+// be thousands of nodes deep: the dominant per-frame cost on mobile.
+//
+// While a turn is streaming and the reader is pinned we instead run ONE rAF
+// loop that eases scrollTop toward the bottom — exactly one scrollHeight read
+// and at most one scrollTop write per frame, closing a fixed fraction of the
+// remaining distance so a newly wrapped line arrives as a short glide instead
+// of a jump. The loop parks itself after a stretch of frames with nothing to
+// chase, and refuses on the same signals the settle path refuses on, so the
+// sticky-unpin model (#3343/#4295) is unchanged.
+const _TAIL_FOLLOW_EASE=0.26;        // fraction of the remaining gap per frame
+const _TAIL_FOLLOW_MIN_STEP_PX=0.6;  // floor so the glide always converges
+const _TAIL_FOLLOW_MAX_LAG_PX=36;    // steady-state lag ceiling (~1.5 lines)
+const _TAIL_FOLLOW_SNAP_PX=600;      // beyond this, jump — a glide would lag
+const _TAIL_FOLLOW_QUIET_FRAMES=10;  // ~160ms at 60Hz with nothing to chase
+let _tailFollowRAF=0;
+let _tailFollowQuietFrames=0;
+function _tailFollowStop(){
+  if(_tailFollowRAF){cancelAnimationFrame(_tailFollowRAF);_tailFollowRAF=0;}
+  _tailFollowQuietFrames=0;
+}
+// True while text is still arriving/playing out for the active turn. The word
+// fade keeps releasing text for up to ~1.4s AFTER the SSE `done` clears
+// S.activeStreamId, so the drain flag keeps the glide owning the tail for that
+// playout instead of handing it back to the per-tick settle.
+function _tailFollowStreamLive(){
+  try{
+    if(S&&S.activeStreamId) return true;
+  }catch(_){ }
+  if(typeof window==='undefined') return false;
+  const until=Number(window._streamFadeDrainingUntil)||0;
+  return until>performance.now();
+}
+function _tailFollowFrame(){
+  _tailFollowRAF=0;
+  const el=$('messages');
+  if(!el){ _tailFollowQuietFrames=0; return; }
+  // Same refusal set as the settle-path RO callback (never fight a reader who
+  // scrolled away), plus one mobile addition: yield while a finger is actually
+  // DOWN on the transcript, so a per-frame write can never cancel an in-progress
+  // drag or iOS momentum. Deliberately NOT the 1200ms _recentMessageTouchScroll
+  // Intent() tail — touchstart marks that on any tap (a copy button, expanding a
+  // tool card), and pausing follow for 1.2s after a tap would be a regression
+  // against the current settle path, which does not check it at all. A real
+  // upward drag still stops the glide through the sticky-unpin flag.
+  // A jump-to-question owner deliberately holds the reader at the jump target
+  // across smooth-scroll frames (#6621), so the glide must yield to it for the
+  // same reason scrollIfPinned() returns early on it — otherwise the two write
+  // scrollTop against each other every frame.
+  if(typeof _messageJumpScrollOwner!=='undefined'&&_messageJumpScrollOwner){
+    _tailFollowQuietFrames=0;
+    return;
+  }
+  if(!window._autoScrollFollow||!_scrollPinned||_messageUserUnpinned
+    ||_recentNonMessageScrollIntent()||_messageTouchScrollActive){
+    _tailFollowQuietFrames=0;
+    return;
+  }
+  const max=el.scrollHeight-el.clientHeight;
+  const gap=max-el.scrollTop;
+  if(gap>0.5){
+    _tailFollowQuietFrames=0;
+    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+    // Ease by a fixed fraction so a wrapped line arrives as a glide, but never
+    // let the tail sit more than _TAIL_FOLLOW_MAX_LAG_PX behind: with the word
+    // fade off the transcript can grow several lines per render tick, and a pure
+    // proportional ease would park the last lines below the fold.
+    const step=Math.max(_TAIL_FOLLOW_MIN_STEP_PX, gap*_TAIL_FOLLOW_EASE, gap-_TAIL_FOLLOW_MAX_LAG_PX);
+    // Land exactly on the bottom for the last pixel rather than leaving a
+    // fractional residue behind — every near-bottom predicate in this file
+    // measures against scrollHeight-clientHeight.
+    el.scrollTop=(gap>_TAIL_FOLLOW_SNAP_PX||gap-step<1) ? max : Math.min(max, el.scrollTop+step);
+    _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+    _nearBottomCount=2;
+    _deferClearProgrammaticScroll();
+  }else{
+    _tailFollowQuietFrames=_tailFollowQuietFrames+1;
+    if(_tailFollowQuietFrames>=_TAIL_FOLLOW_QUIET_FRAMES){_tailFollowQuietFrames=0;return;}
+  }
+  _tailFollowRAF=requestAnimationFrame(_tailFollowFrame);
+}
+function _tailFollowStart(){
+  _tailFollowQuietFrames=0;
+  if(_tailFollowRAF) return;
+  _tailFollowRAF=requestAnimationFrame(_tailFollowFrame);
+}
+let _scrollIfPinnedCoalesced=false;
 function scrollIfPinned(){
   if(!window._autoScrollFollow) return;
   // A jump-to-question owner is mid-flight: it deliberately holds the reader at
@@ -7291,6 +7390,15 @@ function scrollIfPinned(){
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
+  // Live/playing-out turn: hand the tail to the rAF glide instead of snapping
+  // scrollTop and rebuilding the settle ResizeObserver on every tick. The
+  // completion paths (scrollToBottom(), the DOM-replace follow) still run the
+  // full settle, so late layout — Prism, KaTeX, Mermaid, images — is still
+  // re-anchored once the turn ends.
+  // typeof guard keeps this inert in the unit harnesses that extract this
+  // function body without the tail-follow helpers, matching the guard style the
+  // rest of this function already uses.
+  if(typeof _tailFollowStreamLive==='function'&&_tailFollowStreamLive()){ _tailFollowStart(); return; }
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){

@@ -5252,8 +5252,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _drainStreamFadeBeforeDone(onDone){
     const drainStartedAt=performance.now();
     let forcedDone=false;
+    let lastStepMs=0;
+    // The SSE `done` handler already cleared S.activeStreamId, but text is still
+    // being released here. Tell ui.js's tail-follow glide it still owns the
+    // scroll tail for the playout, so the last words of an answer scroll with
+    // the same motion as the rest of it instead of snapping per settle tick.
+    // A self-expiring DEADLINE, not a boolean: an abandoned drain (session
+    // switch, cancel, teardown) must never strand the flag on and permanently
+    // divert scrollIfPinned() away from the late-layout settle.
+    const _markDraining=()=>{
+      if(typeof window!=='undefined') window._streamFadeDrainingUntil=performance.now()+400;
+    };
+    const _endDraining=()=>{
+      if(typeof window!=='undefined') window._streamFadeDrainingUntil=0;
+    };
+    _markDraining();
+    // Vsync-align the drain beat for the same reason as _scheduleRender(): a
+    // setTimeout(33)+rAF pair lands unevenly, which is most visible on the last
+    // words of a reply.
+    const pump=()=>{
+      requestAnimationFrame(()=>{
+        if(performance.now()-lastStepMs<29){pump();return;}
+        lastStepMs=performance.now();
+        step();
+      });
+    };
     const step=()=>{
-      if(!assistantBody){onDone();return;}
+      if(!assistantBody){_endDraining();onDone();return;}
+      _markDraining();
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
       const anchorProcessText=_streamFadeDomText||target;
@@ -5266,7 +5292,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // Let the last released words visibly finish their stagger + fade before
         // the final renderMessages() DOM replacement removes the live spans.
         const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
+        setTimeout(()=>{_endDraining();onDone();}, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
         return;
       }
       // Final SSE `done` means the canonical completed session is available.
@@ -5275,11 +5301,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
         forcedDone=true;
         if(_smdParser) _smdEndParser();
+        _endDraining();
         onDone();
         return;
       }
-      setTimeout(()=>requestAnimationFrame(step), 33);
+      pump();
     };
+    lastStepMs=performance.now();
     step();
   }
   function _flushPendingSegmentRender(options={}){
@@ -5654,7 +5682,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const caughtUp=_renderStreamingFadeMarkdown(displayText);
           anchorProcessText=_streamFadeDomText||'';
           if(!caughtUp&&!_streamFinalized){
-            setTimeout(()=>_scheduleRender(), 33);
+            // rAF, not setTimeout(33): _scheduleRender() already gates on the
+            // 33ms fade interval, so a 33ms timer on top of it pushed the next
+            // playout tick out to as much as 66ms whenever tokens had stopped
+            // arriving — a visible hitch in the middle of an answer.
+            if(typeof requestAnimationFrame==='function') requestAnimationFrame(()=>_scheduleRender());
+            else setTimeout(()=>_scheduleRender(), 33);
           }
         } else {
           assistantBody.classList.remove('stream-fade-active');
@@ -5686,6 +5719,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const frameIntervalMs=_shouldUseLiveProseFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
+    } else if(_shouldUseLiveProseFade()&&typeof requestAnimationFrame==='function'){
+      // Vsync-align the word-fade cadence. A setTimeout(33)+rAF pair fires the
+      // render anywhere between 33ms and 50ms depending on where the timer lands
+      // relative to the next frame, so the released word wave arrives unevenly
+      // and reads as typing stutter even though the pacing math is time-based.
+      // Poll rAF instead and render on the first frame at/after the interval —
+      // a steady 2-frame beat on a 60Hz display, 4 frames at 120Hz.
+      const _poll=()=>{
+        _pendingRafHandle=null;
+        if(_streamFinalized){_renderPending=false;return;}
+        // 4ms tolerance: a frame landing a hair early still counts, otherwise
+        // the tick slips a whole frame whenever vsync drifts under the interval.
+        if(performance.now()-_lastRenderMs>=frameIntervalMs-4){_doRender();return;}
+        _pendingRafHandle=requestAnimationFrame(_poll);
+      };
+      _pendingRafHandle=requestAnimationFrame(_poll);
     } else {
       _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), frameIntervalMs-sinceLastMs);
     }
