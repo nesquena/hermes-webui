@@ -95,13 +95,12 @@ class TestClientGuardsWired:
         assert "decodeURIComponent" in LOGIN_JS
         assert "2048" in LOGIN_JS
 
-    def test_workspace_js_skips_next_on_login_page(self):
-        # The 401 handler must NOT append the whole login URL as next when it's
-        # already on the login page (the recursion source).
-        assert "login$/.test(_p)" in WORKSPACE_JS
-        assert "window.location.href='login';" in WORKSPACE_JS
-        # And the non-login path still captures the real destination.
-        assert "'login?next='+encodeURIComponent" in WORKSPACE_JS
+    def test_workspace_js_uses_top_level_reload_without_building_next(self):
+        # Reloading the current deep link delegates auth routing to the server or
+        # reverse proxy, so this client path cannot recursively wrap login?next=.
+        assert "_redirectIfUnauth(res)" in WORKSPACE_JS
+        assert "window.location.reload()" in WORKSPACE_JS
+        assert "login?next=" not in WORKSPACE_JS
 
     def test_all_client_401_helpers_guard_login_page(self):
         # #5578 Codex round-2: workspace.js was fixed but two more client 401
@@ -109,7 +108,8 @@ class TestClientGuardsWired:
         # also nested the login URL. All three must carry the on-login guard.
         UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-        assert "login$/.test(_p)" in UI_JS, "ui.js _redirectIfUnauth must guard the login page"
+        assert "window.location.reload()" in UI_JS
+        assert "login?next=" not in UI_JS, "ui.js must not rebuild a nested login redirect"
         assert "login$/.test(_p)" in BOOT_JS, "boot.js redirectToLogin must guard the login page"
 
 

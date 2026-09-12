@@ -175,7 +175,7 @@ def test_cleared_title_allows_initial_auto_generation(monkeypatch):
     )
     monkeypatch.setattr(
         "api.state_sync.sync_session_title",
-        lambda *_args, **_kwargs: None,
+        lambda _sid, title, **_kwargs: (title, 'llm'),
     )
 
     streaming._run_background_title_update(

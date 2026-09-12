@@ -39,29 +39,22 @@ async function api(path,opts={}){
         }
         fetchOpts.signal=controller.signal;
       }
+      const callerProvidedHeaders=Object.prototype.hasOwnProperty.call(fetchOpts,'headers');
+      const requestHeaders=new Headers(fetchOpts.headers||undefined);
+      if(!callerProvidedHeaders)requestHeaders.set('Content-Type','application/json');
+      if(!requestHeaders.has('X-Requested-With'))requestHeaders.set('X-Requested-With','XMLHttpRequest');
+      fetchOpts.headers=requestHeaders;
       const requestPromise=(async()=>{
-        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        const res=await fetch(url.href,{credentials:'include',...fetchOpts});
         if(!res.ok){
-          // 401 means the auth session expired. Redirect to login so the user can
-          // re-authenticate. This is especially important for iOS PWA (standalone mode)
-          // and for subpath mounts like /hermes/, where /login escapes to the site root.
+          // A top-level navigation lets either WebUI auth or an identity-aware
+          // reverse proxy refresh its own HttpOnly session while preserving the
+          // current deep link. Callers may opt out when they own bootstrap auth.
           if(res.status===401){
-            // #5578: if we're ALREADY on the login page, appending
-            // window.location.pathname+search (which contains ?next=…) into a
-            // fresh next= wraps the login URL into itself and re-encodes it —
-            // exponential URL growth on each expired-auth bounce until the tab
-            // breaks. On the login page, just reload login WITHOUT a next (the
-            // page preserves its own inner next); elsewhere, capture the path.
             if(redirect401){
-              // Already on the login page? Reload login WITHOUT a next.
-              const _p=(window.location.pathname||'').replace(/\/+$/,'');
-              if(/(?:^|\/)login$/.test(_p)){
-                window.location.href='login';
-              }else{
-                window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
-              }
+              if(typeof _redirectIfUnauth==='function')_redirectIfUnauth(res);
+              else window.location.reload();
             }
-            // Callers can opt out of navigation and handle the unauthenticated state themselves.
             return;
           }
           const text=await res.text();

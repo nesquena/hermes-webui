@@ -13,6 +13,7 @@ import gzip
 import json
 from api.sse_chunked import end_sse_headers
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -107,6 +108,7 @@ def _sync_session_title_to_insights(session) -> None:
             estimated_cost=getattr(session, "estimated_cost", 0.0),
             model=getattr(session, "model", ""),
             title=session.title,
+            title_source='user' if getattr(session, 'manual_title', False) is True else 'llm',
             message_count=len(messages),
             profile=getattr(session, "profile", None),
             cache_read_tokens=getattr(session, "cache_read_tokens", None) or 0,
@@ -122,10 +124,16 @@ def _persist_generated_session_title(
     *,
     event_reason: str,
     require_default_title: bool = False,
+    expected_title=None,
+    expected_db=None,
 ) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
     sid = str(getattr(session, "session_id", "") or "")
     original_session = session
+    from api.state_sync import get_session_title_state
+    if expected_title is None:
+        expected_title = (session.title, getattr(session, 'manual_title', False))
+        expected_db = get_session_title_state(sid, profile=getattr(session, 'profile', None) or 'default')
     with _get_session_agent_lock(sid):
         with LOCK:
             latest = SESSIONS.get(sid)
@@ -151,17 +159,17 @@ def _persist_generated_session_title(
             }
             if not _looks_like_default_cli_title(latest_meta):
                 return session.title
-        session.title = normalized_title
-        from api.session_ops import mark_session_title_generated
+        if (session.title, getattr(session, 'manual_title', False)) != expected_title:
+            raise ValueError('Session title changed while generating; retry explicitly')
+        from api.streaming import _apply_generated_title
 
-        # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
-        mark_session_title_generated(session)
+        _apply_generated_title(session, normalized_title, expected=expected_db,
+                               replace=True, explicit=not require_default_title)
         session.save(touch_updated_at=False)
         with LOCK:
             SESSIONS[sid] = session
             SESSIONS.move_to_end(sid)
             _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-    _sync_session_title_to_insights(session)
     _publish_session_list_changed(
         event_reason,
         profile=getattr(session, "profile", None),
@@ -200,6 +208,9 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
                 }
                 if not _looks_like_default_cli_title(current_meta):
                     return
+                from api.state_sync import get_session_title_state
+                expected_title = (current.title, getattr(current, 'manual_title', False))
+                expected_db = get_session_title_state(sid, profile=getattr(current, 'profile', None) or 'default')
                 next_title, _reason, _raw_preview = generate_session_title_for_session(current)
                 normalized_current = str(getattr(current, "title", "") or "").strip()
                 normalized_next = str(next_title or "").strip()
@@ -210,6 +221,8 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
                     normalized_next,
                     event_reason="session_title_regenerate",
                     require_default_title=True,
+                    expected_title=expected_title,
+                    expected_db=expected_db,
                 )
             except Exception:
                 logger.debug("Failed to generate imported session title for %s", sid, exc_info=True)
@@ -11647,6 +11660,23 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
+def _insights_agent_model_usage(db_path, cutoff: float):
+    """Return Agent-ledger model usage through its public read-only API.
+
+    ``session_model_usage`` is the authoritative per-route accounting ledger.
+    Reuse Agent's reconciliation so model switches, auxiliary calls, stored
+    costs, and legacy residuals have the same meaning in CLI and WebUI Insights.
+    """
+    from agent.insights import InsightsEngine  # type: ignore[import-not-found]
+    from hermes_state import SessionDB  # type: ignore[import-not-found]
+
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        return InsightsEngine(db).get_model_usage_breakdown(cutoff=cutoff)
+    finally:
+        db.close()
+
+
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
@@ -11715,6 +11745,10 @@ def _handle_insights(handler, parsed) -> bool:
     total_cache_read_tokens = 0
     total_cost = 0.0
     model_stats: dict[str, dict] = {}
+    population_session_ids: set[str] = set()
+    population_is_exact = True
+    webui_fallback_by_id: dict[str, dict] = {}
+    state_route_ids: set[str] = set()
     daily_tokens: dict[str, dict] = {}
     # Activity by day of week (0=Mon .. 6=Sun)
     dow_activity = collections.Counter()
@@ -11722,10 +11756,36 @@ def _handle_insights(handler, parsed) -> bool:
     hod_activity = collections.Counter()
 
     for s in sessions_data:
+        session_id = s.get("session_id")
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and session_id not in population_session_ids
+        ):
+            population_session_ids.add(session_id)
+        else:
+            population_is_exact = False
         input_tokens = _safe_usage_int(s.get("input_tokens"))
         output_tokens = _safe_usage_int(s.get("output_tokens"))
         cache_read_tokens = _safe_usage_int(s.get("cache_read_tokens"))
         cost_value = _safe_cost_float(s.get("estimated_cost"))
+        if isinstance(session_id, str) and session_id:
+            fallback_ts = _session_usage_ts(s)
+            fallback_day = (
+                _time.strftime("%Y-%m-%d", _time.localtime(fallback_ts))
+                if fallback_ts else None
+            )
+            webui_fallback_by_id[session_id] = {
+                "model": s.get("model") or "unknown",
+                "sessions": 1,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cost": cost_value,
+                "messages": _safe_usage_int(s.get("message_count")),
+                "date": fallback_day,
+                "timestamp": fallback_ts,
+            }
         total_messages += _safe_usage_int(s.get("message_count"))
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
@@ -11770,11 +11830,13 @@ def _handle_insights(handler, parsed) -> bool:
                 pass
 
     # ── Also include CLI sessions from Hermes state.db ─────────────────────
+    db_path = None
     try:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            state_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+            with closing(sqlite3.connect(state_uri, uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
@@ -11800,6 +11862,46 @@ def _handle_insights(handler, parsed) -> bool:
                           AND COALESCE(source, '') != 'webui'
                     """, (cutoff, cutoff))
                 for row in cur.fetchall():
+                    row_id = row["id"]
+                    if not isinstance(row_id, str) or not row_id:
+                        population_is_exact = False
+                    elif row_id in population_session_ids:
+                        # Identity, not source labeling, is the deduplication
+                        # boundary. Replace the compact index contribution with
+                        # the state row so fallback remains state-authoritative.
+                        state_route_ids.add(row_id)
+                        fallback = webui_fallback_by_id[row_id]
+                        total_sessions -= 1
+                        total_messages -= fallback["messages"]
+                        total_input_tokens -= fallback["input_tokens"]
+                        total_output_tokens -= fallback["output_tokens"]
+                        total_cache_read_tokens -= fallback["cache_read_tokens"]
+                        total_cost -= fallback["cost"]
+                        old_model = model_stats[fallback["model"]]
+                        for key in (
+                            "sessions", "input_tokens", "output_tokens",
+                            "cache_read_tokens", "cost",
+                        ):
+                            old_model[key] -= fallback[key]
+                        if not old_model["sessions"]:
+                            model_stats.pop(fallback["model"])
+                        fallback_day = fallback["date"]
+                        if fallback_day and fallback_day in daily_tokens:
+                            old_day = daily_tokens[fallback_day]
+                            for key in (
+                                "sessions", "input_tokens", "output_tokens",
+                                "cache_read_tokens", "cost",
+                            ):
+                                old_day[key] -= fallback[key]
+                            if not old_day["sessions"]:
+                                daily_tokens.pop(fallback_day)
+                        if fallback["timestamp"]:
+                            fallback_dt = _time.localtime(fallback["timestamp"])
+                            dow_activity[fallback_dt.tm_wday] -= 1
+                            hod_activity[fallback_dt.tm_hour] -= 1
+                    else:
+                        population_session_ids.add(row_id)
+                        state_route_ids.add(row_id)
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
@@ -11846,6 +11948,206 @@ def _handle_insights(handler, parsed) -> bool:
                         hod_activity[_dt.tm_hour] += 1
     except Exception:
         logger.debug("Failed to include CLI sessions in insights", exc_info=True)
+
+    # The compact WebUI index predates per-model accounting and can contain a
+    # stale zero cost plus a provider-qualified alias. Adopt Agent reconciliation
+    # only when its public contract proves exact population and accounting parity.
+    # Any mismatch preserves the complete compatibility result above atomically.
+    try:
+        if db_path and db_path.exists():
+            agent_usage = _insights_agent_model_usage(db_path, cutoff)
+            if not isinstance(agent_usage, dict):
+                raise ValueError("invalid Agent usage payload")
+
+            session_ids = agent_usage.get("session_ids")
+            ledger_session_ids = agent_usage.get("ledger_session_ids")
+            agent_models = agent_usage.get("models")
+            agent_daily = agent_usage.get("daily")
+            agent_totals = agent_usage.get("totals")
+
+            def _validated_ids(value, label: str) -> list[str]:
+                if not isinstance(value, list) or not all(
+                    isinstance(item, str) and item for item in value
+                ):
+                    raise ValueError(f"invalid Agent {label}")
+                if len(set(value)) != len(value):
+                    raise ValueError(f"duplicate Agent {label}")
+                return value
+
+            def _validated_count(value, label: str) -> int:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"invalid Agent {label}")
+                return value
+
+            def _validated_cost(value, label: str) -> float:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"invalid Agent {label}")
+                result = float(value)
+                if not math.isfinite(result) or result < 0:
+                    raise ValueError(f"invalid Agent {label}")
+                return result
+
+            covered_ids = set(_validated_ids(session_ids, "session coverage"))
+            if (
+                not population_is_exact
+                or not covered_ids
+                or not covered_ids.issubset(population_session_ids)
+                or not state_route_ids.issubset(covered_ids)
+                or len(population_session_ids) != total_sessions
+            ):
+                raise ValueError("Agent and endpoint populations differ")
+            uncovered_ids = population_session_ids - covered_ids
+            if not uncovered_ids.issubset(webui_fallback_by_id):
+                raise ValueError("Agent omitted a non-WebUI-index session")
+            if agent_usage.get("cutoff") != cutoff:
+                raise ValueError("Agent cutoff mismatch")
+
+            ledger_ids = _validated_ids(
+                ledger_session_ids, "ledger session coverage"
+            )
+            if not ledger_ids or not set(ledger_ids).issubset(covered_ids):
+                raise ValueError("Agent model ledger did not contribute")
+            if not isinstance(agent_models, list) or not agent_models:
+                raise ValueError("invalid Agent model breakdown")
+            if not isinstance(agent_daily, list) or not agent_daily:
+                raise ValueError("invalid Agent daily breakdown")
+            if not isinstance(agent_totals, dict):
+                raise ValueError("invalid Agent totals")
+
+            count_keys = ("input_tokens", "output_tokens", "cache_read_tokens")
+            candidate_stats: dict[str, dict] = {}
+            model_accounted_ids: set[str] = set()
+            model_sums = {**{key: 0 for key in count_keys}, "cost": 0.0}
+            for row in agent_models:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid Agent model row")
+                model = row.get("model")
+                if not isinstance(model, str) or not model or model in candidate_stats:
+                    raise ValueError("invalid or duplicate Agent model")
+                row_ids = _validated_ids(row.get("session_ids"), "model sessions")
+                if not set(row_ids).issubset(covered_ids):
+                    raise ValueError("Agent model accounts for unknown session")
+                sessions = _validated_count(row.get("sessions"), "model sessions")
+                if sessions != len(row_ids):
+                    raise ValueError("Agent model session count mismatch")
+                values: dict[str, int | float] = {"sessions": sessions}
+                for key in count_keys:
+                    values[key] = _validated_count(row.get(key), f"model {key}")
+                    model_sums[key] += values[key]
+                values["cost"] = _validated_cost(row.get("cost"), "model cost")
+                model_sums["cost"] += values["cost"]
+                candidate_stats[model] = values
+                model_accounted_ids.update(row_ids)
+            if model_accounted_ids != covered_ids:
+                raise ValueError("Agent model rows do not cover every session")
+
+            candidate_daily: dict[str, dict] = {}
+            rendered_days = {
+                _time.strftime(
+                    "%Y-%m-%d", _time.localtime(first_day_ts + (i * day_secs))
+                )
+                for i in range(days)
+            }
+            daily_accounted_ids: set[str] = set()
+            daily_sums = {**{key: 0 for key in count_keys}, "cost": 0.0}
+            for row in agent_daily:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid Agent daily row")
+                day = row.get("date")
+                if (
+                    not isinstance(day, str)
+                    or not day
+                    or day not in rendered_days
+                    or day in candidate_daily
+                ):
+                    raise ValueError("invalid, out-of-window, or duplicate Agent date")
+                row_ids = _validated_ids(row.get("session_ids"), "daily sessions")
+                row_id_set = set(row_ids)
+                if (
+                    not row_id_set.issubset(covered_ids)
+                    or row_id_set & daily_accounted_ids
+                ):
+                    raise ValueError("Agent daily session coverage mismatch")
+                sessions = _validated_count(row.get("sessions"), "daily sessions")
+                if sessions != len(row_ids):
+                    raise ValueError("Agent daily session count mismatch")
+                values: dict[str, int | float] = {"sessions": sessions}
+                for key in count_keys:
+                    values[key] = _validated_count(row.get(key), f"daily {key}")
+                    daily_sums[key] += values[key]
+                values["cost"] = _validated_cost(row.get("cost"), "daily cost")
+                daily_sums["cost"] += values["cost"]
+                candidate_daily[day] = values
+                daily_accounted_ids.update(row_id_set)
+            if daily_accounted_ids != covered_ids:
+                raise ValueError("Agent daily rows do not cover every session")
+
+            validated_totals = {}
+            for key in count_keys:
+                validated_totals[key] = _validated_count(
+                    agent_totals.get(key), f"total {key}"
+                )
+                if (
+                    model_sums[key] != validated_totals[key]
+                    or daily_sums[key] != validated_totals[key]
+                ):
+                    raise ValueError(f"Agent {key} totals disagree")
+            validated_totals["cost"] = _validated_cost(
+                agent_totals.get("cost"), "total cost"
+            )
+            if not (
+                math.isclose(
+                    model_sums["cost"], validated_totals["cost"],
+                    rel_tol=1e-9, abs_tol=1e-9,
+                )
+                and math.isclose(
+                    daily_sums["cost"], validated_totals["cost"],
+                    rel_tol=1e-9, abs_tol=1e-9,
+                )
+            ):
+                raise ValueError("Agent cost totals disagree")
+
+            for session_id in uncovered_ids:
+                residual = webui_fallback_by_id[session_id]
+                day = residual.get("date")
+                if (
+                    not isinstance(day, str)
+                    or not day
+                    or day not in rendered_days
+                ):
+                    raise ValueError("WebUI residual has no in-window usage date")
+                model = residual["model"]
+                model_values = candidate_stats.setdefault(model, {
+                    "sessions": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cost": 0.0,
+                })
+                day_values = candidate_daily.setdefault(day, {
+                    "sessions": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cost": 0.0,
+                })
+                for key in ("sessions", *count_keys):
+                    model_values[key] += residual[key]
+                    day_values[key] += residual[key]
+                model_values["cost"] += residual["cost"]
+                day_values["cost"] += residual["cost"]
+                for key in count_keys:
+                    validated_totals[key] += residual[key]
+                validated_totals["cost"] += residual["cost"]
+
+            model_stats = candidate_stats
+            daily_tokens = candidate_daily
+            total_input_tokens = validated_totals["input_tokens"]
+            total_output_tokens = validated_totals["output_tokens"]
+            total_cache_read_tokens = validated_totals["cache_read_tokens"]
+            total_cost = validated_totals["cost"]
+    except Exception:
+        logger.debug("Failed to use Agent model ledger in insights", exc_info=True)
 
     # Build model breakdown
     total_tokens = total_input_tokens + total_output_tokens
@@ -15515,13 +15817,13 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
-        # CLI-parity /reasoning handler — writes to the same config.yaml keys
-        # the CLI uses (display.show_reasoning, agent.reasoning_effort) so a
-        # preference set via WebUI is honoured in the terminal REPL and vice
-        # versa.  Body is one of:
+        # CLI-parity /reasoning handler — writes display.show_reasoning plus
+        # either a selected model's agent.reasoning_overrides entry or the
+        # legacy global agent.reasoning_effort key. Body is one of:
         #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
         #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
-        #                                            → agent.reasoning_effort
+        #                      → per-model override when model_id is supplied;
+        #                        otherwise agent.reasoning_effort
         try:
             display = body.get("display")
             effort = body.get("effort")
@@ -15609,10 +15911,20 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot regenerate titles", 403)
-        next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
-        if not next_title:
-            return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
-        _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")
+        from api.state_sync import get_session_title_state, TitleChangedError
+        expected_title = (s.title, getattr(s, 'manual_title', False))
+        try:
+            expected_db = get_session_title_state(sid, profile=getattr(s, 'profile', None) or 'default')
+            next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
+            if not next_title:
+                return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
+            _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate",
+                                             expected_title=expected_title, expected_db=expected_db)
+        except (ValueError, TitleChangedError) as exc:
+            return bad(handler, str(exc), 409)
+        except Exception:
+            logger.warning('Could not persist regenerated title for %s', sid, exc_info=True)
+            return bad(handler, 'Could not persist session title', 503)
         return j(handler, {
             "session": s.compact(),
             "title": s.title,

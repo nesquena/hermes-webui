@@ -4444,13 +4444,17 @@ def get_reasoning_status(
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
-      - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - reasoning_effort: str — selected-model override, then global fallback
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    if model_id and isinstance(agent_cfg, dict):
+        overrides = agent_cfg.get("reasoning_overrides")
+        if isinstance(overrides, dict) and model_id in overrides:
+            effort_raw = overrides[model_id]
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -4604,13 +4608,19 @@ def set_reasoning_effort(
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> dict:
-    """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
+    """Persist reasoning effort to the active profile's config.yaml.
 
-    Mirrors CLI ``/reasoning <level>``: same key, same valid values
+    Model-aware requests write ``agent.reasoning_overrides[model_id]`` so a
+    composer choice cannot leak onto unrelated models. Requests without model
+    context retain the legacy global ``agent.reasoning_effort`` behavior.
+
+    Mirrors CLI ``/reasoning <level>``: same valid values
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
 
     An empty string is accepted as "clear the override" — it removes the
-    ``agent.reasoning_effort`` key so the provider default takes effect. This is
+    selected model override (or the global key for model-less requests).
+    Model-aware reads then fall back to the global ``agent.reasoning_effort``,
+    when configured, and otherwise to the provider default. This is
     the re-enable path for thinking-toggle-only models (GLM-4.5–5.1 on native
     zai): the dropdown's "Default"/"On" option POSTs ``effort:''`` to switch
     thinking back on after the user selected "None". Without this, the toggle
@@ -4630,13 +4640,23 @@ def set_reasoning_effort(
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        if raw:
+        if model_id:
+            overrides = agent_cfg.get("reasoning_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            if raw:
+                overrides[model_id] = raw
+            else:
+                overrides.pop(model_id, None)
+            if overrides:
+                agent_cfg["reasoning_overrides"] = overrides
+            else:
+                agent_cfg.pop("reasoning_overrides", None)
+        elif raw:
             agent_cfg["reasoning_effort"] = raw
         else:
-            # Clear the override so the provider default takes effect (the
-            # "Default"/"On" re-enable path for thinking-toggle-only models).
-            # Drop the key entirely rather than writing an empty string so the
-            # CLI's "is reasoning_effort configured?" check stays simple.
+            # Clear the global fallback so the provider default takes effect.
+            # Model-aware requests clear only that model's override above.
             agent_cfg.pop("reasoning_effort", None)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)

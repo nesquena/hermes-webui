@@ -199,6 +199,34 @@ request, the upload handler receives an empty body and the upload silently fails
 
 ### 4.2 Session Model
 
+**Generated title authority.** Initial background titling first reads the session's
+profile-scoped Agent `state.db`: an existing LLM/user title is reused verbatim,
+including category tags, rather than issuing a second WebUI title prompt. A
+WebUI `manual_title` remains protected. On modern Agents, new, adaptive-refresh,
+and explicit regeneration candidates use `agent.title_generator.generate_title`
+(the Agent owns prompt, language, configuration, and output validation). Older
+Agents retain the legacy WebUI generation routes.
+
+Title persistence is independent of `sync_to_insights`. The Agent DB is resolved
+before the sidecar/index and SSE/API projection are published; the stored value
+(including collision suffixes or a winning concurrent rename) is the value the
+sidebar receives. Automatic refresh can replace only a matching pre-generation
+`derived`/`llm` snapshot. Explicit regeneration may replace the original manual
+title, but a concurrent WebUI or Agent rename rejects that request. Unknown
+legacy provenance is protected. Equal-rank refresh uses the Agent DB's
+`_execute_write` transaction with a title/source compare-and-swap because
+`set_auto_title` only upgrades provenance. Usage-only insights sync writes at
+`derived` authority and cannot consume the Agent's LLM upgrade or claim a user
+rename.
+
+A missing Agent installation/DB keeps standalone WebUI titling working; an
+unreadable existing DB fails without publishing the candidate. Legacy DBs without
+provenance can fill blank titles but keep existing titles instead of attempting
+an unsafe refresh. Shared-generator failures do not retry divergent legacy
+prompts. This is not a cross-store distributed transaction: DB and sidecar disk
+writes are sequential, and external edits after settlement are not continuously
+mirrored. The fix does not bulk-migrate historical sidecars or reload services.
+
 Session is a plain Python class (not a dataclass, not SQLAlchemy):
 
     Fields:

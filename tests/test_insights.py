@@ -340,7 +340,13 @@ def test_insights_mobile_models_table_has_contained_overflow():
 # ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
 
 
-def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, days="7", now=None):
+_NO_AGENT_USAGE = object()
+
+
+def _call_insights_with_state_db(
+    monkeypatch, tmp_path, entries, state_rows, days="7", now=None,
+    usage_rows=None, agent_usage=_NO_AGENT_USAGE,
+):
     """Like _call_insights but also seeds an agent state.db with `sessions` rows
     and points _active_state_db_path at it, so the CLI second-pass is exercised."""
     import sqlite3
@@ -359,8 +365,13 @@ def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, day
     conn.execute(
         """CREATE TABLE sessions (
             id TEXT PRIMARY KEY, source TEXT, model TEXT, message_count INTEGER,
+            tool_call_count INTEGER DEFAULT 0,
             input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
             cache_read_tokens INTEGER DEFAULT 0,
+            cache_write_tokens INTEGER DEFAULT 0,
+            billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT,
+            actual_cost_usd REAL DEFAULT 0, cost_status TEXT, cost_source TEXT,
+            api_call_count INTEGER DEFAULT 0,
             started_at REAL, ended_at REAL
         )"""
     )
@@ -374,16 +385,79 @@ def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, day
              r.get("estimated_cost_usd", 0.0), r.get("cache_read_tokens", 0),
              r.get("started_at"), r.get("ended_at")),
         )
+    if usage_rows is not None:
+        conn.execute(
+            """CREATE TABLE session_model_usage (
+                session_id TEXT, model TEXT, billing_provider TEXT,
+                billing_base_url TEXT, billing_mode TEXT, api_call_count INTEGER,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER, estimated_cost_usd REAL,
+                actual_cost_usd REAL, cost_status TEXT, cost_source TEXT
+            )"""
+        )
+        for r in usage_rows:
+            conn.execute(
+                "INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    r["session_id"], r["model"], r.get("billing_provider"),
+                    r.get("billing_base_url"), r.get("billing_mode"),
+                    r.get("api_call_count", 0), r.get("input_tokens", 0),
+                    r.get("output_tokens", 0), r.get("cache_read_tokens", 0),
+                    r.get("cache_write_tokens", 0), r.get("reasoning_tokens", 0),
+                    r.get("estimated_cost_usd", 0.0), r.get("actual_cost_usd", 0.0),
+                    r.get("cost_status"), r.get("cost_source"),
+                ),
+            )
     conn.commit()
     conn.close()
     # _handle_insights does `from api.models import _active_state_db_path`, so patch on the module.
     monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    if agent_usage is not _NO_AGENT_USAGE:
+        if isinstance(agent_usage, BaseException):
+            def _raise_agent_usage(*_args, **_kwargs):
+                raise agent_usage
+            monkeypatch.setattr(routes, "_insights_agent_model_usage", _raise_agent_usage)
+        else:
+            monkeypatch.setattr(
+                routes, "_insights_agent_model_usage",
+                lambda *_args, **_kwargs: agent_usage,
+            )
 
     handler = _FakeHandler()
     parsed = SimpleNamespace(query=f"days={days}")
     routes._handle_insights(handler, parsed)
     assert handler.status == 200
     return handler.json_body()
+
+
+def _agent_usage_payload(now, session_ids, models, *, ledger_ids=None, days=7):
+    today = time.localtime(now)
+    midnight = time.mktime((
+        today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0,
+        today.tm_wday, today.tm_yday, today.tm_isdst,
+    ))
+    count_keys = ("input_tokens", "output_tokens", "cache_read_tokens")
+    totals = {
+        key: sum(row[key] for row in models)
+        for key in count_keys
+    }
+    totals["cost"] = sum(row["cost"] for row in models)
+    return {
+        "cutoff": midnight - ((days - 1) * 86400),
+        "session_ids": list(session_ids),
+        "ledger_session_ids": list(
+            session_ids if ledger_ids is None else ledger_ids
+        ),
+        "models": models,
+        "daily": [{
+            "date": time.strftime("%Y-%m-%d", time.localtime(now)),
+            "session_ids": list(session_ids),
+            "sessions": len(session_ids),
+            **totals,
+        }],
+        "totals": totals,
+    }
 
 
 def test_insights_includes_cli_and_gateway_sessions(monkeypatch, tmp_path):
@@ -430,6 +504,392 @@ def test_insights_does_not_double_count_webui_state_db_rows(monkeypatch, tmp_pat
     assert data["total_sessions"] == 2
     # webui tokens counted once (100) + cli (200) = 300, NOT 400.
     assert data["total_input_tokens"] == 300
+
+
+def test_insights_deduplicates_index_identity_even_when_state_source_differs(
+    monkeypatch, tmp_path
+):
+    """Session identity wins when an indexed row has a non-WebUI state source."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "shared", "updated_at": now, "created_at": now,
+         "message_count": 2, "input_tokens": 100, "output_tokens": 50,
+         "estimated_cost": 0.01, "model": "index-model"},
+    ]
+    state_rows = [
+        {"id": "shared", "source": "cli", "model": "state-model",
+         "message_count": 3, "input_tokens": 200, "output_tokens": 80,
+         "estimated_cost_usd": 0.02, "started_at": now, "ended_at": now},
+    ]
+
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, days="7", now=now
+    )
+
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 200
+    assert data["total_cost"] == 0.02
+    assert data["models"][0]["model"] == "state-model"
+
+
+def test_insights_models_use_authoritative_per_model_ledger(monkeypatch, tmp_path):
+    """The model table must not use stale WebUI index cost/model aliases when the
+    Agent ledger has exact per-model attribution for those sessions."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "w1", "updated_at": now, "created_at": now,
+         "message_count": 2, "input_tokens": 100, "output_tokens": 10,
+         "cache_read_tokens": 50, "estimated_cost": 0.0,
+         "model": "@anthropic:claude-fable-5-1"},
+        {"session_id": "w2", "updated_at": now, "created_at": now,
+         "message_count": 3, "input_tokens": 200, "output_tokens": 20,
+         "cache_read_tokens": 100, "estimated_cost": 0.0,
+         "model": "claude-fable-5-1"},
+    ]
+    state_rows = [
+        {"id": "w1", "source": "webui", "model": "@anthropic:claude-fable-5-1",
+         "message_count": 2, "input_tokens": 100, "output_tokens": 10,
+         "cache_read_tokens": 50, "estimated_cost_usd": 0.0,
+         "started_at": now, "ended_at": now},
+        {"id": "w2", "source": "webui", "model": "claude-fable-5-1",
+         "message_count": 3, "input_tokens": 200, "output_tokens": 20,
+         "cache_read_tokens": 100, "estimated_cost_usd": 0.0,
+         "started_at": now, "ended_at": now},
+    ]
+    usage_rows = [
+        {"session_id": "w1", "model": "claude-fable-5-1",
+         "billing_provider": "anthropic", "input_tokens": 100,
+         "output_tokens": 10, "cache_read_tokens": 50,
+         "estimated_cost_usd": 1.25, "cost_status": "estimated",
+         "cost_source": "official_docs_snapshot"},
+        {"session_id": "w2", "model": "claude-fable-5-1",
+         "billing_provider": "anthropic", "input_tokens": 200,
+         "output_tokens": 20, "cache_read_tokens": 100,
+         "estimated_cost_usd": 2.75, "cost_status": "estimated",
+         "cost_source": "official_docs_snapshot"},
+    ]
+
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, days="7", now=now,
+        usage_rows=usage_rows,
+        agent_usage=_agent_usage_payload(
+            now,
+            ["w1", "w2"],
+            [{
+                "model": "claude-fable-5-1", "sessions": 2,
+                "session_ids": ["w1", "w2"],
+                "input_tokens": 300, "output_tokens": 30,
+                "cache_read_tokens": 150, "cost": 4.0,
+            }],
+            days=7,
+        ),
+    )
+
+    fable = [row for row in data["models"] if "fable" in row["model"]]
+    assert len(fable) == 1
+    assert fable[0]["model"] == "claude-fable-5-1"
+    assert fable[0]["sessions"] == 2
+    assert fable[0]["cost"] == 4.0
+    assert fable[0]["cost_share"] == 100
+    assert data["total_input_tokens"] == 300
+    assert data["total_output_tokens"] == 30
+    assert data["total_cache_read_tokens"] == 150
+    assert data["total_cost"] == 4.0
+    assert sum(row["cost"] for row in data["daily_tokens"]) == 4.0
+
+
+def test_insights_keeps_legacy_models_when_agent_state_coverage_is_partial(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "w1", "updated_at": now, "input_tokens": 10,
+         "estimated_cost": 0.25, "model": "legacy-a"},
+        {"session_id": "w2", "updated_at": now, "input_tokens": 20,
+         "estimated_cost": 0.75, "model": "legacy-b"},
+    ]
+    state_rows = [
+        {"id": "w1", "source": "webui", "model": "agent-a",
+         "input_tokens": 10, "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now, usage_rows=[],
+        agent_usage=_agent_usage_payload(
+            now,
+            ["w1"],
+            [{"model": "agent-a", "sessions": 1, "session_ids": ["w1"],
+              "input_tokens": 10, "output_tokens": 0,
+              "cache_read_tokens": 0, "cost": 9.0}],
+        ),
+    )
+    assert {row["model"] for row in data["models"]} == {"agent-a", "legacy-b"}
+    assert next(row for row in data["models"] if row["model"] == "agent-a")["cost"] == 9.0
+    assert next(row for row in data["models"] if row["model"] == "legacy-b")["cost"] == 0.75
+    assert data["total_cost"] == 9.75
+    assert sum(row["cost"] for row in data["daily_tokens"]) == 9.75
+
+
+def test_insights_keeps_legacy_models_when_agent_ledger_is_empty(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now, usage_rows=[],
+        agent_usage=_agent_usage_payload(
+            now,
+            ["w1"],
+            [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+              "input_tokens": 10, "output_tokens": 0,
+              "cache_read_tokens": 0, "cost": 9.0}],
+            ledger_ids=[],
+        ),
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+
+
+def test_insights_keeps_legacy_models_when_agent_result_is_malformed(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    malformed = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 10, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": float("nan")}],
+    )
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=malformed,
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+
+
+def test_insights_keeps_legacy_models_when_agent_api_is_unavailable(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=ImportError("old Agent"),
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+
+
+def test_insights_rejects_semantically_partial_agent_models(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    partial = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "partial", "sessions": 0, "session_ids": [],
+          "input_tokens": 0, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 0.0}],
+    )
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=partial,
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+
+
+def test_insights_rejects_duplicate_local_session_ids(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "w1", "updated_at": now, "input_tokens": 10,
+         "estimated_cost": 0.25, "model": "legacy"},
+        {"session_id": "w1", "updated_at": now, "input_tokens": 20,
+         "estimated_cost": 0.75, "model": "legacy"},
+    ]
+    agent_usage = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 30, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 9.0}],
+    )
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, [], now=now,
+        usage_rows=[], agent_usage=agent_usage,
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["models"][0]["sessions"] == 2
+    assert data["total_cost"] == 1.0
+
+
+def test_insights_rejects_missing_local_session_id(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "w1", "updated_at": now, "input_tokens": 10,
+         "estimated_cost": 0.25, "model": "legacy"},
+        {"updated_at": now, "input_tokens": 20,
+         "estimated_cost": 0.75, "model": "legacy"},
+    ]
+    agent_usage = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 10, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 9.0}],
+    )
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, [], now=now,
+        usage_rows=[], agent_usage=agent_usage,
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["models"][0]["sessions"] == 2
+    assert data["total_cost"] == 1.0
+
+
+def test_insights_rejects_duplicate_agent_ledger_ids(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    agent_usage = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 10, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 9.0}],
+        ledger_ids=["w1", "w1"],
+    )
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=agent_usage,
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+
+
+def test_insights_rejects_agent_omitting_state_backed_session(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.25, "model": "legacy-web"}]
+    state_rows = [{"id": "cli1", "source": "cli", "model": "legacy-cli",
+                   "input_tokens": 20, "estimated_cost_usd": 0.75,
+                   "started_at": now, "ended_at": now}]
+    agent_usage = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 10, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 9.0}],
+    )
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=agent_usage,
+    )
+    assert {row["model"] for row in data["models"]} == {
+        "legacy-web", "legacy-cli",
+    }
+    assert data["total_cost"] == 1.0
+
+
+def test_insights_rejects_agent_daily_date_outside_rendered_window(
+    monkeypatch, tmp_path
+):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    agent_usage = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 10, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 9.0}],
+    )
+    agent_usage["daily"][0]["date"] = "2099-01-01"
+
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=agent_usage,
+    )
+
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+    assert sum(row["cost"] for row in data["daily_tokens"]) == 0.5
+
+
+def test_insights_rejects_agent_daily_total_disagreement(monkeypatch, tmp_path):
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [{"session_id": "w1", "updated_at": now, "input_tokens": 10,
+                "estimated_cost": 0.5, "model": "legacy"}]
+    state_rows = [{"id": "w1", "source": "webui", "model": "agent",
+                   "input_tokens": 10, "started_at": now, "ended_at": now}]
+    agent_usage = _agent_usage_payload(
+        now,
+        ["w1"],
+        [{"model": "agent", "sessions": 1, "session_ids": ["w1"],
+          "input_tokens": 10, "output_tokens": 0,
+          "cache_read_tokens": 0, "cost": 9.0}],
+    )
+    agent_usage["daily"][0]["cost"] = 0.0
+    data = _call_insights_with_state_db(
+        monkeypatch, tmp_path, entries, state_rows, now=now,
+        usage_rows=[], agent_usage=agent_usage,
+    )
+    assert data["models"][0]["model"] == "legacy"
+    assert data["total_cost"] == 0.5
+    assert sum(row["cost"] for row in data["daily_tokens"]) == 0.5
+
+
+def test_insights_agent_model_usage_is_read_only_and_always_closes(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    events = []
+
+    class FakeDB:
+        def __init__(self, *, db_path, read_only):
+            events.append(("open", db_path, read_only))
+
+        def close(self):
+            events.append(("close",))
+
+    class FakeEngine:
+        should_raise = False
+
+        def __init__(self, db):
+            events.append(("engine", db))
+
+        def get_model_usage_breakdown(self, *, cutoff):
+            events.append(("call", cutoff))
+            if self.should_raise:
+                raise RuntimeError("boom")
+            return {"ok": True}
+
+    monkeypatch.setitem(sys.modules, "hermes_state", SimpleNamespace(SessionDB=FakeDB))
+    monkeypatch.setitem(
+        sys.modules, "agent.insights", SimpleNamespace(InsightsEngine=FakeEngine)
+    )
+    db_path = tmp_path / "state.db"
+
+    assert routes._insights_agent_model_usage(db_path, 12.5) == {"ok": True}
+    assert events[0] == ("open", db_path, True)
+    assert events[-1] == ("close",)
+
+    FakeEngine.should_raise = True
+    try:
+        routes._insights_agent_model_usage(db_path, 13.5)
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+    else:
+        raise AssertionError("expected helper failure")
+    assert events[-1] == ("close",)
 
 
 # ── #3911 / salvage of #3912: prompt-cache hit rate on Insights ────────────

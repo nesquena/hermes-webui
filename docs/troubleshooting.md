@@ -177,6 +177,20 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ---
 
+## Installed PWA stops updating after reverse-proxy login expires
+
+**Symptom.** A long-open installed PWA still renders its cached conversation, but API actions or live updates stop after the identity-aware reverse proxy's browser session expires. Closing and reopening the PWA restores access.
+
+**Why.** Some identity-aware proxies treat background `fetch`/SSE failures differently from top-level navigation. Cloudflare Access, for example, can return a login redirect for an expired subrequest unless the AJAX request carries `X-Requested-With: XMLHttpRequest`; a standalone WebKit app cannot refresh the proxy's HttpOnly authorization cookie itself.
+
+**Diagnostic.** Confirm that a fresh top-level navigation reaches the proxy login/refresh flow while the stuck app's API requests fail after the configured proxy-session lifetime. For Cloudflare Access, inspect the application and policy session durations and verify that expired AJAX requests return `401` when they carry `X-Requested-With: XMLHttpRequest`.
+
+**Fix.** Current WebUI builds add that header to same-origin fetches. A `401` reloads the current deep link at the top level, allowing the proxy to silently reissue its application token while its global session is valid or to show the identity-provider login when required. Native browser `EventSource` does not expose a custom-header API, so SSE connections cannot carry this marker directly; their reconnect/status path and the focus, `pageshow`, and visible-page resume events run a deduplicated marked health probe that drives the same recovery without relying on background timers. Keep the service worker's navigation path network-first; do not expose or script-read the proxy's HttpOnly cookie.
+
+**When to file a bug.** File a WebUI bug if the page still requires a force-close after the proxy demonstrably returns `401` for the marked health/API request. Include the browser/PWA mode, sanitized response status and headers, configured session durations, and whether a normal top-level reload recovered the same deep link.
+
+---
+
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
 **Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI manually. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.

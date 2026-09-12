@@ -87,9 +87,10 @@ async function _probeOfflineRecovery(){
     try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
     if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},OFFLINE_HEALTH_TIMEOUT_MS);
     try{
-      const opts={cache:'no-store',credentials:'include'};
+      const opts={cache:'no-store',credentials:'include',headers:{'X-Requested-With':'XMLHttpRequest'}};
       if(ctrl)opts.signal=ctrl.signal;
       const res=await fetcher(_offlineHealthUrl(),opts);
+      if(_redirectIfUnauth(res))return false;
       return !!(res&&res.ok);
     }catch(_){return false;}
     finally{if(timer)clearTimeout(timer);}
@@ -181,7 +182,18 @@ function _patchOfflineFetch(){
   _offlineFetchPatched=true;
   _offlineRawFetch=window.fetch.bind(window);
   window.fetch=async function(...args){
-    try{return await _offlineRawFetch(...args);}
+    try{
+      const input=args[0];
+      const init=args[1]||{};
+      let requestUrl=null;
+      try{requestUrl=new URL(typeof input==='string'||input instanceof URL?input:input.url,document.baseURI||location.href);}catch(_){}
+      if(requestUrl&&requestUrl.origin===location.origin){
+        const headers=new Headers(init.headers||(input&&input.headers)||undefined);
+        if(!headers.has('X-Requested-With'))headers.set('X-Requested-With','XMLHttpRequest');
+        args=[input,{...init,headers}];
+      }
+      return await _offlineRawFetch(...args);
+    }
     catch(e){
       if(!_isAbortError(e)&&(e instanceof TypeError||!_browserReportsOnline())){
         void _showOfflineBannerIfProbeFails(_browserReportsOnline()?'network':'browser');
@@ -192,17 +204,26 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
+  const probeOnResume=()=>{
+    if(document.hidden||document.visibilityState==='hidden')return;
+    void _probeOfflineRecovery();
+  };
   window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  window.addEventListener('focus',probeOnResume);
+  window.addEventListener('pageshow',probeOnResume);
+  document.addEventListener('visibilitychange',probeOnResume);
   if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();
-// Redirect to login when the server responds with 401 (auth session expired).
-// Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
-// escaping to the personal site root /login.
-// #5578: on a login-shaped page, reload 'login' WITHOUT a next (avoid self-nesting).
-function _redirectIfUnauth(res){if(res&&res.status===401){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}return true;}return false;}
+// A 401 can come from WebUI auth or an identity-aware reverse proxy. Reload the
+// current top-level URL so the owner of that auth boundary can run its normal
+// navigation flow (for example, Cloudflare Access can refresh its HttpOnly
+// application token). Deduping matters because several API calls often settle
+// together after a suspended mobile app resumes.
+let _authReloadStarted=false;
+function _redirectIfUnauth(res){if(!res||res.status!==401)return false;if(!_authReloadStarted){_authReloadStarted=true;window.location.reload();}return true;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -3934,11 +3955,23 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const entryProvider=String(existing.providerId||'').toLowerCase();
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
+  // provider/... is an equivalent routing spelling for the catalog's bare ID
+  // only when the stripped prefix matches both the configured badge provider
+  // and the existing picker row's provider. Preserve multi-segment IDs from
+  // other providers instead of globally discarding another slash segment.
+  const rawId=String(modelId||'');
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const routedId=rawId.slice(slashPrefix.length);
+    if((entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    )) return true;
+  }
   // @provider:model is an equivalent routing spelling only when an existing
   // picker row belongs to that same provider. This supports named custom
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
-  const rawId=String(modelId||'');
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
@@ -10141,6 +10174,8 @@ async function refreshSession() {
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
 // ── Update banner ──
+const UPDATE_BANNER_NOTICE_STORAGE_KEY='hermes-update-banner-last-shown-v1';
+const UPDATE_BANNER_NOTICE_INTERVAL_MS=7*24*60*60*1000;
 function _formatUpdateTargetStatus(label,info){
   const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0);
   if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;
@@ -10158,6 +10193,73 @@ function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
+}
+function _updateBannerNoticeSignature(data){
+  const targets=[
+    {key:'webui',label:'WebUI',info:data&&data.webui},
+    {key:'agent',label:'Agent',info:data&&data.agent},
+  ];
+  const payload=[];
+  targets.forEach((target)=>{
+    const info=target.info;
+    if(!_formatUpdateTargetStatus(target.label,info)) return;
+    payload.push({
+      key:target.key,
+      behind:Number(info.behind)||0,
+      release_based:!!info.release_based,
+      manual_update:!!info.manual_update,
+      branch:String(info.branch||''),
+      channel:String(info.channel||''),
+      current_version:String(info.current_version||''),
+      latest_version:String(info.latest_version||''),
+      current_sha:String(info.current_sha||''),
+      latest_sha:String(info.latest_sha||''),
+      compare_url:String(info.compare_url||''),
+    });
+  });
+  return payload.length?JSON.stringify(payload):'';
+}
+function _readUpdateBannerNoticeRecord(){
+  try{
+    const raw=localStorage.getItem(UPDATE_BANNER_NOTICE_STORAGE_KEY);
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    if(!parsed||typeof parsed!=='object') return null;
+    const signature=typeof parsed.signature==='string'?parsed.signature:'';
+    const shownAt=Number(parsed.shownAt)||0;
+    if(!signature||!shownAt) return null;
+    return {signature,shownAt};
+  }catch(_e){
+    try{localStorage.removeItem(UPDATE_BANNER_NOTICE_STORAGE_KEY);}catch(_ignore){}
+    return null;
+  }
+}
+function _rememberUpdateBannerNoticeShown(data){
+  const signature=_updateBannerNoticeSignature(data);
+  if(!signature) return;
+  try{
+    localStorage.setItem(UPDATE_BANNER_NOTICE_STORAGE_KEY,JSON.stringify({
+      signature,
+      shownAt:Date.now(),
+    }));
+  }catch(_e){}
+}
+function _shouldShowUpdateBannerNotice(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  if(options.force) return true;
+  const signature=_updateBannerNoticeSignature(data);
+  if(!signature) return true;
+  const record=_readUpdateBannerNoticeRecord();
+  const now=Date.now();
+  if(
+    record&&
+    record.signature===signature&&
+    record.shownAt<=now&&
+    now-record.shownAt<UPDATE_BANNER_NOTICE_INTERVAL_MS
+  ){
+    return false;
+  }
+  return true;
 }
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
@@ -10454,6 +10556,7 @@ function _renderUpdateWhatsNewLinks(data){
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -10487,7 +10590,13 @@ function _showUpdateBanner(data){
     msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
   }
   const banner=$('updateBanner');
+  if(typeof _shouldShowUpdateBannerNotice==='function'&&!_shouldShowUpdateBannerNotice(data,options)){
+    if(banner) banner.classList.remove('visible');
+    if(typeof _hideUpdateSummaryPanel==='function') _hideUpdateSummaryPanel();
+    return;
+  }
   if(banner) banner.classList.add('visible');
+  if(typeof _rememberUpdateBannerNoticeShown==='function') _rememberUpdateBannerNoticeShown(data);
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
@@ -10500,6 +10609,7 @@ function _i18nUpdateText(key, fallback){
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
+  if(typeof _rememberUpdateBannerNoticeShown==='function') _rememberUpdateBannerNoticeShown(window._updateData||{});
   sessionStorage.setItem('hermes-update-dismissed','1');
 }
 function _isUpdateApplyNetworkError(error){
