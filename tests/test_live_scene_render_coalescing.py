@@ -73,6 +73,17 @@ def test_queued_live_scene_paint_is_released_on_stream_exit():
     assert result["paintsAfterTeardownCancel"] == 0
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_cancel_only_touches_the_matching_timer_api():
+    result = _run_live_scene_coalescing()
+    # An unrelated rAF sharing the pending timeout's numeric ID must survive.
+    assert result["unrelatedRafSurvivesCancel"] is True
+    # An unrelated timeout sharing the pending rAF's numeric ID must survive.
+    assert result["unrelatedTimeoutSurvivesCancel"] is True
+    # The cancelled scene paint itself still never lands.
+    assert result["paintsAfterCollisionCancel"] == 0
+
+
 _NODE_SCRIPT = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -93,26 +104,34 @@ function extractFunc(name){
 }
 
 const clock = { t: 0 };
-const timers = [];
-let nextTimerId = 1;
+const timeouts = [];
+const rafs = [];
+let nextTimeoutId = 1;
+let nextRafId = 1;
+let nextSeq = 1;
 const sandbox = { console };
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
-// Fake clock + timer queue: requestAnimationFrame is a same-tick timer so the
-// burst/leading/trailing edges are deterministic across runs.
+// Fake clock + timer queues: requestAnimationFrame is a same-tick timer so the
+// burst/leading/trailing edges are deterministic across runs. Timeout and rAF
+// IDs come from independent counters — a real browser keeps separate ID spaces,
+// so a cancel must only ever touch the matching queue.
 sandbox.performance = { now: () => clock.t };
-sandbox.setTimeout = (cb, ms) => { const id = nextTimerId++; timers.push({ id, cb, at: clock.t + (Number(ms) || 0) }); return id; };
-sandbox.clearTimeout = (id) => { const i = timers.findIndex(t => t.id === id); if(i >= 0) timers.splice(i, 1); };
-sandbox.requestAnimationFrame = (cb) => { const id = nextTimerId++; timers.push({ id, cb, at: clock.t }); return id; };
-sandbox.cancelAnimationFrame = (id) => { const i = timers.findIndex(t => t.id === id); if(i >= 0) timers.splice(i, 1); };
+sandbox.setTimeout = (cb, ms) => { const id = nextTimeoutId++; timeouts.push({ kind: 'timeout', id, seq: nextSeq++, cb, at: clock.t + (Number(ms) || 0) }); return id; };
+sandbox.clearTimeout = (id) => { const i = timeouts.findIndex(t => t.id === id); if(i >= 0) timeouts.splice(i, 1); };
+sandbox.requestAnimationFrame = (cb) => { const id = nextRafId++; rafs.push({ kind: 'raf', id, seq: nextSeq++, cb, at: clock.t }); return id; };
+sandbox.cancelAnimationFrame = (id) => { const i = rafs.findIndex(t => t.id === id); if(i >= 0) rafs.splice(i, 1); };
 sandbox.drain = () => {
   for(let guard = 0; guard < 5000; guard += 1){
     let due = null;
-    for(const t of timers){
-      if(t.at <= clock.t && (!due || t.at < due.at || (t.at === due.at && t.id < due.id))) due = t;
+    for(const t of timeouts){
+      if(t.at <= clock.t && (!due || t.at < due.at || (t.at === due.at && t.seq < due.seq))) due = t;
+    }
+    for(const t of rafs){
+      if(t.at <= clock.t && (!due || t.at < due.at || (t.at === due.at && t.seq < due.seq))) due = t;
     }
     if(!due) return;
-    timers.splice(timers.indexOf(due), 1);
+    (due.kind === 'timeout' ? timeouts : rafs).splice((due.kind === 'timeout' ? timeouts : rafs).indexOf(due), 1);
     due.cb();
   }
   throw new Error('timer drain did not settle');
@@ -122,8 +141,11 @@ vm.createContext(sandbox);
 
 // Production keeps these bindings in closure scope; extracting the functions
 // evaluates them as globals, so the harness owns the shared state.
+// _anchorScenePaintHandle is kept declared so the harness also runs against the
+// pre-fix single-handle implementation — the collision assertions below fail
+// there, which is the regression this file guards.
 vm.runInContext(
-  'var _anchorScenePaintHandle=null; var _anchorSceneLastPaintMs=0;' +
+  'var _anchorScenePaintHandle=null; var _anchorSceneTimeoutHandle=null; var _anchorSceneRafHandle=null; var _anchorSceneLastPaintMs=0;' +
   'var _streamFinalized=false; var _anchorShadowWarned=false;' +
   'var _pendingRafHandle=null; var _renderPending=false;' +
   'var _anchorRegistry={}; var streamId="stream-1"; var activeSid="sid-1";',
@@ -206,6 +228,35 @@ vm.runInContext('_cancelAnimationFramePendingStreamRender()', sandbox);
 sandbox.advance(200);
 sandbox.drain();
 result.paintsAfterTeardownCancel = sandbox.paints - fifth;
+
+// 6. Cancelling a pending scene paint must only touch the matching timer API.
+// Timeout and rAF IDs are opaque and not collision-free across namespaces, so
+// an unrelated timer/frame sharing the pending handle's numeric ID must survive.
+const sixth = sandbox.paints;
+let unrelatedRafFired = false;
+let unrelatedTimeoutFired = false;
+// 6a. Pending paint sits in the timeout phase; an unrelated rAF shares its ID.
+clock.t = 0;
+nextTimeoutId = 1; nextRafId = 1; nextSeq = 1;
+vm.runInContext('_anchorSceneLastPaintMs=0;', sandbox);
+sandbox.requestAnimationFrame(() => { unrelatedRafFired = true; }); // rAF id 1
+render(); // timeout phase: waitMs = 66 - 0 > 0 → timeout id 1 (collides)
+sandbox._cancelPendingAnchorScenePaint();
+sandbox.advance(200);
+sandbox.drain();
+result.unrelatedRafSurvivesCancel = unrelatedRafFired === true;
+// 6b. Pending paint sits in the rAF phase; an unrelated timeout shares its ID.
+clock.t = 0;
+nextTimeoutId = 1; nextRafId = 1; nextSeq = 1;
+vm.runInContext('_anchorSceneLastPaintMs=0;', sandbox);
+sandbox.setTimeout(() => { unrelatedTimeoutFired = true; }, 200); // timeout id 1
+sandbox.advance(100); // past the 66ms budget → direct rAF, rAF id 1 (collides)
+render();
+sandbox._cancelPendingAnchorScenePaint();
+sandbox.advance(200);
+sandbox.drain();
+result.unrelatedTimeoutSurvivesCancel = unrelatedTimeoutFired === true;
+result.paintsAfterCollisionCancel = sandbox.paints - sixth;
 
 console.log(JSON.stringify(result));
 """

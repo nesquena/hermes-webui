@@ -2919,7 +2919,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // 2,874 long tasks and 37s of blocked main-thread time). Coalesce live-scene
   // paints onto one frame budget, keeping the trailing edge so the newest delta
   // is always painted; settlement still renders the authoritative scene.
-  let _anchorScenePaintHandle=null;
+  let _anchorSceneTimeoutHandle=null;
+  let _anchorSceneRafHandle=null;
   let _anchorSceneLastPaintMs=0;
   let _anchorScenePendingReasoning=null;
   function _anchorScenePaintIntervalMs(){
@@ -2927,10 +2928,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _cancelPendingAnchorScenePaint(){
     _anchorScenePendingReasoning=null;
-    if(_anchorScenePaintHandle===null) return;
-    cancelAnimationFrame(_anchorScenePaintHandle);
-    clearTimeout(_anchorScenePaintHandle);
-    _anchorScenePaintHandle=null;
+    // Timeout and rAF handles live in separate ID spaces, so cancelling must
+    // only touch the matching API — a wrong-API cancel could kill an unrelated
+    // timer/frame that happens to share the same numeric ID.
+    if(_anchorSceneTimeoutHandle!==null){
+      clearTimeout(_anchorSceneTimeoutHandle);
+      _anchorSceneTimeoutHandle=null;
+    }
+    if(_anchorSceneRafHandle!==null){
+      cancelAnimationFrame(_anchorSceneRafHandle);
+      _anchorSceneRafHandle=null;
+    }
   }
   function _paintAnchorLiveScene(){
     try{
@@ -2968,9 +2976,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }catch(_){}
   }
   function _scheduleAnchorSceneRender(){
-    if(_anchorScenePaintHandle!==null) return true;
+    if(_anchorSceneTimeoutHandle!==null||_anchorSceneRafHandle!==null) return true;
     const fire=()=>{
-      _anchorScenePaintHandle=null;
+      _anchorSceneRafHandle=null;
       // A queued paint can outlive finalization or a session switch; writing a
       // live scene into a settled/detached turn is the #631 Bug A class, so
       // re-check ownership here instead of trusting the schedule.
@@ -2980,9 +2988,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     const waitMs=_anchorScenePaintIntervalMs()-(performance.now()-_anchorSceneLastPaintMs);
     if(waitMs>0){
-      _anchorScenePaintHandle=setTimeout(()=>{_anchorScenePaintHandle=requestAnimationFrame(fire);},waitMs);
+      _anchorSceneTimeoutHandle=setTimeout(()=>{
+        _anchorSceneTimeoutHandle=null;
+        _anchorSceneRafHandle=requestAnimationFrame(fire);
+      },waitMs);
     }else{
-      _anchorScenePaintHandle=requestAnimationFrame(fire);
+      _anchorSceneRafHandle=requestAnimationFrame(fire);
     }
     return true;
   }
