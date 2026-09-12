@@ -613,8 +613,9 @@ def _is_native_raster_data_uri(text: str) -> bool:
     Native image content is opaque binary, not text that the credential regexes
     can safely rewrite. The exemption is a credential-boundary decision, so a
     matching header or magic prefix is not enough: decode the entire canonical
-    base64 payload and require the image format to terminate exactly at the end
-    of the decoded bytes. Any malformed, ambiguous, or trailing content falls
+    base64 payload and require it to contain only complete raster content through
+    the end of the decoded bytes. JPEG additionally permits an MPO-style sequence
+    of complete images. Any malformed, ambiguous, or trailing content falls
     through to normal text redaction.
     """
     if not isinstance(text, str):
@@ -724,37 +725,38 @@ _JPEG_SOF_MARKERS = {
 }
 
 
-def _is_complete_jpeg(raw: bytes) -> bool:
-    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
-        return False
-    pos = 2
+def _complete_jpeg_end(raw: bytes, start: int) -> int | None:
+    """Return the byte after one complete JPEG image, or ``None``."""
+    if len(raw) - start < 4 or raw[start:start + 2] != b"\xff\xd8":
+        return None
+    pos = start + 2
     saw_sof = False
     saw_scan = False
     while pos < len(raw):
         marker_start = pos
         if raw[pos] != 0xFF:
-            return False
+            return None
         while pos < len(raw) and raw[pos] == 0xFF:
             pos += 1
         if pos >= len(raw):
-            return False
+            return None
         marker = raw[pos]
         pos += 1
         if marker == 0xD9:
-            return saw_sof and saw_scan and pos == len(raw)
+            return pos if saw_sof and saw_scan else None
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
-            return False
+            return None
         if pos + 2 > len(raw):
-            return False
+            return None
         segment_length = int.from_bytes(raw[pos:pos + 2], "big")
         if segment_length < 2:
-            return False
+            return None
         segment_end = pos + segment_length
         if segment_end > len(raw):
-            return False
+            return None
         if marker in _JPEG_SOF_MARKERS:
             if segment_length < 8:
-                return False
+                return None
             saw_sof = True
         if marker != 0xDA:
             pos = segment_end
@@ -770,7 +772,7 @@ def _is_complete_jpeg(raw: bytes) -> bool:
             while pos < len(raw) and raw[pos] == 0xFF:
                 pos += 1
             if pos >= len(raw):
-                return False
+                return None
             scan_marker = raw[pos]
             if scan_marker == 0x00 or 0xD0 <= scan_marker <= 0xD7:
                 pos += 1
@@ -778,8 +780,20 @@ def _is_complete_jpeg(raw: bytes) -> bool:
             pos = marker_start
             break
         else:
+            return None
+    return None
+
+
+def _is_complete_jpeg(raw: bytes) -> bool:
+    """Validate a JPEG or an MPO-style sequence of complete JPEG images."""
+    pos = 0
+    images = 0
+    while pos < len(raw):
+        pos = _complete_jpeg_end(raw, pos)
+        if pos is None:
             return False
-    return False
+        images += 1
+    return images > 0
 
 
 def _gif_subblocks_end(raw: bytes, pos: int) -> int | None:
