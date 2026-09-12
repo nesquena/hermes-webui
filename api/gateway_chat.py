@@ -1494,3 +1494,20 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # Release the cross-process per-session admission permit (#7201
+        # rework). The gateway worker teardown is the single exit every
+        # gateway turn passes through; the permit fences the whole turn so it
+        # is released here, not at wakeup-dispatch time. Idempotent.
+        try:
+            from api.background_process import (
+                _release_session_permit,
+                _session_permit_owner,
+            )
+
+            _release_session_permit(session_id, _session_permit_owner())
+        except Exception:
+            logger.debug(
+                "session-permit release failed for session %s",
+                session_id,
+                exc_info=True,
+            )

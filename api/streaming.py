@@ -13192,6 +13192,25 @@ def _run_agent_streaming(
                 session_id,
                 exc_info=True,
             )
+        # Release the cross-process per-session admission permit (#7201
+        # rework). The permit fences the whole turn (acquired by every turn
+        # entrypoint in _start_chat_stream_for_session), so it must be
+        # released here — the single teardown every stream passes through —
+        # not at wakeup-dispatch time. Idempotent: the wakeup runner already
+        # released it when the turn was NOT accepted.
+        try:
+            from api.background_process import (
+                _release_session_permit,
+                _session_permit_owner,
+            )
+
+            _release_session_permit(session_id, _session_permit_owner())
+        except Exception:
+            logger.debug(
+                "session-permit release failed for session %s",
+                session_id,
+                exc_info=True,
+            )
 
 # ============================================================
 # SECTION: HTTP Request Handler

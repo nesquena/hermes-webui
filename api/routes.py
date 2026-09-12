@@ -23052,6 +23052,34 @@ def _start_chat_stream_for_session(
         stale_response["_status"] = 409
         return stale_response
     attachments = attachments or []
+    # Cross-process admission fence (#7201 rework): every turn entrypoint —
+    # interactive AND autonomous — must consult the durable per-session permit
+    # before starting, so backend B's async wakeup cannot race backend A's
+    # interactive turn on the same session. The acquire is idempotent for the
+    # same owner, so a wakeup that fenced the permit before claiming passes
+    # through unchanged; a different live owner (another WebUI backend) gets a
+    # 409 just like the in-process active-stream guard below.
+    try:
+        from api.background_process import (
+            _session_permit_owner as _permit_owner_fn,
+            _try_acquire_session_permit,
+        )
+
+        _permit_owner = _permit_owner_fn()
+        if not _try_acquire_session_permit(s.session_id, _permit_owner):
+            return {
+                "error": "session already has an active stream in another backend",
+                "_status": 409,
+            }
+    except Exception:
+        # Never fail an interactive turn because the permit ledger is
+        # unavailable; the in-process guard below still applies.
+        logger.debug(
+            "session-permit fence unavailable for session %s",
+            s.session_id,
+            exc_info=True,
+        )
+        _permit_owner = None
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
     # duplicated clarify cards for what appears to be a single user request.
