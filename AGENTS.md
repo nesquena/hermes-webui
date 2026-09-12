@@ -69,6 +69,10 @@ Follow that checklist's safety rules:
   the manual verification performed.
 - For runtime, streaming, recovery, replay, compression, or sidebar metadata
   changes, name the state layer being mutated and prove the relevant invariant.
+- Active-run Steer resolves the stream-bound agent with explicit stream and
+  worker ownership before consulting the reusable session cache. Compression
+  may rotate the agent identity; steering must never evict or close an agent.
+  Keep HTTP response writes outside runtime registry locks.
 - For Docker build changes in `docker_init.bash`, mirror directory exclusions
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).
