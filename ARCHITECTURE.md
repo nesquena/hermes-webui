@@ -107,6 +107,8 @@ State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
     sessions/          One JSON file per session: {session_id}.json
+    redaction_cache/   Derived redacted transcript projections, one JSON file
+                       per session (see §4.9); removed with its session
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
@@ -417,6 +419,51 @@ Older Hermes Agent versions that lack either capability continue through
 whose default `SessionDB()` path remains frozen at module import. Keep this fallback
 compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
 than a second WebUI implementation.
+
+### 4.9 Sensitive-Text Redaction and the Transcript Projection Cache
+
+API responses are scrubbed of credentials (API keys, tokens, passwords) by the
+redaction layer in `api/helpers.py` before leaving the server. Because the
+redactor is pure and deterministic, two caches make repeated scrubbing cheap:
+
+- **In-memory memos** (`functools.lru_cache`): the clean-or-redacted decision
+  per string, in a small tier (strings ≤16 KiB) and a big tier (≤256 KiB),
+  plus a redactor-result memo. Capacities default to 16384 / 16384 / 256
+  entries and are tunable via `HERMES_WEBUI_REDACT_DECISION_MEMO`,
+  `HERMES_WEBUI_REDACT_FN_MEMO`, and `HERMES_WEBUI_REDACT_BIG_DECISION_MEMO`;
+  each knob is clamped to a per-tier 1 GiB byte-budget ceiling. Strings above
+  256 KiB bypass the memos (still redacted). The memos are cleared when a
+  session is deleted — they are keyed on original plaintext, so a deleted
+  session's secrets must not linger in RAM.
+- **Persistent transcript projections** in
+  `STATE_DIR/redaction_cache/{session_id}.json`, written by full-transcript
+  `GET /api/session` loads (`redact_session_lists_cached` in `api/helpers.py`).
+
+**Projection cache lifecycle.** Created/updated on full-transcript loads:
+per-message content digests splice unchanged messages from the cached
+projection (zero redaction work; transcripts are append-mostly) and recompute
+only appended/edited items. The file is a derived artifact, never a correctness
+dependency: any unparsable file, validation mismatch, or untrustworthy rules
+identity falls back to plain redaction. Validation on read checks the schema
+version, a rules fingerprint that is a *content* identity (sha256 of the
+redaction policy source bytes of `api/helpers.py` and the agent redactor,
+captured once at import — not mtime/size metadata and not the WebUI version,
+which can degrade to a constant `unknown`), and the `api_redact_enabled`
+setting. With redaction disabled the cache is bypassed entirely so no
+cleartext copy is ever persisted. Stored projections are decoration-free;
+the per-request `_active_turn_user` flag is applied after retrieval.
+
+**Deletion contract.** `delete_redaction_session_cache(sid)` — called from
+`/api/session/delete`, the sessions-cleanup sweep, and the background-session
+reaper — removes the projection file and clears the in-memory memos. Because
+a full-transcript load holds no session lock while redacting, a delete can
+complete mid-load; the delete hook records the sid in a bounded in-process
+deletion fence and holds a per-session guard around {mark-deleted + unlink},
+while the load's write path holds the same guard around {fence-check +
+replace}. A racing load therefore cannot recreate the projection of a deleted
+session, and it clears the memos on exit if it observed the fence. Regression
+coverage: `tests/test_redaction_session_cache.py`,
+`tests/test_redaction_decision_memo.py`.
 
 ---
 

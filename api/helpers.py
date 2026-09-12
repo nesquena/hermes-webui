@@ -3,12 +3,15 @@ Hermes Web UI -- HTTP helper functions.
 """
 import base64 as _base64
 import binascii as _binascii
+import collections
 import functools
 import json as _json
 import logging
 import os
 import re as _re
 import ssl
+import threading
+import weakref
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -1394,7 +1397,8 @@ def redact_session_data(session_dict: dict) -> dict:
 # `_active_turn_user` flag is applied after retrieval from the CURRENT
 # request's turn token, never persisted. Delete the file when the session is
 # deleted (delete_redaction_session_cache) so a deleted conversation is not
-# recoverable from redaction_cache/.
+# recoverable from redaction_cache/ — the deletion FENCE + per-session GUARD
+# below make that contract hold even when a load races the delete.
 _REDACT_SESSION_CACHE_VERSION = 1
 
 
@@ -1464,6 +1468,82 @@ def _redact_item_digest(value) -> str:
     ).hexdigest()
 
 
+# ── Deletion fence + per-session write guard (deletion-race fix) ──────────────
+# A full-transcript GET spends up to seconds redacting a large cold session
+# while holding NO session lock (the load path only locks agent mutation). A
+# session delete that completes during that window used to be undone by the
+# GET's final os.replace(): the projection file was RECREATED after deletion
+# had already unlinked it, and the redaction pass repopulated the
+# plaintext-keyed process memos that the delete had just cleared — so a
+# deleted conversation stayed recoverable on disk and in RAM. Two mechanisms
+# close that, whichever thread wins the race:
+#
+#   fence — delete_redaction_session_cache() records the sid in a bounded
+#           in-process registry; any cache write for a fenced sid is refused,
+#           and a load that observes the fence clears the memos on its way
+#           out (the load itself still serves its legitimately-read payload).
+#   guard — a per-sid Lock (weak registry, same lifecycle pattern as the
+#           session agent locks in api/config.py) serializes the delete
+#           side's {mark-deleted + unlink} against the write side's
+#           {fence-check + os.replace}, so an unlink and a recreate cannot
+#           interleave.
+_REDACT_CACHE_DELETED_MAX = 8192
+_REDACT_CACHE_DELETED_IDS: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_REDACT_CACHE_DELETED_LOCK = threading.Lock()
+_REDACT_CACHE_GUARD_LOCKS = weakref.WeakValueDictionary()
+_REDACT_CACHE_GUARD_LOCKS_LOCK = threading.Lock()
+
+
+def _redact_session_cache_guard(session_id: str) -> threading.Lock:
+    """Per-session Lock serializing projection deletion against projection
+    writes. Weak values keep one lock per overlapping holder/waiter without
+    leaking a permanent registry entry per deleted session; a caller's local
+    reference keeps the lock alive for the whole critical section."""
+    with _REDACT_CACHE_GUARD_LOCKS_LOCK:
+        lock = _REDACT_CACHE_GUARD_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _REDACT_CACHE_GUARD_LOCKS[session_id] = lock
+        return lock
+
+
+def _redact_cache_mark_deleted(session_id: str) -> None:
+    """Record ``session_id`` in the bounded deletion fence (FIFO eviction at
+    ``_REDACT_CACHE_DELETED_MAX`` so the registry cannot grow unboundedly)."""
+    with _REDACT_CACHE_DELETED_LOCK:
+        _REDACT_CACHE_DELETED_IDS.pop(session_id, None)
+        _REDACT_CACHE_DELETED_IDS[session_id] = None
+        while len(_REDACT_CACHE_DELETED_IDS) > _REDACT_CACHE_DELETED_MAX:
+            _REDACT_CACHE_DELETED_IDS.popitem(last=False)
+
+
+def _redact_cache_is_deleted(session_id: str) -> bool:
+    with _REDACT_CACHE_DELETED_LOCK:
+        return session_id in _REDACT_CACHE_DELETED_IDS
+
+
+def _redact_clear_process_memos() -> None:
+    """Best-effort clear of the process-wide redaction memos (see
+    delete_redaction_session_cache for the RAM-retention rationale)."""
+    try:
+        _redact_fn_lru.cache_clear()
+        _redact_text_lru.cache_clear()
+        _redact_text_big_lru.cache_clear()
+    except Exception:
+        pass
+
+
+def _redact_unlink_projection(path) -> bool:
+    """Remove a projection file if present; True only if actually removed."""
+    try:
+        if not path.exists():
+            return False
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return not path.exists()
+
+
 def _redact_apply_turn_decoration(raw_items, projected_items, _active_turn_token):
     """Mirror `_public_message_projection`'s active-turn flag onto a cached
     (decoration-free) projection, using the CURRENT request's token."""
@@ -1506,6 +1586,19 @@ def redact_session_lists_cached(session_id, lists: dict, *, _active_turn_token=N
     try:
         rules_key = _redact_session_cache_rules_key()
         path = _redact_session_cache_path(session_id)
+        if _redact_cache_is_deleted(session_id):
+            # Deletion race (load side): the session was deleted BEFORE this
+            # load started (slow client, or a Session object grabbed just
+            # before the delete popped it). Serve the payload that was
+            # legitimately read, but never read from or (re)create the on-disk
+            # projection for a deleted session, and drop whatever plaintext
+            # this pass memoizes — the same RAM contract as the delete hook.
+            fenced_out = {
+                key: _redact_messages(items, _enabled=_enabled, _active_turn_token=_active_turn_token)
+                for key, items in lists.items()
+            }
+            _redact_clear_process_memos()
+            return fenced_out
         cache = None
         # A valid rules_key is a HARD prerequisite for authorizing a cached read.
         # If no trustworthy content identity could be computed (rules_key is
@@ -1567,7 +1660,14 @@ def redact_session_lists_cached(session_id, lists: dict, *, _active_turn_token=N
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as fh:
                         fh.write(_json.dumps(payload, ensure_ascii=False))
-                    os.replace(tmp_name, path)
+                    # Deletion race (write side): a delete that ran while this
+                    # GET was redacting must be the last word. The per-session
+                    # guard serializes {fence-check + replace} against the
+                    # delete hook's {mark-deleted + unlink}, so the projection
+                    # cannot be recreated after deletion unlinked it.
+                    with _redact_session_cache_guard(session_id):
+                        if not _redact_cache_is_deleted(session_id):
+                            os.replace(tmp_name, path)
                 finally:
                     if os.path.exists(tmp_name):
                         os.unlink(tmp_name)
@@ -1576,6 +1676,12 @@ def redact_session_lists_cached(session_id, lists: dict, *, _active_turn_token=N
         for key, items in lists.items():
             if key in projected_by_key:
                 _redact_apply_turn_decoration(items, projected_by_key[key], _active_turn_token)
+        # Deletion race (RAM side): if the session was deleted at ANY point
+        # during this load, this pass just (re)populated the plaintext-keyed
+        # process memos that the delete hook clears — drop them again so a
+        # racing load cannot resurrect the deleted session's strings in RAM.
+        if _redact_cache_is_deleted(session_id):
+            _redact_clear_process_memos()
         return out
     except Exception:
         # Cache is best-effort; never fail a response over it.
@@ -1601,24 +1707,40 @@ def delete_redaction_session_cache(session_id) -> bool:
     cheap, and only ever reached on a real deletion path. Unsafe ids and a
     missing projection file are a no-op for the on-disk artifact; returns True
     only if a file was actually removed. Best-effort — never raises.
+
+    Deletion-race contract: the full-transcript GET that builds projections
+    holds no session lock, so a load can still be redacting when this delete
+    runs — and without fencing, its final ``os.replace`` would RECREATE the
+    projection after this unlink, while its redaction pass repopulated the
+    memos this function clears. This hook therefore (1) records the sid in a
+    bounded in-process deletion fence that refuses any later cache write for
+    that sid, and (2) holds the per-session cache guard around
+    {mark-deleted + unlink} so it cannot interleave with a concurrent
+    writer's {fence-check + os.replace} critical section. A racing load that
+    observes the fence clears the memos on its way out, so its own
+    repopulation is also dropped.
     """
     try:
         path = _redact_session_cache_path(session_id)
     except Exception:
         return False
+    file_removed = False
     try:
-        _redact_fn_lru.cache_clear()
-        _redact_text_lru.cache_clear()
-        _redact_text_big_lru.cache_clear()
+        with _redact_session_cache_guard(session_id):
+            _redact_cache_mark_deleted(session_id)
+            file_removed = _redact_unlink_projection(path)
     except Exception:
-        pass
-    try:
-        if not path.exists():
-            return False
-        path.unlink(missing_ok=True)
-    except OSError:
-        return False
-    return not path.exists()
+        # Cache bookkeeping must never break a deletion path: still fence the
+        # sid and attempt the unlink best-effort (outside the guard).
+        try:
+            _redact_cache_mark_deleted(session_id)
+            file_removed = _redact_unlink_projection(path)
+        except Exception:
+            pass
+    # AFTER the fence is recorded: a racing load that repopulates the memos
+    # past this clear sees the fence on its final check and clears again.
+    _redact_clear_process_memos()
+    return file_removed
 
 
 def read_body(handler) -> dict:

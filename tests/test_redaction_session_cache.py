@@ -12,8 +12,14 @@ Locks:
   * `delete_redaction_session_cache` removes the file on session deletion
     (deleted conversations must not linger in `redaction_cache/`) and is a
     safe no-op for missing/unsafe ids.
+  * deletion-race fence: a full-transcript load that overlaps a session
+    delete can never (re)create the deleted session's projection — the load
+    still serves its legitimately-read payload, but the write is refused and
+    the process memos it repopulated are cleared again.
 """
 import json
+import threading
+import time
 
 import pytest
 
@@ -288,3 +294,119 @@ def test_delete_clears_in_memory_redaction_memos(state_dir):
     assert H._redact_text_lru.cache_info().currsize == 0
     assert H._redact_fn_lru.cache_info().currsize == 0
     assert H._redact_text_big_lru.cache_info().currsize == 0
+
+
+# ── Deletion race: a load in flight when the session is deleted ───────────────
+# A full-transcript GET redacts for up to seconds on a cold large session with
+# no session lock held. A delete completing inside that window must be the
+# last word: no recreated projection on disk, no repopulated memos in RAM.
+
+
+def test_delete_race_inflight_load_cannot_recreate_projection(state_dir, monkeypatch):
+    # Deterministic interleave of the reported race: the delete lands between
+    # the load's first and last `_redact_messages` call (i.e. mid-redaction).
+    # The cold load would normally persist a fresh cache file at the end —
+    # that write must now be refused by the deletion fence.
+    msgs = _msgs()
+    real = H._redact_messages
+    fired = {"deleted": False}
+
+    def racing(messages, **kwargs):
+        if not fired["deleted"]:
+            fired["deleted"] = True
+            delete_redaction_session_cache("sessRace")  # delete lands mid-load
+        return real(messages, **kwargs)
+
+    monkeypatch.setattr(H, "_redact_messages", racing)
+    out = redact_session_lists_cached("sessRace", {"messages": msgs})
+    # The response still serves the legitimately-read transcript, redacted.
+    assert _SECRET_STATE_OK(out)
+    assert out["messages"][0]["content"].startswith("hello one")
+    # ...but the on-disk projection was NOT recreated after the delete.
+    assert not (state_dir / "redaction_cache" / "sessRace.json").exists()
+
+
+def test_delete_race_warm_load_clears_repopulated_memos(state_dir, monkeypatch):
+    # RAM side of the same race, warm path: an edited message forces real
+    # redaction work mid-load; the delete clears the memos, the load's later
+    # items repopulate them, and the load's final fence check must clear them
+    # again so the deleted session's plaintext does not linger in RAM.
+    sid = "sessRaceWarm"
+    redact_session_lists_cached(sid, {"messages": _msgs()})  # seed cache
+    secret = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    H._redact_text_lru.cache_clear()
+    H._redact_fn_lru.cache_clear()
+    H._redact_text_big_lru.cache_clear()
+    real = H._redact_messages
+    fired = {"deleted": False}
+
+    def racing(messages, **kwargs):
+        result = real(messages, **kwargs)  # populates the plaintext-keyed memos
+        if not fired["deleted"]:
+            fired["deleted"] = True
+            delete_redaction_session_cache(sid)  # delete lands mid-load
+        return result
+
+    monkeypatch.setattr(H, "_redact_messages", racing)
+    msgs = _msgs()
+    msgs[1]["content"] = f"edited reply mentioning {secret} inside"  # forces recompute
+    out = redact_session_lists_cached(sid, {"messages": msgs})
+    assert _SECRET_STATE_OK(out)
+    # Memos the racing load repopulated after the delete's clear are dropped.
+    assert H._redact_text_lru.cache_info().currsize == 0
+    assert H._redact_fn_lru.cache_info().currsize == 0
+    assert H._redact_text_big_lru.cache_info().currsize == 0
+    # And the on-disk projection is gone (unlinked by the delete, not rewritten).
+    assert not (state_dir / "redaction_cache" / f"{sid}.json").exists()
+
+
+def test_fenced_session_load_skips_disk_and_clears_memos(state_dir):
+    # A load that starts AFTER the delete (slow client, or a Session object
+    # grabbed just before the delete popped it) must not read from or
+    # recreate the artifact, and must clear whatever it memoizes.
+    sid = "sessFenced"
+    delete_redaction_session_cache(sid)
+    H._redact_text_lru.cache_clear()
+    H._redact_text("warm the memo sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", _enabled=True)
+    assert H._redact_text_lru.cache_info().currsize >= 1
+    out = redact_session_lists_cached(sid, {"messages": _msgs()})
+    assert _SECRET_STATE_OK(out)  # payload still served (and redacted)
+    assert not (state_dir / "redaction_cache" / f"{sid}.json").exists()
+    assert H._redact_text_lru.cache_info().currsize == 0
+
+
+def test_fence_does_not_degrade_other_sessions(state_dir):
+    # The fence is per-session: deleting one session must not disable the
+    # cache fast path for unrelated sessions.
+    delete_redaction_session_cache("sessGone")
+    redact_session_lists_cached("sessAlive", {"messages": _msgs()})
+    assert (state_dir / "redaction_cache" / "sessAlive.json").exists()
+
+
+def test_concurrent_writer_delete_ends_with_no_projection(state_dir):
+    # Property form of the race fix: however writer/delete threads interleave,
+    # once the delete has completed, no later or in-flight write may leave the
+    # projection on disk (fence refuses post-delete writes; the guard orders
+    # in-flight {check+replace} against {mark+unlink}).
+    sid = "sessThreads"
+    msgs = _msgs() + [{"role": "user", "content": "a third message"}]
+    stop = threading.Event()
+    errors: list = []
+
+    def writer():
+        try:
+            while not stop.is_set():
+                out = redact_session_lists_cached(sid, {"messages": msgs})
+                assert _SECRET_STATE_OK(out)
+        except Exception as exc:  # pragma: no cover - surfaced by assertion below
+            errors.append(exc)
+
+    th = threading.Thread(target=writer, daemon=True)
+    th.start()
+    time.sleep(0.05)  # let some writes land first
+    delete_redaction_session_cache(sid)
+    stop.set()
+    th.join(timeout=10)
+    assert not th.is_alive()
+    assert errors == []
+    assert not (state_dir / "redaction_cache" / f"{sid}.json").exists()
