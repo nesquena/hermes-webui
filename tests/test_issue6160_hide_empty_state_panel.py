@@ -123,6 +123,6 @@ def test_panels_round_trip_and_hot_apply_hide_welcome_panel():
 
 def test_hide_welcome_panel_copy_covers_every_locale():
     js = I18N.read_text(encoding="utf-8")
-    assert js.count("settings_label_hide_empty_state_panel:") == 15
-    assert js.count("settings_desc_hide_empty_state_panel:") == 15
+    assert js.count("settings_label_hide_empty_state_panel:") == 16
+    assert js.count("settings_desc_hide_empty_state_panel:") == 16
     assert "settings_label_hide_empty_state_panel: 'Ukryj panel powitalny nowej konwersacji'" in js

@@ -299,6 +299,10 @@ def test_login_locale_resolver_handles_new_locales():
     assert _resolve_login_locale_key("fr") == "fr"
     assert _resolve_login_locale_key("fr-FR") == "fr"
     assert _resolve_login_locale_key("fr-CA") == "fr"
+    # Persian: bare code, BCP-47 region form, and underscore variant (#6664).
+    assert _resolve_login_locale_key("fa") == "fa"
+    assert _resolve_login_locale_key("fa-IR") == "fa"
+    assert _resolve_login_locale_key("fa_IR") == "fa"
     # Unknown locale still falls back to en.
     assert _resolve_login_locale_key("xx-YY") == "en"
 

@@ -690,7 +690,7 @@ def test_refine_output_stays_marker_free_in_sent_user_rendering():
 
 def test_refine_draft_ends_with_localized_instruction_and_one_space_across_all_locales():
     values = _instruction_values(I18N)
-    assert len(values) == 15
+    assert len(values) == 16  # 15 locales + fa (#6664 Persian locale)
     for instruction in values:
         out = _run_js("refine_with_instruction", instruction)
         assert out["composerValue"].endswith(f"{instruction} ")
