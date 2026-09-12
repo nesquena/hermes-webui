@@ -374,7 +374,16 @@ Full list of environment variables:
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
-| `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions; an evicted session lazily reloads from its JSON sidecar on next access |
+| `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction protects active sessions and unsaved data; stale empty draftless shells may expire after their grace period. Persisted victims lazily reload from their JSON sidecars on next access |
+
+The resident-session LRU also has an independent serialized-size budget so a few very large transcripts cannot bypass the entry limit. It defaults to 128 MiB and can be tuned in `config.yaml` without adding another environment variable:
+
+```yaml
+webui:
+  sessions_cache_max_mb: 128
+```
+
+The size is a stable floor for resident Python memory rather than an exact RSS ceiling. Active sessions and sessions with unsaved data are protected; a stale empty draftless shell may be evicted after its grace period. Under byte-only pressure, one oversized most-recent transcript stays warm to avoid a cold-reload loop; the entry-count cap remains authoritative when both limits are exceeded.
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 

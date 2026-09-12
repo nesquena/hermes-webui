@@ -13,13 +13,17 @@ unsaved session and lose data) with ``_evict_sessions_over_cap()``: it only ever
 removes clean, persisted, non-active sessions, and ``get_session()`` lazily
 reloads an evicted session from its JSON sidecar on next access.
 
-These tests prove the four required invariants:
-  1. Eviction happens once the cache grows past the cap.
+These tests prove the required invariants:
+  1. Eviction happens once the cache grows past the entry or byte cap.
   2. An active / streaming session is NEVER evicted, even when oldest.
   3. An evicted session lazily reloads from disk with identical content.
   4. No data loss: eviction removes only the in-memory copy, never the file.
+  5. Full loads/saves record serialized weight; metadata stubs stay lightweight.
+  6. One oversized most-recent transcript remains warm instead of reload-looping.
 """
 import collections
+import json
+import os
 import shutil
 import tempfile
 import threading
@@ -150,6 +154,81 @@ def test_cache_cap_preserves_environment_fallback():
         _cfg.SESSIONS_MAX = old_sessions_max
 
 
+def test_default_sessions_cache_byte_cap_is_128_mib():
+    """The entry cap also has a serialized-byte backstop for large transcripts."""
+    from api import config as _cfg
+
+    assert _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES == 128 * 1024 * 1024
+
+
+def test_cache_byte_cap_reads_config_yaml_key_and_fails_safe():
+    """Operators can tune the byte budget without disabling it accidentally."""
+    from api import config as _cfg
+
+    mib = 1024 * 1024
+    assert _cfg.get_sessions_cache_max_bytes(
+        {"webui": {"sessions_cache_max_mb": 64}}
+    ) == 64 * mib
+    assert _cfg.get_sessions_cache_max_bytes(
+        {"webui": {"sessions_cache_max_mb": "32"}}
+    ) == 32 * mib
+    for invalid in (0, -1, "nope", None):
+        assert _cfg.get_sessions_cache_max_bytes(
+            {"webui": {"sessions_cache_max_mb": invalid}}
+        ) == _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES
+
+
+def test_eviction_resolves_both_limits_from_one_config_snapshot(
+    isolated_session_env, monkeypatch,
+):
+    """Each pass uses one snapshot whose count and byte limits drive eviction."""
+    from api import config as _cfg
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    calls = 0
+
+    def fake_get_config():
+        nonlocal calls
+        calls += 1
+        return {
+            "webui": {
+                "sessions_cache_max": 2,
+                "sessions_cache_max_mb": 1,
+            }
+        }
+
+    monkeypatch.setattr(_cfg, "get_config", fake_get_config)
+
+    # Count dominates: three tiny sessions are below 1 MiB but exceed cap=2.
+    count_sessions = [_make_persisted_session(700 + i) for i in range(3)]
+    with LOCK:
+        for session in count_sessions:
+            SESSIONS[session.session_id] = session
+        count_evicted = _evict_sessions_over_cap()
+    assert count_evicted == 1
+    assert list(SESSIONS) == [s.session_id for s in count_sessions[-2:]]
+
+    SESSIONS.clear()
+
+    # Bytes dominate: two ~700 KiB sessions meet cap=2 but exceed 1 MiB.
+    byte_sessions = [
+        _make_persisted_session(
+            710 + i,
+            messages=[{"role": "assistant", "content": "x" * (700 * 1024)}],
+        )
+        for i in range(2)
+    ]
+    with LOCK:
+        for session in byte_sessions:
+            SESSIONS[session.session_id] = session
+        byte_evicted = _evict_sessions_over_cap()
+
+    assert byte_evicted == 1
+    assert list(SESSIONS) == [byte_sessions[-1].session_id]
+    assert calls == 2  # exactly one configuration read per enforcement pass
+
+
 # ─────────────────────────── invariant 1: eviction ──────────────────────────
 
 def test_eviction_happens_past_the_cap(isolated_session_env):
@@ -175,6 +254,814 @@ def test_eviction_happens_past_the_cap(isolated_session_env):
     kept = set(SESSIONS.keys())
     assert created[-1].session_id in kept
     assert created[0].session_id not in kept
+
+
+def test_eviction_happens_past_the_byte_cap_below_entry_cap(isolated_session_env):
+    """A few large transcripts must not bypass the count-only LRU bound."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    created = [
+        _make_persisted_session(
+            i,
+            messages=[{"role": "assistant", "content": "x" * (700 * 1024)}],
+        )
+        for i in range(3)
+    ]
+    for session in created:
+        _insert(session)
+
+    assert len(SESSIONS) == 3  # comfortably below the entry cap used below
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 2
+    assert list(SESSIONS) == [created[-1].session_id]
+    assert sum(s._cache_resident_bytes for s in SESSIONS.values()) <= 1024 * 1024
+
+
+def test_byte_eviction_preserves_same_count_unsaved_edit(isolated_session_env):
+    """Byte pressure must not discard edits that do not change message count."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap, get_session
+
+    edited = _make_persisted_session(
+        90,
+        messages=[{"role": "assistant", "content": "old"}],
+    )
+    sibling = _make_persisted_session(
+        91,
+        messages=[{"role": "assistant", "content": "sibling"}],
+    )
+    _insert(edited)
+    _insert(sibling)
+
+    edited.messages[0]["content"] = "new"
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 0
+    assert edited.session_id in SESSIONS
+    assert SESSIONS[edited.session_id] is edited
+    assert get_session(edited.session_id).messages[0]["content"] == "new"
+
+    # A successful save refreshes the persisted-state fingerprint, so the now
+    # clean LRU can be reclaimed and lazy reload returns the edited content.
+    edited.save()
+    get_session(sibling.session_id)  # make the sibling MRU; edited is evictable LRU
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1)
+    assert evicted == 1
+    assert edited.session_id not in SESSIONS
+    assert get_session(edited.session_id).messages[0]["content"] == "new"
+
+
+def test_byte_eviction_preserves_unsaved_metadata_edit(isolated_session_env):
+    """Persisted message parity cannot justify dropping changed metadata."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    edited = _make_persisted_session(92)
+    sibling = _make_persisted_session(93)
+    _insert(edited)
+    _insert(sibling)
+
+    edited.title = "Unsaved title"
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 0
+    assert SESSIONS[edited.session_id] is edited
+    assert SESSIONS[edited.session_id].title == "Unsaved title"
+
+
+def test_save_fingerprint_describes_serialized_snapshot_not_later_mutation(
+    isolated_session_env, monkeypatch,
+):
+    """A mutation after payload capture must remain visibly unsaved."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    session = _make_persisted_session(
+        89,
+        messages=[{"role": "assistant", "content": "persisted"}],
+    )
+    _insert(session)
+    real_replace = models._safe_replace
+    mutated = False
+
+    def replace_then_mutate(src, dst):
+        nonlocal mutated
+        real_replace(src, dst)
+        if Path(dst) == session.path:
+            session.title = "unsaved after payload"
+            mutated = True
+
+    monkeypatch.setattr(models, "_safe_replace", replace_then_mutate)
+    session.save(touch_updated_at=False)
+
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert mutated is True
+    assert persisted["title"] != session.title
+    assert models._session_matches_persisted_state(session) is False
+
+    sibling = _make_persisted_session(88)
+    _insert(sibling)  # make the sibling MRU so the edited session is considered
+    with LOCK:
+        evicted = models._evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 0
+    assert SESSIONS[session.session_id] is session
+
+
+def test_save_snapshot_is_not_fooled_by_nested_aba_during_serialization(
+    isolated_session_env, monkeypatch,
+):
+    """The payload and durable fingerprint must describe one immutable snapshot."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    session = _make_persisted_session(
+        87,
+        messages=[{"role": "assistant", "content": "A"}],
+    )
+    _insert(session)
+    real_dumps = models.json.dumps
+    mutated = False
+
+    def dumps_with_nested_aba(value, *args, **kwargs):
+        nonlocal mutated
+        if (
+            not mutated
+            and isinstance(value, dict)
+            and value.get("session_id") == session.session_id
+            and isinstance(value.get("messages"), list)
+        ):
+            mutated = True
+            session.messages[0]["content"] = "B"
+            try:
+                return real_dumps(value, *args, **kwargs)
+            finally:
+                session.messages[0]["content"] = "A"
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(models.json, "dumps", dumps_with_nested_aba)
+    session.save(touch_updated_at=False)
+
+    assert mutated is True
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert persisted["messages"][0]["content"] == "A"
+    assert session.messages[0]["content"] == "A"
+    assert models._session_matches_persisted_state(session) is True
+
+    sibling = _make_persisted_session(86)
+    _insert(sibling)  # make the sibling MRU before reclaiming the clean LRU
+    with LOCK:
+        evicted = models._evict_sessions_over_cap(cap=10, max_bytes=1)
+
+    assert evicted == 1
+    assert session.session_id not in SESSIONS
+    assert models.get_session(session.session_id).messages[0]["content"] == "A"
+
+
+def test_save_snapshot_drives_prefix_metadata_and_backup_decisions(
+    isolated_session_env, monkeypatch,
+):
+    """Derived prefix fields and shrink recovery must use the copied snapshot."""
+    from api import models
+
+    previous_messages = [
+        {"role": "user", "content": f"previous {i}"}
+        for i in range(5)
+    ]
+    session = _make_persisted_session(83, messages=previous_messages)
+    current_messages = [
+        {"role": "user", "content": f"current {i}"}
+        for i in range(10)
+    ]
+    session.messages = list(current_messages)
+    real_deepcopy = models.copy.deepcopy
+    mutated = False
+
+    def deepcopy_with_nested_mutation(value, *args, **kwargs):
+        nonlocal mutated
+        if (
+            not mutated
+            and isinstance(value, dict)
+            and value.get("session_id") == session.session_id
+            and value.get("messages") is session.messages
+        ):
+            mutated = True
+            session.messages.clear()
+            try:
+                return real_deepcopy(value, *args, **kwargs)
+            finally:
+                session.messages.extend(current_messages)
+        return real_deepcopy(value, *args, **kwargs)
+
+    monkeypatch.setattr(models.copy, "deepcopy", deepcopy_with_nested_mutation)
+    session.save(touch_updated_at=False)
+
+    assert mutated is True
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    backup = json.loads(session.path.with_suffix(".json.bak").read_text(encoding="utf-8"))
+    assert persisted["message_count"] == 0
+    assert persisted["messages"] == []
+    assert len(backup["messages"]) == len(previous_messages)
+    assert len(session.messages) == len(current_messages)
+    assert session._cache_persisted_fingerprint is None
+
+
+class _ObservedSessions(collections.OrderedDict):
+    """Ordered cache double that exposes the candidate-removal instant."""
+
+    def __init__(self, *args, observed_session_id, removal_started, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._observed_session_id = observed_session_id
+        self._removal_started = removal_started
+
+    def pop(self, key, default=None):
+        if key == self._observed_session_id:
+            self._removal_started.set()
+        return super().pop(key, default)
+
+
+def test_byte_eviction_coordinates_validation_and_removal_with_session_writer(
+    isolated_session_env, monkeypatch,
+):
+    """A writer that begins after validation cannot lose an unsaved mutation."""
+    from api import config as _cfg
+    from api import models
+    from api.config import LOCK
+
+    candidate = _make_persisted_session(85)
+    sibling = _make_persisted_session(84)
+    removal_started = threading.Event()
+    cache = _ObservedSessions(
+        [(candidate.session_id, candidate), (sibling.session_id, sibling)],
+        observed_session_id=candidate.session_id,
+        removal_started=removal_started,
+    )
+    monkeypatch.setattr(_cfg, "SESSIONS", cache)
+    monkeypatch.setattr(models, "SESSIONS", cache)
+
+    real_matches = models._session_matches_persisted_state
+    validation_finished = threading.Event()
+    mutation_attempted = threading.Event()
+    mutation_finished = threading.Event()
+    mutation_before_removal = threading.Event()
+    failures = []
+
+    def matches_then_offer_writer(session):
+        matches = real_matches(session)
+        if session is candidate:
+            validation_finished.set()
+            assert mutation_attempted.wait(timeout=1.0)
+            # The unsafe implementation lets the writer mutate here. A safe
+            # implementation either blocks it until removal, or revalidates and
+            # retains the changed cache entry.
+            mutation_finished.wait(timeout=0.1)
+        return matches
+
+    monkeypatch.setattr(models, "_session_matches_persisted_state", matches_then_offer_writer)
+
+    def mutate_and_save():
+        try:
+            assert validation_finished.wait(timeout=1.0)
+            mutation_attempted.set()
+            with _cfg._get_session_agent_lock(candidate.session_id):
+                if not removal_started.is_set():
+                    mutation_before_removal.set()
+                else:
+                    # Eviction removed candidate from cache under lock. Interpose
+                    # a reader that cold-loads the old sidecar into cache before
+                    # this detached save finishes.
+                    reader_session = models.get_session(candidate.session_id)
+                    assert reader_session is not candidate
+                    assert reader_session.composer_draft == {}
+                    assert cache.get(candidate.session_id) is reader_session
+                candidate.composer_draft = {"text": "new composer draft"}
+                candidate.title = "Unsaved concurrent title"
+                mutation_finished.set()
+                candidate.save(touch_updated_at=False)
+        except BaseException as exc:
+            failures.append(exc)
+
+    writer = threading.Thread(target=mutate_and_save, daemon=True)
+    writer.start()
+    with LOCK:
+        models._evict_sessions_over_cap(cap=10, max_bytes=1)
+    writer.join(timeout=2.0)
+
+    assert writer.is_alive() is False
+    assert failures == []
+    # If mutation won the race, validation must have been repeated and cache
+    # removal skipped. If removal won under the writer lock, the subsequent save
+    # is durable and it is safe for the old clean object to have been reclaimed.
+    assert not (
+        mutation_before_removal.is_set() and candidate.session_id not in cache
+    ), "byte eviction removed state changed after its durability check"
+    # Both disk and cache must return the new draft rather than leaving an
+    # interposed reader's stale-generation reload resident in cache.
+    persisted_disk = json.loads(candidate.path.read_text(encoding="utf-8"))
+    assert persisted_disk.get("composer_draft") == {"text": "new composer draft"}
+    cached_resolved = models.get_session(candidate.session_id)
+    assert cached_resolved.composer_draft == {"text": "new composer draft"}
+    assert cache.get(candidate.session_id).composer_draft == {"text": "new composer draft"}
+
+
+def test_state_db_reconcile_refreshes_cached_weight_and_enforces_budget(
+    isolated_session_env, monkeypatch,
+):
+    """Reconciliation through a locked copy must update the cached projection."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    sibling = _make_persisted_session(
+        94,
+        messages=[{"role": "assistant", "content": "s" * (400 * 1024), "timestamp": 1.0}],
+    )
+    cached = _make_persisted_session(
+        95,
+        messages=[{"role": "user", "content": "u" * (400 * 1024), "timestamp": 1.0}],
+    )
+    cached.active_stream_id = "dead-stream"
+    cached.save(touch_updated_at=False)
+    _insert(sibling)
+    _insert(cached)  # the get_session reconciliation path promotes this to MRU
+
+    state_messages = list(cached.messages) + [
+        {"role": "assistant", "content": "a" * (700 * 1024), "timestamp": 2.0}
+    ]
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda *_args, **_kwargs: {"message_count": 2, "last_message_at": 2.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: state_messages,
+    )
+    monkeypatch.setattr(
+        models,
+        "reconciled_state_db_messages_for_session",
+        lambda *_args, **kwargs: list(state_messages),
+    )
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    assert models._sync_sidecar_from_state_db_if_newer(cached) is True
+
+    assert SESSIONS[cached.session_id] is cached
+    assert sibling.session_id not in SESSIONS
+    assert cached._cache_resident_bytes == cached.path.stat().st_size
+    assert models._session_matches_persisted_state(cached) is True
+    authority = models._session_persisted_authority(cached)
+    assert authority is not None
+    assert cached._cache_persisted_fingerprint == authority[0]
+    assert cached._sidecar_stat_sig == authority[1]
+    assert models._sidecar_signature_matches_path(cached.path, authority[1]) is True
+
+
+def test_state_db_reconcile_preserves_unsaved_metadata_and_skips_byte_eviction(
+    isolated_session_env, monkeypatch,
+):
+    """A lock-owned repair cannot make unrelated cached metadata look durable."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    cached = _make_persisted_session(
+        96,
+        messages=[{"role": "user", "content": "u" * (400 * 1024), "timestamp": 1.0}],
+    )
+    cached.active_stream_id = "dead-metadata-stream"
+    cached.save(touch_updated_at=False)
+    sibling = _make_persisted_session(
+        97,
+        messages=[{"role": "assistant", "content": "s" * (400 * 1024), "timestamp": 1.0}],
+    )
+    _insert(cached)
+    _insert(sibling)
+    cached.title = "Unsaved title"
+
+    recovered = list(cached.messages) + [
+        {"role": "assistant", "content": "a" * (700 * 1024), "timestamp": 2.0}
+    ]
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda *_args, **_kwargs: {"message_count": 2, "last_message_at": 2.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        models,
+        "reconciled_state_db_messages_for_session",
+        lambda *_args, **_kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    assert models._sync_sidecar_from_state_db_if_newer(cached) is True
+
+    assert SESSIONS[cached.session_id] is cached
+    assert cached.title == "Unsaved title"
+    assert cached._cache_persisted_fingerprint is None
+    assert sibling.session_id in SESSIONS
+
+
+def test_save_enforces_byte_budget_after_resident_session_grows(
+    isolated_session_env, monkeypatch,
+):
+    """A hot session growing in place reclaims old cache entries immediately."""
+    from api import config as _cfg
+    from api.config import SESSIONS
+
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    sessions = [
+        _make_persisted_session(
+            400 + i,
+            messages=[{"role": "assistant", "content": "s" * (250 * 1024)}],
+        )
+        for i in range(3)
+    ]
+    for session in sessions:
+        _insert(session)
+
+    assert list(SESSIONS) == [session.session_id for session in sessions]
+
+    current = sessions[-1]
+    current.messages = [
+        {"role": "assistant", "content": "g" * (700 * 1024)}
+    ]
+    current.save()
+
+    assert current._cache_resident_bytes == current.path.stat().st_size
+    assert sessions[0].session_id not in SESSIONS
+    assert sessions[1].session_id in SESSIONS
+    assert current.session_id in SESSIONS
+    assert sum(s._cache_resident_bytes for s in SESSIONS.values()) <= 1024 * 1024
+
+
+def test_cache_hit_full_reload_enforces_grown_sidecar_weight(
+    isolated_session_env, monkeypatch,
+):
+    """Replacing a stale cache hit must immediately reapply the byte budget."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+    siblings = [
+        _make_persisted_session(
+            410 + i,
+            messages=[{"role": "assistant", "content": "s" * (400 * 1024)}],
+        )
+        for i in range(2)
+    ]
+    stale = _make_persisted_session(
+        412,
+        messages=[{"role": "assistant", "content": "old" * 1024}],
+    )
+    for session in [*siblings, stale]:
+        _insert(session)
+
+    external = models.Session(
+        session_id=stale.session_id,
+        title=stale.title,
+        messages=[
+            {"role": "user", "content": "new prompt"},
+            {"role": "assistant", "content": "grown" + "g" * (700 * 1024)},
+        ],
+        created_at=stale.created_at,
+        updated_at=stale.updated_at + 1,
+    )
+    external.save(touch_updated_at=False)
+
+    refreshed = models.get_session(stale.session_id)
+
+    assert refreshed is SESSIONS[stale.session_id]
+    assert refreshed is not stale
+    assert refreshed.messages[-1]["content"].startswith("grown")
+    assert refreshed._cache_resident_bytes == refreshed.path.stat().st_size
+    assert all(session.session_id not in SESSIONS for session in siblings)
+    assert sum(models._session_cache_resident_bytes(s) for s in SESSIONS.values()) <= 1024 * 1024
+
+
+def test_eviction_legacy_partial_self_heal_does_not_reacquire_cache_lock(
+    isolated_session_env,
+):
+    """Eviction can full-load and repair legacy partials without deadlocking LOCK."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "legacy-partial-eviction"
+    partial = {
+        "role": "assistant",
+        "content": "working",
+        "_partial": True,
+        "timestamp": 123.0,
+    }
+    # Pre-#5854 ordering: scenes precede message_count, so the cheap prefix has
+    # no authoritative count and eviction must full-load. Duplicate partials
+    # make that load invoke its self-healing save path.
+    legacy_payload = {
+        "session_id": sid,
+        "title": "Legacy partials",
+        "workspace": str(isolated_session_env.parent),
+        "model": "test",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "anchor_activity_scenes": {},
+        "message_count": 3,
+        "messages": [
+            {"role": "user", "content": "run it"},
+            partial,
+            dict(partial),
+        ],
+        "tool_calls": [],
+    }
+    path = isolated_session_env / f"{sid}.json"
+    path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    cached = models.Session(
+        session_id=sid,
+        title="Legacy partials",
+        messages=[legacy_payload["messages"][0], partial],
+        created_at=100.0,
+        updated_at=200.0,
+    )
+    cached._cache_resident_bytes = path.stat().st_size
+    sibling = _make_persisted_session(419)
+    SESSIONS[sid] = cached
+    SESSIONS[sibling.session_id] = sibling
+
+    failures = []
+
+    def enforce():
+        try:
+            with LOCK:
+                models._evict_sessions_over_cap(cap=1, max_bytes=1 << 30)
+        except BaseException as exc:  # surface cleanup errors after breaking a RED deadlock
+            failures.append(exc)
+
+    worker = threading.Thread(target=enforce, daemon=True)
+    worker.start()
+    worker.join(timeout=1.0)
+    deadlocked = worker.is_alive()
+    if deadlocked:
+        # A plain threading.Lock has no ownership, so release the outer hold to
+        # let the daemon unwind instead of leaking a stuck thread into pytest.
+        LOCK.release()
+        worker.join(timeout=1.0)
+
+    assert deadlocked is False, "legacy self-heal recursively acquired the cache LOCK"
+    assert failures == []
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
+
+
+def test_byte_eviction_preserves_active_session_and_reclaims_clean_entries(isolated_session_env):
+    """Byte pressure keeps active and MRU state while reclaiming older clean data."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    clean = _make_persisted_session(
+        100,
+        messages=[{"role": "assistant", "content": "b" * (700 * 1024)}],
+    )
+    active = _make_persisted_session(
+        101,
+        messages=[{"role": "assistant", "content": "a" * (700 * 1024)}],
+    )
+    active.active_stream_id = "live-stream"
+    current = _make_persisted_session(
+        102,
+        messages=[{"role": "assistant", "content": "c" * (100 * 1024)}],
+    )
+    _insert(clean)
+    _insert(active)
+    _insert(current)
+
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 1
+    assert clean.session_id not in SESSIONS
+    assert active.session_id in SESSIONS
+    assert current.session_id in SESSIONS
+
+
+def test_byte_eviction_keeps_mru_warm_behind_pinned_active_session(isolated_session_env):
+    """Pinned work must not force the visible MRU into a cold-load loop."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    active = _make_persisted_session(
+        190,
+        messages=[{"role": "assistant", "content": "a" * (700 * 1024)}],
+    )
+    active.active_stream_id = "live-stream"
+    current = _make_persisted_session(
+        191,
+        messages=[{"role": "assistant", "content": "c" * (700 * 1024)}],
+    )
+    _insert(active)
+    _insert(current)  # MRU / currently viewed transcript
+
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 0
+    assert list(SESSIONS) == [active.session_id, current.session_id]
+
+
+def test_byte_eviction_keeps_one_oversized_mru_to_avoid_reload_loop(isolated_session_env):
+    """One transcript may exceed the budget; retaining it avoids cold-loading every access."""
+    from api.config import LOCK, SESSIONS
+    from api.models import _evict_sessions_over_cap
+
+    oversized = _make_persisted_session(
+        200,
+        messages=[{"role": "assistant", "content": "z" * (2 * 1024 * 1024)}],
+    )
+    _insert(oversized)
+
+    with LOCK:
+        evicted = _evict_sessions_over_cap(cap=10, max_bytes=1024 * 1024)
+
+    assert evicted == 0
+    assert list(SESSIONS) == [oversized.session_id]
+    assert oversized._cache_resident_bytes > 1024 * 1024
+
+
+def test_resident_weight_tracks_save_full_load_and_metadata_stub(isolated_session_env):
+    """Weights follow retained data without deep-walking the Python object graph."""
+    from api.models import Session
+
+    session = _make_persisted_session(
+        300,
+        messages=[{"role": "assistant", "content": "w" * (256 * 1024)}],
+    )
+    sidecar_bytes = session.path.stat().st_size
+    assert session._cache_resident_bytes == sidecar_bytes
+
+    loaded = Session.load(session.session_id)
+    assert loaded is not None
+    assert loaded._cache_resident_bytes == sidecar_bytes
+    assert loaded._cache_persisted_fingerprint is not None
+
+    metadata_stub = Session.load_metadata_only(session.session_id)
+    assert metadata_stub is not None
+    assert 0 < metadata_stub._cache_resident_bytes < sidecar_bytes
+
+
+def test_full_load_weights_the_exact_bytes_read_across_atomic_replace(
+    isolated_session_env, monkeypatch,
+):
+    """A pre-read stat from the old inode cannot weight replacement JSON."""
+    from api import models
+    from api.models import Session
+
+    original = _make_persisted_session(
+        301,
+        messages=[{"role": "assistant", "content": "old"}],
+    )
+    target = original.path
+    old_sig = models._sidecar_stat_signature(target)
+    replacement_data = json.loads(target.read_text(encoding="utf-8"))
+    replacement_data["messages"] = [
+        {"role": "assistant", "content": "new" + "x" * (700 * 1024)}
+    ]
+    replacement_data["message_count"] = 1
+    replacement = target.with_suffix(".replacement")
+    replacement.write_text(
+        json.dumps(replacement_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    replacement_size = replacement.stat().st_size
+    real_signature = models._sidecar_stat_signature
+    swapped = False
+
+    def replace_after_signature(path):
+        nonlocal swapped
+        if Path(path) == target and not swapped:
+            swapped = True
+            os.replace(replacement, target)
+            return old_sig
+        return real_signature(path)
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", replace_after_signature)
+
+    loaded = Session.load(original.session_id)
+
+    assert swapped is True
+    assert loaded.messages[0]["content"].startswith("new")
+    assert loaded._cache_resident_bytes == replacement_size
+    assert replacement_size > old_sig[2]
+
+
+def test_save_measurement_failure_marks_weight_unknown_and_enforces_conservatively(
+    isolated_session_env, monkeypatch,
+):
+    """A successful save never keeps a stale pre-growth weight after size failure."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+    sessions = [
+        _make_persisted_session(
+            310 + i,
+            messages=[{"role": "assistant", "content": "s" * (250 * 1024)}],
+        )
+        for i in range(3)
+    ]
+    for session in sessions:
+        _insert(session)
+
+    current = sessions[-1]
+    replaced = False
+    real_replace = models._safe_replace
+    real_path_stat = Path.stat
+
+    def marked_replace(src, dst):
+        nonlocal replaced
+        real_replace(src, dst)
+        if Path(dst) == current.path:
+            replaced = True
+
+    def fail_target_stat(path, *args, **kwargs):
+        if replaced and Path(path) == current.path:
+            raise OSError("post-replace stat unavailable")
+        return real_path_stat(path, *args, **kwargs)
+
+    def fail_open_file_stat(_fd):
+        raise OSError("open-file size unavailable")
+
+    monkeypatch.setattr(models, "_safe_replace", marked_replace)
+    monkeypatch.setattr(Path, "stat", fail_target_stat)
+    monkeypatch.setattr(models.os, "fstat", fail_open_file_stat)
+    current.messages = [
+        {"role": "assistant", "content": "grown" + "g" * (700 * 1024)}
+    ]
+
+    current.save()
+
+    assert current._cache_resident_bytes is None
+    assert sessions[0].session_id not in SESSIONS
+    assert current.session_id in SESSIONS
 
 
 # ────────────────────── invariant 2: never evict active ──────────────────────
@@ -491,6 +1378,74 @@ def test_scan_accessor_reuses_resident_sessions_without_promoting(isolated_sessi
     assert list(SESSIONS.keys()) == order_before, "scan must not promote in the LRU"
 
 
+def test_scan_reconciliation_does_not_enforce_cache_bounds(
+    isolated_session_env, monkeypatch,
+):
+    """A scan self-heal may update disk/cache state but must not churn the LRU."""
+    from api import config as _cfg
+    from api import models
+    from api.config import SESSIONS
+
+    stale = _make_persisted_session(
+        940,
+        messages=[
+            {"role": "user", "content": "u" * (400 * 1024), "timestamp": 100.0}
+        ],
+    )
+    stale.active_stream_id = "dead-scan-stream"
+    stale.pending_user_message = "recover scan"
+    stale.pending_started_at = 102.0
+    stale.save(touch_updated_at=False)
+    siblings = [
+        _make_persisted_session(
+            941 + i,
+            messages=[
+                {"role": "assistant", "content": "s" * (400 * 1024), "timestamp": 100.0}
+            ],
+        )
+        for i in range(2)
+    ]
+    _insert(stale)
+    for sibling in siblings:
+        _insert(sibling)
+    order_before = list(SESSIONS)
+
+    recovered = list(stale.messages) + [
+        {
+            "role": "assistant",
+            "content": "recovered" + "a" * (700 * 1024),
+            "timestamp": 103.0,
+        }
+    ]
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda *_args, **_kwargs: {"message_count": 2, "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: list(recovered),
+    )
+    monkeypatch.setattr(
+        _cfg,
+        "get_config",
+        lambda: {
+            "webui": {
+                "sessions_cache_max": 10,
+                "sessions_cache_max_mb": 1,
+            }
+        },
+    )
+
+    scanned = models.get_session_for_scan(stale.session_id)
+
+    assert scanned is stale
+    assert scanned.messages[-1]["content"].startswith("recovered")
+    assert list(SESSIONS) == order_before, "scan reconciliation must not evict or promote"
+
+
 def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
     isolated_session_env, monkeypatch,
 ):
@@ -556,3 +1511,385 @@ def test_content_search_scan_recovers_newer_state_db_without_lru_churn(
     assert captured["payload"]["sessions"][0]["session_id"] == stale.session_id
     assert list(SESSIONS.keys()) == order_before, "scan recovery must not promote the LRU"
     assert len(SESSIONS) == size_before, "scan recovery must not insert or evict cache entries"
+
+
+def test_cold_load_rejects_stale_sidecar_generation_on_concurrent_disk_change(
+    isolated_session_env, monkeypatch,
+):
+    """Cold-load insertion must detect concurrent sidecar replacement and reload fresh disk."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-cas-cold-load"
+    original = models.Session(
+        session_id=sid,
+        title="Original title",
+        messages=[{"role": "user", "content": "hello", "timestamp": 100.0}],
+    )
+    original.save()
+
+    real_load = models.Session.load
+    interposed = False
+
+    def load_and_interpose(cls, session_id):
+        nonlocal interposed
+        loaded = real_load(session_id)
+        if session_id == sid and not interposed:
+            interposed = True
+            # Replace the file on disk concurrently before _resolve_session inserts
+            updated = models.Session(
+                session_id=sid,
+                title="Updated title on disk",
+                composer_draft={"text": "concurrent draft"},
+                messages=[{"role": "user", "content": "hello", "timestamp": 100.0}],
+            )
+            updated.save()
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_and_interpose))
+
+    resolved = models.get_session(sid)
+    assert resolved is not None
+    assert resolved.title == "Updated title on disk"
+    assert resolved.composer_draft == {"text": "concurrent draft"}
+    cached = SESSIONS.get(sid)
+    assert cached is not None
+    assert cached.title == "Updated title on disk"
+    assert cached.composer_draft == {"text": "concurrent draft"}
+
+
+def test_detached_save_reconciles_clean_reloaded_cache_across_same_count_metadata_edit(
+    isolated_session_env,
+):
+    """A detached save replacing a sidecar with same count must overwrite a clean old cache entry."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-detached-metadata-cas"
+    v1 = models.Session(
+        session_id=sid,
+        title="Version 1",
+        composer_draft={},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 100.0}],
+    )
+    v1.save()
+
+    # Reader cold-loads v1 into SESSIONS
+    loaded_v1 = models.get_session(sid)
+    assert loaded_v1 is not None
+    assert SESSIONS.get(sid) is loaded_v1
+
+    # Detached writer had resolved v1 earlier, mutates metadata, and saves
+    v2 = models.Session(
+        session_id=sid,
+        title="Version 2 Updated",
+        composer_draft={"text": "draft v2"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 100.0}],
+    )
+    v2.save()
+
+    # Cache must now serve v2, not stale loaded_v1
+    cached = SESSIONS.get(sid)
+    assert cached is not None
+    assert cached.title == "Version 2 Updated"
+    assert cached.composer_draft == {"text": "draft v2"}
+    resolved = models.get_session(sid)
+    assert resolved.title == "Version 2 Updated"
+    assert resolved.composer_draft == {"text": "draft v2"}
+
+
+def test_cached_session_lags_disk_detects_clean_cache_stat_signature_mismatch(
+    isolated_session_env,
+):
+    """An inactive clean cached session detects same-count disk modification via stat signature."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-lags-stat-sig"
+    v1 = models.Session(
+        session_id=sid,
+        title="Original",
+        composer_draft={},
+        messages=[{"role": "user", "content": "msg", "timestamp": 100.0}],
+    )
+    v1.save()
+
+    cached = models.get_session(sid)
+    assert cached is not None
+    assert SESSIONS.get(sid) is cached
+    assert models._cached_session_lags_disk(cached) is False
+
+    # An external writer updates disk directly (e.g. outside process or via raw file write)
+    payload = json.loads(v1.path.read_text(encoding="utf-8"))
+    payload["title"] = "Modified on disk directly"
+    payload["composer_draft"] = {"text": "external draft"}
+    v1.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Because cached is clean and its _sidecar_stat_sig != disk stat signature, lags_disk returns True
+    assert models._cached_session_lags_disk(cached) is True
+    resolved = models.get_session(sid)
+    assert resolved.title == "Modified on disk directly"
+    assert resolved.composer_draft == {"text": "external draft"}
+
+
+def test_save_clears_authority_when_replaced_before_generation_capture(
+    isolated_session_env, monkeypatch,
+):
+    """A save must not pair its snapshot fingerprint with another writer's path stat."""
+    from api import models
+
+    original = _make_persisted_session(810)
+    writer = models.Session(
+        session_id=original.session_id,
+        title="writer payload",
+        composer_draft={"text": "writer draft"},
+        messages=list(original.messages),
+    )
+    replacement_data = json.loads(original.path.read_text(encoding="utf-8"))
+    replacement_data["title"] = "interposed replacement"
+    replacement_data["composer_draft"] = {"text": "interposed draft"}
+    replacement = original.path.with_suffix(".generation-race")
+    replacement.write_text(
+        json.dumps(replacement_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    real_replace = models._safe_replace
+    interposed = False
+
+    def install_then_replace(src, dst):
+        nonlocal interposed
+        real_replace(src, dst)
+        if Path(dst) == writer.path and not interposed:
+            interposed = True
+            os.replace(replacement, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", install_then_replace)
+
+    writer.save(touch_updated_at=False, skip_index=True, enforce_cache_bounds=False)
+
+    assert interposed is True
+    assert writer._cache_persisted_authority is None
+    assert writer._cache_persisted_fingerprint is None
+    assert writer._sidecar_stat_sig is None
+    assert writer._cache_resident_bytes is None
+    persisted = json.loads(writer.path.read_text(encoding="utf-8"))
+    assert persisted["title"] == "interposed replacement"
+    assert persisted["composer_draft"] == {"text": "interposed draft"}
+
+
+def test_cold_load_retries_each_replacement_and_publishes_only_final_generation(
+    isolated_session_env, monkeypatch,
+):
+    """Cold cache insertion retries every stale candidate, including retry #2."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-cold-two-replacements"
+    v1 = models.Session(
+        session_id=sid,
+        title="generation one",
+        composer_draft={"text": "one"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v2 = models.Session(
+        session_id=sid,
+        title="generation two",
+        composer_draft={"text": "two"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v3 = models.Session(
+        session_id=sid,
+        title="generation three",
+        composer_draft={"text": "three"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v1.save(touch_updated_at=False, enforce_cache_bounds=False)
+
+    real_publish = models._publish_verified_session_cas
+    replacements = [v2, v3]
+    publish_calls = 0
+
+    def replace_before_publish(*args, **kwargs):
+        nonlocal publish_calls
+        if publish_calls < len(replacements):
+            replacements[publish_calls].save(
+                touch_updated_at=False,
+                skip_index=True,
+                enforce_cache_bounds=False,
+            )
+        publish_calls += 1
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_publish_verified_session_cas", replace_before_publish)
+
+    resolved = models.get_session(sid)
+
+    assert publish_calls == 3
+    assert resolved.title == "generation three"
+    assert resolved.composer_draft == {"text": "three"}
+    assert SESSIONS[sid] is resolved
+    assert models._session_matches_persisted_state(resolved) is True
+
+
+def test_cold_load_never_caches_missing_generation_after_bounded_exhaustion(
+    isolated_session_env, monkeypatch,
+):
+    """Missing generation tokens fail closed rather than entering SESSIONS."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-cold-missing-generation"
+    source = models.Session(
+        session_id=sid,
+        title="stable disk payload",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    source.save(touch_updated_at=False, enforce_cache_bounds=False)
+
+    real_load = models.Session.load
+    loads = 0
+
+    def load_without_generation(cls, session_id):
+        nonlocal loads
+        loaded = real_load(session_id)
+        if session_id == sid and loaded is not None:
+            loads += 1
+            models._set_session_persisted_authority(loaded, None, None)
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_without_generation))
+
+    with pytest.raises(KeyError):
+        models.get_session(sid)
+
+    assert loads == models._SESSION_CACHE_PUBLICATION_RETRIES
+    assert sid not in SESSIONS
+
+
+def test_cache_hit_refresh_cas_preserves_newer_cache_publication(
+    isolated_session_env, monkeypatch,
+):
+    """A stale disk load cannot overwrite a cache entry published while it parsed."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "sess-cache-hit-cas"
+    old = models.Session(
+        session_id=sid,
+        title="old cache generation",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    old.save(touch_updated_at=False, enforce_cache_bounds=False)
+    disk = models.Session(
+        session_id=sid,
+        title="disk refresh generation",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    disk.save(touch_updated_at=False, enforce_cache_bounds=False)
+    # Deliberately retain the older clean generation in cache so the normal
+    # freshness path starts a full disk load.
+    with LOCK:
+        SESSIONS[sid] = old
+
+    winner = models.Session.load(sid)
+    assert winner is not None
+    winner.composer_draft = {"text": "newer cache publication"}
+    real_load = models.Session.load
+    interposed = False
+
+    def load_then_publish_winner(cls, session_id):
+        nonlocal interposed
+        loaded = real_load(session_id)
+        if session_id == sid and not interposed:
+            interposed = True
+            with LOCK:
+                SESSIONS[sid] = winner
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_then_publish_winner))
+
+    resolved = models.get_session(sid)
+
+    assert interposed is True
+    assert resolved is winner
+    assert SESSIONS[sid] is winner
+    assert resolved.composer_draft == {"text": "newer cache publication"}
+
+
+def test_detached_save_cas_never_replaces_dirty_cached_generation(
+    isolated_session_env,
+):
+    """A detached writer cannot discard a cache object's unsaved metadata."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "sess-save-cas-dirty-cache"
+    v1 = models.Session(
+        session_id=sid,
+        title="generation one",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v1.save(touch_updated_at=False, enforce_cache_bounds=False)
+    dirty_cached = models.Session.load(sid)
+    assert dirty_cached is not None
+    dirty_cached.composer_draft = {"text": "unsaved cache draft"}
+    with LOCK:
+        SESSIONS[sid] = dirty_cached
+
+    detached_writer = models.Session(
+        session_id=sid,
+        title="generation two",
+        composer_draft={"text": "durable writer draft"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    detached_writer.save(touch_updated_at=False)
+
+    assert SESSIONS[sid] is dirty_cached
+    assert dirty_cached.composer_draft == {"text": "unsaved cache draft"}
+    persisted = json.loads(detached_writer.path.read_text(encoding="utf-8"))
+    assert persisted["composer_draft"] == {"text": "durable writer draft"}
+
+
+def test_stale_tail_cas_retries_after_observed_cache_entry_is_removed(
+    isolated_session_env, monkeypatch,
+):
+    """A stale-tail refresh retries as a cold publication if its cache CAS loses to removal."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "sess-stale-tail-cas-removal"
+    disk = models.Session(
+        session_id=sid,
+        title="durable assistant tail",
+        messages=[
+            {"role": "user", "content": "prompt", "timestamp": 1.0},
+            {"role": "assistant", "content": "durable answer", "timestamp": 2.0},
+        ],
+    )
+    disk.save(touch_updated_at=False, enforce_cache_bounds=False)
+    stale = models.Session.load(sid)
+    assert stale is not None
+    stale.messages[-1] = {"role": "user", "content": "prompt", "timestamp": 2.0}
+    with LOCK:
+        SESSIONS[sid] = stale
+
+    real_publish = models._publish_verified_session_cas
+    publish_calls = 0
+
+    def remove_observed_entry_once(*args, **kwargs):
+        nonlocal publish_calls
+        if publish_calls == 0:
+            with LOCK:
+                SESSIONS.pop(sid, None)
+        publish_calls += 1
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_publish_verified_session_cas", remove_observed_entry_once)
+
+    resolved = models.get_session(sid)
+
+    assert publish_calls == 2
+    assert resolved.messages[-1]["role"] == "assistant"
+    assert resolved.messages[-1]["content"] == "durable answer"
+    assert SESSIONS[sid] is resolved
