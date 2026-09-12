@@ -6488,6 +6488,10 @@ const PROFILE_DROPDOWN_CACHE_TTL_MS = 5 * 60 * 1000;
 let _profileSwitchGeneration = 0;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 let _profileDropdownOpenGeneration = 0;
+// data-profile of the option that currently holds keyboard focus inside the
+// open menu. Survives re-renders (the focused node is detached by innerHTML='',
+// so identity must be tracked by name) and is null until the first focus lands.
+let _profileDropdownFocusedName = null;
 
 function _profileDropdownClearStoredCache(){
   try{localStorage.removeItem(PROFILE_DROPDOWN_CACHE_KEY);}catch(_){}
@@ -6577,9 +6581,9 @@ function _openProfileDropdownShell(){
   dd.classList.add('open');
   _positionProfileDropdown();
   const chip=$('profileChip');
-  if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
+  if(chip && _profileDropdownTrigger===chip){ chip.classList.add('active'); chip.setAttribute('aria-expanded','true'); }
   const tbtn=$('titlebarProfileBtn');
-  if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
+  if(tbtn && _profileDropdownTrigger===tbtn){ tbtn.classList.add('active'); tbtn.setAttribute('aria-expanded','true'); }
 }
 
 async function _profileSwitchPanelLoad(){
@@ -6852,6 +6856,13 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
+  // ARIA menu-button contract: the popup is a menu whose rows the user chooses
+  // between, plus one navigation command (Manage profiles). A listbox would be
+  // wrong here — it is for selecting a *value*, and a command cannot be an
+  // option. role="menu"/"menuitem" fits both rows, and the active profile is
+  // marked with aria-current rather than aria-selected.
+  dd.setAttribute('role','menu');
+  dd.setAttribute('aria-label', t('tab_profiles') || 'Profiles');
   const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');
   const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
@@ -6860,6 +6871,10 @@ function renderProfileDropdown(data) {
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    opt.setAttribute('role','menuitem');
+    opt.setAttribute('tabindex','-1');
+    if (p.name === active) opt.setAttribute('aria-current','true');
+    opt.setAttribute('data-profile', p.name);
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
@@ -6869,7 +6884,7 @@ function renderProfileDropdown(data) {
     opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
-      closeProfileDropdown();
+      closeProfileDropdown({restore:true});
       if (p.name === active) return;
       await switchToProfile(p.name);
     };
@@ -6879,13 +6894,27 @@ function renderProfileDropdown(data) {
   if (!data.single_profile_mode) {
     const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
     const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
+    mgmt.setAttribute('role','menuitem');
+    mgmt.setAttribute('tabindex','-1');
+    mgmt.setAttribute('data-profile', '__manage__');
     mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
-    mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
+    mgmt.onclick = () => {
+      // This is a navigation command, not a selection: close WITHOUT restoring
+      // focus (the opener chip/button can be hidden after the switch, e.g. on
+      // mobile) and land focus on the destination panel instead.
+      closeProfileDropdown();
+      mobileSwitchPanel('profiles');
+      _focusProfilesPanelDestination();
+    };
     dd.appendChild(mgmt);
   }
   // Sync titlebar label to the resolved active profile
   const tbl = $('titlebarProfileLabel');
   if (tbl) tbl.textContent = active;
+  // Keyboard users: move focus into the just-rendered menu so ArrowUp/Down +
+  // Enter work immediately without an extra click (matches the session action
+  // menu focus-on-open behavior).
+  _focusProfileDropdownOption();
 }
 
 function toggleProfileDropdown(e) {
@@ -6900,8 +6929,11 @@ function toggleProfileDropdown(e) {
   const cached = _profileDropdownBestCachedData();
 
   if(cached && !cached.single_profile_mode){
-    renderProfileDropdown(cached);
+    // Open the shell BEFORE rendering: _focusProfileDropdownOption() only acts
+    // while the menu is open, so render-while-closed would silently drop the
+    // focus-on-open behavior.
     _openProfileDropdownShell();
+    renderProfileDropdown(cached);
   }else{
     _renderProfileDropdownLoading();
     _openProfileDropdownShell();
@@ -6914,8 +6946,8 @@ function toggleProfileDropdown(e) {
       closeProfileDropdown();
       return;
     }
-    renderProfileDropdown(data);
     _openProfileDropdownShell();
+    renderProfileDropdown(data);
   }).catch(e => {
     if(openGen !== _profileDropdownOpenGeneration) return;
     if(cached && !cached.single_profile_mode){
@@ -6927,14 +6959,25 @@ function toggleProfileDropdown(e) {
   });
 }
 
-function closeProfileDropdown() {
+function closeProfileDropdown(opts) {
+  const restore = !!(opts && opts.restore === true);
   _profileDropdownOpenGeneration++;
+  _profileDropdownFocusedName = null;
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
   const chip=$('profileChip');
-  if(chip) chip.classList.remove('active');
+  if(chip){ chip.classList.remove('active'); chip.setAttribute('aria-expanded','false'); }
   const tbtn=$('titlebarProfileBtn');
-  if(tbtn) tbtn.classList.remove('active');
+  if(tbtn){ tbtn.classList.remove('active'); tbtn.setAttribute('aria-expanded','false'); }
+  if(restore){
+    // Only yank focus back when the keyboard asked for it (Escape / selection).
+    // Click-outside closes must not steal focus from wherever the user moved.
+    const trigger=_profileDropdownTrigger||chip;
+    const focusInside=dd && document.activeElement && dd.contains(document.activeElement);
+    if(trigger && trigger.isConnected && focusInside && typeof trigger.focus==='function'){
+      try{trigger.focus({preventScroll:true});}catch(_){trigger.focus();}
+    }
+  }
 }
 document.addEventListener('click', e => {
   if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
@@ -6942,6 +6985,123 @@ document.addEventListener('click', e => {
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
   if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
+});
+
+// ── Profile dropdown keyboard navigation ─────────────────────────────────────
+// The dropdown is a plain-div menu, so it previously had NO keyboard support:
+// opening it (click or Enter) left focus on the trigger and ArrowUp/Down did
+// nothing, forcing mouse-only selection. Mirror the session action menu pattern
+// (sessions.js _mountSessionActionMenu): rows are focusable menuitems, arrow
+// keys move focus, Enter/Space activate, Escape closes and returns focus to the
+// trigger.
+
+function _focusProfilesPanelDestination(){
+  // After "Manage profiles" the opener may be hidden (mobile), so focus the
+  // destination panel heading instead of restoring focus to the trigger.
+  const panel=$('panelProfiles');
+  const head=panel && panel.querySelector('.panel-head');
+  if(!head) return;
+  if(head.getAttribute('tabindex')===null) head.setAttribute('tabindex','-1');
+  try{head.focus({preventScroll:true});}catch(_){head.focus();}
+}
+
+function _profileDropdownOptions(){
+  const dd=$('profileDropdown');
+  return dd ? Array.from(dd.querySelectorAll('.profile-opt')) : [];
+}
+
+function _focusProfileDropdownOption(){
+  const dd=$('profileDropdown');
+  if(!dd || !dd.classList.contains('open')) return;
+  const items=_profileDropdownOptions();
+  if(!items.length) return;
+  const fe=document.activeElement;
+  // Is focus attached to this menu interaction? Inside the menu, on one of the
+  // trigger buttons (the user just opened it), or a recently-focused option the
+  // refresh just detached (innerHTML='') — which is inside by the user's last
+  // interaction.
+  const focusAttached=!!(fe && (
+    fe===dd || dd.contains(fe)
+    || fe===$('profileChip') || fe===$('titlebarProfileBtn')
+    || (typeof fe.getAttribute==='function' && fe.getAttribute('data-profile') && fe.isConnected===false)
+  ));
+  // Never steal focus from the rest of the app: if the user Tabbed out of the
+  // menu, a background refresh must not yank focus back into it.
+  if(fe && fe!==document.body && !focusAttached) return;
+  let idx=-1;
+  // Preserve an in-progress keyboard selection across a background refresh:
+  // re-focus the rebuilt row with the same data-profile instead of jumping
+  // back to the active one.
+  if(focusAttached) idx=items.findIndex(o=>o.getAttribute('data-profile')===_profileDropdownFocusedName);
+  if(idx<0) idx=items.findIndex(o=>o.getAttribute('aria-current')==='true');
+  if(idx<0) idx=0;
+  const target=items[idx];
+  if(target && target!==fe){
+    const profileName=target.getAttribute('data-profile');
+    if(profileName) _profileDropdownFocusedName=profileName;
+    try{target.focus({preventScroll:true});}catch(_){target.focus();}
+  }
+}
+
+function _profileDropdownKeydownHandler(e){
+  const dd=$('profileDropdown');
+  if(!dd || !dd.classList.contains('open')) return;
+  // Menu-button contract: Tab / Shift+Tab moves focus out of the menu and
+  // dismisses it. Do NOT preventDefault (the native Tab must advance focus),
+  // do not restore focus to the trigger — the browser already moved it — and
+  // close deferred so the refresh-preservation logic cannot mistake this for a
+  // real focus exit.
+  if(e.key==='Tab' && dd.contains(document.activeElement)){
+    setTimeout(()=>{ closeProfileDropdown(); },0);
+    return;
+  }
+  // Scope the rest of the handler to the menu: once focus has left it by any
+  // non-Tab path, Arrow/Home/End/Enter/Escape must keep working in the rest of
+  // the app, not be hijacked by an open menu the user has moved away from.
+  if(dd.contains(document.activeElement)===false || document.activeElement===null) return;
+  const items=_profileDropdownOptions();
+  if(e.key==='Escape'){
+    e.preventDefault();
+    e.stopPropagation();
+    closeProfileDropdown({restore:true});
+    return;
+  }
+  if(!items.length) return;
+  const current=items.indexOf(document.activeElement);
+  let next=-1;
+  if(e.key==='ArrowDown') next=(current+1)%items.length;
+  else if(e.key==='ArrowUp') next=(current-1+items.length)%items.length;
+  else if(e.key==='Home') next=0;
+  else if(e.key==='End') next=items.length-1;
+  if(next>=0 && next!==current){
+    e.preventDefault();
+    const target=items[next];
+    const profileName=target.getAttribute('data-profile');
+    if(profileName) _profileDropdownFocusedName=profileName;
+    try{target.focus({preventScroll:true});}catch(_){target.focus();}
+    return;
+  }
+  if((e.key==='Enter'||e.key===' ') && current>=0){
+    // Only activate when an option (or the manage row) actually holds focus;
+    // otherwise let the key pass through (e.g. Tab moved focus to the composer).
+    e.preventDefault();
+    items[current].click();
+  }
+}
+document.addEventListener('keydown', _profileDropdownKeydownHandler);
+
+// ArrowUp/Down on the trigger opens the menu and moves focus onto the first
+// option (native Enter/Space on a button already opens it via click).
+['profileChip','titlebarProfileBtn'].forEach(id=>{
+  const el=$(id);
+  if(!el) return;
+  el.addEventListener('keydown', e=>{
+    if(e.key!=='ArrowDown' && e.key!=='ArrowUp') return;
+    const dd=$('profileDropdown');
+    if(dd && dd.classList.contains('open')) return; // menu handler moves focus
+    e.preventDefault();
+    toggleProfileDropdown(e);
+  });
 });
 
 function _openProfileSwitchSessionBrowser(){
