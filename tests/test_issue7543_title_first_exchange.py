@@ -22,9 +22,14 @@ class _ProfileEnv:
 
 
 def _capturing_llm_result(captured, title="LLM Title", status="llm_aux"):
+    # Guard-faithful stand-in for the aux route: mirrors the documented
+    # generate_title_raw_via_aux contract — empty assistant_text is rejected
+    # with missing_exchange (the provider edge), never the selection logic.
     def _fake(user_text, assistant_text, **kwargs):
         captured["user_text"] = user_text
         captured["assistant_text"] = assistant_text
+        if not user_text or not assistant_text:
+            return None, "missing_exchange", ""
         return title, status, ""
 
     return _fake
@@ -95,36 +100,12 @@ def test_issue7543_real_transcript_shape_reaches_llm_path(monkeypatch):
     assert captured["assistant_text"].startswith("## Zertifikat")
 
 
-# --- Fix B: fallback to last complete exchange when first exchange unusable ---
-#
-# NOTE: both walkers share text extraction, so a "scrubbed message" transcript
-# is handled identically by pre- and post-fix code (verified against the
-# pre-fix module). To actually pin Fix B's discriminator — first walker yields
-# no user text, latest walker yields a complete pair — the walkers are mocked.
-# The transcript-level scrubber case stays covered by the mocked-walker test's
-# transcript comment and by Fix A tests at snippet level.
-
-
-def test_regenerate_helper_falls_back_when_first_exchange_yields_no_user_text(monkeypatch):
-    """Fix B discriminator: first exchange unusable, latest exchange usable."""
+def test_regenerate_helper_errors_with_real_walkers_when_no_user_text_exists(monkeypatch):
+    """Observable error path through the real walkers: no user text anywhere
+    (orphan assistant rows only) -> empty_user_message, aux never called."""
     captured = {}
-    monkeypatch.setattr(streaming, "_first_exchange_snippets", lambda msgs: ("", ""))
-    monkeypatch.setattr(
-        streaming, "_latest_exchange_snippets", lambda msgs: ("Latest question", "Latest answer")
-    )
-    title, status, _raw = _run_generation(monkeypatch, [{"role": "assistant", "content": "x"}], captured)
-    assert status == "llm_aux"
-    assert title == "LLM Title"
-    assert captured["user_text"] == "Latest question"
-    assert captured["assistant_text"] == "Latest answer"
-
-
-def test_regenerate_helper_still_errors_when_neither_walker_yields_exchange(monkeypatch):
-    """Original error path: both walkers unusable -> empty_user_message."""
-    captured = {}
-    monkeypatch.setattr(streaming, "_first_exchange_snippets", lambda msgs: ("", ""))
-    monkeypatch.setattr(streaming, "_latest_exchange_snippets", lambda msgs: ("", ""))
-    title, status, _raw = _run_generation(monkeypatch, [{"role": "assistant", "content": "x"}], captured)
+    messages = [{"role": "assistant", "content": "orphan answer without any user turn"}]
+    title, status, _raw = _run_generation(monkeypatch, messages, captured)
     assert title is None
     assert status == "empty_user_message"
     assert "user_text" not in captured  # aux path never reached

@@ -5097,16 +5097,8 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     messages = getattr(session, 'messages', None) or []
     if prefer_latest:
         user_text, assistant_text = _latest_exchange_snippets(messages)
-        if not user_text:
-            return None, 'empty_user_message', ''
     else:
         user_text, assistant_text = _first_exchange_snippets(messages)
-        if not user_text:
-            # Issue #7543: scrubbing can empty the opening user message; fall
-            # back to the last complete exchange instead of empty_user_message.
-            fb_user, fb_asst = _latest_exchange_snippets(messages)
-            if fb_user and fb_asst:
-                user_text, assistant_text = fb_user, fb_asst
     if not user_text:
         return None, 'empty_user_message', ''
     from api import profiles as profiles_api
