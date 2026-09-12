@@ -69,7 +69,7 @@ def test_stream_end_defers_settlement_when_live_assistant_still_present():
 
 def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
     body = _event_block("stream_end")
-    assert "const status=await _restoreSettledSession(source,{status:true});" in body
+    assert "const status=await _restoreSettledSession(source,{status:true,allowUnmarkedShorterTerminalSnapshot:true});" in body
     assert "if(status==='active'&&S.activeStreamId===streamId)" in body
     assert "_scheduleStreamEndRecovery(source,200);" in body
     assert "_finalizeStreamEndFallback(source);" in body
@@ -78,7 +78,7 @@ def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
     assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery)" in fn
-    assert "_restoreSettledSession(source,{status:true})" in fn
+    assert "_restoreSettledSession(source,{status:true,allowUnmarkedShorterTerminalSnapshot:true})" in fn
     assert "if(status==='active'&&_streamEndRecoveryAttempts<10)" in fn
     assert "_scheduleStreamEndRecovery(source,200);" in fn
     assert "_finalizeStreamEndFallback(source);" in fn
