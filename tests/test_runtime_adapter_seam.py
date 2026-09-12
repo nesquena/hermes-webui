@@ -476,6 +476,8 @@ def test_chat_start_adapter_path_preserves_legacy_response_shape():
 
     assert '"stream_id",' in helper_body
     assert '"session_id",' in helper_body
+    assert '"type",' in helper_body
+    assert '"retryable",' in helper_body
     assert 'response.setdefault("stream_id", result.stream_id)' in helper_body
     assert 'response.setdefault("session_id", result.session_id)' in helper_body
     assert '"run_id",' not in helper_body
@@ -518,6 +520,39 @@ def test_chat_start_response_from_run_start_filters_adapter_internal_fields():
         "effective_model": "gpt-5.5",
         "effective_model_provider": "openai-codex",
     }
+
+
+def test_chat_start_response_from_run_start_forwards_continuation_retry_fields():
+    """Legacy-journal must keep type/retryable so the browser can retry a 409."""
+    routes = importlib.import_module("api.routes")
+    runtime = importlib.import_module("api.runtime_adapter")
+
+    response = routes._chat_start_response_from_run_start(
+        runtime.RunStartResult(
+            run_id="",
+            session_id="compression-tip",
+            stream_id="",
+            status="started",
+            payload={
+                "error": "session rotated during chat start; retry on continuation",
+                "type": "session_continuation_changed",
+                "session_id": "compression-tip",
+                "retryable": True,
+                "_status": 409,
+                "run_id": "runner-internal-1",
+                "status": "started",
+                "active_controls": ["cancel"],
+            },
+        )
+    )
+
+    assert response["type"] == "session_continuation_changed"
+    assert response["retryable"] is True
+    assert response["session_id"] == "compression-tip"
+    assert response["_status"] == 409
+    assert "run_id" not in response
+    assert "status" not in response
+    assert "active_controls" not in response
 
 
 def test_rfc_distinguishes_goal_routing_from_queue_route_staging():
