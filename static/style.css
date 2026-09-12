@@ -2355,6 +2355,10 @@
   .process-wakeup-chip svg{width:11px;height:11px;flex:0 0 auto;}
   .process-wakeup-chip.ok{color:var(--success,#3fb950);border-color:currentColor;}
   .process-wakeup-chip.fail{color:var(--error,#f85149);border-color:currentColor;}
+  /* Async-delegation batches also settle partially (some tasks failed, or a
+     subagent hit its iteration cap) and with no provable outcome at all. */
+  .process-wakeup-chip.partial{color:var(--warning,#d29922);border-color:currentColor;}
+  .process-wakeup-chip.neutral{color:var(--muted,#8b949e);border-color:var(--border,#30363d);}
   /* Watch chip must shrink so a long pattern truncates instead of pushing the
      row past the card edge on narrow viewports (#6350 review finding 3). */
   .process-wakeup-chip.watch{flex:0 1 auto;min-width:0;}
