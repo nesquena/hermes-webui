@@ -1055,6 +1055,15 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     # profile-scoped read can't inherit the server process's ANTHROPIC_TOKEN /
     # CLAUDE_CODE_OAUTH_TOKEN etc. (#3961 cross-profile residual leak).
     names.update(_agent_registry_credential_env_names())
+    try:
+        from api.config import _env_ref_var_name
+    except Exception:
+        def _env_ref_var_name(inner: str):
+            ref = (inner or "").strip()
+            if ref.startswith("env:"):
+                return ref[len("env:"):].strip() or None
+            return ref or None
+
 
     config_path = Path(profile_home_path) / "config.yaml"
     if not config_path.exists():
@@ -1081,7 +1090,7 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         api_key = str(custom_provider.get("api_key") or "").strip()
         match = re.fullmatch(r"\$\{([^}]+)\}", api_key)
         if match:
-            env_name = str(match.group(1) or "").strip()
+            env_name = _env_ref_var_name(str(match.group(1) or "").strip())
             if env_name:
                 names.add(env_name)
     return names
