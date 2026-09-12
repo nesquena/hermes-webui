@@ -300,3 +300,56 @@ def test_agent_schema_rejection_falls_back_to_existing_request_shape():
     assert len(calls) == 2
     assert calls[1]["extra_body"] == {"reasoning_split": True}
     assert agent.reasoning_config is None
+
+
+@pytest.mark.parametrize(
+    "schema_response",
+    (
+        _response(""),
+        {
+            "choices": [
+                {
+                    "message": {"content": "", "reasoning": "hidden reasoning"},
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ),
+)
+def test_agent_empty_schema_response_tries_compatibility_shape(schema_response):
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return schema_response
+        return _response("Compatibility After Empty Schema")
+
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=fake_create))
+    )
+    agent = MagicMock()
+    agent.api_mode = "openai"
+    agent.provider = "custom"
+    agent.model = "reasoning-gateway"
+    agent.base_url = "https://reasoning.example/v1"
+    agent.reasoning_config = None
+    agent._build_api_kwargs.side_effect = lambda messages: {
+        "messages": messages,
+        "extra_body": {"reasoning_effort": "none"},
+    }
+    agent._ensure_primary_openai_client.return_value = client
+
+    result, status = streaming.generate_title_raw_via_agent(
+        agent,
+        "Why is the schema response empty?",
+        "Compatibility mode can still return a title.",
+    )
+
+    assert result == "Compatibility After Empty Schema"
+    assert status == "llm_retry"
+    assert len(calls) == 2
+    assert calls[1]["messages"] == calls[0]["messages"]
+    assert calls[1]["max_tokens"] == calls[0]["max_tokens"]
+    assert calls[1]["extra_body"] == {"reasoning_effort": "none"}
+    assert agent.reasoning_config is None

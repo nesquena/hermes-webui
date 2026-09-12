@@ -607,8 +607,10 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(status, 'llm_empty_reasoning')
-        # One call per prompt at base budget — no retry, no second-prompt attempt.
-        self.assertEqual(call_count[0], 1)
+        # The schema response gets one compatibility attempt. Reasoning-only
+        # compatibility output then short-circuits without a larger budget or
+        # second-prompt attempt.
+        self.assertEqual(call_count[0], 2)
         self.assertIsNone(agent.reasoning_config)
 
     def test_agent_route_still_retries_finish_length_without_reasoning(self):

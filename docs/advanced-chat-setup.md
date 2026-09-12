@@ -72,6 +72,14 @@ manually titled. Image-only or metadata-only content does not provide title
 text. Existing manual-title protection and the title-generation setting still
 apply; this cleanup does not rewrite the transcript or native image parts.
 
+Title-model requests prefer a strict JSON object containing a string `title`.
+OpenAI-compatible routes that reject the schema, return empty content, or emit
+reasoning without a title are retried once with the route's compatibility
+request shape. Generated candidates are unwrapped from common JSON containers
+and rejected rather than truncated when they resemble reasoning/meta commentary
+or exceed twelve words; rejected candidates fall through to the existing title
+retry or local-summary behavior.
+
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):
 

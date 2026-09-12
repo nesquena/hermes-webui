@@ -4794,6 +4794,9 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                                     continue
                                 raise
                             raw, empty_status = _extract_title_response(resp)
+                            if mode == 'schema' and empty_status in {'llm_empty', 'llm_empty_reasoning'}:
+                                schema_unavailable = True
+                                continue
                             break
                     raw = str(raw or '').strip()
                     if raw:
