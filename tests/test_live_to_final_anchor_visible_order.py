@@ -1050,6 +1050,16 @@ def test_done_sets_turn_duration_before_persisting_anchor_scene():
     assert duration_idx < attach_idx
 
 
+def test_done_retries_anchor_scene_persistence_after_settlement():
+    done = _event_listener_body(MESSAGES_JS, "done")
+
+    attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    retry_idx = done.index("_retrySettledAnchorScene(", attach_idx)
+    schedule_idx = done.index("setTimeout(()=>{", attach_idx)
+
+    assert attach_idx < schedule_idx < retry_idx
+
+
 def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")

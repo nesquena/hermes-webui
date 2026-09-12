@@ -1079,6 +1079,10 @@ def main() -> int:
                 anchor_scene_requests=anchor_scene_requests,
             )
             assert scene.get("version") == "activity_scene_v1", scene
+            assert any(item.get("type") == "request" for item in anchor_scene_requests), {
+                "message": "anchor scene was hydrated without a persistence request",
+                "anchor_scene_requests": anchor_scene_requests,
+            }
             if scenario == "terminal-error":
                 scene_rows = scene.get("activity_rows") or []
                 assert any(
