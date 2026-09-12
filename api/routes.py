@@ -12890,19 +12890,21 @@ def _static_content_identity(static_root: Path) -> str:
 def _assets_cache_bust_token(static_root: Path) -> str:
     """Return a cache token covering the WebUI's served static shell.
 
-    The token changes whenever any recursive static resource changes by byte
-    identity, even when WEBUI_VERSION or file metadata stays constant (non-git
+    After bounded freshness expiry, changes to any recursive static resource
+    change its byte identity, even with stable version or metadata (non-git
     installs). Cache name must change on bundle edits or the service-worker
     cache serves stale bundles indefinitely; hard refresh does not bypass
     service-worker caches.
     """
     from urllib.parse import quote
     from api.updates import WEBUI_VERSION
+    from api.asset_identity_cache import ASSET_IDENTITY_CACHE
 
     try:
-        fingerprint = hashlib.sha256(
-            _static_content_identity(static_root).encode("ascii")
-        )
+        identity = ASSET_IDENTITY_CACHE.get(static_root, _static_content_identity)
+        if identity is None:
+            return quote(WEBUI_VERSION, safe="") + _ASSET_IDENTITY_UNAVAILABLE_SUFFIX
+        fingerprint = hashlib.sha256(identity.encode("ascii"))
         return quote(f"{WEBUI_VERSION}+a{fingerprint.hexdigest()[:10]}", safe="")
     except Exception:
         # Preserve the historical string-returning helper for callers that only

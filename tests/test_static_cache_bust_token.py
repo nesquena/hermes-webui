@@ -42,6 +42,24 @@ def _one_pixel_png(pixel: bytes) -> bytes:
     )
 
 
+@pytest.fixture(autouse=True)
+def asset_clock(monkeypatch):
+    """Isolate real cache state and advance its monotonic freshness explicitly."""
+    from api import asset_identity_cache
+
+    now = [100.0]
+    monkeypatch.setattr(
+        asset_identity_cache,
+        "ASSET_IDENTITY_CACHE",
+        asset_identity_cache.AssetIdentityCache(clock=lambda: now[0]),
+    )
+
+    def expire():
+        now[0] += 1.0
+
+    return expire
+
+
 @pytest.fixture()
 def asset_token():
     """Return the real _assets_cache_bust_token bound to this worktree."""
@@ -57,7 +75,7 @@ def test_token_does_not_raise_on_missing_static_root(tmp_path, asset_token):
     assert token != ""
 
 
-def test_token_is_stable_for_metadata_only_touch(tmp_path, asset_token):
+def test_token_is_stable_for_metadata_only_touch(tmp_path, asset_token, asset_clock):
     """A touch without a byte edit is not a new content revision."""
     static_root = tmp_path / "static"
     static_root.mkdir()
@@ -66,6 +84,7 @@ def test_token_is_stable_for_metadata_only_touch(tmp_path, asset_token):
     first = asset_token(static_root)
     time.sleep(0.02)
     bundle.touch()
+    asset_clock()
     second = asset_token(static_root)
     assert second == first, "metadata alone must not create a new revision"
 
@@ -85,7 +104,7 @@ def test_token_is_stable_for_metadata_only_touch(tmp_path, asset_token):
     ],
 )
 def test_token_changes_for_shell_bytes_with_stable_metadata(
-    tmp_path, asset_token, relative_path, first_bytes, second_bytes
+    tmp_path, asset_token, relative_path, first_bytes, second_bytes, asset_clock
 ):
     """Byte identity—not metadata—must govern the shell revision."""
     static_root = tmp_path / "static"
@@ -102,6 +121,7 @@ def test_token_changes_for_shell_bytes_with_stable_metadata(
     restored_stat = bundle.stat()
     assert restored_stat.st_size == stat.st_size
     assert restored_stat.st_mtime_ns == stat.st_mtime_ns
+    asset_clock()
     assert asset_token(static_root) != first
 
 
@@ -138,7 +158,7 @@ class _RouteHandler:
 
 
 def test_shell_cache_and_worker_agree_after_nested_bundle_mutation(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, asset_clock
 ):
     """A bundle edit invalidates the shell even when index.html is unchanged."""
     static_root = tmp_path / "static"
@@ -172,7 +192,10 @@ def test_shell_cache_and_worker_agree_after_nested_bundle_mutation(
 
     stat = bundle.stat()
     bundle.write_bytes(b"export const value = 'bravo';\n")
-    os.utime(bundle, (stat.st_atime, stat.st_mtime))
+    os.utime(bundle, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert bundle.stat().st_size == stat.st_size
+    assert bundle.stat().st_mtime_ns == stat.st_mtime_ns
+    asset_clock()
 
     second_shell_token = shell_token()
     handler = _RouteHandler()
@@ -244,7 +267,7 @@ def test_unavailable_identity_does_not_authorize_cached_shell_reuse(
     )
 
 
-def test_search_only_vendor_directory_fails_closed(tmp_path, monkeypatch):
+def test_search_only_vendor_directory_fails_closed(tmp_path, monkeypatch, asset_clock):
     """A still-servable leaf beneath an unlistable vendor directory fails closed."""
     if os.name != "posix":
         pytest.skip("real 0111 directory semantics require POSIX")
@@ -302,6 +325,7 @@ def test_search_only_vendor_directory_fails_closed(tmp_path, monkeypatch):
         assert static_handler.status == 200
         assert bytes(static_handler.body) == b"export const value = 'bravo';\n"
 
+        asset_clock()
         second_token = routes._assets_cache_bust_token(static_root)
         assert not routes._asset_identity_is_available(second_token)
         assert second_token.endswith(routes._ASSET_IDENTITY_UNAVAILABLE_SUFFIX)
