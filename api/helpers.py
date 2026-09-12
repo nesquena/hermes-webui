@@ -1244,6 +1244,86 @@ def redact_session_data(session_dict: dict) -> dict:
     return result
 
 
+def redact_session_data_incremental(
+    session_dict: dict,
+    *,
+    prefix_count: int,
+    prefix_redacted: list,
+    _active_turn_token: str | None = None,
+) -> dict:
+    """Redact a session payload, reusing an already-redacted transcript prefix.
+
+    Produces the same output as ``redact_session_data`` when the caller has
+    already redacted ``session_dict["messages"][:prefix_count]`` (as
+    ``prefix_redacted``) and verified the raw prefix is unchanged; only the
+    message tail and the small non-transcript fields are redacted in this call.
+    A settled ``done`` payload therefore stops re-walking the full transcript
+    on every turn — long, tool-heavy sessions previously blocked unrelated
+    WebUI requests for tens of seconds while the whole transcript was redacted
+    on each turn (#7081).
+
+    The caller must pass the same ``_active_turn_token`` that produced
+    ``prefix_redacted`` (or omit it to derive it from the payload, as
+    ``redact_session_data`` does). Any prefix that cannot be proven reusable
+    (wrong shape, ``prefix_count`` out of range, mismatched
+    ``prefix_redacted`` length) falls back to a full redaction pass, so a
+    stale cache can never leak unredacted content.
+    """
+    from api.config import load_settings
+    from api.process_event_utils import build_active_turn_token
+
+    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    if not isinstance(session_dict, dict):
+        return {}
+    if _active_turn_token is None:
+        _active_turn_token = build_active_turn_token(
+            session_dict.get("active_stream_id"),
+            session_dict.get("pending_started_at"),
+        )
+    messages = session_dict.get("messages")
+    prefix_ok = (
+        isinstance(messages, list)
+        and isinstance(prefix_redacted, list)
+        and 0 <= prefix_count <= len(messages)
+        and len(prefix_redacted) == prefix_count
+    )
+    if not prefix_ok:
+        return redact_session_data(session_dict)
+    result = {}
+    for key, value in session_dict.items():
+        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:
+            continue
+        if key == 'title' and isinstance(value, str):
+            result[key] = _redact_text(value, _enabled=_enabled)
+        elif key in {'messages', 'context_messages'}:
+            if key == 'messages' and prefix_count:
+                tail = value[prefix_count:]
+                result[key] = list(prefix_redacted) + (
+                    _redact_messages(
+                        tail,
+                        _enabled=_enabled,
+                        _active_turn_token=_active_turn_token,
+                    )
+                    if tail
+                    else []
+                )
+            else:
+                result[key] = _redact_messages(
+                    value,
+                    _enabled=_enabled,
+                    _active_turn_token=_active_turn_token,
+                )
+        elif key == 'tool_calls' and isinstance(value, list):
+            result[key] = _redact_tool_calls(value, _enabled=_enabled)
+        elif key in {'todo_state', 'runtime_journal_snapshot'}:
+            result[key] = _redact_nested_message_containers(value, _enabled=_enabled)
+        else:
+            # Operational fields (workspace path, ids, config, timestamps, etc.)
+            # are NOT credential-masked — mirror redact_session_data exactly.
+            result[key] = _copy_json_value(value)
+    return result
+
+
 def read_body(handler) -> dict:
     """Read and JSON-parse a POST request body (capped at 20MB)."""
     raw_length = handler.headers.get('Content-Length', 0)
