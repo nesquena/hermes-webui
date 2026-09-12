@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import time
 
 import pytest
 
 import api.config as cfg
 import api.profiles as profiles
+
+
+# The autouse isolate_models_catalog_state fixture replaces these with hermetic
+# no-ops for every test. The real-disk TOCTOU regression test below needs the
+# genuine implementations, so capture them at import time (before any fixture
+# has run).
+_REAL_SAVE_MODELS_CACHE_TO_DISK = cfg._save_models_cache_to_disk
+_REAL_DELETE_MODELS_CACHE_ON_DISK = cfg._delete_models_cache_on_disk
+_REAL_LOAD_MODELS_CACHE_FROM_DISK = cfg._load_models_cache_from_disk
 
 
 @pytest.fixture(autouse=True)
@@ -489,3 +499,292 @@ def test_provider_models_list_of_dicts_without_id_does_not_collapse_catalog(
     assert any(mid.endswith("gpt-5.5") for mid in group_model_ids)
     assert any(mid.endswith("gpt-4.1") for mid in group_model_ids)
     assert any(mid.endswith("gpt-4o") for mid in group_model_ids)
+
+
+def test_stale_over_budget_rebuild_discarded_after_invalidation(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581: an in-flight rebuild must not republish after invalidation.
+
+    Provider cleanup now calls invalidate_models_cache() (api/providers.py).
+    An over-budget rebuild worker that started BEFORE the cleanup would
+    otherwise republish its stale catalog — resurrecting the just-removed
+    provider in memory and re-creating the on-disk cache, so the picker still
+    shows it (even across a restart). The generation/owner token must discard
+    the stale result, skip the disk write, and leave a newer rebuild's
+    in-progress flag untouched.
+    """
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+
+    # The catalog the STALE worker builds (still contains the provider that
+    # the cleanup removes mid-flight).
+    stale_result = {
+        "active_provider": "openai-api",
+        "default_model": "gpt-5.5",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai-api",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            }
+        ],
+        "aliases": {},
+    }
+    # The catalog the FRESH (post-removal) rebuild builds.
+    fresh_result = {
+        "active_provider": "anthropic",
+        "default_model": "claude-sonnet-4.6",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "Anthropic",
+                "provider_id": "anthropic",
+                "models": [
+                    {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"}
+                ],
+            }
+        ],
+        "aliases": {},
+    }
+
+    stale_started = threading.Event()
+    release_stale = threading.Event()
+    fresh_started = threading.Event()
+    release_fresh = threading.Event()
+
+    def _stale_rebuild(_builder):
+        stale_started.set()
+        assert release_stale.wait(5)
+        return copy.deepcopy(stale_result)
+
+    def _fresh_rebuild(_builder):
+        fresh_started.set()
+        assert release_fresh.wait(5)
+        return copy.deepcopy(fresh_result)
+
+    rebuilds = iter([_stale_rebuild, _fresh_rebuild])
+
+    def _controlled_rebuild(_builder):
+        return next(rebuilds)(_builder)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _controlled_rebuild)
+
+    disk_writes = []
+    monkeypatch.setattr(
+        cfg,
+        "_save_models_cache_to_disk",
+        lambda cache: disk_writes.append(copy.deepcopy(cache)),
+    )
+
+    def _rebuild_worker_threads():
+        return [
+            t for t in threading.enumerate() if t.name == "models-catalog-rebuild"
+        ]
+
+    baseline_workers = len(_rebuild_worker_threads())
+
+    # 1. Start a rebuild that exceeds the budget; its worker tries to publish
+    #    out-of-band once it finishes.
+    cfg.get_available_models()
+    assert stale_started.wait(5)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 1
+
+    # 2. Provider cleanup (the _clean_provider_key_from_config path) removes
+    #    the provider and invalidates the model cache mid-flight.
+    cfg.invalidate_models_cache()
+    assert cfg._available_models_cache is None
+
+    # 3. A new caller triggers a FRESH rebuild against the post-removal
+    #    config; it now owns the in-progress flag.
+    cfg.get_available_models()
+    assert fresh_started.wait(5)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 2
+    assert cfg._cache_build_in_progress is True
+
+    # 4. Let the STALE worker finish: its publish attempt must be discarded
+    #    (generation mismatch) — no memory publish, no disk write, and the
+    #    fresh rebuild's in-progress flag must survive.
+    release_stale.set()
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and len(_rebuild_worker_threads()) > baseline_workers + 1
+    ):
+        time.sleep(0.01)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 1
+    # The stale worker neither republished the removed provider...
+    assert cfg._available_models_cache is None
+    # ...nor cleared the fresh rebuild's in-progress state.
+    assert cfg._cache_build_in_progress is True
+
+    # 5. Let the FRESH worker finish: it publishes the post-removal catalog.
+    release_fresh.set()
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and len(_rebuild_worker_threads()) > baseline_workers
+    ):
+        time.sleep(0.01)
+    assert len(_rebuild_worker_threads()) == baseline_workers
+    assert cfg._cache_build_in_progress is False
+    assert cfg._available_models_cache == fresh_result
+
+    # 6. The removed provider never reappeared — neither in memory nor in any
+    #    on-disk write.
+    provider_ids = [
+        group["provider_id"] for group in cfg._available_models_cache["groups"]
+    ]
+    assert "openai-api" not in provider_ids
+    assert disk_writes == [fresh_result], (
+        "the stale rebuild must not write its catalog to disk"
+    )
+
+
+def test_disk_save_atomic_with_invalidation_real_disk(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 (TOCTOU): generation check + disk save must be
+    atomic under _cache_build_cv, on the real disk.
+
+    The stale-worker race is: (1) the worker passes the generation check,
+    (2) an invalidation advances the generation AND deletes the on-disk cache,
+    (3) the worker proceeds to _save_models_cache_to_disk and re-creates the
+    file with the removed provider + post-removal fingerprint — which the
+    strict boot loader accepts, resurrecting the provider from disk.
+
+    The fix holds _cache_build_cv from the generation check through the atomic
+    disk rename: the invalidation either blocks until the rename lands and
+    then deletes the file, or runs first and bumps the generation so the
+    publish block is skipped entirely. This test drives the REAL disk path
+    (the autouse fixture's no-op saves are replaced by the genuine
+    implementations) and asserts BOTH the on-disk cache file AND a strict
+    restart load stay free of the removed provider.
+    """
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    # The autouse fixture neutralizes the disk functions for hermetic tests;
+    # this test needs the real I/O so the file state after the race is
+    # genuinely asserted (the fixture still points _get_models_cache_path at
+    # the isolated tmp_path, so no production cache file is touched).
+    monkeypatch.setattr(
+        cfg, "_save_models_cache_to_disk", _REAL_SAVE_MODELS_CACHE_TO_DISK
+    )
+    monkeypatch.setattr(
+        cfg, "_delete_models_cache_on_disk", _REAL_DELETE_MODELS_CACHE_ON_DISK
+    )
+    monkeypatch.setattr(
+        cfg, "_load_models_cache_from_disk", _REAL_LOAD_MODELS_CACHE_FROM_DISK
+    )
+
+    # The catalog the STALE worker builds (still contains the provider the
+    # cleanup removes mid-flight).
+    stale_result = {
+        "active_provider": "openai-api",
+        "default_model": "gpt-5.5",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai-api",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            }
+        ],
+        "aliases": {},
+    }
+
+    stale_started = threading.Event()
+    release_stale = threading.Event()
+    disk_save_entered = threading.Event()
+    release_disk_save = threading.Event()
+    invalidation_done = threading.Event()
+
+    def _stale_rebuild(_builder):
+        stale_started.set()
+        assert release_stale.wait(5)
+        return copy.deepcopy(stale_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _stale_rebuild)
+
+    def _paused_save(cache):
+        # Only reached after the generation check passed — and, with the fix,
+        # while the worker still holds _cache_build_cv. Pause here so the
+        # test can try to invalidate in the TOCTOU window.
+        disk_save_entered.set()
+        assert release_disk_save.wait(5)
+        _REAL_SAVE_MODELS_CACHE_TO_DISK(cache)
+
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", _paused_save)
+
+    def _rebuild_worker_threads():
+        return [
+            t for t in threading.enumerate() if t.name == "models-catalog-rebuild"
+        ]
+
+    baseline_workers = len(_rebuild_worker_threads())
+
+    # 1. Over-budget rebuild: the worker builds a catalog that still contains
+    #    the provider the cleanup removes (openai-api).
+    cfg.get_available_models()
+    assert stale_started.wait(5)
+    assert len(_rebuild_worker_threads()) == baseline_workers + 1
+
+    # 2. Let the worker finish building and publish. The generation check
+    #    passes (no invalidation yet) and it enters the disk save, where it
+    #    pauses — with the fix, still holding _cache_build_cv.
+    release_stale.set()
+    assert disk_save_entered.wait(5)
+
+    # 3. Invalidate on a separate thread: it must BLOCK behind the worker's
+    #    cv-held disk save (the fix) instead of interleaving between the
+    #    generation check and the rename (the TOCTOU bug).
+    def _invalidate():
+        cfg.invalidate_models_cache()
+        invalidation_done.set()
+
+    invalidation_thread = threading.Thread(
+        target=_invalidate, name="test-invalidation", daemon=True
+    )
+    invalidation_thread.start()
+    time.sleep(0.2)
+    assert not invalidation_done.is_set(), (
+        "invalidation must not interleave between the generation check and "
+        "the atomic disk rename (#6581 TOCTOU)"
+    )
+
+    # 4. Resume the worker: it completes the real disk write (the file
+    #    briefly holds the stale catalog), then releases the cv — and only
+    #    then does the invalidation run, strictly after, deleting the file.
+    release_disk_save.set()
+    assert invalidation_done.wait(5)
+    invalidation_thread.join(5)
+
+    # 5. The removed provider must not survive anywhere. Not in memory...
+    assert cfg._available_models_cache is None
+    # ...not in the on-disk cache: the invalidation deleted the file the
+    #    stale worker just wrote (on the buggy code the file survives with
+    #    the removed provider + post-removal fingerprint)...
+    cache_path = cfg._get_models_cache_path()
+    assert not cache_path.exists(), (
+        "the stale on-disk write must be deleted by the post-write "
+        "invalidation, not resurrect the removed provider on next boot"
+    )
+    # ...and not through a strict restart load (a fresh process's boot path).
+    assert cfg._load_models_cache_from_disk() is None
+
+    deadline = time.monotonic() + 5
+    while (
+        time.monotonic() < deadline
+        and len(_rebuild_worker_threads()) > baseline_workers
+    ):
+        time.sleep(0.01)
+    assert len(_rebuild_worker_threads()) == baseline_workers

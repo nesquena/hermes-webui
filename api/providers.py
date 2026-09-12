@@ -3027,6 +3027,15 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True
+                    # If the provider entry is now empty (only had api_key),
+                    # remove the entire entry so it does not linger as an
+                    # empty dict that the model-picker detection loop treats
+                    # as a configured provider (#6335).
+                    if isinstance(provider_cfg, dict) and len(provider_cfg) == 0:
+                        del providers_cfg[provider_id]
+                        # Also clean up the providers section if it fell empty
+                        if len(providers_cfg) == 0:
+                            del cfg["providers"]
 
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})
@@ -3055,5 +3064,6 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         if changed:
             reload_config()
             invalidate_providers_cache()
+            invalidate_models_cache()
     except Exception:
         logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)
