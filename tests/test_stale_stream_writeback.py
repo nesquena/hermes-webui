@@ -133,7 +133,7 @@ def test_stale_stream_clear_skips_fresh_pending_turn_inside_grace_window(monkeyp
 
 def test_stale_stream_clear_trusts_completed_run_journal_instead_of_adding_marker(monkeypatch):
     import api.routes as routes
-    from api.run_journal import append_run_event
+    from tests.run_journal_test_utils import append_run_event
 
     sid = "completed_journal_late_pending_clear"
     stream_id = "completed-stream"

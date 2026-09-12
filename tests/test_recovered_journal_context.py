@@ -16,7 +16,7 @@ from api.models import (
     _append_journaled_partial_output,
     _append_recovered_pending_turn,
 )
-from api.run_journal import append_run_event
+from tests.run_journal_test_utils import append_run_event
 from api.streaming import _context_messages_for_new_turn
 
 

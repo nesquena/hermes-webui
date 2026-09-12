@@ -6,11 +6,26 @@ from api.streaming import _compact_for_echo_compare
 def test_streaming_initializes_one_run_journal_writer_per_stream():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     register_idx = src.index("register_active_run(")
-    writer_idx = src.index("RunJournalWriter(session_id, stream_id)", register_idx)
+    writer_idx = src.index("run_journal = RunJournalWriter(", register_idx)
     cancel_idx = src.index("cancel_event = threading.Event()", writer_idx)
 
     assert "from api.run_journal import RunJournalWriter" in src
+    assert "incarnation=run_journal_incarnation" in src[writer_idx:cancel_idx]
     assert register_idx < writer_idx < cancel_idx
+
+
+def test_routes_activate_run_journal_only_after_session_save_and_pass_capability():
+    src = Path("api/routes.py").read_text(encoding="utf-8")
+    start = src.index("def _start_chat_stream_for_session(")
+    end = src.index("\n\ndef _start_run(", start)
+    body = src[start:end]
+
+    preflight_idx = body.index("validate_run_journal_session_activation(s.session_id)")
+    persist_idx = body.index("_prepare_chat_start_session_for_stream(")
+    activate_idx = body.index("activate_run_journal_session(s.session_id)", persist_idx)
+    kwargs_idx = body.index('"run_journal_incarnation": run_journal_incarnation')
+
+    assert preflight_idx < persist_idx < activate_idx < kwargs_idx
 
 
 def test_streaming_journals_sse_events_before_queue_delivery():

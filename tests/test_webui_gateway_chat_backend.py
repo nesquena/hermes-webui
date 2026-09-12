@@ -325,6 +325,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     s.pending_attachments = []
     s.pending_started_at = 123
     s.save()
+    from api.run_journal import activate_run_journal_session
+    run_journal_incarnation = activate_run_journal_session(s.session_id)
     channel = create_stream_channel()
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
@@ -336,6 +338,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         str(tmp_path),
         stream_id,
         [],
+        run_journal_incarnation=run_journal_incarnation,
     )
 
     saved = models.get_session(s.session_id)

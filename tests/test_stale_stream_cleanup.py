@@ -12,6 +12,12 @@ SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 SW_SRC = (REPO / "static" / "sw.js").read_text(encoding="utf-8")
 
 
+def _discard_test_session_owner(session):
+    with routes.LOCK:
+        if routes.SESSIONS.get(session.session_id) is session:
+            routes.SESSIONS.pop(session.session_id, None)
+
+
 class _GateLock:
     def __init__(self):
         self._lock = threading.Lock()
@@ -76,10 +82,14 @@ def test_session_load_clears_stale_stream_before_response():
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():
-    stale_comment_pos = ROUTES_SRC.index("# Stale stream id from a previous run; clear and continue.")
-    cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", stale_comment_pos)
-    stream_id_pos = ROUTES_SRC.index("stream_id = uuid.uuid4().hex", cleanup_pos)
-    assert stale_comment_pos < cleanup_pos < stream_id_pos
+    start_pos = ROUTES_SRC.index("def _start_chat_stream_for_session(")
+    end_pos = ROUTES_SRC.index("def _start_run(", start_pos)
+    start_body = ROUTES_SRC[start_pos:end_pos]
+
+    owner_bind_pos = start_body.index("_bind_chat_start_session_owner(s)")
+    stale_mark_pos = start_body.index("needs_stale_cleanup = True", owner_bind_pos)
+    cleanup_pos = start_body.index("_clear_stale_stream_state(s)", stale_mark_pos)
+    assert owner_bind_pos < stale_mark_pos < cleanup_pos
 
 
 def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_path):
@@ -154,6 +164,7 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
         assert "new-stream" not in routes.STREAMS
     finally:
         routes.STREAMS.pop(existing_stream_id, None)
+        _discard_test_session_owner(session)
 
 
 def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id(monkeypatch, tmp_path):
@@ -220,6 +231,7 @@ def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id
         assert "new-stream" not in routes.STREAMS
     finally:
         config.unregister_active_run(old_stream_id)
+        _discard_test_session_owner(session)
 
 
 def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch, tmp_path):
@@ -277,6 +289,8 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
         assert session.pending_user_message == "successor prompt"
     finally:
         routes.STREAMS.pop("new-stream", None)
+        routes.unregister_stream_owner("new-stream")
+        _discard_test_session_owner(session)
 
 
 def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp_path):
@@ -351,6 +365,8 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
     finally:
         config.unregister_active_run(stale_stream_id)
         routes.STREAMS.pop("new-stream", None)
+        routes.unregister_stream_owner("new-stream")
+        _discard_test_session_owner(session)
 
 
 def test_live_worker_past_ceiling_is_not_reaped_from_active_runs():

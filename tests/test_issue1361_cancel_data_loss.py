@@ -25,7 +25,7 @@ import api.config as config
 import api.models as models
 import api.streaming as streaming
 from api.models import Session
-from api.run_journal import append_run_event
+from tests.run_journal_test_utils import append_run_event
 from api.streaming import cancel_stream
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
