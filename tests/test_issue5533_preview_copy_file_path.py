@@ -1850,10 +1850,12 @@ def _rename_entry_point_sources():
     assert "'/api/file/rename'" in tree, (
         "double-click inline rename not found in _renderTreeItems()"
     )
-    start = tree.index("'/api/file/rename'")
-    # Back up past `const data=await api(` so the binding itself is in the slice.
-    dblclick = tree[max(0, start - 200) :]
-    dblclick = dblclick[: dblclick.index("inp.replaceWith(")]
+    # Slice the whole ondblclick handler: the ownership capture sits above the
+    # rename input and finish() ends at the nameEl -> input swap.
+    start = tree.index("nameEl.ondblclick=")
+    dblclick = tree[start:]
+    dblclick = dblclick[: dblclick.index("nameEl.replaceWith(inp)")]
+    assert "'/api/file/rename'" in dblclick
     return {"_inlineRenameFileItem": inline, "_renderTreeItems dblclick": dblclick}
 
 
@@ -2134,3 +2136,479 @@ def test_300px_default_width_container_rule_and_locale_coverage():
         )
     assert _locale_string("de", "copy_file_contents") == "Dateiinhalt kopieren"
     assert _locale_string("ru", "copy_file_contents") == "Копировать содержимое файла"
+
+
+# ── Cross-context rename ownership (maintainer review PR #6957) ──────────────
+# Both rename paths cross an await while holding a RELATIVE path. That path
+# names one file inside the session/workspace the rename started in and a
+# completely different file in every other one, so a response that resolves
+# after the user switched context must not be applied to the new context. The
+# tests below drive the REAL callers — _renderTreeItems()'s double-click handler
+# and _inlineRenameFileItem() — against a deferred /api/file/rename response.
+
+_TREE_RENAME_STUB = r"""
+// Track every element the production code creates so the test can reach the
+// inline rename <input> the double-click handler injects, and give elements the
+// replaceWith() the handler uses to swap the row label for that input.
+const createdEls=[];
+const _origCreate=document.createElement;
+document.createElement=(tag)=>{
+  const el=_origCreate(tag);
+  el.tagName=String(tag).toUpperCase();
+  el.replaceWith=()=>{};
+  createdEls.push(el);
+  return el;
+};
+const breadcrumbs=[];
+renderFileBreadcrumb=(p)=>{breadcrumbs.push(String(p));};
+const loadDirCalls=[];
+async function loadDir(dir,opts){loadDirCalls.push({dir:dir,opts:opts||null});}
+function renderFileTree(){}
+function _saveExpandedDirs(){}
+function li(){return '';}
+function fileIcon(){return '';}
+function _workspaceEscapeExactGrant(){return null;}
+function _setWsDragData(){}
+function _clearWsDragData(){}
+function _clearWorkspaceMoveDragOver(){}
+function _showFileContextMenu(){}
+function _bindWorkspaceMoveDropTarget(){}
+function _bindWorkspaceOsUploadDropTarget(){}
+function _workspaceEntriesForRender(entries){return entries||[];}
+async function showConfirmDialog(){return false;}
+async function authorizeWorkspaceEscapeNavigation(){return null;}
+const window={_isImeEnter:()=>false};
+// The rename input's focus/select timer is irrelevant here; keep it off the
+// event loop so `await tick()` only ever observes the rename flow.
+function setTimeout(fn,ms){return 0;}
+function clearTimeout(){}
+
+// showPromptDialog is deferred so a test can switch session/workspace WHILE the
+// rename prompt is open — the first await gap in _inlineRenameFileItem().
+let _promptResolve=null;
+let promptCalls=0;
+function showPromptDialog(){
+  promptCalls++;
+  return new Promise(res=>{_promptResolve=res;});
+}
+
+// A deferred /api/file/rename, plus plain reads for openFile().
+const renameRequests=[];
+let _renameResolve=null;
+let _renameReject=null;
+function armDeferredRename(readContent){
+  api=(route,opts)=>{
+    if(String(route).indexOf('/api/file/rename')!==-1){
+      renameRequests.push(JSON.parse(opts.body));
+      return new Promise((res,rej)=>{_renameResolve=res;_renameReject=rej;});
+    }
+    return Promise.resolve({content:readContent});
+  };
+}
+
+// Open `path` as the settled, copyable preview of the CURRENT session.
+async function settlePreview(path,content){
+  const armed=api;
+  api=async()=>({content:content});
+  await openFile(path);
+  await tick();
+  api=armed;
+}
+
+function snapshot(){
+  return {
+    curPath:_previewCurrentPath,
+    rawPath:_previewRawContentPath,
+    rawContent:_previewRawContent,
+    pathText:$('previewPathText').textContent,
+    breadcrumb:breadcrumbs[breadcrumbs.length-1]||'',
+    copyable:previewRawContentIsCopyable(),
+    dirCache:JSON.stringify(S._dirCache),
+    expandedDirs:[...S._expandedDirs],
+    loadDirCount:loadDirCalls.length,
+    toastCount:toasts.length,
+  };
+}
+
+// Double-click the row's file-name label and return the rename <input> the
+// handler put in its place.
+function openDblclickRename(item){
+  const container=_origCreate('div');
+  _renderTreeItems(container,[item],0);
+  const row=container._children[0];
+  const nameEl=row._children.find(c=>c.className==='file-name');
+  if(!nameEl) throw new Error('file-name element not rendered');
+  nameEl.ondblclick({stopPropagation(){}});
+  const inp=createdEls.filter(e=>e.className==='file-rename-input').pop();
+  if(!inp) throw new Error('double-click did not open a rename input');
+  return inp;
+}
+function commitDblclickRename(inp,newName){
+  inp.value=newName;
+  inp.onkeydown({key:'Enter',preventDefault(){}});
+}
+"""
+
+_RENAME_UI_FNS = (
+    "_workspaceParentDir",
+    "elideMiddle",
+    "_captureWorkspaceOpOwner",
+    "_workspaceOpOwnerIsCurrent",
+    "_remapWorkspaceCachesAfterMove",
+    "_renderTreeItems",
+    "_inlineRenameFileItem",
+)
+
+# The same relative path exists in both workspaces and names a different file in
+# each — that collision is the whole point of the race.
+_SHARED_REL_PATH = "docs/note.md"
+
+
+def _run_rename_scenario(scenario: str) -> dict:
+    script = (
+        _DOM_STUB
+        + _TREE_RENAME_STUB
+        + "\n"
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(UI_JS, _RENAME_UI_FNS)
+        + "\n(async()=>{\n"
+        + scenario
+        + "\n})().catch(e=>{console.error(e);process.exit(1);});\n"
+    )
+    return _run_node(script)
+
+
+# Session A starts the rename; the user then switches to session B, whose
+# workspace has its own file at the identical relative path.
+_ENTER_SESSION_A = """
+  S.session={session_id:'sess-a',workspace:'/workspace/a'};
+  S.currentDir='docs';
+  S._expandedDirs=new Set();
+  S._dirCache={'docs':[{name:'note.md',path:'docs/note.md',type:'file'}]};
+  await settlePreview('docs/note.md','A WORKSPACE BYTES');
+"""
+
+_SWITCH_TO_SESSION_B = """
+  // Real switch entry points (loadSession / switchToWorkspace) drop the cached
+  // raw content; mirror that, then let B settle its OWN docs/note.md.
+  S.session={session_id:'sess-b',workspace:'/workspace/b'};
+  invalidatePreviewRawContent();
+  S.currentDir='docs';
+  S._dirCache={'docs':[{name:'note.md',path:'docs/note.md',type:'file'}]};
+  await settlePreview('docs/note.md','B WORKSPACE BYTES');
+"""
+
+
+def _assert_session_b_untouched(out, label):
+    """Nothing a session-A rename response does may be visible in session B."""
+    before, after = out["beforeRelease"], out["afterRelease"]
+    assert before["rawContent"] == "B WORKSPACE BYTES", (
+        f"{label}: session B's preview never settled: {before}"
+    )
+    assert after["curPath"] == _SHARED_REL_PATH, (
+        f"{label}: the stale response remapped B's _previewCurrentPath: {after['curPath']}"
+    )
+    assert after["rawPath"] == _SHARED_REL_PATH, (
+        f"{label}: the stale response remapped B's raw-content path: {after['rawPath']}"
+    )
+    assert after["pathText"] == _SHARED_REL_PATH, (
+        f"{label}: B's header was relabeled with A's rename: {after['pathText']}"
+    )
+    assert after["breadcrumb"] == before["breadcrumb"], (
+        f"{label}: B's breadcrumb was rewritten by A's rename: {after['breadcrumb']}"
+    )
+    assert after["dirCache"] == before["dirCache"], (
+        f"{label}: the stale response mutated B's directory cache: {after['dirCache']}"
+    )
+    assert after["expandedDirs"] == before["expandedDirs"], (
+        f"{label}: the stale response mutated B's expanded-dir set"
+    )
+    assert after["loadDirCount"] == before["loadDirCount"], (
+        f"{label}: the stale response reloaded B's directory "
+        f"({before['loadDirCount']} -> {after['loadDirCount']})"
+    )
+    assert after["toastCount"] == before["toastCount"], (
+        f"{label}: the stale response toasted into session B: {out['toasts']}"
+    )
+    assert after["copyable"] is True, (
+        f"{label}: B's own preview stopped being copyable: {after}"
+    )
+    assert out["copied"] == ["B WORKSPACE BYTES"], (
+        f"{label}: the copy payload no longer belongs to session B: {out['copied']}"
+    )
+    assert not any(tst["msg"] == "renamed_to" for tst in out["toasts"]), (
+        f"{label}: a rename from session A was announced in session B: {out['toasts']}"
+    )
+
+
+@requires_node
+def test_dblclick_rename_response_cannot_relabel_a_newer_session():
+    """Double-click rename in session A, switch to session B (same relative
+    path, different workspace), then let A's response land.
+
+    The response describes a file in /workspace/a. Applying it in /workspace/b
+    would rename B's identically-pathed file on screen — header, breadcrumb,
+    raw-content path and copy target — without anything having been renamed
+    there. Ownership captured at ondblclick must drop the response instead.
+    """
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const inp=openDblclickRename({name:'note.md',path:'docs/note.md',type:'file'});
+  commitDblclickRename(inp,'renamed.md');
+  await tick();
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const beforeRelease=snapshot();
+
+  // A's rename finally resolves — canonicalized by the server, and scoped to a
+  // workspace the user is no longer in.
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await tick();await tick();
+
+  const afterRelease=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    beforeRelease, afterRelease, renameRequests, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+
+    assert len(out["renameRequests"]) == 1, (
+        f"expected exactly one rename request: {out['renameRequests']}"
+    )
+    req = out["renameRequests"][0]
+    assert req["session_id"] == "sess-a", (
+        f"the rename was sent under the live session instead of the capturing "
+        f"one: {req['session_id']}"
+    )
+    assert req["path"] == _SHARED_REL_PATH, (
+        f"the rename was sent for a re-read path instead of the captured one: {req['path']}"
+    )
+    _assert_session_b_untouched(out, "dblclick rename")
+
+
+@requires_node
+def test_dblclick_rename_failure_does_not_toast_into_a_newer_session():
+    """A rename that FAILS in session A is not session B's error to report."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const inp=openDblclickRename({name:'note.md',path:'docs/note.md',type:'file'});
+  commitDblclickRename(inp,'renamed.md');
+  await tick();
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const toastsBefore=toasts.length;
+  _renameReject(new Error('boom'));
+  await tick();await tick();
+
+  console.log(JSON.stringify({toastsBefore, toasts:[...toasts]}));
+"""
+    )
+    assert len(out["toasts"]) == out["toastsBefore"], (
+        f"a failure from session A toasted into session B: {out['toasts']}"
+    )
+    assert not any(tst["msg"].startswith("rename_failed") for tst in out["toasts"])
+
+
+@requires_node
+def test_dblclick_rename_same_owner_still_remaps_to_the_canonical_path():
+    """Same-owner control: with no context switch the double-click rename must
+    still follow the SERVER's canonical path and reload with preservePreview."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  const before=snapshot();
+  armDeferredRename('unused');
+  const inp=openDblclickRename({name:'note.md',path:'docs/note.md',type:'file'});
+  commitDblclickRename(inp,'renamed.md');
+  await tick();
+
+  // No switch: the same session/workspace is still live when the response lands.
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await tick();await tick();
+
+  const after=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    before, after, renameRequests, loadDirCalls, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    after = out["after"]
+    assert out["renameRequests"][0]["session_id"] == "sess-a"
+    assert out["renameRequests"][0]["path"] == _SHARED_REL_PATH
+    assert after["curPath"] == "docs/canonical_renamed.md", (
+        f"the owner's own rename did not remap the preview: {after['curPath']}"
+    )
+    assert after["rawPath"] == "docs/canonical_renamed.md"
+    assert after["pathText"] == "docs/canonical_renamed.md"
+    assert after["breadcrumb"] == "docs/canonical_renamed.md"
+    assert after["copyable"] is True
+    assert out["copied"] == ["A WORKSPACE BYTES"]
+    assert out["loadDirCalls"] == [{"dir": "docs", "opts": {"preservePreview": True}}], (
+        f"the owner's reload must preserve the preview: {out['loadDirCalls']}"
+    )
+    assert any(tst["msg"] == "renamed_torenamed.md" for tst in out["toasts"]), (
+        f"the owner's own rename was not announced: {out['toasts']}"
+    )
+
+
+@requires_node
+def test_inline_rename_aborts_when_the_context_changes_during_the_prompt():
+    """_inlineRenameFileItem() awaits showPromptDialog() before it ever calls
+    the API. A switch inside that gap must abort the rename outright — issuing
+    it would rename the NEW workspace's identically-pathed file."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const pending=_inlineRenameFileItem({name:'note.md',path:'docs/note.md',type:'file'});
+  await tick();
+  const promptOpened=promptCalls;
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const beforeResolve=snapshot();
+  _promptResolve('renamed.md');   // the user confirms — but in session B now
+  await tick();await tick();
+  // If the rename went out anyway, resolve it so the scenario can REPORT that
+  // rather than hang on a promise nothing will settle.
+  if(_renameResolve)_renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await pending;
+  await tick();
+
+  const afterResolve=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    promptOpened, beforeResolve, afterResolve, renameRequests,
+    copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    assert out["promptOpened"] == 1, "the rename prompt never opened"
+    assert out["renameRequests"] == [], (
+        f"a rename was issued after the context changed under the prompt: "
+        f"{out['renameRequests']}"
+    )
+    before, after = out["beforeResolve"], out["afterResolve"]
+    assert after["curPath"] == _SHARED_REL_PATH
+    assert after["rawPath"] == _SHARED_REL_PATH
+    assert after["pathText"] == _SHARED_REL_PATH
+    assert after["breadcrumb"] == before["breadcrumb"]
+    assert after["dirCache"] == before["dirCache"]
+    assert after["loadDirCount"] == before["loadDirCount"]
+    assert after["copyable"] is True
+    assert out["copied"] == ["B WORKSPACE BYTES"]
+
+
+@requires_node
+def test_inline_rename_response_cannot_relabel_a_newer_session():
+    """The prompt is answered in session A and the API call goes out there; the
+    user switches to session B while it is in flight. A's response must not
+    remap B's preview, caches, header, breadcrumb or copy target."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const pending=_inlineRenameFileItem({name:'note.md',path:'docs/note.md',type:'file'});
+  await tick();
+  _promptResolve('renamed.md');   // answered while session A is still live
+  await tick();
+"""
+        + _SWITCH_TO_SESSION_B
+        + """
+  const beforeRelease=snapshot();
+
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await pending;
+  await tick();
+
+  const afterRelease=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    beforeRelease, afterRelease, renameRequests, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    assert len(out["renameRequests"]) == 1, (
+        f"expected exactly one rename request: {out['renameRequests']}"
+    )
+    req = out["renameRequests"][0]
+    assert req["session_id"] == "sess-a", (
+        f"the rename re-read the live session instead of the captured one: {req['session_id']}"
+    )
+    assert req["path"] == _SHARED_REL_PATH
+    _assert_session_b_untouched(out, "inline rename")
+
+
+@requires_node
+def test_inline_rename_same_owner_still_remaps_to_the_canonical_path():
+    """Same-owner control for the prompt-dialog path."""
+    out = _run_rename_scenario(
+        _ENTER_SESSION_A
+        + """
+  armDeferredRename('unused');
+  const pending=_inlineRenameFileItem({name:'note.md',path:'docs/note.md',type:'file'});
+  await tick();
+  _promptResolve('renamed.md');
+  await tick();
+
+  _renameResolve({old_path:'docs/note.md',new_path:'docs/canonical_renamed.md'});
+  await pending;
+  await tick();
+
+  const after=snapshot();
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    after, renameRequests, loadDirCalls, copied:[...copied], toasts:[...toasts],
+  }));
+"""
+    )
+    after = out["after"]
+    assert out["renameRequests"][0]["session_id"] == "sess-a"
+    assert after["curPath"] == "docs/canonical_renamed.md"
+    assert after["rawPath"] == "docs/canonical_renamed.md"
+    assert after["pathText"] == "docs/canonical_renamed.md"
+    assert after["breadcrumb"] == "docs/canonical_renamed.md"
+    assert after["copyable"] is True
+    assert out["copied"] == ["A WORKSPACE BYTES"]
+    assert out["loadDirCalls"] == [{"dir": "docs", "opts": {"preservePreview": True}}]
+    assert any(tst["msg"] == "renamed_torenamed.md" for tst in out["toasts"])
+
+
+def test_both_rename_paths_capture_ownership_before_their_first_await():
+    """Source-level guard: the capture must precede the first await in each
+    path, and neither may re-read S.session for the request payload."""
+    inline = _function_body(UI_JS, "_inlineRenameFileItem")
+    compact_inline = _compact(inline)
+    assert compact_inline.index("_captureWorkspaceOpOwner(") < compact_inline.index(
+        "awaitshowPromptDialog("
+    ), "_inlineRenameFileItem() captures ownership after the prompt await"
+
+    for label, src in _rename_entry_point_sources().items():
+        compact = _compact(src)
+        assert "session_id:renameOwner.sessionId" in compact, (
+            f"{label}: the request re-reads the live session instead of the captured one"
+        )
+        assert "path:renameOwner.path" in compact, (
+            f"{label}: the request re-reads the item path instead of the captured one"
+        )
+        assert compact.count("_workspaceOpOwnerIsCurrent(renameOwner)") >= 3, (
+            f"{label}: expected ownership checks before the request, after the "
+            f"response, and in the error path"
+        )
+        assert compact.index("_workspaceOpOwnerIsCurrent(renameOwner)") < compact.index(
+            "awaitapi('/api/file/rename'"
+        ), f"{label}: nothing gates the request itself on ownership"

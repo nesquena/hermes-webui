@@ -21125,6 +21125,28 @@ function _clearWorkspaceMoveDragOver(){
   document.querySelectorAll('.file-item.drag-over,.breadcrumb-seg.drag-over').forEach(el=>el.classList.remove('drag-over'));
 }
 
+// Cross-context ownership for workspace operations that span an await.
+// A rename is issued against ONE session's workspace, and its response only
+// describes that context: the relative path it renames names a different file
+// in every other workspace. Any await (a prompt dialog, the rename request
+// itself) is a gap the user can switch session/workspace across, so callers
+// capture the owning identity BEFORE the first gap and refuse to touch the
+// panel — toast, cache remap, preview path, reload — once it no longer matches
+// the live context (maintainer review PR #6957).
+function _captureWorkspaceOpOwner(path){
+  return {
+    sessionId:(S.session&&S.session.session_id)||'',
+    workspace:(S.session&&S.session.workspace)||'',
+    path:String(path||''),
+  };
+}
+
+function _workspaceOpOwnerIsCurrent(owner){
+  if(!owner||!owner.sessionId||!S.session) return false;
+  return owner.sessionId===(S.session.session_id||'')
+      && owner.workspace===(S.session.workspace||'');
+}
+
 function _remapWorkspaceCachesAfterMove(oldPath,newPath,isDir){
   if(isDir&&S._expandedDirs){
     if(S._expandedDirs.has(oldPath)){
@@ -21335,6 +21357,11 @@ function _renderTreeItems(container, entries, depth){
         openFile(item.path);
         return;
       }
+      // Capture the owning context at the moment the rename is opened: the
+      // user types into this input for an unbounded time, and both that wait
+      // and the request itself are gaps a session/workspace switch can land in
+      // (maintainer review PR #6957).
+      const renameOwner=_captureWorkspaceOpOwner(item.path);
       const inp=document.createElement('input');
       inp.className='file-rename-input';inp.value=item.name;
       inp.onclick=(e2)=>e2.stopPropagation();
@@ -21342,7 +21369,9 @@ function _renderTreeItems(container, entries, depth){
         inp.onblur=null;
         if(save){
           const newName=inp.value.trim();
-          if(newName&&newName!==item.name){
+          // Ownership gate before the request: this row's relative path names a
+          // different file in whatever session/workspace is live now.
+          if(newName&&newName!==item.name&&_workspaceOpOwnerIsCurrent(renameOwner)){
             try{
               // The server owns the resulting path: it sanitizes the name and
               // may land the file somewhere other than parent+'/'+newName, so
@@ -21350,11 +21379,15 @@ function _renderTreeItems(container, entries, depth){
               // and only fall back to the locally-computed path when the
               // response omits it (maintainer review PR #6957).
               const data=await api('/api/file/rename',{method:'POST',body:JSON.stringify({
-                session_id:S.session.session_id,path:item.path,new_name:newName
+                session_id:renameOwner.sessionId,path:renameOwner.path,new_name:newName
               })});
+              // A response from the context the rename started in must not
+              // mutate a newer one: below this line the toast, the caches and
+              // the open preview all belong to whoever is live.
+              if(!_workspaceOpOwnerIsCurrent(renameOwner)){inp.replaceWith(nameEl);return;}
               showToast(t('renamed_to')+newName);
-              const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
-              const canonicalOldPath=(data&&data.old_path)||item.path;
+              const parent=renameOwner.path.includes('/')?renameOwner.path.substring(0,renameOwner.path.lastIndexOf('/')):'.';
+              const canonicalOldPath=(data&&data.old_path)||renameOwner.path;
               const canonicalNewPath=(data&&data.new_path)||(parent==='.'?newName:parent+'/'+newName);
               _remapWorkspaceCachesAfterMove(canonicalOldPath,canonicalNewPath,isDirLike);
               // Update expanded dirs cache key if renaming a directory
@@ -21369,7 +21402,10 @@ function _renderTreeItems(container, entries, depth){
               // caches were just remapped for.
               if(S._dirCache)delete S._dirCache[S.currentDir];
               await loadDir(S.currentDir,{preservePreview:true});
-            }catch(err){showToast(t('rename_failed')+err.message);}
+            }catch(err){
+              // A failure belongs to the context that issued it, same as a success.
+              if(_workspaceOpOwnerIsCurrent(renameOwner))showToast(t('rename_failed')+err.message);
+            }
           }
         }
         inp.replaceWith(nameEl);
@@ -21646,6 +21682,12 @@ async function _inlineRenameFileItem(item){
     return;
   }
   const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
+  // Ownership is captured BEFORE the prompt, not after: showPromptDialog()
+  // parks here for as long as the user takes to type, and a session/workspace
+  // switch during that wait would otherwise make the rename target — and every
+  // mutation the response drives — belong to whichever context happens to be
+  // live when it returns (maintainer review PR #6957).
+  const renameOwner=_captureWorkspaceOpOwner(item.path);
   // Pre-fill the input with the current name and select just the stem
   // (everything before the last '.') so the user can immediately retype the
   // basename while preserving the extension — matches macOS Finder. For
@@ -21659,14 +21701,23 @@ async function _inlineRenameFileItem(item){
     selectAll:isDirLike
   });
   if(!newName||newName===item.name)return;
+  // The prompt just returned into a context that may no longer be the one that
+  // opened it. Renaming here would apply this workspace's relative path to a
+  // different workspace's file, so abort before the request is issued.
+  if(!_workspaceOpOwnerIsCurrent(renameOwner))return;
   try{
     // Server-authoritative paths: the rename response reports where the entry
     // actually ended up, which can differ from parent+'/'+newName once the
     // server sanitizes the name (maintainer review PR #6957).
-    const data=await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    // The request carries the CAPTURED session and path, never a re-read of the
+    // live globals, so the server is asked about the file the user actually picked.
+    const data=await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:renameOwner.sessionId,path:renameOwner.path,new_name:newName})});
+    // A successful response from the previous context must not relabel this
+    // one: everything below mutates the visible panel and the directory caches.
+    if(!_workspaceOpOwnerIsCurrent(renameOwner))return;
     showToast(t('renamed_to')+newName);
-    const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
-    const canonicalOldPath=(data&&data.old_path)||item.path;
+    const parent=renameOwner.path.includes('/')?renameOwner.path.substring(0,renameOwner.path.lastIndexOf('/')):'.';
+    const canonicalOldPath=(data&&data.old_path)||renameOwner.path;
     const canonicalNewPath=(data&&data.new_path)||(parent==='.'?newName:parent+'/'+newName);
     _remapWorkspaceCachesAfterMove(canonicalOldPath,canonicalNewPath,isDirLike);
     // Update expanded dirs cache key if renaming a directory
@@ -21680,7 +21731,12 @@ async function _inlineRenameFileItem(item){
     // Keep the open preview: the caches (and _previewCurrentPath) were just
     // remapped onto the new path, and a plain loadDir() would clear them.
     await loadDir(S.currentDir,{preservePreview:true});
-  }catch(err){showToast(t('rename_failed')+err.message);}
+  }catch(err){
+    // Same rule on failure: a rename that failed in the previous context is not
+    // this context's error to report.
+    if(!_workspaceOpOwnerIsCurrent(renameOwner))return;
+    showToast(t('rename_failed')+err.message);
+  }
 }
 
 async function _menuRenameWorkspaceItem(item){
