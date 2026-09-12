@@ -9422,15 +9422,16 @@ async function loadSettingsPanel(){
     }
     const cliCapField=$('settingsCliVisibleSessionCap');
     if(cliCapField){
+      const _cliCapParent=$('settingsShowCliSessions');
       const _clampCliCap=(v)=>{const n=parseInt(v,10);if(!Number.isFinite(n)||n<1)return 20;return n>500?500:n;};
       cliCapField.value=_clampCliCap(settings.cli_visible_session_cap==null?20:settings.cli_visible_session_cap);
       window._cliVisibleSessionCap=parseInt(cliCapField.value,10);
-      cliCapField.disabled=showCliCb?!showCliCb.checked:true;
+      cliCapField.disabled=_cliCapParent?!_cliCapParent.checked:true;
       // Normalize (clamp blank/oob to [1,500] or default 20) on commit so the saved
       // value matches the help text and the box never displays a value the server rejected.
       cliCapField.addEventListener('change',()=>{cliCapField.value=_clampCliCap(cliCapField.value);window._cliVisibleSessionCap=parseInt(cliCapField.value,10);_schedulePreferencesAutosave();},{once:false});
       cliCapField.addEventListener('input',()=>{window._cliVisibleSessionCap=parseInt(cliCapField.value,10)||20;_schedulePreferencesAutosave();},{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){cliCapField.disabled=!showCliCb.checked;},{once:false});}
+      if(_cliCapParent){_cliCapParent.addEventListener('change',function(){cliCapField.disabled=!_cliCapParent.checked;},{once:false});}
     }
     const fadeTextCb=$('settingsFadeTextEffect');
     if(fadeTextCb){
