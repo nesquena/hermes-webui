@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for PWA-backed browser notifications (#3196)."""
 
 from pathlib import Path
@@ -7,7 +8,7 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 SW_JS = (ROOT / "static" / "sw.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
 DESKTOP_BACKGROUND_NOTIFICATION_NAMES = (
@@ -160,7 +161,7 @@ def test_notification_i18n_and_changelog_entries_exist():
         "notifications_denied",
         "notifications_unsupported",
     ]:
-        assert key in I18N_JS
+        assert key in I18N_SOURCE
     assert "PWA notifications now use the service worker" in CHANGELOG
     assert "#3196" in CHANGELOG
     entry = next(

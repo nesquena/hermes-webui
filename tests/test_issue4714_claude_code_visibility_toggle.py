@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for Issue #4714: hide Claude Code imports independently.
 
 The route must keep `show_cli_sessions` as the parent gate while allowing
@@ -482,7 +483,7 @@ console.log(JSON.stringify(body));
 
 def test_locale_keys_exist_in_every_locale_block():
     """Every locale block should carry the Claude Code label and description keys."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
 
     assert i18n.count("settings_label_claude_code_sessions:") == i18n.count("settings_label_api_redact:")
     assert i18n.count("settings_desc_claude_code_sessions:") == i18n.count("settings_desc_previous_messaging_sessions:")

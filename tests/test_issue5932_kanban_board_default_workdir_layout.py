@@ -38,11 +38,11 @@ def test_board_modal_default_workdir_layout(locale, width, height):
                     timeout=10000,
                 )
                 page.wait_for_function(
-                    "() => typeof setLocale === 'function' && typeof applyLocaleToDOM === 'function' && typeof openKanbanCreateBoard === 'function'",
+                    "() => typeof activateLocale === 'function' && typeof applyLocaleToDOM === 'function' && typeof openKanbanCreateBoard === 'function'",
                     timeout=10000,
                 )
-                page.evaluate("""([lang]) => {
-                    setLocale(lang);
+                page.evaluate("""async ([lang]) => {
+                    await activateLocale(lang);
                     openKanbanCreateBoard();
                     const modal = document.getElementById('kanbanBoardModal');
                     if (!modal || modal.hidden) throw new Error('Kanban board modal did not open');

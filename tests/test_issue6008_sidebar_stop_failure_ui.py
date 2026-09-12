@@ -1,5 +1,6 @@
 """Sidebar stop must not settle the UI when /api/chat/cancel fails."""
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 import pathlib
@@ -13,7 +14,7 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _extract_function(src: str, name: str) -> str:
@@ -169,9 +170,9 @@ def test_failed_sidebar_stop_keeps_local_state():
 
 def test_primary_composer_stop_renders_localized_error_and_preserves_success():
     cancel_key = "cancel_" + "failed"
-    english = re.search(rf"{cancel_key}:\s*'((?:\\'|[^'])*)'", I18N_JS)
+    english = re.search(rf"{cancel_key}:\s*'((?:\\'|[^'])*)'", I18N_SOURCE)
     japanese = re.search(
-        rf"{cancel_key}:\s*'((?:\\'|[^'])*)'", I18N_JS[I18N_JS.index("ja:"):]
+        rf"{cancel_key}:\s*'((?:\\'|[^'])*)'", I18N_SOURCE[I18N_SOURCE.index("ja:"):]
     )
     assert english and japanese
     english_message = english.group(1).replace("\\'", "'")

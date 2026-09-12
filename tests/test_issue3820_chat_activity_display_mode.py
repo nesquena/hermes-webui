@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for issue #3820 chat activity display mode."""
 
 import json
@@ -12,7 +13,7 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
@@ -458,11 +459,11 @@ def test_settings_ui_exposes_chat_activity_display_mode_selector():
     assert "function _pickTransparentEventTimestamps" in PANELS_JS
     assert "body.chat_activity_display_mode" in PANELS_JS
     assert "renderMessages({preserveScroll:true})" in PANELS_JS
-    assert "settings_label_chat_activity_display_mode" in I18N_JS
-    assert "settings_desc_chat_activity_display_mode" in I18N_JS
-    assert "settings_label_transparent_stream_event_timestamps" in I18N_JS
-    assert "settings_desc_transparent_stream_event_timestamps" in I18N_JS
-    assert I18N_JS.count("settings_option_final_answer_only") == I18N_JS.count("settings_option_transparent_stream")
+    assert "settings_label_chat_activity_display_mode" in I18N_SOURCE
+    assert "settings_desc_chat_activity_display_mode" in I18N_SOURCE
+    assert "settings_label_transparent_stream_event_timestamps" in I18N_SOURCE
+    assert "settings_desc_transparent_stream_event_timestamps" in I18N_SOURCE
+    assert I18N_SOURCE.count("settings_option_final_answer_only") == I18N_SOURCE.count("settings_option_transparent_stream")
 
 
 def test_chat_activity_display_mode_plumbing_preserves_hide_all_activity():
@@ -873,7 +874,7 @@ def test_transparent_turn_footer_shows_elapsed_tokens_ttft_status():
     assert "_formatFirstToken(msg._firstTokenMs)" in UI_JS
     assert "_formatTurnDuration(msg._turnDuration)" in UI_JS
     # i18n key for the TTFT tooltip.
-    assert "first_token_time" in I18N_JS
+    assert "first_token_time" in I18N_SOURCE
 
 
 def test_transparent_turn_wiring_runs_after_per_turn_duration_block():

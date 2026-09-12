@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Issue #5671: workspace switcher and New Chat workspace announcements."""
 from pathlib import Path
 
@@ -7,7 +8,7 @@ INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _block(source: str, start_marker: str, end_marker: str) -> str:
@@ -130,7 +131,7 @@ def test_new_session_announces_started_workspace_without_leaving_stale_browse_te
 
 
 def test_workspace_a11y_i18n_keys_exist_in_english_locale():
-    assert "workspace_switcher_aria: 'Switch workspace. Current workspace: {0}.'" in I18N_JS
-    assert "workspace_context_aria" not in I18N_JS
-    assert "workspace_context_none" not in I18N_JS
-    assert "new_session_workspace_announce: 'New chat started in workspace: {0}.'" in I18N_JS
+    assert "workspace_switcher_aria: 'Switch workspace. Current workspace: {0}.'" in I18N_SOURCE
+    assert "workspace_context_aria" not in I18N_SOURCE
+    assert "workspace_context_none" not in I18N_SOURCE
+    assert "new_session_workspace_announce: 'New chat started in workspace: {0}.'" in I18N_SOURCE

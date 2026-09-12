@@ -11,6 +11,7 @@ Three small follow-ups landed alongside the main batch:
 """
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 from pathlib import Path
 
@@ -63,13 +64,13 @@ def test_branch_endpoint_rejects_negative_keep_count():
 def test_no_orphan_wiki_i18n_keys():
     """PR #1342 leaked 9 unused `wiki_*` keys (wiki_panel_title, wiki_status_label,
     wiki_entry_count, wiki_last_modified, wiki_not_available, wiki_enabled,
-    wiki_disabled, wiki_toggle_failed, wiki_panel_desc) into static/i18n.js
-    from a different branch. Zero references existed outside i18n.js. They
+    wiki_disabled, wiki_toggle_failed, wiki_panel_desc) into static/split locale bundles
+    from a different branch. Zero references existed outside split locale bundles. They
     were stripped by Opus pre-release follow-up. This test pins that they
     don't return."""
-    i18n_src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n_src = locale_source_text()
     # If wiki_* keys are added in the future, they MUST have at least one
-    # reference outside i18n.js. Until then, this test fails loudly.
+    # reference outside split locale bundles. Until then, this test fails loudly.
     forbidden_keys = [
         "wiki_panel_title",
         "wiki_panel_desc",
@@ -83,7 +84,7 @@ def test_no_orphan_wiki_i18n_keys():
     ]
     for key in forbidden_keys:
         assert key not in i18n_src, (
-            f"{key!r} is back in static/i18n.js but no consumer uses it. "
+            f"{key!r} is back in static/split locale bundles but no consumer uses it. "
             "If you're adding wiki UI, also wire it up in the JS / panel HTML / "
             "Python so the key is actually used. See v0.50.253 Opus pre-release "
             "review."

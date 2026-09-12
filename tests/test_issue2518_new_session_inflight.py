@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #2518 new-conversation cold-start dedupe."""
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def test_new_session_sets_visible_pending_state_for_cold_catalog_wait():
 
 def test_new_session_pending_button_style_and_copy_exist():
     css = _source("static/style.css")
-    i18n = _source("static/i18n.js")
+    i18n = locale_source_text()
     assert '.panel-head-btn:disabled,.panel-head-btn[aria-busy="true"]' in css
     assert '.app-titlebar-new-chat:disabled,.app-titlebar-new-chat[aria-busy="true"]' in css
     assert "cursor:wait" in css

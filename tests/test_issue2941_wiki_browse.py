@@ -7,6 +7,7 @@ Verifies that:
 4. The four i18n keys are present in every locale block.
 """
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 import os
@@ -551,7 +552,7 @@ def test_wiki_page_alias_spellings_are_rejected(monkeypatch, tmp_path):
 
 
 def test_i18n_wiki_keys_in_all_locales():
-    src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    src = locale_source_text()
     required_keys = [
         "wiki_browse",
         "wiki_search_placeholder",

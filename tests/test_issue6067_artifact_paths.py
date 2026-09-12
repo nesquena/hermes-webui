@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import os
 from pathlib import Path
 import re
@@ -12,7 +13,7 @@ from _layout_helpers import assert_layout_sane
 
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 EXPECT_VISIBLE = os.environ.get("ISSUE6067_EXPECT_VISIBLE", "1") != "0"
 HEADLESS = os.environ.get("ISSUE6067_HEADLESS", "1") != "0"
 SCREENSHOT_PATH = os.environ.get("ISSUE6067_SCREENSHOT_PATH")
@@ -47,10 +48,10 @@ def _function(source, name):
 
 
 def _locale_blocks():
-    matches = list(re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", I18N_JS, re.MULTILINE))
-    end = I18N_JS.index("\n};", matches[-1].start())
+    matches = list(re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", I18N_SOURCE, re.MULTILINE))
+    end = I18N_SOURCE.index("\n};", matches[-1].start())
     return {
-        match.group(1).strip("'"): I18N_JS[match.start() : (matches[index + 1].start() if index + 1 < len(matches) else end)]
+        match.group(1).strip("'"): I18N_SOURCE[match.start() : (matches[index + 1].start() if index + 1 < len(matches) else end)]
         for index, match in enumerate(matches)
     }
 
@@ -110,7 +111,7 @@ def test_issue6067_session_source_key_is_english_fallback_owned():
         assert not re.search(r"\bworkspace_artifact_source_session:\s*'", block), (
             f"workspace_artifact_source_session must be absent from non-English locale {locale!r}"
         )
-    assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS
+    assert "_locale[key] ?? LOCALES.en[key]" in I18N_SOURCE
 
 
 def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():

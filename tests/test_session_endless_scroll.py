@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 import re
 
@@ -7,7 +8,7 @@ BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_endless_scroll_is_opt_in_setting():
@@ -56,5 +57,5 @@ def test_touch_momentum_defers_endless_scroll_prefetch():
 
 
 def test_endless_scroll_i18n_keys_exist_for_each_locale():
-    assert I18N_JS.count("settings_label_session_endless_scroll") == I18N_JS.count("settings_label_workspace_panel_open")
-    assert I18N_JS.count("settings_desc_session_endless_scroll") == I18N_JS.count("settings_desc_workspace_panel_open")
+    assert I18N_SOURCE.count("settings_label_session_endless_scroll") == I18N_SOURCE.count("settings_label_workspace_panel_open")
+    assert I18N_SOURCE.count("settings_desc_session_endless_scroll") == I18N_SOURCE.count("settings_desc_workspace_panel_open")

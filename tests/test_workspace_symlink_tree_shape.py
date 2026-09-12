@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for #4226 — symlinks in the workspace file tree must display correctly.
 
 The renderer _renderTreeItems must use isDirLike (type==='dir' || (type==='symlink'
@@ -8,7 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 ICONS_JS = (REPO_ROOT / "static" / "icons.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 WS_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
@@ -82,7 +83,7 @@ class TestLinkIcon:
 
 class TestSymlinkTooltip:
     def test_symlink_link_to_key_in_i18n(self):
-        count = I18N_JS.count("symlink_link_to:")
+        count = I18N_SOURCE.count("symlink_link_to:")
         assert count >= 5, \
             f"symlink_link_to key must appear in multiple locale blocks; found {count}"
 

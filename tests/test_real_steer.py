@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for real /steer functionality (follow-up to PR #1062).
 
 Covers the new POST /api/chat/steer endpoint which mirrors the CLI's /steer
@@ -290,7 +291,7 @@ class TestFrontendWiring:
     def setup_class(cls):
         cls.cmds = (Path(__file__).parent.parent / "static" / "commands.js").read_text(encoding="utf-8")
         cls.msgs = (Path(__file__).parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
-        cls.i18n = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+        cls.i18n = locale_source_text()
 
     def test_cmd_steer_calls_endpoint(self):
         idx = self.cmds.find("async function cmdSteer(")
@@ -964,7 +965,7 @@ class TestI18nKeys:
 
     @classmethod
     def setup_class(cls):
-        cls.i18n = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+        cls.i18n = locale_source_text()
 
     def test_cmd_steer_delivered_in_all_locales(self):
         assert self.i18n.count("cmd_steer_delivered:") >= 6, (

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for issue #1202 — OAuth provider cards always show "Not Configured"
 when auth is via config.yaml or when a token was consumed by the native CLI.
@@ -11,7 +12,7 @@ Fixes:
   2. api/providers.py: except clause no longer forces has_key=False
   3. api/providers.py: auth_error field added to provider dict
   4. static/panels.js: OAuth card shows correct hint + badge per key_source
-  5. static/i18n.js: new i18n keys for config_yaml and not_configured hints
+  5. static/split locale bundles: new i18n keys for config_yaml and not_configured hints
 """
 
 import re
@@ -225,13 +226,13 @@ class TestBuildProviderCardJs:
 
 
 # ---------------------------------------------------------------------------
-# Tests for i18n.js new keys
+# Tests for split locale bundles new keys
 # ---------------------------------------------------------------------------
 
 class TestI18nNewKeys:
     """Verify new i18n keys exist in the English locale."""
 
-    I18N = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    I18N = locale_source_text()
 
     def test_providers_oauth_config_yaml_hint_exists(self):
         assert "providers_oauth_config_yaml_hint" in self.I18N, (

@@ -1406,7 +1406,7 @@ async function cmdSteer(args){
 function _steerFailureMessageKey(fallback) {
   if(fallback==='gateway_steer_queued')return 'steer_fail_no_cached_agent';
   const key = 'steer_fail_' + (fallback || 'unknown');
-  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+  return (typeof getLocaleBundle === 'function' && getLocaleBundle('en') && getLocaleBundle('en')[key])
     ? key : 'steer_fail_unknown';
 }
 

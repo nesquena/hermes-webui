@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for font size setting (#833) — Small/Default/Large/Extra Large in Appearance."""
 import os
 import re
@@ -178,7 +179,7 @@ class TestFontSizeI18nCoverage:
     }
 
     def test_all_locales_have_font_size_keys(self):
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         count = src.count("settings_label_font_size")
         # 6 locales: en, ru, es, de, zh, zh-Hant
         assert count >= 6, (
@@ -186,17 +187,17 @@ class TestFontSizeI18nCoverage:
         )
 
     def test_font_size_small_key_in_all_locales(self):
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         count = src.count("font_size_small")
         assert count >= 6, f"font_size_small must appear in all 6 locales, found {count}"
 
     def test_font_size_large_key_in_all_locales(self):
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         count = src.count("font_size_large")
         assert count >= 6, f"font_size_large must appear in all 6 locales, found {count}"
 
     def test_font_size_extra_large_key_in_all_locales(self):
-        src = _read("static/i18n.js")
+        src = locale_source_text()
         count = src.count("font_size_xlarge")
         assert count >= 6, f"font_size_xlarge must appear in all locales, found {count}"
 

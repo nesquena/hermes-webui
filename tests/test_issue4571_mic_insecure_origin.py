@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for #4571 insecure-origin microphone messaging.
 
 Browser speech/microphone APIs can report permission-style errors when the real
@@ -11,11 +12,11 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _locale_count() -> int:
-    return len(re.findall(r"^  ['\"]?[\w-]+['\"]?: \{", I18N_JS, re.MULTILINE))
+    return len(re.findall(r"^  ['\"]?[\w-]+['\"]?: \{", I18N_SOURCE, re.MULTILINE))
 
 
 def _slice_between(src: str, start_marker: str, end_marker: str) -> str:
@@ -25,9 +26,9 @@ def _slice_between(src: str, start_marker: str, end_marker: str) -> str:
 
 
 def test_i18n_key_exists_in_every_locale_and_names_https_localhost():
-    assert I18N_JS.count("mic_insecure_origin") == _locale_count()
+    assert I18N_SOURCE.count("mic_insecure_origin") == _locale_count()
 
-    english = re.search(r"mic_insecure_origin: '([^']+)'", I18N_JS)
+    english = re.search(r"mic_insecure_origin: '([^']+)'", I18N_SOURCE)
     assert english, "English mic_insecure_origin string must exist"
     value = english.group(1).lower()
     assert "https" in value

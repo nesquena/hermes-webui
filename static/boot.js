@@ -3430,13 +3430,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
-    if(typeof setLocale==='function'){
-      const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
-        : (s.language || localStorage.getItem('hermes-lang') || 'en');
-      setLocale(_lang);
-      if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
-    }
+    const _lang=typeof resolvePreferredLocale==='function'
+      ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
+      : (s.language || localStorage.getItem('hermes-lang') || 'en');
+    await activateLocale(_lang);
     _mirrorSpeechSettingsFromServer(s);
     // Apply voice-mode visibility BEFORE computing the divider so the
     // .composer-divider (#5451) sees #btnVoiceMode final display even
@@ -3498,13 +3495,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     _applyComposerControlOrder(window._composerControlOrder);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
-    if(typeof setLocale==='function'){
-      const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))
-        : (localStorage.getItem('hermes-lang') || 'en');
-      setLocale(_lang);
-      if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
-    }
+    const _lang=typeof resolvePreferredLocale==='function'
+      ? resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))
+      : (localStorage.getItem('hermes-lang') || 'en');
+    await activateLocale(_lang);
     // Apply voice-mode visibility BEFORE computing the divider so the
     // .composer-divider (#5451) sees #btnVoiceMode final display even when
     // a server/localStorage sync path flipped the pref between module init

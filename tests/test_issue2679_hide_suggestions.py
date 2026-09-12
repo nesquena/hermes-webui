@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #2679: optional hiding of empty-chat suggestions."""
 from pathlib import Path
 
@@ -6,7 +7,7 @@ INDEX = REPO_ROOT / "static" / "index.html"
 STYLE = REPO_ROOT / "static" / "style.css"
 PANELS = REPO_ROOT / "static" / "panels.js"
 BOOT = REPO_ROOT / "static" / "boot.js"
-I18N = REPO_ROOT / "static" / "i18n.js"
+I18N = locale_source_text()
 CONFIG = REPO_ROOT / "api" / "config.py"
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 
@@ -49,7 +50,7 @@ def test_panels_round_trip_and_hot_apply_hide_suggestions():
 
 
 def test_hide_suggestions_i18n_all_locales_and_changelog():
-    js = I18N.read_text(encoding="utf-8")
+    js = I18N
     assert js.count("settings_label_hide_suggestions:") == 15
     assert js.count("settings_desc_hide_suggestions:") == 15
     changelog = CHANGELOG.read_text(encoding="utf-8")

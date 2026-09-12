@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_codes, locale_key_names, locale_source_text
 """Regression coverage for process-wakeup transcript rendering.
 
 A background-process wakeup is stored as a synthetic user turn
@@ -19,7 +20,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = ROOT / "static" / "ui.js"
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -214,18 +215,5 @@ def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
 
 
 def test_process_wakeup_label_key_exists_in_all_locales():
-    locale_pattern = re.compile(
-        r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
-        re.MULTILINE,
-    )
-    locale_matches = list(locale_pattern.finditer(I18N_JS))
-    assert locale_matches, "expected at least the English locale"
-    for idx, match in enumerate(locale_matches):
-        name = match.group("quoted") or match.group("plain")
-        start = match.end()
-        end = locale_matches[idx + 1].start() if idx + 1 < len(locale_matches) else I18N_JS.find("\n};", start)
-        block = I18N_JS[start:end]
-        assert re.search(r"\bprocess_wakeup_label\s*:", block), (
-            f"process_wakeup_label missing from locale {name}"
-        )
-    assert "process_wakeup_label:'Background wakeup'" in I18N_JS
+    assert all("process_wakeup_label" in locale_key_names(code) for code in locale_codes())
+    assert "process_wakeup_label:'Background wakeup'" in I18N_SOURCE

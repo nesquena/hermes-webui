@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import json
 import pathlib
 import subprocess
@@ -6,7 +7,7 @@ import textwrap
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _extract_function(source: str, name: str) -> str:
@@ -168,13 +169,13 @@ def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
         "session_time_bucket_last_week",
         "session_time_bucket_older",
     ):
-        assert key in I18N_JS
+        assert key in I18N_SOURCE
 
 
 def test_german_relative_time_translations_interpolate_numbers():
-    assert "session_time_minutes_ago: (n) => `Vor ${n} Minuten`" in I18N_JS
-    assert "session_time_hours_ago: (n) => `Vor ${n} Stunden`" in I18N_JS
-    assert "session_time_days_ago: (n) => `Vor ${n} Tagen`" in I18N_JS
-    assert "session_time_minutes_ago: 'Vor {n} Minuten'" not in I18N_JS
-    assert "session_time_hours_ago: 'Vor {n} Stunden'" not in I18N_JS
-    assert "session_time_days_ago: 'Vor {n} Tagen'" not in I18N_JS
+    assert "session_time_minutes_ago: (n) => `Vor ${n} Minuten`" in I18N_SOURCE
+    assert "session_time_hours_ago: (n) => `Vor ${n} Stunden`" in I18N_SOURCE
+    assert "session_time_days_ago: (n) => `Vor ${n} Tagen`" in I18N_SOURCE
+    assert "session_time_minutes_ago: 'Vor {n} Minuten'" not in I18N_SOURCE
+    assert "session_time_hours_ago: 'Vor {n} Stunden'" not in I18N_SOURCE
+    assert "session_time_days_ago: 'Vor {n} Tagen'" not in I18N_SOURCE

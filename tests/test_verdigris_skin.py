@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Verdigris skin registration and emerald/bronze palette affordances."""
 
 from pathlib import Path
@@ -7,7 +8,7 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_verdigris_skin_is_registered_in_all_files():
@@ -38,4 +39,4 @@ def test_verdigris_has_no_light_variant():
 def test_verdigris_i18n_lists_skin_in_all_locales():
     # There are 12 locales; each should now include verdigris as the trailing skin.
     # 10 locales use ASCII closing paren, 2 Chinese locales use full-width paren.
-    assert I18N_JS.count("verdigris)") + I18N_JS.count("verdigris）") == 15
+    assert I18N_SOURCE.count("verdigris)") + I18N_SOURCE.count("verdigris）") == 15

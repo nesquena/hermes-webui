@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for update banner fixes — #813 (conflict recovery) and #814 (restart after update).
 
 Covers:
@@ -3262,7 +3263,7 @@ class TestCheckForUpdatesButton:
 
     def test_check_now_i18n_key_exists(self):
         """settings_check_now i18n key must exist in all locale blocks."""
-        src = read('static/i18n.js')
+        src = locale_source_text()
         count = src.count('settings_check_now')
         assert count >= 5, (
             f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #5748 model picker selected badge and scroll state."""
 
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _body_between(src: str, start: str, end: str) -> str:
@@ -59,4 +60,4 @@ def test_selected_badge_helper_does_not_accept_dead_select_parameter():
 
 
 def test_selected_badge_label_has_locale_entries():
-    assert I18N_JS.count("model_badge_selected:") >= 14
+    assert I18N_SOURCE.count("model_badge_selected:") >= 14

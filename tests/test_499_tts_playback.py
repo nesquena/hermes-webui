@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for #499: TTS playback of agent responses via Web Speech API.
 
@@ -162,21 +163,21 @@ class TestTtsI18n:
     """TTS i18n keys exist in the English locale."""
 
     def test_tts_listen_key(self):
-        src = _read('i18n.js')
+        src = locale_source_text()
         assert "tts_listen:" in src, \
-            "tts_listen key not found in i18n.js"
+            "tts_listen key not found in split locale bundles"
 
     def test_tts_not_supported_key(self):
-        src = _read('i18n.js')
+        src = locale_source_text()
         assert "tts_not_supported:" in src, \
-            "tts_not_supported key not found in i18n.js"
+            "tts_not_supported key not found in split locale bundles"
 
     def test_tts_settings_keys(self):
-        src = _read('i18n.js')
+        src = locale_source_text()
         for key in ['settings_label_tts', 'settings_label_tts_auto_read',
                      'settings_label_tts_voice', 'settings_label_tts_rate',
                      'settings_label_tts_pitch']:
-            assert f"{key}:" in src, f"{key} not found in i18n.js"
+            assert f"{key}:" in src, f"{key} not found in split locale bundles"
 
 
 class TestTtsAutoRead:

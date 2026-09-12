@@ -1,5 +1,6 @@
 """Source-inspection and behavioral tests for Kanban modal fields added in #4470."""
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 import json
 import re
 import shutil
@@ -10,7 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 KANBAN_BRIDGE = (ROOT / "api" / "kanban_bridge.py").read_text(encoding="utf-8")
 
 NODE = shutil.which("node")
@@ -129,7 +130,7 @@ def test_i18n_new_keys_in_all_locales():
         "kanban_parents_placeholder",
     ]
     for key in required:
-        count = I18N_JS.count(f"{key}:")
+        count = I18N_SOURCE.count(f"{key}:")
         assert count == 15, f"Key '{key}' appears {count} times, expected 15 (one per locale)"
 
 
