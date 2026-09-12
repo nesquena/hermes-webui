@@ -1405,6 +1405,12 @@ async function cmdSteer(args){
 
 function _steerFailureMessageKey(fallback) {
   if(fallback==='gateway_steer_queued')return 'steer_fail_no_cached_agent';
+  // Gateway relay delivery failures all reuse the existing delivery-failure
+  // copy (no new i18n keys): the run may have finished or the steer endpoint
+  // rejected the guidance. 404/405/410 never reach here — the backend maps
+  // those to gateway_steer_queued, handled by the queue branch above.
+  if(fallback==='gateway_steer_no_run_id'||fallback==='gateway_steer_not_accepting'||fallback==='gateway_steer_error'
+    ||(typeof fallback==='string'&&/^gateway_steer_http_\d+$/.test(fallback)))return 'steer_fail_steer_error';
   const key = 'steer_fail_' + (fallback || 'unknown');
   return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
     ? key : 'steer_fail_unknown';

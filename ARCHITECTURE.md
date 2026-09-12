@@ -328,6 +328,54 @@ on_tool callback:
 The approval surface-on-tool logic means approvals appear immediately after the tool
 fires (within the same SSE stream), without waiting for the next poll cycle.
 
+### 4.4a Gateway Chat Invocation (_run_gateway_chat_streaming)
+
+When HERMES_WEBUI_CHAT_BACKEND=gateway, browser turns run through
+_run_gateway_chat_streaming in api/gateway_chat.py instead of the in-process
+agent path in 4.4. Runtime ownership moves to the gateway; WebUI retains the
+browser API, SSE, and session surface.
+
+- Steer routing decides active-run backend ownership (ACTIVE_RUNS) before
+  consulting the local SESSION_AGENT_CACHE, so a confirmed gateway-owned run
+  never falls through to a stale cached local agent. An exception during the
+  ownership lookup fails closed: the request reports steer_error and no local
+  steering is attempted.
+- The gateway worker publishes its run id into _STREAM_RUN_IDS with a
+  pending -> ready/failed/fallback lifecycle under
+  _STREAM_RUN_STARTING_CONDITION, and retires that state when the owner
+  finishes. Steer borrows the id through the locked bounded wait (up to five
+  seconds during run startup), holds no registry locks across HTTP I/O, and
+  releases its temporary waiter reference on every exit. A wait that resolves
+  to the fallback phase (legacy chat-completions transport) cannot relay at
+  all, so it degrades to gateway_steer_queued — the same next-turn queue
+  convention as the 404/405/410 compatibility path — instead of a
+  draft-retry failure; the phase snapshot comes from the wait itself so the
+  decision cannot race waiter retirement.
+- The steer POST resolves its base URL through get_config() (the same
+  webui_gateway_base_url config-file authority the run was created with),
+  refuses HTTP redirects via the no-redirect opener shared with
+  stop_gateway_run, and validates that the terminal response is a 2xx on the
+  steer route itself; a followed redirect or other unproven landing is
+  reported as gateway_steer_error, never as an accepted delivery.
+- On the Runs API path, the POST /v1/runs body includes the session's
+  canonical workspace only when it resolves at or below /workspace; other
+  paths omit the field and final filesystem validation stays gateway-side.
+- The Runs-API event translator converts a terminal run.completed payload's
+  non-empty pending_steer field into the existing pending_steer_leftover SSE
+  event (session id + text) before the caller's terminal done/stream_end
+  events, matching the in-process path's end-of-turn drain. Because the event
+  flows through the journaling put_gateway_event, a reconnecting browser
+  replays it exactly once per run-journal cursor window and never again once
+  its cursor advances past it; cancelled turns and error completions emit
+  nothing (local-path parity). Browser-side, the listener queues the leftover
+  for the OWNING session id even when the user has switched views (the
+  session queue is persisted per-session data — a view match must not gate
+  the queue write), while anchor/toast updates and the current picker's model
+  state stay scoped to the owning session being the active view.
+
+Operator-facing behavior (queue/draft policy for steer failures, container
+path agreement) is documented in docs/advanced-chat-setup.md.
+
 ### 4.5 Approval System Integration
 
 The approval system uses the existing Hermes gateway module at tools/approval.py.
