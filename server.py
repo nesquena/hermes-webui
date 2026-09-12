@@ -667,10 +667,10 @@ def main() -> None:
         load_plugins()
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
-
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
-
+    from api.context_brief import start_auto_brief_worker
+    start_auto_brief_worker()
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:
