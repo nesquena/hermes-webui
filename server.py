@@ -107,6 +107,7 @@ from api.helpers import (
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
+from api.log_stream import durable_print
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -337,11 +338,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _safe_webui_print(message: str) -> None:
-        """Emit a request log line without letting logging break responses."""
-        try:
-            print(message, flush=True)
-        except Exception:
-            pass
+        """Emit via startup's fd duplicate; agent code can hijack sys.stdout."""
+        durable_print(message)
 
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
