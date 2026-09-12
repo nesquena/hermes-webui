@@ -5980,7 +5980,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      // Browser notification is owned by showApprovalCard()/_notifyPromptCard()
+      // so every surfacing path (SSE, fallback poll, post-respond refresh,
+      // reload) dedupes through the same per-id gate.
     });
 
     source.addEventListener('clarify',e=>{
@@ -5988,7 +5990,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      // Browser notification is owned by showClarifyCard()/_notifyPromptCard().
     });
 
     source.addEventListener('state_saved',e=>{
@@ -7475,6 +7477,16 @@ function _rememberApprovalPending(pending, pendingCount) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
   if (!sid) return null;
+  const prev = _approvalPendingBySession.get(sid);
+  // A replacement pending entry DISPLACES the previous prompt for this
+  // session: retire the displaced prompt notification-dedupe key so the same
+  // externally supplied ID can legitimately notify again later. A re-render
+  // of the SAME prompt serializes to the same owner key - skip retirement
+  // there so repeated poll ticks stay deduped.
+  if (prev && prev.pending
+      && _promptNotifyKey("approval", sid, prev.pending) !== _promptNotifyKey("approval", sid, pending)) {
+    _retirePromptNotifyKey("approval", sid, prev.pending);
+  }
   const nextPending = {...pending, _session_id: sid};
   _approvalPendingBySession.set(sid, {pending: nextPending, pendingCount: pendingCount || 1});
   return sid;
@@ -7482,7 +7494,9 @@ function _rememberApprovalPending(pending, pendingCount) {
 
 function _clearApprovalPendingForSession(sid) {
   if (sid) {
+    const entry = _approvalPendingBySession.get(sid);
     _approvalPendingBySession.delete(sid);
+    if (entry && entry.pending) _retirePromptNotifyKey('approval', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -7625,6 +7639,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
+  if(typeof _notifyPromptCard==='function') _notifyPromptCard('approval', sid, pending);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
   if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   _approvalClearedOwner = null;
@@ -8444,6 +8459,14 @@ function _rememberClarifyPending(pending) {
   if (!pending) return null;
   const sid = pending._session_id || _promptActiveSessionId();
   if (!sid) return null;
+  const prev = _clarifyPendingBySession.get(sid);
+  // Mirror of the approval displacement retirement above: a NEW clarification
+  // replaces the session pending entry, so the displaced prompt dedupe key
+  // retires (same-owner re-renders keep their key).
+  if (prev && prev.pending
+      && _promptNotifyKey("clarify", sid, prev.pending) !== _promptNotifyKey("clarify", sid, pending)) {
+    _retirePromptNotifyKey("clarify", sid, prev.pending);
+  }
   const nextPending = {...pending, _session_id: sid};
   _clarifyPendingBySession.set(sid, {pending: nextPending});
   return sid;
@@ -8451,7 +8474,9 @@ function _rememberClarifyPending(pending) {
 
 function _clearClarifyPendingForSession(sid) {
   if (sid) {
+    const entry = _clarifyPendingBySession.get(sid);
     _clarifyPendingBySession.delete(sid);
+    if (entry && entry.pending) _retirePromptNotifyKey('clarify', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -8743,6 +8768,7 @@ function _clarifySetControlsDisabled(disabled, loading=false) {
 
 function showClarifyCard(pending) {
   const sid = _rememberClarifyPending(pending);
+  if(typeof _notifyPromptCard==='function') _notifyPromptCard('clarify', sid, pending);
   if (!_clarifyPromptBelongsToActiveSession(sid)) return;
   const question = pending.question || pending.description || '';
   const choices = Array.isArray(pending.choices_offered)
@@ -9207,6 +9233,70 @@ function requestNotificationPermission(){
     if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     return p;
   });
+}
+const _promptNotifySeen = new Map();
+// Prompt-card notifications: an approval or clarify card BLOCKS the run until
+// it is answered, so every surfacing path must notify — the live SSE event,
+// the 1.5s fallback poll, the post-respond "next approval" refresh, and a
+// page reload while a prompt is still pending. The chokepoint is the card
+// renderer itself (showApprovalCard / showClarifyCard); this helper dedupes
+// per logical OWNER - the typed tuple [kind, sid, prompt id, run owner id,
+// mirror token] serialized with JSON.stringify so delimiter-bearing producer
+// strings cannot collide (the gateway accepts approval_id as an unrestricted
+// string) - so repeated poll ticks, re-renders, and session switches ping
+// exactly once per owner. The run-owner fields mirror the approval-owner
+// identity used elsewhere in this file (_approvalOwnerForPending): the same
+// externally supplied approval_id may legitimately be pending in two
+// sessions, or in two gateway runs within one session, and each owner must
+// notify on its own. Seen entries are retired by PROMPT LIFECYCLE, not by
+// wall-clock age: _clearApprovalPendingForSession() and
+// _clearClarifyPendingForSession() (the resolution/dismissal/terminal
+// chokepoints) call _retirePromptNotifyKey(), so a prompt left pending for
+// hours never re-notifies, while a resolved prompt whose ID is later reused
+// legitimately notifies again. Entries are also NOT recorded when
+// notifications are disabled, so enabling mid-prompt re-notifies that owner.
+function _promptNotifyKey(kind, sid, pending){
+  const p = pending || {};
+  const id = p.approval_id || p.clarify_id || '';
+  const runId = String(p.run_id || '').trim();
+  const mirrorToken = String(p._gateway_mirror_token || '').trim();
+  return JSON.stringify([kind, String(sid || ''), String(id),
+    runId && mirrorToken ? runId : '',
+    runId && mirrorToken ? mirrorToken : '']);
+}
+function _retirePromptNotifyKey(kind, sid, pending){
+  if (!pending) return;
+  const id = pending.approval_id || pending.clarify_id || '';
+  if (!id) return;
+  _promptNotifySeen.delete(_promptNotifyKey(kind, sid, pending));
+}
+function _notifyPromptCard(kind, sid, pending){
+  const p = pending || {};
+  const id = p.approval_id || p.clarify_id || '';
+  if (!id) return;
+  const key = _promptNotifyKey(kind, sid, p);
+  if (_promptNotifySeen.has(key)) return;
+  // Suppress ONLY when the user is effectively looking at this prompt right
+  // now: it belongs to the session open in the pane AND the tab is visible
+  // AND focused. Every other combination pings:
+  //   1. prompt for a non-active session (even with the tab focused)
+  //   2. active session, but a different tab is selected
+  //   3. active session, tab active, but the Chrome window is not focused
+  // Suppression is NOT recorded, so the same prompt still pings exactly once
+  // the moment the user is no longer looking at it.
+  if (typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid)) return;
+  if (typeof sendBrowserNotification !== 'function') return;
+  if (typeof window !== 'undefined' && !window._notificationsEnabled) return;
+  _promptNotifySeen.set(key, Date.now());
+  // forceHidden: this caller already made the visibility decision (the
+  // actively-viewed gate above). sendBrowserNotification's own live gate
+  // ("notify only when document.hidden") would otherwise veto the
+  // unfocused-but-visible case, which this feature explicitly notifies for.
+  if (kind === 'clarify') {
+    sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid, forceHidden: true });
+  } else {
+    sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid, forceHidden: true });
+  }
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
