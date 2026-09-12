@@ -12,8 +12,15 @@
   const turnLifecycleListeners=new Map();
   const turnLifecycleStates=new Map();
   const configureRegistrations=new Map();
-  const configureQuarantinedIds=new Set();
+  const quarantinedExtensionIds=new Set();
   const configureChangeListeners=new Set();
+  const MESSAGE_ACTION_ID_RE=/^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+  const MESSAGE_ACTION_ICONS=new Set(['pin','bookmark','star']);
+  const MESSAGE_ACTION_ROLES=new Set(['user','assistant']);
+  const MESSAGE_ACTION_LIMIT=2;
+  const messageActionRegistrations=new Map();
+  const messageActionPending=new Map();
+  const messageActionChangeListeners=new Set();
   const currentExtensionStatus=new Map();
   let trustedSeeded=false;
   let extensionStatusSeeded=false;
@@ -146,8 +153,10 @@
     if(extensionStatusSeeded){
       for(const id of previousStatus.keys()){
         if(nextIds.has(id)) continue;
-        configureQuarantinedIds.add(id);
+        quarantinedExtensionIds.add(id);
+        removeMessageActionsForExtension(id);
         notifyConfigureChange(id,'quarantine');
+        notifyMessageActionChange(id,null,'quarantine');
       }
     }
     currentExtensionStatus.clear();
@@ -172,6 +181,13 @@
       const after=currentExtensionStatus.get(id);
       if(!before||!after||before.effective_enabled!==after.effective_enabled){
         notifyConfigureChange(id,'status');
+      }
+    }
+    for(const record of messageActionRegistrations.values()){
+      const before=previousStatus.get(record.extensionId);
+      const after=currentExtensionStatus.get(record.extensionId);
+      if(!before||!after||before.effective_enabled!==after.effective_enabled){
+        notifyMessageActionChange(record.extensionId,record.id,'status');
       }
     }
   }
@@ -382,6 +398,254 @@
     });
   }
 
+  function messageActionKey(extensionId,actionId){
+    return `${extensionId}\u0000${actionId}`;
+  }
+
+  function messageActionTargetKey(extensionId,actionId,context){
+    return `${messageActionKey(extensionId,actionId)}\u0000${context.sessionId}\u0000${context.messageIndex}\u0000${context.role}`;
+  }
+
+  function notifyMessageActionChange(extensionId,actionId,reason){
+    const change=Object.freeze({extensionId,actionId,reason});
+    for(const listener of [...messageActionChangeListeners]){
+      try{
+        listener(change);
+      }catch(error){
+        if(typeof console!=='undefined'&&typeof console.error==='function'){
+          try{console.error('[Hermes extensions] Message-action change listener failed:',error);}catch(_loggingError){}
+        }
+      }
+    }
+  }
+
+  function onMessageActionChange(listener){
+    if(typeof listener!=='function') return null;
+    messageActionChangeListeners.add(listener);
+    let active=true;
+    return function unsubscribe(){
+      if(!active) return false;
+      active=false;
+      messageActionChangeListeners.delete(listener);
+      return true;
+    };
+  }
+
+  function normalizeMessageActionDescriptor(raw){
+    if(!raw||typeof raw!=='object'||Array.isArray(raw)) return null;
+    const id=typeof raw.id==='string'?raw.id.trim():'';
+    const label=typeof raw.label==='string'?raw.label.trim():'';
+    const icon=typeof raw.icon==='string'?raw.icon.trim():'';
+    if(!MESSAGE_ACTION_ID_RE.test(id)||!label||label.length>120||!MESSAGE_ACTION_ICONS.has(icon)||typeof raw.onInvoke!=='function') return null;
+    const roles=raw.roles===undefined?['user','assistant']:raw.roles;
+    if(!Array.isArray(roles)||!roles.length) return null;
+    const normalizedRoles=[];
+    const seenRoles=new Set();
+    for(const role of roles){
+      if(typeof role!=='string'||!MESSAGE_ACTION_ROLES.has(role)||seenRoles.has(role)) return null;
+      seenRoles.add(role);
+      normalizedRoles.push(role);
+    }
+    if(raw.getPressed!==undefined&&typeof raw.getPressed!=='function') return null;
+    return {id,label,icon,roles:new Set(normalizedRoles),getPressed:raw.getPressed,onInvoke:raw.onInvoke};
+  }
+
+  function messageActionAvailable(record){
+    if(!record||!record.active||quarantinedExtensionIds.has(record.extensionId)) return false;
+    const status=currentExtensionStatus.get(record.extensionId);
+    return !!(status&&status.effective_enabled===true);
+  }
+
+  function registerMessageAction(clean,rawDescriptor){
+    if(!trustedExtensions.has(clean)||quarantinedExtensionIds.has(clean)) return null;
+    const status=currentExtensionStatus.get(clean);
+    if(!status||status.effective_enabled!==true) return null;
+    let descriptor;
+    try{
+      descriptor=normalizeMessageActionDescriptor(rawDescriptor);
+    }catch(_error){
+      return null;
+    }
+    if(!descriptor) return null;
+    const key=messageActionKey(clean,descriptor.id);
+    if(messageActionRegistrations.has(key)||messageActionRegistrations.size>=MESSAGE_ACTION_LIMIT) return null;
+    const record={extensionId:clean,...descriptor,active:true};
+    messageActionRegistrations.set(key,record);
+    notifyMessageActionChange(clean,descriptor.id,'registration');
+    let active=true;
+    return function unregister(){
+      if(!active) return false;
+      active=false;
+      record.active=false;
+      if(messageActionRegistrations.get(key)===record) messageActionRegistrations.delete(key);
+      for(const pendingKey of messageActionPending.keys()){
+        if(pendingKey.startsWith(`${key}\u0000`)) messageActionPending.delete(pendingKey);
+      }
+      notifyMessageActionChange(clean,descriptor.id,'registration');
+      return true;
+    };
+  }
+
+  function removeMessageActionsForExtension(clean){
+    const prefix=`${clean}\u0000`;
+    for(const [key,record] of [...messageActionRegistrations]){
+      if(record.extensionId!==clean) continue;
+      record.active=false;
+      messageActionRegistrations.delete(key);
+    }
+    for(const key of messageActionPending.keys()){
+      if(key.startsWith(prefix)) messageActionPending.delete(key);
+    }
+  }
+
+  function messageAccessor(clean){
+    return Object.freeze({
+      registerAction(descriptor){
+        return registerMessageAction(clean,descriptor);
+      },
+      invalidateActions(){
+        let changed=false;
+        for(const record of messageActionRegistrations.values()){
+          if(record.extensionId!==clean||!record.active) continue;
+          changed=true;
+          break;
+        }
+        if(changed) notifyMessageActionChange(clean,null,'state');
+        return changed;
+      },
+    });
+  }
+
+  function normalizeMessageIdentityContext(raw,includeText){
+    if(!raw||typeof raw!=='object') return null;
+    const sessionId=typeof raw.sessionId==='string'?raw.sessionId.trim():'';
+    const messageIndex=raw.messageIndex;
+    const role=raw.role;
+    if(!sessionId||!Number.isSafeInteger(messageIndex)||messageIndex<0||!MESSAGE_ACTION_ROLES.has(role)) return null;
+    const context={sessionId,messageIndex,role};
+    if(includeText){
+      if(typeof raw.text!=='string') return null;
+      context.text=raw.text;
+    }
+    return Object.freeze(context);
+  }
+
+  function pressedForMessageAction(record,context){
+    if(typeof record.getPressed!=='function') return false;
+    try{
+      const result=record.getPressed(context);
+      if(result!==null&&(typeof result==='object'||typeof result==='function')){
+        try{
+          if(typeof result.then==='function'){
+            Promise.resolve(result).catch(()=>{});
+            return false;
+          }
+        }catch(_thenError){return false;}
+      }
+      return result===true;
+    }catch(_error){
+      return false;
+    }
+  }
+
+  function messageActionsForContext(rawContext){
+    const context=normalizeMessageIdentityContext(rawContext,false);
+    if(!context) return [];
+    const actions=[];
+    for(const record of messageActionRegistrations.values()){
+      if(!messageActionAvailable(record)||!record.roles.has(context.role)) continue;
+      const pending=messageActionPending.has(messageActionTargetKey(record.extensionId,record.id,context));
+      actions.push(Object.freeze({
+        extensionId:record.extensionId,
+        id:record.id,
+        label:record.label,
+        icon:record.icon,
+        pressed:pressedForMessageAction(record,context),
+        pending,
+      }));
+    }
+    return actions;
+  }
+
+  function focusMessageActionTarget(opener){
+    if(!opener||typeof opener.focus!=='function'||opener.isConnected===false||opener.disabled===true) return false;
+    try{
+      opener.focus({preventScroll:true});
+      return true;
+    }catch(_focusOptionsError){
+      try{opener.focus();return true;}catch(_focusError){return false;}
+    }
+  }
+
+  function reportMessageActionFailure(record,error,onError){
+    if(typeof console!=='undefined'&&typeof console.error==='function'){
+      try{console.error(`[Hermes extensions] ${record.extensionId}:${record.id} message action failed:`,error);}catch(_loggingError){}
+    }
+    if(typeof onError==='function'){
+      try{onError(error);}catch(_callbackError){}
+    }
+  }
+
+  function invokeMessageAction(extensionId,actionId,rawContext,options){
+    const cleanExtensionId=extensionIdValue(extensionId);
+    const cleanActionId=typeof actionId==='string'?actionId.trim():'';
+    const record=messageActionRegistrations.get(messageActionKey(cleanExtensionId,cleanActionId));
+    const context=normalizeMessageIdentityContext(rawContext,true);
+    if(!record||!context||!messageActionAvailable(record)||!record.roles.has(context.role)) return false;
+    const pendingKey=messageActionTargetKey(cleanExtensionId,cleanActionId,context);
+    if(messageActionPending.has(pendingKey)) return false;
+    const opener=options&&options.opener;
+    const onError=options&&options.onError;
+    let settled=false;
+    let failureReported=false;
+    const invocationToken={};
+    messageActionPending.set(pendingKey,invocationToken);
+    notifyMessageActionChange(cleanExtensionId,cleanActionId,'pending');
+
+    function settle(){
+      if(settled) return false;
+      settled=true;
+      if(messageActionPending.get(pendingKey)!==invocationToken) return false;
+      messageActionPending.delete(pendingKey);
+      notifyMessageActionChange(cleanExtensionId,cleanActionId,'pending');
+      focusMessageActionTarget(opener);
+      return true;
+    }
+
+    function fail(error){
+      if(!failureReported){
+        failureReported=true;
+        reportMessageActionFailure(record,error,onError);
+      }
+      settle();
+    }
+
+    let result;
+    try{
+      result=record.onInvoke(context);
+    }catch(error){
+      fail(error);
+      return true;
+    }
+    let then;
+    try{
+      then=result!==null&&(typeof result==='object'||typeof result==='function')?result.then:null;
+    }catch(error){
+      fail(error);
+      return true;
+    }
+    if(typeof then==='function'){
+      try{then.call(result,settle,fail);}catch(error){fail(error);}
+    }else{
+      settle();
+    }
+    return true;
+  }
+
+  function extensionIdValue(value){
+    return typeof value==='string'?value.trim():'';
+  }
+
   function notifyConfigureChange(id,reason){
     const change=Object.freeze({id,reason});
     for(const listener of [...configureChangeListeners]){
@@ -408,7 +672,7 @@
   }
 
   function registerConfigureHandler(clean,handler){
-    if(typeof handler!=='function'||!trustedExtensions.has(clean)||configureQuarantinedIds.has(clean)) return null;
+    if(typeof handler!=='function'||!trustedExtensions.has(clean)||quarantinedExtensionIds.has(clean)) return null;
     if(configureRegistrations.has(clean)) return null;
     const record={handler,pending:false,active:true};
     configureRegistrations.set(clean,record);
@@ -429,7 +693,7 @@
     const record=configureRegistrations.get(clean);
     const status=currentExtensionStatus.get(clean);
     const available=!!(
-      clean&&record&&record.active&&!configureQuarantinedIds.has(clean)
+      clean&&record&&record.active&&!quarantinedExtensionIds.has(clean)
       &&status&&status.effective_enabled===true
     );
     return {available,pending:available&&record.pending===true};
@@ -610,6 +874,7 @@
       settings:settingsAccessor(clean,trusted,true,true),
       storage:storageAccessor(clean,trusted),
       events:eventAccessor(clean),
+      messages:messageAccessor(clean),
     });
     registrations.set(clean,handle);
     return handle;
@@ -625,6 +890,9 @@
     _configureStateForExtension:configureStateForExtension,
     _invokeConfigure:invokeConfigure,
     _onConfigureChange:onConfigureChange,
+    _messageActionsForContext:messageActionsForContext,
+    _invokeMessageAction:invokeMessageAction,
+    _onMessageActionChange:onMessageActionChange,
     resetSettingsForExtension(id){return settingsForExtension(id).reset();},
     clearStorageForExtension(id){return storageForExtension(id).clear();},
   };
@@ -637,4 +905,7 @@
   window.hermesExt.storage.forExtension=storageForExtension;
   window.hermesExt.register=registerExtension;
   primeFromStatus(window.__HERMES_EXTENSION_CONFIG__||{});
+  if(typeof window._bindHermesExtensionMessageActions==='function'){
+    window._bindHermesExtensionMessageActions();
+  }
 })();

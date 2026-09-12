@@ -6048,6 +6048,10 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-actions { opacity: .25; }
 .msg-row:hover .msg-actions { opacity: 1; }
 .assistant-turn:hover .msg-actions { opacity: 1; }
+.extension-message-actions{display:contents;}
+.extension-msg-action[aria-pressed="true"]{color:var(--accent);}
+.extension-msg-action[aria-pressed="true"] svg{fill:currentColor;}
+.extension-msg-action:disabled{cursor:not-allowed;opacity:.55;}
 
 /* ── User message: right-aligned bubble; no avatar/label — position identifies sender ── */
 .msg-row[data-role="user"] .msg-body {
