@@ -597,7 +597,8 @@
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
-            <button type="button" class="icon-btn has-tooltip" id="btnAttach" data-tooltip="Attach files" data-i18n-title="composer_control_attach" data-i18n-aria-label="composer_control_attach" aria-label="Attach files">
+            <input type="file" id="cameraFileInput" class="file-input-visually-hidden" accept="image/*" capture="environment">
+            <button type="button" class="icon-btn has-tooltip" id="btnAttach" data-tooltip="Attach files" data-i18n-title="composer_control_attach" data-i18n-aria-label="composer_control_attach" aria-label="Attach files" aria-expanded="false" aria-controls="attachChoicePopup">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <button type="button" class="icon-btn has-tooltip" id="btnSavedPrompts" data-tooltip="Saved prompts" data-i18n-title="composer_control_saved_prompts" data-i18n-aria-label="composer_control_saved_prompts" onclick="toggleSavedPromptsPopup()" aria-haspopup="menu" aria-expanded="false" aria-controls="savedPromptsPopup" aria-label="Saved prompts">
@@ -695,6 +696,10 @@
               </button>
             </div>
           </div>
+          <menu id="attachChoicePopup" class="attach-choice-popup" role="menu" aria-label="Attach options" data-i18n-aria-label="composer_attach_options" hidden>
+            <button type="button" role="menuitem" data-attach-choice="camera" data-i18n="composer_attach_photo">Take photo</button>
+            <button type="button" role="menuitem" data-attach-choice="files" data-i18n="composer_attach_files">Choose files</button>
+          </menu>
           <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="menu" aria-label="Saved prompts" data-i18n-aria-label="composer_control_saved_prompts"></div>
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
