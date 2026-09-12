@@ -130,6 +130,9 @@ class FakeElement {
 
   set innerHTML(value) {
     this._innerHTML = String(value || '');
+    if (!value || value === '') {
+      this.children = [];
+    }
   }
 
   get innerHTML() {
@@ -492,6 +495,7 @@ function runScenario(command) {
       globalThis.loadExtensionsPanel = async () => undefined;
       globalThis._settingsIndex = null;
       globalThis._settingsIndexPromise = null;
+      globalThis._settingsDynamicPromise = null;
       globalThis._settingsSearchSeq = 0;
 
       let query = '';

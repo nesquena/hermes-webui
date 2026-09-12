@@ -44,36 +44,46 @@ class TestSettingsSearch:
             "panels.js must contain _buildSettingsIndex() function"
         )
         body = PANELS_JS[PANELS_JS.find("function _buildSettingsIndex()"):]
-        assert "settingsPaneConversation" in body, (
-            "_buildSettingsIndex must reference settingsPaneConversation pane"
-        )
-        assert "searchBlob" in body, (
-            "_buildSettingsIndex must store a searchBlob for settings fields"
-        )
-        assert "titleText" in body, (
-            "_buildSettingsIndex must store title bucket text"
-        )
-        assert "valueText" in body, (
-            "_buildSettingsIndex must store value bucket text"
-        )
-        assert "descriptionText" in body, (
-            "_buildSettingsIndex must store description bucket text"
+        assert "_scanSettingsPanes" in body, (
+            "_buildSettingsIndex must call _scanSettingsPanes"
         )
 
-    def test_panels_js_has_filter_settings_function(self):
-        """panels.js must contain filterSettings function."""
-        assert "function filterSettings(query)" in PANELS_JS, (
-            "panels.js must contain filterSettings(query) function"
+    def test_panels_js_has_scan_settings_panes_function(self):
+        """panels.js must contain _scanSettingsPanes function with index logic."""
+        assert "function _scanSettingsPanes()" in PANELS_JS, (
+            "panels.js must contain _scanSettingsPanes() function"
         )
-        body = PANELS_JS[PANELS_JS.find("function filterSettings(query)"):]
+        body = PANELS_JS[PANELS_JS.find("function _scanSettingsPanes()"):]
+        assert "settingsPaneConversation" in body, (
+            "_scanSettingsPanes must reference settingsPaneConversation pane"
+        )
+        assert "searchBlob" in body, (
+            "_scanSettingsPanes must store a searchBlob for settings fields"
+        )
+        assert "titleText" in body, (
+            "_scanSettingsPanes must store title bucket text"
+        )
+        assert "valueText" in body, (
+            "_scanSettingsPanes must store value bucket text"
+        )
+        assert "descriptionText" in body, (
+            "_scanSettingsPanes must store description bucket text"
+        )
+
+    def test_panels_js_has_render_settings_results_function(self):
+        """panels.js must contain _renderSettingsResults function."""
+        assert "function _renderSettingsResults(resultsEl, q, seq)" in PANELS_JS, (
+            "panels.js must contain _renderSettingsResults(resultsEl, q, seq) function"
+        )
+        body = PANELS_JS[PANELS_JS.find("function _renderSettingsResults(resultsEl, q, seq)"):]
         assert "_scoreSettingsSearchMatch" in body, (
-            "filterSettings must call _scoreSettingsSearchMatch for ranking"
+            "_renderSettingsResults must call _scoreSettingsSearchMatch for ranking"
         )
         assert "esc(m.label)" in body, (
-            "filterSettings must keep rendering the visible label text"
+            "_renderSettingsResults must keep rendering the visible label text"
         )
         assert ".sort(" in body, (
-            "filterSettings must order matches deterministically"
+            "_renderSettingsResults must order matches deterministically"
         )
 
     def test_panels_js_has_navigate_to_field_function(self):
@@ -178,45 +188,45 @@ class TestSettingsSearch:
 
     def test_panels_js_handles_providers_pane(self):
         """panels.js must handle the Providers pane in index building."""
-        idx = PANELS_JS.find("function _buildSettingsIndex()")
-        assert idx >= 0, "_buildSettingsIndex not found"
+        idx = PANELS_JS.find("function _scanSettingsPanes()")
+        assert idx >= 0, "_scanSettingsPanes not found"
         body = PANELS_JS[idx:idx + 2000]
         assert "settingsPaneProviders" in body, (
-            "_buildSettingsIndex must handle Providers pane"
+            "_scanSettingsPanes must handle Providers pane"
         )
 
     def test_panels_js_handles_plugins_pane(self):
         """panels.js must handle the Plugins pane in index building."""
-        idx = PANELS_JS.find("function _buildSettingsIndex()")
-        assert idx >= 0, "_buildSettingsIndex not found"
+        idx = PANELS_JS.find("function _scanSettingsPanes()")
+        assert idx >= 0, "_scanSettingsPanes not found"
         body = PANELS_JS[idx:idx + 2000]
         assert "settingsPanePlugins" in body, (
-            "_buildSettingsIndex must handle Plugins pane"
+            "_scanSettingsPanes must handle Plugins pane"
         )
 
     def test_settings_index_includes_provider_cards(self):
         """Providers pane entries must index provider cards and API key fields."""
-        idx = PANELS_JS.find("function _buildSettingsIndex()")
-        assert idx >= 0, "_buildSettingsIndex not found"
+        idx = PANELS_JS.find("function _scanSettingsPanes()")
+        assert idx >= 0, "_scanSettingsPanes not found"
         body = PANELS_JS[idx:idx + 3500]
         assert "pane.querySelectorAll('.provider-card')" in body, (
-            "_buildSettingsIndex must scan provider cards so Providers search is not empty"
+            "_scanSettingsPanes must scan provider cards so Providers search is not empty"
         )
         assert "card.querySelectorAll('.provider-card-field')" in body, (
-            "_buildSettingsIndex must index provider card fields like API key controls"
+            "_scanSettingsPanes must index provider card fields like API key controls"
         )
 
     def test_settings_index_includes_plugin_cards(self):
         """Plugins pane entries must index plugin cards by plugin name."""
-        idx = PANELS_JS.find("function _buildSettingsIndex()")
-        assert idx >= 0, "_buildSettingsIndex not found"
-        end = PANELS_JS.find("function _resolveSettingsField(entry)", idx)
+        idx = PANELS_JS.find("function _scanSettingsPanes()")
+        assert idx >= 0, "_scanSettingsPanes not found"
+        end = PANELS_JS.find("function _buildSettingsIndex()", idx)
         body = PANELS_JS[idx:end]
         assert "if (sectionKey === 'plugins')" in body, (
-            "_buildSettingsIndex should include a plugins section branch"
+            "_scanSettingsPanes should include a plugins section branch"
         )
         assert "pane.querySelectorAll('.plugin-card')" in body, (
-            "_buildSettingsIndex must scan plugin cards so Plugins search is not empty"
+            "_scanSettingsPanes must scan plugin cards so Plugins search is not empty"
         )
 
     def test_resolve_settings_field_rehydrates_provider_plugin_cards(self):
@@ -232,21 +242,21 @@ class TestSettingsSearch:
         )
 
     def test_filter_settings_caps_results(self):
-        """filterSettings must cap results at 12 items."""
-        idx = PANELS_JS.find("function filterSettings(query)")
-        assert idx >= 0, "filterSettings function not found"
+        """_renderSettingsResults must cap results at 12 items."""
+        idx = PANELS_JS.find("function _renderSettingsResults(resultsEl, q, seq)")
+        assert idx >= 0, "_renderSettingsResults function not found"
         body = PANELS_JS[idx:idx + 2000]
         assert ".slice(0, 12)" in body, (
-            "filterSettings must cap results at 12 items with .slice(0, 12)"
+            "_renderSettingsResults must cap results at 12 items with .slice(0, 12)"
         )
 
     def test_filter_settings_uses_escaping(self):
-        """filterSettings must escape HTML in rendered text with esc()."""
-        idx = PANELS_JS.find("function filterSettings(query)")
-        assert idx >= 0, "filterSettings function not found"
+        """_renderSettingsResults must escape HTML in rendered text with esc()."""
+        idx = PANELS_JS.find("function _renderSettingsResults(resultsEl, q, seq)")
+        assert idx >= 0, "_renderSettingsResults function not found"
         body = PANELS_JS[idx:idx + 2000]
         assert "esc(" in body, (
-            "filterSettings must use esc() for HTML escaping of all rendered text"
+            "_renderSettingsResults must use esc() for HTML escaping of all rendered text"
         )
 
 
@@ -257,8 +267,8 @@ class TestSettingsSearchReviewFixes:
         """The field index must catch the common toggle shape
         <label><input><span data-i18n='...'></span></label>, not just
         label[data-i18n]. Otherwise most checkbox settings are unsearchable."""
-        idx = PANELS_JS.find("function _buildSettingsIndex")
-        assert idx >= 0, "_buildSettingsIndex not found"
+        idx = PANELS_JS.find("function _scanSettingsPanes")
+        assert idx >= 0, "_scanSettingsPanes not found"
         body = PANELS_JS[idx:idx + 2600]
         assert "field.querySelector(" in body, (
             "field index query should run a querySelector against field"
