@@ -259,6 +259,7 @@ global._showAllProfiles = false;
 global._showArchived = false;
 global._activeProject = null;
 global.NO_PROJECT_FILTER = '__none__';
+global._resetSessionSelectionForScopeChange = () => {{}};
 global.renderSessionListFromCache = () => {{}};
 global.renderSessionList = () => Promise.resolve();
 {requested_source_fn}
@@ -285,8 +286,12 @@ def test_project_filter_click_path_triggers_fresh_session_load():
     project_filter_fn = _extract_function(src, "_setActiveProjectFilter")
     script = f"""
 const calls = [];
+let selectionResetCount = 0;
 global.NO_PROJECT_FILTER = '__none__';
 global._activeProject = null;
+global._resetSessionSelectionForScopeChange = () => {{
+  selectionResetCount += 1;
+}};
 global.renderSessionListFromCache = () => {{
   calls.push('cache');
 }};
@@ -300,11 +305,13 @@ _setActiveProjectFilter('__none__');
 console.log(JSON.stringify({{
   activeProject: global._activeProject,
   calls,
+  selectionResetCount,
 }}));
 """
     body = _run_node(script)
 
     assert body["activeProject"] == "__none__"
+    assert body["selectionResetCount"] == 2
     assert body["calls"] == [
         "cache",
         {"deferWhileInteracting": False},

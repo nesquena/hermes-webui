@@ -220,6 +220,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
+- Batch-select conversations from a persistent bottom control; select mode keeps Select All/Deselect All, count, Archive, Move, Delete, and Cancel available while the list scrolls
 - Session projects -- named groups with colors for organizing sessions
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
