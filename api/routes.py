@@ -10310,7 +10310,7 @@ from api.models import (
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
-    save_projects,
+    mutate_projects,
     import_cli_session,
     CLAUDE_CODE_SOURCE,
     get_cli_sessions,
@@ -14871,6 +14871,7 @@ def _resolve_new_session_workspace(body, visible_prev_session_id):
     )
     return str(workspace)
 
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -17152,11 +17153,7 @@ def handle_post(handler, parsed) -> bool:
         color = body.get("color")
         if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
             return bad(handler, "Invalid color format")
-        projects = load_projects()
-        # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
-        # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
-        # client could create a project tagged with an arbitrary/unknown profile,
-        # producing hidden cross-profile rows that can't be managed normally.
+        # #3331: validate optional client profile before persisting the project.
         _requested_profile = str(body.get('profile') or "").strip()
         if _requested_profile and _requested_profile != "default":
             from api.profiles import _PROFILE_ID_RE
@@ -17169,8 +17166,12 @@ def handle_post(handler, parsed) -> bool:
             "profile": _requested_profile or get_active_profile_name() or 'default',
             "created_at": time.time(),
         }
-        projects.append(proj)
-        save_projects(projects)
+
+        def _create_project(projects):
+            projects.append(proj)
+            return proj, True
+
+        proj = mutate_projects(_create_project)
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/rename":
@@ -17180,23 +17181,26 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         import re as _re
 
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
+        color_present = "color" in body
+        color = body.get("color")
+        if color_present and color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
+            return bad(handler, "Invalid color format")
+        active_profile = get_active_profile_name()
+
+        def _rename_project(projects):
+            proj = next(
+                (p for p in projects if p["project_id"] == body["project_id"]), None
+            )
+            if not proj or not _profiles_match(proj.get("profile"), active_profile):
+                return None, False
+            proj["name"] = body["name"].strip()[:128]
+            if color_present:
+                proj["color"] = color
+            return proj, True
+
+        proj = mutate_projects(_rename_project)
         if not proj:
             return bad(handler, "Project not found", 404)
-        # #1614: a project can only be renamed by the profile that owns it.
-        active_profile = get_active_profile_name()
-        if not _profiles_match(proj.get("profile"), active_profile):
-            return bad(handler, "Project not found", 404)
-        proj["name"] = body["name"].strip()[:128]
-        if "color" in body:
-            color = body["color"]
-            if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
-                return bad(handler, "Invalid color format")
-            proj["color"] = color
-        save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/delete":
@@ -17204,18 +17208,20 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id")
         except ValueError as e:
             return bad(handler, str(e))
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
-        if not proj:
-            return bad(handler, "Project not found", 404)
-        # #1614: a project can only be deleted by the profile that owns it.
         active_profile = get_active_profile_name()
-        if not _profiles_match(proj.get("profile"), active_profile):
+
+        def _delete_project(projects):
+            for index, proj in enumerate(projects):
+                if proj.get("project_id") != body["project_id"]:
+                    continue
+                if not _profiles_match(proj.get("profile"), active_profile):
+                    return False, False
+                projects.pop(index)
+                return True, True
+            return False, False
+
+        if not mutate_projects(_delete_project):
             return bad(handler, "Project not found", 404)
-        projects = [p for p in projects if p["project_id"] != body["project_id"]]
-        save_projects(projects)
         # Unassign all sessions that belonged to this project.
         # #3746: this loop is O(N) full-JSON read+save per session, and each
         # save() reserializes the entire messages array. For a project with many

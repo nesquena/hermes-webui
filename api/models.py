@@ -6551,7 +6551,81 @@ def title_from(messages, fallback: str='Untitled'):
 # ── Project helpers ──────────────────────────────────────────────────────────
 
 _PROJECTS_MIGRATION_LOCK = threading.Lock()
+_PROJECTS_THREAD_LOCK = threading.RLock()
 _projects_migrated = False
+
+
+@contextmanager
+def _projects_process_lock():
+    """Serialize projects.json mutations across WebUI and MCP processes."""
+    lock_path = PROJECTS_FILE.with_name(f".{PROJECTS_FILE.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+        if _msvcrt is not None:
+            if os.fstat(lock_file.fileno()).st_size == 0:
+                lock_file.write(b"\0")
+            lock_file.seek(0)
+            _msvcrt.locking(  # type: ignore[attr-defined]
+                lock_file.fileno(), _msvcrt.LK_LOCK, 1  # type: ignore[attr-defined]
+            )
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(  # type: ignore[attr-defined]
+                    lock_file.fileno(), _msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                )
+            return
+        raise RuntimeError("cross-process project locking is unavailable")
+
+
+def _read_projects_file() -> list:
+    if not PROJECTS_FILE.exists():
+        return []
+    try:
+        data = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _write_projects_file_atomic(projects) -> None:
+    PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = PROJECTS_FILE.with_name(f".{PROJECTS_FILE.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp_path.open('x', encoding='utf-8') as handle:
+            json.dump(projects, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, PROJECTS_FILE)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def mutate_projects(mutator):
+    """Apply one locked read-modify-write transaction to projects.json.
+
+    ``mutator`` receives the current list and returns ``(result, changed)``.
+    The file is atomically replaced only when ``changed`` is true.
+    """
+    with _PROJECTS_THREAD_LOCK:
+        with _projects_process_lock():
+            projects = _read_projects_file()
+            result, changed = mutator(projects)
+            if changed:
+                _write_projects_file_atomic(projects)
+            return result
 
 
 def _backfill_project_profiles_if_needed(projects: list) -> bool:
@@ -6603,41 +6677,30 @@ def load_projects(*, _migrate: bool = True) -> list:
     callsites that want the raw on-disk shape (test fixtures, e.g.).
     """
     global _projects_migrated
-    if not PROJECTS_FILE.exists():
-        return []
-    try:
-        projects = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return []
+    projects = _read_projects_file()
     if _migrate and not _projects_migrated:
         with _PROJECTS_MIGRATION_LOCK:
-            # Re-check inside the lock — another thread may have raced.
-            if _projects_migrated:
-                # Per Opus advisor on stage-293: another thread completed
-                # migration and wrote new state to disk while we waited for
-                # the lock. Our `projects` snapshot is the pre-migration
-                # version; re-read so the caller doesn't see stale untagged
-                # rows (which a mutation route could then write back,
-                # silently overwriting the migration).
+            if not _projects_migrated:
+                def _migrate_projects(current):
+                    changed = _backfill_project_profiles_if_needed(current)
+                    return current, changed
+
                 try:
-                    return json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
-                except Exception:
-                    return projects
-            if _backfill_project_profiles_if_needed(projects):
-                try:
-                    save_projects(projects)
+                    projects = mutate_projects(_migrate_projects)
                     _projects_migrated = True
                 except Exception:
                     logger.debug("Failed to persist project profile backfill")
                     # Leave _projects_migrated False so a future call retries.
             else:
-                # Nothing to migrate — already tagged.
-                _projects_migrated = True
+                projects = _read_projects_file()
     return projects
 
+
 def save_projects(projects) -> None:
-    """Write project list to disk."""
-    PROJECTS_FILE.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding='utf-8')
+    """Atomically replace the project list under the shared process lock."""
+    with _PROJECTS_THREAD_LOCK:
+        with _projects_process_lock():
+            _write_projects_file_atomic(projects)
 
 
 CRON_PROJECT_NAME = 'Cron Jobs'
@@ -6668,38 +6731,35 @@ def ensure_cron_project(create: bool = True) -> str | None:
 
     active = get_active_profile_name() or 'default'
     with _CRON_PROJECT_LOCK:
-        projects = load_projects()
-        # Look for an existing per-profile cron project. Match either an exact
-        # profile tag or the renamed-root alias (a 'default'-tagged project
-        # under a renamed root, or a renamed-root-tagged project under
-        # 'default'). _is_root_profile is the canonical alias check.
-        for p in projects:
-            if p.get('name') != CRON_PROJECT_NAME:
-                continue
-            row_profile = p.get('profile')
-            if row_profile == active:
-                return p['project_id']
-            if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
-                return p['project_id']
-        # Reuse a legacy untagged cron project — back-tag it to the active profile.
-        for p in projects:
-            if p.get('name') == CRON_PROJECT_NAME and not p.get('profile'):
-                p['profile'] = active
-                save_projects(projects)
-                return p['project_id']
-        if not create:
-            return None
-        # Otherwise create a new one tagged with the active profile.
-        project_id = uuid.uuid4().hex[:12]
-        projects.append({
-            'project_id': project_id,
-            'name': CRON_PROJECT_NAME,
-            'color': '#6366f1',
-            'profile': active,
-            'created_at': time.time(),
-        })
-        save_projects(projects)
-        return project_id
+        def _mutate(projects):
+            # Look for an existing per-profile cron project. Match either an exact
+            # profile tag or the renamed-root alias.
+            for p in projects:
+                if p.get('name') != CRON_PROJECT_NAME:
+                    continue
+                row_profile = p.get('profile')
+                if row_profile == active:
+                    return p['project_id'], False
+                if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
+                    return p['project_id'], False
+            # Reuse a legacy untagged cron project — back-tag it to the active profile.
+            for p in projects:
+                if p.get('name') == CRON_PROJECT_NAME and not p.get('profile'):
+                    p['profile'] = active
+                    return p['project_id'], True
+            if not create:
+                return None, False
+            project_id = uuid.uuid4().hex[:12]
+            projects.append({
+                'project_id': project_id,
+                'name': CRON_PROJECT_NAME,
+                'color': '#6366f1',
+                'profile': active,
+                'created_at': time.time(),
+            })
+            return project_id, True
+
+        return mutate_projects(_mutate)
 
 
 WEBHOOK_PROJECT_NAME = 'Webhooks'
@@ -6712,30 +6772,30 @@ def ensure_webhook_project() -> str:
 
     active = get_active_profile_name() or 'default'
     with _WEBHOOK_PROJECT_LOCK:
-        projects = load_projects()
-        for p in projects:
-            if p.get('name') != WEBHOOK_PROJECT_NAME:
-                continue
-            row_profile = p.get('profile')
-            if row_profile == active:
-                return p['project_id']
-            if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
-                return p['project_id']
-        for p in projects:
-            if p.get('name') == WEBHOOK_PROJECT_NAME and not p.get('profile'):
-                p['profile'] = active
-                save_projects(projects)
-                return p['project_id']
-        project_id = uuid.uuid4().hex[:12]
-        projects.append({
-            'project_id': project_id,
-            'name': WEBHOOK_PROJECT_NAME,
-            'color': '#0ea5e9',
-            'profile': active,
-            'created_at': time.time(),
-        })
-        save_projects(projects)
-        return project_id
+        def _mutate(projects):
+            for p in projects:
+                if p.get('name') != WEBHOOK_PROJECT_NAME:
+                    continue
+                row_profile = p.get('profile')
+                if row_profile == active:
+                    return p['project_id'], False
+                if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
+                    return p['project_id'], False
+            for p in projects:
+                if p.get('name') == WEBHOOK_PROJECT_NAME and not p.get('profile'):
+                    p['profile'] = active
+                    return p['project_id'], True
+            project_id = uuid.uuid4().hex[:12]
+            projects.append({
+                'project_id': project_id,
+                'name': WEBHOOK_PROJECT_NAME,
+                'color': '#0ea5e9',
+                'profile': active,
+                'created_at': time.time(),
+            })
+            return project_id, True
+
+        return mutate_projects(_mutate)
 
 
 def _profile_has_user_projects() -> bool:
