@@ -649,6 +649,16 @@ def main() -> None:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
     try:
+        from api.gateway_supervisor import should_enable_supervisor, start_supervisor
+        if should_enable_supervisor():
+            start_supervisor()
+            print('[ok] Gateway supervisor started', flush=True)
+        else:
+            print('[tip] Gateway supervisor disabled (multi-container or explicit config)', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Gateway supervisor failed to start: {e}', flush=True)
+
+    try:
         from api.background_process import start_drain_thread
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
@@ -730,6 +740,11 @@ def main() -> None:
             stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")
+        try:
+            from api.gateway_supervisor import stop_supervisor
+            stop_supervisor()
+        except Exception:
+            logger.debug("Failed to stop gateway supervisor during shutdown", exc_info=True)
         try:
             from api.session_lifecycle import drain_all_on_shutdown
             drain_all_on_shutdown()
