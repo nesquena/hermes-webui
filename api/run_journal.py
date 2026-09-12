@@ -385,6 +385,50 @@ def _iter_bounded_raw_jsonl_lines(path: Path, *, max_bytes: int, retained_bytes:
         return
 
 
+def _append_run_event_locked(
+    path: Path,
+    session_id: str,
+    run_id: str,
+    event_name: str,
+    payload,
+    *,
+    seq: int | None = None,
+    created_at: float | None = None,
+) -> dict:
+    if seq is not None:
+        assigned_seq = int(seq)
+        _note_assigned_seq(path, assigned_seq)
+    else:
+        assigned_seq = _reserve_next_seq(path)
+    terminal_state = _terminal_state_for_event(event_name, payload)
+    event = {
+        "version": 1,
+        "event_id": f"{run_id}:{assigned_seq}",
+        "seq": assigned_seq,
+        "run_id": str(run_id),
+        "session_id": str(session_id),
+        "event": event_name,
+        "type": event_name,
+        "created_at": float(created_at if created_at is not None else time.time()),
+        "terminal": bool(terminal_state),
+        "terminal_state": terminal_state,
+        "payload": payload,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created_file = not path.exists()
+    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(line)
+        fh.flush()
+        if _should_fsync_event(terminal_state):
+            os.fsync(fh.fileno())
+    _discard_cached_summary(path)
+    if created_file:
+        _fsync_parent_dir(path)
+    return event
+
+
 def append_run_event(
     session_id: str,
     run_id: str,
@@ -402,38 +446,15 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
-        if seq is not None:
-            assigned_seq = int(seq)
-            _note_assigned_seq(path, assigned_seq)
-        else:
-            assigned_seq = _reserve_next_seq(path)
-        terminal_state = _terminal_state_for_event(event_name, payload)
-        event = {
-            "version": 1,
-            "event_id": f"{run_id}:{assigned_seq}",
-            "seq": assigned_seq,
-            "run_id": str(run_id),
-            "session_id": str(session_id),
-            "event": event_name,
-            "type": event_name,
-            "created_at": float(created_at if created_at is not None else time.time()),
-            "terminal": bool(terminal_state),
-            "terminal_state": terminal_state,
-            "payload": payload,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        created_file = not path.exists()
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            if _should_fsync_event(terminal_state):
-                os.fsync(fh.fileno())
-        _discard_cached_summary(path)
-        if created_file:
-            _fsync_parent_dir(path)
-        return event
+        return _append_run_event_locked(
+            path,
+            session_id,
+            run_id,
+            event_name,
+            payload,
+            seq=seq,
+            created_at=created_at,
+        )
 
 
 class RunJournalWriter:
@@ -447,19 +468,47 @@ class RunJournalWriter:
         self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # append_run_event owns sequence reservation and the physical append in
+        # one per-path critical section. Reserving here and releasing the lock
+        # before calling it lets a direct concurrent append write seq=N+1 before
+        # this writer writes seq=N, which makes replay report a non-contiguous
+        # journal even though the numeric set is gapless.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
+
+    def accept_and_append_if_nonterminal(self, event_name: str, payload, accept):
+        """Run ``accept`` and append its event before any terminal writer wins.
+
+        Returns ``(accepted, event, reason, error)``. The callback is never called
+        after a terminal or malformed journal. A persistence error after callback
+        acceptance is reported separately because runtime acceptance cannot be
+        rolled back.
+        """
+        with self._lock:
+            existing, malformed = _read_jsonl(self._path)
+            if malformed:
+                return False, None, "journal_malformed", None
+            if any(event.get("terminal") for event in existing):
+                return False, None, "terminal", None
+            accepted = bool(accept())
+            if not accepted:
+                return False, None, "rejected", None
+            try:
+                event = _append_run_event_locked(
+                    self._path,
+                    self.session_id,
+                    self.run_id,
+                    str(event_name or "").strip(),
+                    payload or {},
+                )
+            except Exception as exc:
+                return True, None, "persistence_error", exc
+            return True, event, None, None
 
 
 def read_run_events(
