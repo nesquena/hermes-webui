@@ -13,14 +13,16 @@ Implementation:
   - api/streaming.py `put()` captures `journaled["event_id"]` from
     `RunJournalWriter.append_sse_event()` return and writes it to
     `STREAM_LAST_EVENT_ID[stream_id]`.
-  - StreamChannel queue items carry `(event, data, event_id)` so active
-    subscribers emit each frame with its own id instead of the latest global id.
+  - StreamChannel queue items carry `(event, data, event_id)` even when the
+    journal has no id, so active subscribers can clear EventSource state instead
+    of inheriting the latest global id.
   - Legacy plain queues keep `(event, data)` and use `STREAM_LAST_EVENT_ID` as a
     compatibility fallback.
   - api/streaming.py finally-block cleanup pops STREAM_LAST_EVENT_ID.
 """
 
 from pathlib import Path
+import ast
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -51,43 +53,50 @@ def test_put_writes_event_id_to_side_channel_dict():
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
         "this is the side-channel the SSE consumer reads at emit time"
     )
+    assert "fallback_event_seq" not in put_body
 
 
-def test_stream_channel_queue_item_carries_per_event_id_with_legacy_fallback():
-    """StreamChannel queue items need per-frame ids; legacy queues stay 2-tuples."""
+def test_stream_channel_queue_item_carries_explicit_journal_identity():
+    """StreamChannel queue items distinguish journal-less frames from legacy queues."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
-        "StreamChannel events must carry their own event_id while legacy queue "
-        "consumers retain the 2-tuple shape"
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "StreamChannel events must carry an explicit event_id, including None, "
+        "while legacy queue consumers retain the 2-tuple shape"
     )
     assert "q.put_nowait(queue_item)" in put_body
 
 
-def test_gateway_queue_item_carries_per_event_id_with_legacy_fallback():
+def test_gateway_queue_item_carries_explicit_journal_identity():
     """Gateway-backed WebUI chat must preserve the same live cursor invariant."""
     put_def_idx = GATEWAY_CHAT_PY.find("def put_gateway_event(event, data):")
     assert put_def_idx != -1, "put_gateway_event(event, data) not found"
     put_body = GATEWAY_CHAT_PY[put_def_idx:put_def_idx + 1800]
-    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
-        "Gateway live events must carry their own event_id for StreamChannel "
+    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in put_body, (
+        "Gateway live events must carry an explicit event_id for StreamChannel "
         "subscribers while preserving legacy queue compatibility"
     )
     assert "q.put_nowait(queue_item)" in put_body
+    assert "fallback_event_seq" not in put_body
 
 
 def test_sse_handler_reads_event_id_from_side_channel():
     """The SSE consumer in _handle_sse_stream must read STREAM_LAST_EVENT_ID
     and pass it to _sse_with_id when present."""
-    handler_idx = ROUTES_PY.find("def _handle_sse_stream(handler, parsed):")
-    assert handler_idx != -1, "_handle_sse_stream not found"
-    handler_body = ROUTES_PY[handler_idx:handler_idx + 5400]
+    tree = ast.parse(ROUTES_PY)
+    handler_node = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_handle_sse_stream"), None)
+    assert handler_node is not None, "_handle_sse_stream not found"
+    lines = ROUTES_PY.splitlines(keepends=True)
+    handler_body = "".join(lines[handler_node.lineno - 1:handler_node.end_lineno])
     assert "STREAM_LAST_EVENT_ID.get(stream_id)" in handler_body, (
         "_handle_sse_stream must read STREAM_LAST_EVENT_ID[stream_id] to "
         "get the event_id for emit"
     )
     assert "_sse_with_id(handler, event, data, event_id)" in handler_body, (
         "_handle_sse_stream must call _sse_with_id when event_id is set"
+    )
+    assert "_sse_with_reset_id(handler, event, data)" in handler_body, (
+        "_handle_sse_stream must reset EventSource state for journal-less frames"
     )
 
 

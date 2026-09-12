@@ -128,6 +128,9 @@ def test_chat_stream_approval_listener_renders_received_count():
     function showApprovalForSession(sid, data, count) {{ rendered.push({{sid, data, count}}); }}
     function playAttentionSound() {{}}
     function _attentionSoundKey() {{ return 'approval'; }}
+    let streamId = 'stream-browser';
+    function _captureNotificationEventIdentity(streamId, event) {{ return {{streamId, lastEventId: event && event.lastEventId}}; }}
+    function _sendStreamNotification() {{}}
     function sendBrowserNotification() {{}}
     {listener}
     source.listeners.approval({{ data: JSON.stringify({{command: 'head', approval_id: 'a', pending_count: 2}}) }});

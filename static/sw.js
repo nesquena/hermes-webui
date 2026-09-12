@@ -173,6 +173,123 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+const NOTIFICATION_PRESENT_MESSAGE = 'hermes.notification.present';
+const NOTIFICATION_PRESENT_PROTOCOL_VERSION = 1;
+const MAX_NOTIFICATION_IDENTITY_LENGTH = 512;
+const MAX_NOTIFICATION_TITLE_LENGTH = 256;
+const MAX_NOTIFICATION_BODY_LENGTH = 4096;
+
+function isBoundedString(value, maxLength, allowEmpty = false) {
+  return typeof value === 'string' &&
+    (allowEmpty || value.length > 0) && value.length <= maxLength;
+}
+
+function normalizeNotificationUrl(value) {
+  if (!isBoundedString(value, 4096)) return null;
+  try {
+    const scopeUrl = new URL(self.registration.scope || `${self.location.origin}/`);
+    const targetUrl = new URL(value, scopeUrl);
+    const scopePath = scopeUrl.pathname.endsWith('/')
+      ? scopeUrl.pathname
+      : `${scopeUrl.pathname}/`;
+    if (targetUrl.origin !== self.location.origin ||
+        (targetUrl.pathname !== scopeUrl.pathname &&
+         !targetUrl.pathname.startsWith(scopePath))) {
+      return null;
+    }
+    return targetUrl.href;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function normalizeNotificationOptions(options, eventId) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return null;
+  const allowed = new Set(['body', 'tag', 'renotify', 'icon', 'badge', 'data']);
+  if (Object.keys(options).some((key) => !allowed.has(key))) return null;
+  if (!isBoundedString(options.body, MAX_NOTIFICATION_BODY_LENGTH, true)) return null;
+  if (!isBoundedString(options.tag, MAX_NOTIFICATION_IDENTITY_LENGTH)) return null;
+  if (options.tag !== 'hermes-webui' && !options.tag.startsWith('hermes-')) return null;
+  if (options.renotify !== true) return null;
+  if (options.icon !== 'static/favicon-192.png' || options.badge !== 'static/favicon-32.png') {
+    return null;
+  }
+  if (!options.data || typeof options.data !== 'object' || Array.isArray(options.data)) return null;
+  const url = normalizeNotificationUrl(options.data.url);
+  if (!url) return null;
+  return {
+    body: options.body,
+    tag: options.tag,
+    renotify: true,
+    icon: options.icon,
+    badge: options.badge,
+    data: {url, eventId},
+  };
+}
+
+function validateNotificationMessage(event) {
+  if (!event || !Array.isArray(event.ports) || event.ports.length !== 1) return null;
+  const port = event.ports[0];
+  if (!port || typeof port.postMessage !== 'function') return null;
+  const source = event.source;
+  if (!source || !isBoundedString(source.id, 256)) return null;
+  if (source.url) {
+    if (!normalizeNotificationUrl(source.url)) return null;
+  }
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      data.type !== NOTIFICATION_PRESENT_MESSAGE ||
+      data.protocolVersion !== NOTIFICATION_PRESENT_PROTOCOL_VERSION ||
+      !isBoundedString(data.eventId, MAX_NOTIFICATION_IDENTITY_LENGTH) ||
+      data.eventId.trim().length === 0) return null;
+  if (!isBoundedString(data.title, MAX_NOTIFICATION_TITLE_LENGTH)) return null;
+  const options = normalizeNotificationOptions(data.options, data.eventId);
+  if (!options) return null;
+  return {
+    port,
+    eventId: data.eventId,
+    title: data.title,
+    options,
+  };
+}
+
+const notificationPresentationByTag = new Map();
+
+async function handleNotificationPresentation(event) {
+  const request = validateNotificationMessage(event);
+  if (!request) {
+    if (event && event.ports && event.ports.length === 1 && event.ports[0] &&
+        typeof event.ports[0].postMessage === 'function') {
+      event.ports[0].postMessage({status: 'invalid'});
+    }
+    return;
+  }
+  const tag = request.options.tag;
+  const previous = notificationPresentationByTag.get(tag) || Promise.resolve();
+  const operation = previous.then(async () => {
+    const displayed = await self.registration.getNotifications({tag});
+    if (displayed.some((notification) => notification && notification.data &&
+        notification.data.eventId === request.eventId)) return 'duplicate';
+    await self.registration.showNotification(request.title, request.options);
+    return 'shown';
+  });
+  const trackedOperation = operation.catch(() => {});
+  notificationPresentationByTag.set(tag, trackedOperation);
+  try {
+    request.port.postMessage({status: await operation});
+  } catch (_error) {
+    try { request.port.postMessage({status: 'unavailable'}); } catch (_replyError) { /* best effort */ }
+  } finally {
+    if (notificationPresentationByTag.get(tag) === trackedOperation) {
+      notificationPresentationByTag.delete(tag);
+    }
+  }
+}
+
+self.addEventListener('message', (event) => {
+  const operation = handleNotificationPresentation(event);
+  if (event && typeof event.waitUntil === 'function') event.waitUntil(operation);
+});
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
