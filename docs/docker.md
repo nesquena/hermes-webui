@@ -297,6 +297,9 @@ services:
       # a registered provider. Set DASHBOARD_PASSWORD in your .env.
       - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${DASHBOARD_USER:-admin}
       - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+      # Gateway API key: the agent opens port 8642 only when this is
+      # a usable value (>=16 chars) — it is what the WebUI talks to.
+      - API_SERVER_KEY=${API_SERVER_KEY:-}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -318,6 +321,10 @@ services:
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
+      # Same gateway over the compose network, authenticated with the
+      # matching key, so the health pill and the Tasks surfaces work.
+      - HERMES_API_URL=http://hermes-agent:8642
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -336,6 +343,12 @@ Because the dashboard binds beyond loopback inside the container, it is protecte
 by its own basic-auth provider — the browser will prompt for the `DASHBOARD_USER` /
 `DASHBOARD_PASSWORD` you set. `API_SERVER_KEY` does not cover the dashboard; it
 guards only the gateway API on port 8642.
+Set `API_SERVER_KEY` (a random string of at least 16 characters) in `.env`
+before `docker compose up`: without it the agent leaves port 8642 closed and
+the WebUI reports the agent gateway as unreachable in System Settings and in
+the Tasks panel. `HERMES_API_URL` together with the matching
+`HERMES_WEBUI_GATEWAY_API_KEY` is what points the UI at that gateway and
+authenticates its health probe.
 Check `hermes gateway run --help` for the exact flag names for your agent release —
 the env-var equivalents shown above (`HERMES_DASHBOARD=1`, `HERMES_DASHBOARD_HOST`,
 `HERMES_DASHBOARD_PORT`) are available in recent releases alongside the CLI flags.
