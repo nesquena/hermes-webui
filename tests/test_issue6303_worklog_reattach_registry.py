@@ -1284,3 +1284,121 @@ def test_cancel_from_superseded_transport_does_not_settle_current_transport():
     owns the same session+stream pair."""
     result = _run_harness(_TERMINAL_GENERATION_DRIVER)
     _assert_terminal_row(result, "cancel")
+
+# ---------------------------------------------------------------------------
+# Matrix row: stale run-journal cursor mutation (review item 6, first bullet).
+#
+# The run journal cursor (INFLIGHT[activeSid].lastRunJournalSeq/EventId) is
+# transport-scoped replay authority: if a superseded transport keeps advancing
+# it, a later replay starts after content that was never rendered and silently
+# skips it. The cursor listeners are registered for every journal event name
+# through the production _wireSSE() path, so this row drives the real listener.
+# ---------------------------------------------------------------------------
+
+_CURSOR_GENERATION_DRIVER = textwrap.dedent("""\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+  lastRunJournalSeq: 5,
+  lastRunJournalEventId: 'evt-5',
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+(async () => {
+  attachLiveStream(SID, STREAM_ID, [], {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const sourceA = __esCreated[0];
+
+  // The same (session_id, stream_id) pair gets a NEW transport: the superseded
+  // generation A must lose replay authority over the cursor.
+  sourceA.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const sourceB = __esCreated[1];
+
+  __results.generationBInstalled = __esCreated.length === 2 && !!sourceB && sourceB !== sourceA;
+  __results.currentTransportIsB = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  // The cursor listeners are registered for every journal event name: prove the
+  // stale transport has one, else the no-op assertion would be vacuous.
+  __results.cursorListenerOnA = (sourceA._handlers['reasoning'] || []).length;
+  __results.cursorListenerOnB = (sourceB._handlers['reasoning'] || []).length;
+
+  __results.cursorBefore = String(INFLIGHT[SID].lastRunJournalSeq);
+
+  // A stale higher event id must not advance closure cursor state or the
+  // persisted INFLIGHT cursor.
+  sourceA.dispatch('reasoning', { text: 'STALE-A', event_id: 'stream:41' });
+  __results.cursorAfterStale = String(INFLIGHT[SID].lastRunJournalSeq);
+  __results.cursorEventIdAfterStale = String(INFLIGHT[SID].lastRunJournalEventId || '');
+  __results.staleAppliedToRegistry = window._liveAnchorRegistries.get(STREAM_ID).anchor.activity_events.length;
+
+  // The current transport's matching event advances the cursor exactly once.
+  sourceB.dispatch('reasoning', { text: 'CURRENT-B', event_id: 'stream:42' });
+  __results.cursorAfterCurrent = String(INFLIGHT[SID].lastRunJournalSeq);
+  __results.cursorEventIdAfterCurrent = String(INFLIGHT[SID].lastRunJournalEventId || '');
+  __results.currentAppliedToRegistry = window._liveAnchorRegistries.get(STREAM_ID).anchor.activity_events.length;
+
+  // A second stale event with an even higher id must still be inert.
+  sourceA.dispatch('reasoning', { text: 'STALE-A-2', event_id: 'stream:99' });
+  __results.cursorAfterSecondStale = String(INFLIGHT[SID].lastRunJournalSeq);
+
+  process.stdout.write(JSON.stringify(__results) + '\\n', () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+""")
+
+
+def test_stale_transport_cannot_advance_the_run_journal_cursor():
+    """A superseded transport must not advance the persisted run-journal cursor
+    (replay authority), while the current transport advances it exactly once."""
+    result = _run_harness(_CURSOR_GENERATION_DRIVER)
+
+    assert result["generationBInstalled"] is True, (
+        "the fresh-reconnect path must supersede generation A"
+    )
+    assert result["currentTransportIsB"] is True, (
+        "LIVE_STREAMS[activeSid] must own generation B"
+    )
+    assert result["cursorListenerOnA"] >= 1 and result["cursorListenerOnB"] >= 1, (
+        "both transports must have the journal-event listeners registered, "
+        "otherwise the inert-event assertions would be vacuous"
+    )
+    assert result["cursorBefore"] == "5", "precondition: the cursor starts at seq 5"
+    assert result["cursorAfterStale"] == "5", (
+        "a stale higher event_id (stream:41) from the SUPERSEDED transport must "
+        "not advance closure cursor state or the persisted INFLIGHT cursor — a "
+        "stale advance makes a later replay skip unrendered content"
+    )
+    assert result["cursorEventIdAfterStale"] == "evt-5", (
+        "the stale event must not overwrite the persisted cursor event id"
+    )
+    assert result["staleAppliedToRegistry"] == 0, (
+        "the stale event must not be applied to the registry either"
+    )
+    assert result["cursorAfterCurrent"] == "42", (
+        "the CURRENT transport's event must advance the cursor exactly once"
+    )
+    assert result["cursorEventIdAfterCurrent"].endswith("42"), (
+        "the persisted cursor event id must come from the current transport"
+    )
+    assert result["currentAppliedToRegistry"] == 1, (
+        "the current transport's event must be applied to the registry exactly once"
+    )
+    assert result["cursorAfterSecondStale"] == "42", (
+        "no later stale event may advance the cursor beyond the current transport's seq"
+    )
