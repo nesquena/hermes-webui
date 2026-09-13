@@ -79,6 +79,8 @@ function buildRuntime() {
   const activeSid = scenario.activeSid || 'session-5224';
   const streamId = scenario.streamId || 'stream-5224';
   const calls = [];
+  globalThis._anchorPaintGeneration = 0;
+  globalThis._anchorPaintDisposed = false;
   globalThis.activeSid = activeSid;
   globalThis.streamId = streamId;
   globalThis.assistantText = false;
