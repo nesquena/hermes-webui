@@ -236,6 +236,61 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Session sidecar publication authority
+
+Every compliant writer of `SESSION_DIR/<sid>.json` participates in the same
+per-SID thread and cross-process authority. This includes normal `Session.save()`
+writes, backup recovery, and discoverability repairs. Existing sidecars are
+fenced by their generation plus exact digest; first publication is create-or-fail,
+so a stale alias or repair cannot overwrite a sidecar that appeared concurrently.
+Out-of-band replacements increment `_sidecar_generation_v1` and invalidate cached
+aliases before later saves can proceed.
+
+When a State DB self-heal saves through a freshly loaded owner, the caller's
+cached alias inherits the new revision only if it owned the exact pre-save
+revision. Otherwise the self-heal returns and installs the freshly saved owner;
+it never grants a stale alias authority over unrelated unsaved fields.
+
+State DB sidecar materialization treats its initial scan only as candidate
+discovery and re-reads the complete authoritative row after acquiring the SID
+authority. That targeted reread uses one explicit SQLite read transaction for
+session metadata and ordered messages. Its private temporary file is flushed
+before create-only publication. Hidden background-session cleanup follows agent
+lock then SID authority, records a durable delete tombstone before unlinking,
+invalidates cached aliases, removes recoverable backups, attempts State DB
+cleanup, and fsyncs the session directory.
+
+Deleted-WebUI-session tombstone updates are serialized by a global cross-process
+authority in a lock-path namespace that no accepted session SID can alias. It is
+acquired only after any SID authority. Manual delete, hidden-background cleanup,
+and empty-session cleanup share one artifact-removal helper. Empty-session cleanup
+reads and validates the embedded SID, payload, and exact revision while holding
+the SID authority, then rechecks that revision immediately before deletion.
+Tombstone publication flushes the file and parent directory before sidecar
+deletion can start; a failure leaves that candidate uncounted. Primary, backup,
+or archive unlink failure also fails closed before State DB cleanup or cleanup
+success. A successful delete verifies those files are absent and fsyncs the
+session directory again.
+
+Sidecar, primary-backup, and incomparable-backup archive publications flush the
+file before atomic publication and fsync the parent directory on POSIX. Native
+Windows keeps atomic publication and file flushing, but Python does not expose an
+equivalent directory-fsync guarantee here; the final directory entry is therefore
+not guaranteed across sudden power loss on native Windows. POSIX ignores only
+filesystem-declared unsupported directory-fsync errors (`EINVAL`/`ENOTSUP`);
+permission and I/O failures propagate.
+
+Hidden ephemeral (`/btw`) sessions use the same deletion protocol on both
+cancelled and normally completed turns. Callers keep the canonical lock order
+(agent lock, then SID authority), validate the session ID, canonical sidecar
+path, embedded payload, and exact owned revision, and then invoke the shared
+artifact-removal helper. The durable tombstone is published before removing the
+primary, `.json.bak`, incomparable-backup archives, or session-owned replay-v10
+backup/manifest/temporary artifacts. Cleanup remains best-effort for the SSE
+response, but protocol failures are warning-logged and never fall back to a raw
+sidecar unlink; a successful normal cleanup clears transient in-memory stream
+fields so final recovery does not attempt to recreate the deleted sidecar.
+
 #### Imported `state.db` sidebar projection
 
 `api.models.get_cli_sessions()` projects conversations from the active Hermes

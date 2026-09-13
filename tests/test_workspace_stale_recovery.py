@@ -68,8 +68,320 @@ def test_resolve_chat_workspace_with_recovery_repairs_missing_implicit_workspace
     resolved = routes._resolve_chat_workspace_with_recovery(session, None)
 
     assert resolved == str(fallback.resolve())
-    assert session.workspace == str(fallback.resolve())
+    assert session.workspace == str(stale)
     assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
+
+
+def test_chat_start_adopts_reloaded_owner_after_implicit_workspace_recovery(
+    monkeypatch, tmp_path
+):
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    stale_workspace = tmp_path / "deleted-workspace"
+    sid = "chat-recovery-owner"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_write_session_index", lambda **_kwargs: None)
+    seed = models.Session(
+        session_id=sid,
+        workspace=str(stale_workspace),
+        model="test-model",
+        model_provider="test-provider",
+        profile="default",
+        messages=[{"role": "user", "content": "preserve me"}],
+    )
+    seed.save(skip_index=True)
+    stale_alias = models.Session.load(sid)
+    concurrent_owner = models.Session.load(sid)
+    assert stale_alias is not None and concurrent_owner is not None
+    concurrent_owner.title = "concurrent mutation"
+    concurrent_owner.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS[sid] = stale_alias
+
+    captured = {}
+
+    def start_run(session, **kwargs):
+        captured["session"] = session
+        session.workspace = kwargs["workspace"]
+        session.save(skip_index=True)
+        return {"stream_id": "recovered-owner-stream"}
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(workspace, "load_workspaces", lambda: [])
+    monkeypatch.setattr(routes, "get_last_workspace", lambda: str(fallback))
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_a, **_k: stale_alias)
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda *_a, **_k: (None, None, {}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_a, **_k: ("test-model", "test-provider", "test-model"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_repair_foreign_session_model_provider",
+        lambda _session, **_kwargs: "test-provider",
+    )
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: payload)
+
+    response = routes._handle_chat_start(
+        None,
+        {"session_id": sid, "message": "continue"},
+    )
+
+    assert response["stream_id"] == "recovered-owner-stream"
+    assert captured["session"] is not stale_alias
+    assert captured["session"].workspace == str(fallback.resolve())
+
+
+def _patch_chat_start_after_workspace_adoption(
+    monkeypatch,
+    tmp_path,
+    stale_alias,
+    recovered_owner,
+    start_run,
+):
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_get_or_materialize_session",
+        lambda *_args, **_kwargs: stale_alias,
+    )
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda *_args, **_kwargs: routes._ResolvedChatWorkspace(
+            tmp_path,
+            recovered_owner,
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda *_args, **_kwargs: (None, None, {}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", "test-provider", "test-model"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_repair_foreign_session_model_provider",
+        lambda _session, **_kwargs: "test-provider",
+    )
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: {
+            "error": message,
+            "_status": status,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200: {**payload, "_status": status},
+    )
+
+
+def test_chat_start_rechecks_profile_after_workspace_owner_adoption(
+    monkeypatch, tmp_path
+):
+    stale_alias = SimpleNamespace(
+        session_id="profile-owner-race",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        profile="default",
+        messages=[{"role": "user", "content": "default profile"}],
+        context_messages=[],
+        pending_user_message=None,
+        compression_recovery={},
+        recommended_recovery_action=None,
+    )
+    recovered_owner = SimpleNamespace(
+        session_id=stale_alias.session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        profile="other",
+        messages=[{"role": "user", "content": "other profile"}],
+        context_messages=[],
+        pending_user_message=None,
+        compression_recovery={},
+        recommended_recovery_action=None,
+    )
+    started = {"value": False}
+
+    def start_run(_session, **_kwargs):
+        started["value"] = True
+        return {"stream_id": "must-not-start"}
+
+    _patch_chat_start_after_workspace_adoption(
+        monkeypatch,
+        tmp_path,
+        stale_alias,
+        recovered_owner,
+        start_run,
+    )
+
+    response = routes._handle_chat_start(
+        object(),
+        {"session_id": stale_alias.session_id, "message": "continue safely"},
+    )
+
+    assert response["_status"] == 404
+    assert response["error"] == "Session not found"
+    assert started["value"] is False
+
+
+def test_chat_start_recomputes_recovery_after_workspace_owner_adoption(
+    monkeypatch, tmp_path
+):
+    stale_recovery = {
+        "terminal_state": "compression_exhausted",
+        "recommended_action": "start_focused_continuation",
+    }
+    stale_alias = SimpleNamespace(
+        session_id="recovery-owner-race",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        profile="default",
+        messages=[{"role": "user", "content": "stale recovery"}],
+        context_messages=[],
+        pending_user_message=None,
+        compression_recovery=stale_recovery,
+        recommended_recovery_action="start_focused_continuation",
+    )
+    saves = {"count": 0}
+    recovered_owner = SimpleNamespace(
+        session_id=stale_alias.session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        profile="default",
+        messages=[{"role": "user", "content": "recovery already cleared"}],
+        context_messages=[],
+        pending_user_message=None,
+        compression_recovery={},
+        recommended_recovery_action=None,
+        save=lambda: saves.__setitem__("count", saves["count"] + 1),
+    )
+
+    _patch_chat_start_after_workspace_adoption(
+        monkeypatch,
+        tmp_path,
+        stale_alias,
+        recovered_owner,
+        lambda _session, **_kwargs: {"error": "busy", "_status": 409},
+    )
+    adoptions = {"count": 0}
+
+    def resolve_workspace(_session, _requested):
+        adoptions["count"] += 1
+        return routes._ResolvedChatWorkspace(tmp_path, recovered_owner)
+
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        resolve_workspace,
+    )
+
+    response = routes._handle_chat_start(
+        object(),
+        {
+            "session_id": stale_alias.session_id,
+            "message": "continue",
+        },
+    )
+
+    assert response["_status"] == 409
+    assert response["error"] == "busy"
+    assert adoptions["count"] == 1
+    assert recovered_owner.compression_recovery == {}
+    assert recovered_owner.recommended_recovery_action is None
+    assert saves["count"] == 0
+
+
+def test_server_turn_adopts_recovered_owner_before_model_resolution(
+    monkeypatch, tmp_path
+):
+    stale_alias = SimpleNamespace(
+        session_id="server-turn-owner",
+        model="stale-model",
+        model_provider="stale-provider",
+        profile="default",
+    )
+    recovered_owner = SimpleNamespace(
+        session_id=stale_alias.session_id,
+        model="owner-model",
+        model_provider="owner-provider",
+        profile="default",
+    )
+    sessions = iter((stale_alias, recovered_owner))
+    captured = {}
+
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_k: None)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: next(sessions))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda _session, _requested: routes._ResolvedChatWorkspace(
+            tmp_path,
+            recovered_owner,
+        ),
+    )
+
+    def read_profile(session, provider):
+        captured["profile_session"] = session
+        captured["profile_provider"] = provider
+        return None, None, {}
+
+    monkeypatch.setattr(routes, "_read_profile_model_config", read_profile)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **_kwargs: (model, provider, model),
+    )
+    monkeypatch.setattr(
+        routes,
+        "clear_process_wakeup_pause_if_model_changed",
+        lambda *_a, **_k: False,
+    )
+
+    def start_run(session, **kwargs):
+        captured["run_session"] = session
+        captured["run_model"] = kwargs["model"]
+        captured["run_workspace"] = kwargs["workspace"]
+        return {"_status": 200}
+
+    monkeypatch.setattr(routes, "_start_run", start_run)
+
+    response = routes.start_session_turn(
+        stale_alias.session_id,
+        "wake up",
+        source="manual",
+    )
+
+    assert response["_status"] == 200
+    assert captured["profile_session"] is recovered_owner
+    assert captured["profile_provider"] == "owner-provider"
+    assert captured["run_session"] is recovered_owner
+    assert captured["run_model"] == "owner-model"
+    assert captured["run_workspace"] == str(tmp_path)
 
 
 def test_chat_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
@@ -384,7 +696,7 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     )
 
     assert captured == {"workspace": fallback.resolve(), "rel_path": "."}
-    assert session.workspace == str(fallback.resolve())
+    assert session.workspace == str(stale)
     assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
     assert payload == {
         "entries": [],
@@ -433,7 +745,7 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     selected["workspace"] = str(fallback_b)
 
     assert payload["workspace"] == str(fallback_a.resolve())
-    assert session.workspace == str(fallback_a.resolve())
+    assert session.workspace == str(stale)
     assert captured["listed"] == fallback_a.resolve()
     assert str(fallback_a.resolve()) in sidecar.read_text(encoding="utf-8")
 
