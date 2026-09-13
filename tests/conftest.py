@@ -52,6 +52,11 @@ REPO_ROOT  = TESTS_DIR.parent.resolve()
 HOME       = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 
+# Disable the agent-config bridge process-wide so the full test suite is
+# machine-independent (no hermes-agent checkout required). Individual tests
+# that exercise bridge code paths activate their own fake via sys.modules.
+os.environ.setdefault("HERMES_WEBUI_DISABLE_AGENT_CONFIG_BRIDGE", "1")
+
 # ── Test server config ────────────────────────────────────────────────────
 # Port and state dir auto-derive from the repo path when no env var is set,
 # giving every worktree its own isolated port (20000-29999) and state directory.
