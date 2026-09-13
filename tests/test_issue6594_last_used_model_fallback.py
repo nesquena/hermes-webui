@@ -328,6 +328,123 @@ def test_server_session_update_clears_stale_fallback_and_routing():
     assert resp_session.get("gateway_routing_history") == [{"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"}]
 
 
+def test_chat_start_preparation_route_invalidation_scenarios():
+    """Verify chat-start preparation route invalidation and preservation:
+    1. An existing fallback plus a different incoming model/provider clears current attribution but preserves history.
+    2. The same requested route preserves attribution.
+    3. A failed/interrupted turn after the route switch cannot expose the old last_used_model through the session-list projection.
+    """
+    from unittest.mock import MagicMock, patch
+    from api import routes
+    from api.helpers import public_session_projection
+    from api.route_session_list_cache import _session_list_cache_bounded_payload
+
+    # 1. Existing fallback + different incoming model/provider clears current attribution but preserves history
+    s1 = Session(
+        session_id="chat_start_switch_test",
+        title="Chat Start Switch",
+        model="claude-3-5-sonnet",
+        model_provider="anthropic",
+        last_used_model="claude-3-haiku",
+        gateway_routing={"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"},
+        gateway_routing_history=[{"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"}],
+    )
+    s1.save = MagicMock()
+    with patch("api.routes.register_session_writeback_owner"):
+        routes._prepare_chat_start_session_for_stream(
+            s1,
+            msg="Hello from new model",
+            attachments=[],
+            workspace="/tmp",
+            model="gpt-4o",
+            model_provider="openai",
+            stream_id="stream_switch_1",
+            defer_save=True,
+        )
+    assert s1.model == "gpt-4o"
+    assert s1.model_provider == "openai"
+    assert s1.last_used_model is None
+    assert s1.gateway_routing is None
+    assert s1.gateway_routing_history == [{
+        "used_model": "claude-3-haiku",
+        "provider": "anthropic",
+        "requested_model": "claude-3-5-sonnet",
+    }]
+
+    # 2. Same requested route preserves attribution
+    s2 = Session(
+        session_id="chat_start_same_route_test",
+        title="Chat Start Same Route",
+        model="claude-3-5-sonnet",
+        model_provider="anthropic",
+        last_used_model="claude-3-haiku",
+        gateway_routing={"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"},
+        gateway_routing_history=[{"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"}],
+    )
+    s2.save = MagicMock()
+    with patch("api.routes.register_session_writeback_owner"):
+        routes._prepare_chat_start_session_for_stream(
+            s2,
+            msg="Followup on same route",
+            attachments=[],
+            workspace="/tmp",
+            model="claude-3-5-sonnet",
+            model_provider="anthropic",
+            stream_id="stream_same_1",
+            defer_save=True,
+        )
+    assert s2.model == "claude-3-5-sonnet"
+    assert s2.model_provider == "anthropic"
+    assert s2.last_used_model == "claude-3-haiku"
+    assert s2.gateway_routing == {
+        "used_model": "claude-3-haiku",
+        "provider": "anthropic",
+        "requested_model": "claude-3-5-sonnet",
+    }
+    assert s2.gateway_routing_history == [{
+        "used_model": "claude-3-haiku",
+        "provider": "anthropic",
+        "requested_model": "claude-3-5-sonnet",
+    }]
+
+    # 3. Failed/interrupted turn after route switch cannot expose old last_used_model through session-list projection
+    s3 = Session(
+        session_id="chat_start_interrupted_test",
+        title="Interrupted Turn Test",
+        model="claude-3-5-sonnet",
+        model_provider="anthropic",
+        last_used_model="claude-3-haiku",
+        gateway_routing={"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"},
+        gateway_routing_history=[{"used_model": "claude-3-haiku", "provider": "anthropic", "requested_model": "claude-3-5-sonnet"}],
+    )
+    s3.save = MagicMock()
+    with patch("api.routes.register_session_writeback_owner"):
+        routes._prepare_chat_start_session_for_stream(
+            s3,
+            msg="Start turn that fails",
+            attachments=[],
+            workspace="/tmp",
+            model="gpt-4o",
+            model_provider="openai",
+            stream_id="stream_failed_1",
+            defer_save=True,
+        )
+    # Simulate turn failure/interruption before any post-run settlement
+    payload = {"sessions": [dict(s3.__dict__)]}
+    projected = _session_list_cache_bounded_payload(payload)
+    proj_session = projected["sessions"][0]
+
+    assert proj_session["model"] == "gpt-4o"
+    assert proj_session.get("last_used_model") is None
+    assert proj_session.get("gateway_routing") is None
+
+    # Also verify public_session_projection matches
+    pub_proj = public_session_projection(dict(s3.__dict__))
+    assert pub_proj["model"] == "gpt-4o"
+    assert pub_proj.get("last_used_model") is None
+    assert pub_proj.get("gateway_routing") is None
+
+
 def test_production_model_selection_lifecycle_observable_behavior():
     """Test full production sequence: selectModelFromDropdown -> modelSelect.onchange -> syncModelChip -> session update -> in flight."""
     raw_output = _production_event_harness("""
