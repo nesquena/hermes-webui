@@ -134,14 +134,52 @@ LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
 # strict Anchor projection must fail instead of claiming the legacy transcript.
 HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
   python tests/browser_historical_transcript_hydration.py
+
+# Negative classification check: a hard-reload final-text prerequisite failure
+# must not emit the drop-anchor-persistence expected-failure marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=fail-reload-final-text \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative classification check: a Worklog expansion failure after the reloaded
+# Anchor group exists must not emit the drop-anchor-persistence marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=throw-reloaded-worklog-expand \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative classification check: an unrelated Worklog timeout after the reloaded
+# Anchor group exists must emit neither classification marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=timeout-reloaded-worklog-expand \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative discriminator checks: page closure and server death at the final-text
+# and missing-Anchor-group boundaries must emit neither classification marker.
+for bite in \
+  close-reload-final-text \
+  server-death-reload-final-text \
+  close-reloaded-anchor-group \
+  server-death-reloaded-anchor-group; do
+  LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+  LIFECYCLE_NEGATIVE_BITE="$bite" \
+    python tests/browser_conversation_lifecycle.py
+done
 ```
 
 The dedicated `Conversation lifecycle (informational)` workflow runs the current
 proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
-stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+automatically verifies the mutation commands above still fail with their
+scenario-specific expected-failure marker. It also runs the seven negative
+classification and discriminator checks above and rejects them if they emit
+either classification marker. Its `Lifecycle proof summary` result aggregates
+those checks, so a broken proof row, a mutation that unexpectedly survives, or an
+unrelated browser/server failure is visible as a failed workflow result. The
+workflow can also be started manually from the Actions page.
+
+It remains informational: this change does not make it a required merge check.
+The maintainer's private QA harness remains broader; later public slices will add
+session switching, reconnect/replay, cancellation, compression, recovery, and a
+shadow-soak record before the workflow can be considered for promotion.
 
 ### Streaming reader intent
 
