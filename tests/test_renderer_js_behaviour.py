@@ -69,6 +69,17 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+// #7359: renderMd() captures MEDIA refs with the shared MEDIA_REF_CLASS
+// constant (ui.js top-level). Extract the real constant alongside the function
+// so the eval'd body resolves it — keeps the single source of truth instead of
+// re-deriving the char class here. `var` (not const/let) so the binding leaks
+// out of this eval into the enclosing function scope the renderMd eval shares.
+const _mediaRefConst = /const\s+MEDIA_REF_CLASS\s*=\s*(['"`])(?:(?!\1).|\\.)*\1/.exec(src);
+if (_mediaRefConst) {
+  eval('var MEDIA_REF_CLASS = ' + _mediaRefConst[0].replace(/^const\s+MEDIA_REF_CLASS\s*=\s*/, '') + ';');
+} else {
+  throw new Error('MEDIA_REF_CLASS const not found in ui.js');
+}
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
@@ -215,6 +226,28 @@ class TestRendererSanitization:
         assert '<img' in out and 'msg-media-img' in out
         assert 'onclick' not in out
         assert '_openimglightbox' not in out
+
+    def test_media_token_in_code_span_does_not_capture_backtick(self, driver_path):
+        # Regression (#7359): agents routinely format the token as an
+        # inline-code span, e.g. `MEDIA:/workspace/report.md`. The closing
+        # backtick must NOT be captured into the path, otherwise the download
+        # URL becomes .../report.md%60 and the server 404s (no file has a
+        # backtick in its name). Guards the MEDIA path class in renderMd().
+        out = _render(
+            driver_path,
+            "**Markdown:** `MEDIA:/workspace/report.md`",
+        )
+        assert "api/media?path=" in out
+        assert "%60" not in out, f"backtick leaked into media path: {out!r}"
+        assert "report.md" in out
+
+    def test_media_token_in_code_span_does_not_capture_backtick_with_extension(self, driver_path):
+        # Same guard with a bare-path download token (the exact #7359 repro:
+        # a .zip inline-code token used to 404 with a backtick suffix).
+        out = _render(driver_path, "Download: `MEDIA:/abs/path/file.zip`")
+        assert "api/media?path=" in out
+        assert "%60" not in out, f"backtick leaked into media path: {out!r}"
+        assert "file.zip" in out
 
     def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(self, driver_path):
         out = _render(driver_path, '<img src=x onerror=alert(1)//').lower()
