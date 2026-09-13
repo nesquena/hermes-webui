@@ -16754,8 +16754,15 @@ function renderMessages(options){
   const msgCount=S.messages.length;
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
-  // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  // renderMessages() in this window. Keep the existing loading placeholder —
+  // but only while a load for this sid is genuinely in flight: the latch is
+  // timestamped (see _sessionLoadInFlightFor), so a load that bailed without
+  // clearing it can no longer suppress every later render of the session and
+  // freeze the pane on "Loading conversation...".
+  const loadInFlight = typeof _sessionLoadInFlightFor === 'function'
+    ? _sessionLoadInFlightFor(sid)
+    : _loadingSessionId === sid;
+  if(loadInFlight&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(

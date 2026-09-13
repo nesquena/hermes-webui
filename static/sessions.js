@@ -19,6 +19,61 @@ const ICONS={
 // responses from in-flight requests when the user switches sessions again
 // before the first request completes (#1060).
 let _loadingSessionId = null;
+// How long a "still loading" latch may suppress the empty-transcript render.
+// The latch is otherwise unbounded: a load that bails before its clear leaves
+// _loadingSessionId pointing at the session, and renderMessages()' "keep the
+// existing loading placeholder" guard then suppresses every later render for it
+// (msgCount===0), freezing the pane on "Loading conversation..." forever.
+// The stamp lives on the placeholder element itself (see loadSession) rather
+// than in module state, so the extracted-function test harnesses that evaluate
+// loadSession in isolation stay valid.
+const _SESSION_LOAD_IN_FLIGHT_MAX_MS = 20000;
+function _conversationLoadingAgeMs(){
+  const el = $('msgInner');
+  const stamp = (el && el.dataset) ? Number(el.dataset.conversationLoadingSince || 0) : 0;
+  return stamp > 0 ? (Date.now() - stamp) : null;
+}
+function _sessionLoadInFlightFor(sid){
+  if (_loadingSessionId !== sid) return false;
+  const ageMs = _conversationLoadingAgeMs();
+  // No stamp (e.g. a same-session force reload that never drew the placeholder):
+  // treat the latch as live and keep the existing behaviour.
+  return ageMs === null ? true : ageMs < _SESSION_LOAD_IN_FLIGHT_MAX_MS;
+}
+// The "Loading conversation..." placeholder is only cleared by renderMessages().
+// Any load that ends without rendering — a cancelled pre-open hook, a superseded
+// generation, a rejected/404 session, a zero-message transcript — used to leave
+// that text on screen with no way out: clicking the session again hit the same
+// bail, so the pane stayed stuck until the page was thrown away. Settle it with
+// an explicit, retryable state instead of an endless pseudo-spinner.
+function _settleStrandedConversationLoading(settleSid, expectedStamp){
+  try {
+    const inner = $('msgInner');
+    if (!inner || typeof inner.textContent !== 'string') return;
+    if (inner.textContent.indexOf('Loading conversation') === -1) return; // already rendered/replaced
+    // Timer path: if a newer load re-stamped the placeholder since this
+    // timer was scheduled, the newer load owns the pane — leave it alone
+    // (its own timer or render will settle it). Skip for the immediate
+    // cancel-path call (no expectedStamp) where this guard is N/A.
+    if (expectedStamp !== undefined && expectedStamp !== null) {
+      const currentStamp = inner.dataset && inner.dataset.conversationLoadingSince
+        ? Number(inner.dataset.conversationLoadingSince) : null;
+      if (currentStamp !== expectedStamp) return;
+    }
+    // Belt-and-suspenders: a different session's load is still in flight
+    // and owns the pane — do not touch it.
+    if (_loadingSessionId !== settleSid && _sessionLoadInFlightFor(_loadingSessionId)) return;
+    if (_sessionLoadInFlightFor(settleSid)) return;                       // a load still owns the pane
+    if (S.session && S.session.session_id === settleSid) return;          // loaded after all
+    inner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Couldn\u2019t load this conversation.<button type="button" id="conversationLoadRetry" style="margin-left:10px;font:inherit;color:inherit;cursor:pointer;background:none;border:1px solid currentColor;border-radius:4px;padding:2px 10px;">Retry</button></div>';
+    const retry = (typeof inner.querySelector === 'function') ? inner.querySelector('#conversationLoadRetry') : null;
+    if (retry && typeof retry.addEventListener === 'function') {
+      retry.addEventListener('click', () => loadSession(settleSid, {force: true}));
+    }
+  } catch (_) {
+    // UI polish only: never let the escape hatch itself break a load path.
+  }
+}
 // Each loadSession() invocation gets a monotonically increasing generation.
 // `_loadingSessionId` only tracks destination session_id, so same-session
 // concurrent loads can still race and overwrite each other unless we compare
@@ -1687,6 +1742,7 @@ async function _switchProfileForSessionLoad(profile){
 }
 
 async function loadSession(sid){
+
   const opts = arguments[1] || {};
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
@@ -1701,6 +1757,10 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
+      // A cancelled pre-open must still release a placeholder an earlier
+      // attempt left behind, otherwise the pane shows "Loading conversation..."
+      // forever with no fetch pending.
+      _settleStrandedConversationLoading(sid);
       return;
     }
   }
@@ -1844,7 +1904,23 @@ async function loadSession(sid){
     }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
-    if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    if (_msgInner && currentSid !== sid) {
+      _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+      // Stamp the placeholder so a load that bails without clearing its latch
+      // stops suppressing the empty-transcript render after the in-flight
+      // window instead of freezing the pane forever (see _sessionLoadInFlightFor).
+      // The dataset guard also keeps this inert for the extracted-function test
+      // harnesses, whose msgInner is a plain stub.
+      if (_msgInner.dataset) {
+        const loadingStamp = Date.now();
+        _msgInner.dataset.conversationLoadingSince = String(loadingStamp);
+        // Escape hatch: the placeholder is otherwise only cleared by
+        // renderMessages(), so any terminal path that never renders (this is the
+        // last synchronous point before the metadata fetch) strands it. The
+        // helper no-ops when a render or a newer load already took over.
+        setTimeout(() => _settleStrandedConversationLoading(sid, loadingStamp), 4000);
+      }
+    }
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
   // resolution out of the first-paint path; old provider-shaped model IDs are
