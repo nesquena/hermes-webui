@@ -196,15 +196,19 @@ def test_session_clear_preserves_imported_messaging_transcript_and_blocks_state_
     assert loaded.pending_user_source is None
     assert loaded.title == "Untitled"
 
-    persisted = loaded.path.read_text(encoding="utf-8")
-    assert '"messages": []' in persisted
-    assert '"context_messages": []' in persisted
-    assert '"tool_calls": []' in persisted
-    assert '"truncation_watermark": 0.0' in persisted
-    assert '"truncation_boundary": 0.0' in persisted
-    assert '"pending_user_message": null' in persisted
-    assert '"pending_started_at": null' in persisted
-    assert '"pending_user_source": null' in persisted
+    # Assert on the parsed on-disk payload rather than substring-matching a
+    # specific whitespace layout: session files are now written as compact
+    # JSON (big-session save hotpath, 2026-07-13), so '"messages": []' with a
+    # space no longer appears verbatim while the semantics are unchanged.
+    persisted = json.loads(loaded.path.read_text(encoding="utf-8"))
+    assert persisted["messages"] == []
+    assert persisted["context_messages"] == []
+    assert persisted["tool_calls"] == []
+    assert persisted["truncation_watermark"] == 0.0
+    assert persisted["truncation_boundary"] == 0.0
+    assert persisted["pending_user_message"] is None
+    assert persisted["pending_started_at"] is None
+    assert persisted["pending_user_source"] is None
 
     state_db_messages = get_cli_session_messages(sid)
     assert [(m["role"], m["content"], m["timestamp"]) for m in state_db_messages] == [
