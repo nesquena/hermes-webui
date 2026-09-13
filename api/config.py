@@ -6253,8 +6253,11 @@ def _codex_models_cache_fingerprint(path: Path) -> dict:
         fp["size"] = st.st_size
         fp["semantic"] = "unparsed-fallback"
         return fp
-    stripped = _strip_volatile_codex_cache_fields(raw)
     try:
+        # The recursive strip can raise (e.g. RecursionError on a pathologically
+        # deep JSON tree) — keep it inside the fallback try so any transform
+        # failure degrades to the stat fingerprint rather than 500ing /api/models.
+        stripped = _strip_volatile_codex_cache_fields(raw)
         encoded = json.dumps(
             stripped,
             sort_keys=True,

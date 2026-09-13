@@ -356,3 +356,31 @@ def test_missing_codex_cache_fingerprint_is_stable_and_marked(tmp_path, monkeypa
     assert fp.get("missing") is True
     assert config._codex_models_cache_fingerprint(
         tmp_path / "absent" / "models_cache.json") == fp
+
+
+def test_deeply_nested_codex_cache_degrades_to_stat_fallback_without_crashing(tmp_path, monkeypatch):
+    """A strip failure (e.g. RecursionError on a deep tree) must not 500 /api/models.
+
+    The recursive volatile-field strip runs inside the encode try/except, so if
+    it raises (RecursionError on a pathologically deep JSON tree, or any other
+    error) the fingerprint degrades to the stat-based fallback instead of the
+    exception escaping and turning /api/models into an HTTP 500. (#7540 gate
+    finding.) We force the strip to raise directly so the guard is exercised
+    deterministically regardless of the ambient recursion depth.
+    """
+    p = _write_codex(tmp_path, monkeypatch, _codex_cache(fetched_at=_TS_1))
+
+    def _boom(_obj):
+        raise RecursionError("simulated deep-tree strip overflow")
+
+    monkeypatch.setattr(config, "_strip_volatile_codex_cache_fields", _boom)
+
+    # Must not raise; must degrade to the stat-based fingerprint.
+    fp = config._codex_models_cache_fingerprint(p)
+    fp2 = config._codex_models_cache_fingerprint(p)
+
+    assert isinstance(fp, dict)
+    assert fp.get("semantic") == "encode-fallback"
+    assert "mtime_ns" in fp and "size" in fp
+    assert "semantic_sha256" not in fp  # the content hash was NOT produced
+    assert fp2 == fp  # stable across repeated calls on the unchanged file
