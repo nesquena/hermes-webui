@@ -363,6 +363,33 @@ let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
 const _sessionListSourceById = new Map();
+// One selected conversation owns the live token renderer. Other active
+// conversations keep only this small, session-keyed projection in the sidebar
+// so three concurrent runs remain observable without opening/rendering a token
+// stream for every row.
+const SESSION_ACTIVITY_PROJECTION_MAX_ENTRIES = 32;
+const SESSION_ACTIVITY_PROJECTION_TTL_MS = 10 * 60 * 1000;
+const SESSION_ACTIVITY_ALLOWED_STATUSES = Object.freeze({
+  running:true,
+  waiting:true,
+  completed:true,
+  cancelled:true,
+  error:true,
+});
+const SESSION_ACTIVITY_ALLOWED_PHASES = Object.freeze({
+  queued:true,
+  thinking:true,
+  tool:true,
+  answer:true,
+  approval:true,
+  clarify:true,
+  done:true,
+  cancelled:true,
+  error:true,
+  working:true,
+});
+const _sessionActivityById = new Map();
+let _sessionActivityRenderTimer = 0;
 let _sessionListPointerActive = false;
 let _sessionListLastScrollAt = 0;
 let _pendingSessionListPayload = null;
@@ -379,6 +406,111 @@ const SESSION_LONG_PRESS_DELAY_MS = 400;
 const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
+
+function _scheduleSessionActivityProjectionRender(){
+  if(_sessionActivityRenderTimer||typeof renderSessionListFromCache!=='function') return;
+  const flush=()=>{
+    _sessionActivityRenderTimer=0;
+    if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  };
+  if(typeof requestAnimationFrame==='function') _sessionActivityRenderTimer=requestAnimationFrame(flush);
+  else _sessionActivityRenderTimer=setTimeout(flush,120);
+}
+
+function _recordSessionActivityProjection(sid, patch={}){
+  const resolvedSid=String(sid||'').trim();
+  if(!resolvedSid||!patch||typeof patch!=='object') return null;
+  const previous=_sessionActivityById.get(resolvedSid)||{};
+  const requestedStatus=String(patch.status||previous.status||'running').trim().toLowerCase();
+  const status=SESSION_ACTIVITY_ALLOWED_STATUSES[requestedStatus]?requestedStatus:'running';
+  const requestedPhase=String(patch.phase||previous.phase||'working').trim().toLowerCase();
+  const phase=SESSION_ACTIVITY_ALLOWED_PHASES[requestedPhase]?requestedPhase:'working';
+  const count=(value,fallback=0)=>{
+    const n=Number(value);
+    return Number.isFinite(n)?Math.max(0,Math.min(999999,Math.floor(n))):fallback;
+  };
+  const next={
+    sid:resolvedSid,
+    streamId:String(patch.streamId||previous.streamId||'').slice(0,160),
+    status,
+    phase,
+    toolCount:count(patch.toolCount, count(previous.toolCount)),
+    eventCount:count(patch.eventCount, count(previous.eventCount)),
+    assistantChars:count(patch.assistantChars, count(previous.assistantChars)),
+    reasoningChars:count(patch.reasoningChars, count(previous.reasoningChars)),
+    toolName:String(patch.toolName||previous.toolName||'').slice(0,48),
+    startedAt:Number(patch.startedAt||previous.startedAt||0)||0,
+    updatedAt:Date.now(),
+  };
+  _sessionActivityById.set(resolvedSid,next);
+  if(_sessionActivityById.size>SESSION_ACTIVITY_PROJECTION_MAX_ENTRIES){
+    const oldest=[..._sessionActivityById.entries()]
+      .sort((a,b)=>Number(a[1]&&a[1].updatedAt||0)-Number(b[1]&&b[1].updatedAt||0))[0];
+    if(oldest&&oldest[0]!==resolvedSid) _sessionActivityById.delete(oldest[0]);
+  }
+  _scheduleSessionActivityProjectionRender();
+  return next;
+}
+
+function _getSessionActivityProjection(sid, session=null){
+  const resolvedSid=String(sid||'').trim();
+  if(!resolvedSid) return null;
+  const local=_sessionActivityById.get(resolvedSid);
+  if(local&&local.updatedAt&&Date.now()-local.updatedAt>SESSION_ACTIVITY_PROJECTION_TTL_MS){
+    _sessionActivityById.delete(resolvedSid);
+  }
+  const current=_sessionActivityById.get(resolvedSid);
+  if(current) return {...current};
+  const serverRunning=!!(session&&(
+    session.is_streaming||session.active_stream_id||session.cron_running||
+    session.pending_user_message||session.has_pending_user_message
+  ));
+  if(!serverRunning) return null;
+  return {
+    sid:resolvedSid,
+    streamId:String(session.active_stream_id||'').slice(0,160),
+    status:'running',
+    phase:'working',
+    toolCount:0,
+    eventCount:0,
+    assistantChars:0,
+    reasoningChars:0,
+    toolName:'',
+    startedAt:Number(session.pending_started_at||0)||0,
+    updatedAt:0,
+  };
+}
+
+function _formatSessionActivityProjection(projection){
+  if(!projection) return '';
+  const status=String(projection.status||'').toLowerCase();
+  const phase=String(projection.phase||'').toLowerCase();
+  if(status==='waiting') return phase==='clarify'?'Question needed':'Approval needed';
+  if(status==='completed') return 'Complete';
+  if(status==='cancelled') return 'Cancelled';
+  if(status==='error') return 'Error';
+  if(phase==='tool'){
+    const toolName=String(projection.toolName||'').trim();
+    const count=Number(projection.toolCount||0);
+    return toolName
+      ? `Using ${toolName}${count>1?` · ${count} tools`:''}`
+      : `Tool activity${count>0?` · ${count}`:''}`;
+  }
+  if(phase==='thinking') return 'Thinking';
+  if(phase==='answer') return 'Writing';
+  if(phase==='approval') return 'Approval needed';
+  if(phase==='clarify') return 'Question needed';
+  return 'Working';
+}
+
+// messages.js calls this stable window hook rather than owning sidebar state.
+// Keeping the map here makes its lifecycle and row rendering session-scoped;
+// no transcript text is accepted or retained by the projection contract.
+if(typeof window!=='undefined'){
+  window._recordSessionActivityProjection=_recordSessionActivityProjection;
+  window._getSessionActivityProjection=_getSessionActivityProjection;
+  window._formatSessionActivityProjection=_formatSessionActivityProjection;
+}
 
 function _manualTitleAuxConfigFromPayload(auxData){
   if(!auxData||typeof auxData!=='object'||Array.isArray(auxData)) return null;
@@ -821,11 +953,22 @@ function _isSessionLocallyStreaming(s) {
 }
 
 function _isSessionEffectivelyStreaming(s) {
+  const projection=s&&s.session_id&&typeof _getSessionActivityProjection==='function'
+    ? _getSessionActivityProjection(s.session_id,s)
+    : null;
+  // A locally projected run can fill the short sidebar refresh gap only when
+  // the row does not carry an explicit idle answer. An explicit server idle
+  // row wins so a stale browser projection cannot manufacture a spinner after
+  // completion/cancellation (#2066).
+  const projectedRunning=!!(projection&&projection.status==='running'&&s&&
+    s.is_streaming===undefined&&!s.active_stream_id&&!s.cron_running&&
+    !_hasPendingUserMessageSignal(s));
   return Boolean(s && (
     s.is_streaming ||
     s.cron_running ||
     _hasPendingUserMessageSignal(s) ||
-    _isSessionLocallyStreaming(s)
+    _isSessionLocallyStreaming(s) ||
+    projectedRunning
   ));
 }
 
@@ -1063,6 +1206,8 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
+    recoveryVersion:2,
+    recoveryMode:'server-snapshot',
     streamId:String(snapshot.stream_id||snapshot.streamId||''),
     messages,
     uploaded:Array.isArray(uploaded)?[...uploaded]:[],
@@ -1073,6 +1218,13 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     journalSnapshot:true,
     lastAssistantText,
     lastReasoningText,
+    assistantTextTail:lastAssistantText,
+    assistantTextLength:lastAssistantText.length,
+    assistantTextTruncated:false,
+    reasoningTextTail:lastReasoningText,
+    reasoningTextLength:lastReasoningText.length,
+    reasoningTextTruncated:false,
+    recoveryNeedsJournalReplay:false,
     lastRunJournalSeq:Number.isFinite(replayAfterSeq)?Math.max(0,replayAfterSeq):0,
     lastRunJournalEventId:String(snapshot.last_event_id||snapshot.lastEventId||''),
     anchorActivityScene,
@@ -1102,6 +1254,15 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
     return localId===requestedActiveId?localInflight:null;
   }
   if(activeId&&localId!==activeId) return selectDurableSnapshot();
+
+  // LocalStorage intentionally contains only a bounded suffix. Once a tail is
+  // marked partial, the durable run-journal snapshot is the only safe source
+  // for the prefix; even a newer local cursor must not cause the suffix to be
+  // treated as a complete assistant message. The next SSE attach replays from
+  // the durable cursor and preserves the same selected-pane renderer.
+  if(localInflight.recoveryMode==='journal-tail'||localInflight.assistantTextTruncated||localInflight.recoveryNeedsJournalReplay){
+    return selectDurableSnapshot();
+  }
 
   const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
   const serverSeq=Math.max(0,Number(serverLiveSnapshot.lastRunJournalSeq)||0);
@@ -1239,6 +1400,9 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     );
     const completedPersistedObservedStream = !cronRunning && Boolean(observedStreaming && !isStreaming);
     if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
+      if(typeof _recordSessionActivityProjection==='function'){
+        _recordSessionActivityProjection(sid,{status:'completed',phase:'done'});
+      }
       if (!_isSessionActivelyViewedForList(sid)) {
         // Tag cron session-list markers with source+profile so profile-switch
         // reset can clear only inactive-profile cron dots (#5960 / #5975 re-gate).
@@ -2078,6 +2242,8 @@ async function loadSession(sid){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
       INFLIGHT[sid]={
+        recoveryVersion:Number(stored.recoveryVersion||1)||1,
+        recoveryMode:String(stored.recoveryMode||'legacy'),
         streamId:String(stored.streamId||''),
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
@@ -2090,8 +2256,15 @@ async function loadSession(sid){
         todos:Array.isArray(stored.todos)?stored.todos:null,
         todoStateMeta:stored.todoStateMeta||null,
         reattach:true,
-        lastAssistantText:String(stored.lastAssistantText||''),
-        lastReasoningText:String(stored.lastReasoningText||''),
+        lastAssistantText:String((stored.assistantTextTail??stored.lastAssistantText)||''),
+        lastReasoningText:String((stored.reasoningTextTail??stored.lastReasoningText)||''),
+        assistantTextTail:String((stored.assistantTextTail??stored.lastAssistantText)||''),
+        assistantTextLength:Number(stored.assistantTextLength||0)||0,
+        assistantTextTruncated:!!stored.assistantTextTruncated,
+        reasoningTextTail:String((stored.reasoningTextTail??stored.lastReasoningText)||''),
+        reasoningTextLength:Number(stored.reasoningTextLength||0)||0,
+        reasoningTextTruncated:!!stored.reasoningTextTruncated,
+        recoveryNeedsJournalReplay:!!stored.assistantTextTruncated||!!stored.journalReplayFromStart,
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
         lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
@@ -2104,8 +2277,12 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
-    delete INFLIGHT[sid];
-    if(typeof clearInflightState==='function') clearInflightState(sid);
+    // Keep the compact entry long enough to select the durable runtime
+    // snapshot below. If that snapshot is unavailable, attachLiveStream()
+    // replays from sequence zero instead of rendering a suffix as a full turn.
+    INFLIGHT[sid].recoveryNeedsJournalReplay=true;
+    INFLIGHT[sid].lastRunJournalSeq=0;
+    INFLIGHT[sid].lastRunJournalEventId='';
   }
 
   if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
@@ -2129,7 +2306,14 @@ async function loadSession(sid){
 
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
+    const replayFromJournal=!!INFLIGHT[sid].recoveryNeedsJournalReplay;
     const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
+    if(replayFromJournal){
+      const journalMessages=Array.isArray(INFLIGHT[sid].messages)
+        ? INFLIGHT[sid].messages.filter(message=>message&&message.role==='user')
+        : [];
+      inflightMessages.splice(0,inflightMessages.length,...journalMessages);
+    }
     S.toolCalls=[];
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
@@ -2152,7 +2336,8 @@ async function loadSession(sid){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
-    S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
+    S.toolCalls=replayFromJournal?[]:(INFLIGHT[sid].toolCalls||[]);
+    if(replayFromJournal) INFLIGHT[sid].toolCalls=[];
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
@@ -2197,7 +2382,7 @@ async function loadSession(sid){
       (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
     ));
     let restoredLiveTurn=!!restoredAnchorScene;
-    if(!restoredLiveTurn&&typeof restoreLiveTurnHtmlForSession==='function'){
+    if(!replayFromJournal&&!restoredLiveTurn&&typeof restoreLiveTurnHtmlForSession==='function'){
       if(!hasStructuredLiveState){
         restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
       }else{
@@ -8121,6 +8306,9 @@ function renderSessionListFromCache(){
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
     const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const activityProjection=typeof _getSessionActivityProjection==='function'
+      ? _getSessionActivityProjection(s.session_id,s)
+      : null;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
@@ -8209,6 +8397,23 @@ function renderSessionListFromCache(){
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    // Background runs expose only a compact status projection. The selected
+    // row remains intentionally quiet because its full live Worklog owns the
+    // detailed activity view; no token text is copied into this sidebar node.
+    const showBackgroundActivity=!!(!isActive&&activityProjection&&(
+      isStreaming||activityProjection.status!=='running'
+    ));
+    if(showBackgroundActivity){
+      const activityStatus=document.createElement('span');
+      activityStatus.className='session-activity-status';
+      activityStatus.dataset.sessionActivityStatus=String(activityProjection.status||'');
+      activityStatus.dataset.sessionActivitySessionId=s.session_id;
+      activityStatus.setAttribute('data-session-activity-status',String(activityProjection.status||''));
+      activityStatus.textContent=_formatSessionActivityProjection(activityProjection);
+      activityStatus.title=activityStatus.textContent;
+      activityStatus.style.cssText='display:inline-block;max-width:112px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto;font-size:10px;color:var(--muted);opacity:.9;';
+      titleRow.appendChild(activityStatus);
+    }
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
     // truncation, becoming invisible exactly when the title is long enough

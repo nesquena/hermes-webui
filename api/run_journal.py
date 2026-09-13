@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+_WRITER_LOCKS: dict[tuple[str, str, str], threading.RLock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
 # Next-seq to assign per run-journal file path, kept in memory so repeat appends
 # to the same run do not re-parse the whole file on every call. The per-path
@@ -78,12 +78,14 @@ def _run_path(session_id: str, run_id: str, session_dir: Path | None = None) -> 
     return root / RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
 
 
-def _lock_for(path: Path) -> threading.Lock:
+def _lock_for(path: Path) -> threading.RLock:
     key = (str(path.parent), path.name, str(os.getpid()))
     with _WRITER_LOCKS_GUARD:
         lock = _WRITER_LOCKS.get(key)
         if lock is None:
-            lock = threading.Lock()
+            # RunJournalWriter holds this lock while delegating to
+            # append_run_event, which acquires the same per-path lock again.
+            lock = threading.RLock()
             _WRITER_LOCKS[key] = lock
         return lock
 
@@ -452,14 +454,17 @@ class RunJournalWriter:
         # agree on one monotonic, gapless sequence.
         with self._lock:
             seq = _reserve_next_seq(self._path)
-        return append_run_event(
-            self.session_id,
-            self.run_id,
-            event_name,
-            payload or {},
-            session_dir=self.session_dir,
-            seq=seq,
-        )
+            # Keep the reservation and the physical append in one critical
+            # section. append_run_event re-enters this RLock to preserve the
+            # direct-call compatibility of its public API.
+            return append_run_event(
+                self.session_id,
+                self.run_id,
+                event_name,
+                payload or {},
+                session_dir=self.session_dir,
+                seq=seq,
+            )
 
 
 def read_run_events(

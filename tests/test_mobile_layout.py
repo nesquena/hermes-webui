@@ -1020,9 +1020,15 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
-def test_viewport_disables_page_zoom_for_native_pwa_shell():
-    """Installed PWA launches should not rubber-band into browser-style page zoom."""
-    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+def test_viewport_allows_page_zoom_for_accessible_mobile_shell():
+    """Mobile users must retain browser zoom controls in the PWA shell."""
+    match = re.search(r'<meta name="viewport" content="([^"]+)">', HTML)
+    assert match
+    content = match.group(1)
+    assert "width=device-width" in content
+    assert "initial-scale=1" in content
+    assert "maximum-scale" not in content
+    assert "user-scalable" not in content
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():

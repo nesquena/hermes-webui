@@ -8,7 +8,145 @@
   try {
     var _stopChan = new BroadcastChannel('hermes-webui-shutdown');
     _stopChan.onmessage = function() { _showServerStopped(); };
+    window.addEventListener('pagehide', function(event){
+      // Keep the channel alive for BFCache restores, but release it when this
+      // document is actually going away so repeat loads do not accumulate tabs.
+      if(event && event.persisted)return;
+      try{_stopChan.close();}catch(_){ }
+      _stopChan=null;
+    });
   } catch(_) {}
+})();
+
+// Lazy client bundles -------------------------------------------------------
+// The HTML keeps non-chat bundles as inert data-only script tags. This small
+// loader preserves the no-build architecture while giving boot and user
+// navigation one shared promise per bundle, so a scheduled warm-up and a
+// first click can never download the same script twice.
+(function(){
+  const _hermesModulePromises = new Map();
+  const _hermesLoadedModules = new Set();
+  const _hermesModuleDeps = {
+    'extension-settings':['extension-settings'],
+    panels:['extension-settings','panels'],
+    onboarding:['onboarding'],
+  };
+  const _hermesScheduledDisposals = new Set();
+
+  function _loadHermesLazyScript(name){
+    if(_hermesLoadedModules.has(name))return Promise.resolve();
+    const placeholder=document.querySelector('script[data-hermes-lazy="'+name+'"]');
+    const src=placeholder&&placeholder.getAttribute('data-src');
+    if(!src||!/[?&]v=/.test(src)){
+      return Promise.reject(new Error('Missing versioned lazy client asset: '+name));
+    }
+    return new Promise((resolve,reject)=>{
+      const script=document.createElement('script');
+      script.src=src;
+      script.async=false;
+      script.dataset.hermesLazyLoaded=name;
+      script.onload=()=>{
+        _hermesLoadedModules.add(name);
+        resolve();
+      };
+      script.onerror=()=>reject(new Error('Failed to load lazy client asset: '+name));
+      document.head.appendChild(script);
+    });
+  }
+
+  function _ensureHermesClientModule(name){
+    const existing=_hermesModulePromises.get(name);
+    if(existing)return existing;
+    const deps=_hermesModuleDeps[name];
+    if(!deps)return Promise.reject(new Error('Unknown lazy client module: '+name));
+    const promise=deps.reduce((ready,dep)=>ready.then(()=>_loadHermesLazyScript(dep)),Promise.resolve())
+      .then(()=>{
+        if(name==='panels'&&typeof window._restoreTabVisibility==='function'){
+          window._restoreTabVisibility();
+        }
+        return true;
+      })
+      .catch(error=>{
+        _hermesModulePromises.delete(name);
+        throw error;
+      });
+    _hermesModulePromises.set(name,promise);
+    return promise;
+  }
+
+  function _scheduleHermesClientModule(name){
+    return new Promise((resolve,reject)=>{
+      let finished=false;
+      let timer=0;
+      let idleId=0;
+      const dispose=()=>{
+        if(finished)return;
+        finished=true;
+        if(timer)clearTimeout(timer);
+        if(idleId&&typeof cancelIdleCallback==='function')cancelIdleCallback(idleId);
+        _hermesScheduledDisposals.delete(dispose);
+        reject(new Error('Lazy client module cancelled during page teardown: '+name));
+      };
+      const start=()=>{
+        if(finished)return;
+        finished=true;
+        _hermesScheduledDisposals.delete(dispose);
+        _ensureHermesClientModule(name).then(resolve,reject);
+      };
+      _hermesScheduledDisposals.add(dispose);
+      if(typeof requestIdleCallback==='function'){
+        idleId=requestIdleCallback(start,{timeout:1500});
+      }else{
+        timer=setTimeout(start,0);
+      }
+    });
+  }
+
+  window._hermesEnsureClientModule=_ensureHermesClientModule;
+  window._hermesScheduleClientModule=_scheduleHermesClientModule;
+  window.addEventListener('pagehide',function(event){
+    if(event&&event.persisted)return;
+    Array.from(_hermesScheduledDisposals).forEach(dispose=>dispose());
+  });
+
+  // Inline rail/mobile handlers predate the loader and call switchPanel by
+  // name. Install a temporary proxy; panels.js replaces the global function
+  // when its classic script executes, while the proxy makes the first click
+  // wait for the same singleton load promise.
+  const _hermesPanelSwitchProxy=function(name,opts){
+    return _ensureHermesClientModule('panels').then(()=>{
+      const implementation=window.switchPanel;
+      if(typeof implementation!=='function'||implementation===_hermesPanelSwitchProxy){
+        throw new Error('panels.js did not expose switchPanel');
+      }
+      return implementation(name,opts);
+    }).catch(error=>{
+      console.warn('[hermes] lazy panel load failed:',error);
+      return false;
+    });
+  };
+  window._hermesSwitchPanel=_hermesPanelSwitchProxy;
+  if(typeof window.switchPanel!=='function')window.switchPanel=_hermesPanelSwitchProxy;
+
+  // These controls are visible from the chat shell before panels.js finishes
+  // loading. Give them the same safe handoff as switchPanel so a fast tap
+  // cannot become an inline-handler ReferenceError during cold boot.
+  ['toggleProfileDropdown','toggleComposerWsDropdown','switchSettingsSection'].forEach(name=>{
+    if(typeof window[name]==='function')return;
+    const proxy=function(...args){
+      return _ensureHermesClientModule('panels').then(()=>{
+        const implementation=window[name];
+        if(typeof implementation!=='function'||implementation===proxy){
+          throw new Error('panels.js did not expose '+name);
+        }
+        return implementation.apply(this,args);
+      }).catch(error=>{
+        console.warn('[hermes] lazy panel control failed:',error);
+        return false;
+      });
+    };
+    window[name]=proxy;
+  });
 })();
 
 // cancelStream: stop the active chat stream.
@@ -576,7 +714,7 @@ function expandSidebar(){
 // before first paint. This IIFE is a secondary fallback: it ensures consistency
 // after panels.js is loaded and handles the active-tab switch. No-op if
 // panels.js hasn't loaded yet (typeof guard).
-(function _restoreTabVisibility(){
+function _restoreTabVisibility(){
   try{
     if(typeof _applyTabOrder==='function'&&typeof _getTabOrder==='function'){
       _applyTabOrder(_getTabOrder());
@@ -592,7 +730,9 @@ function expandSidebar(){
       if(active)active.classList.remove('active');
     }
   }catch(_){}
-})();
+}
+window._restoreTabVisibility=_restoreTabVisibility;
+_restoreTabVisibility();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
@@ -2627,8 +2767,18 @@ if(window.visualViewport){
       _forceMobileViewportReflow();
     },60);
   };
+  const _disposeMobileViewportReflow=(event)=>{
+    if(event&&event.persisted)return;
+    if(_mobileViewportReflowTimer){
+      clearTimeout(_mobileViewportReflowTimer);
+      _mobileViewportReflowTimer=0;
+    }
+    window.visualViewport.removeEventListener('resize', _scheduleMobileViewportReflow);
+    window.visualViewport.removeEventListener('scroll', _scheduleMobileViewportReflow);
+  };
   window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
   window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+  window.addEventListener('pagehide', _disposeMobileViewportReflow);
 }
 
 // Boot: restore last session or start fresh
@@ -3719,16 +3869,28 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   setTimeout(()=>{
     try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
   },0);
-  // Start independent boot fetches without holding the conversation list behind
-  // them. The sidebar can render from /api/sessions while workspace/onboarding
-  // metadata settles in parallel.
-  const _workspaceListReady=loadWorkspaceList();
-  const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();
   // Render the session list before restoring the saved conversation so a stale
   // saved-session/client-side boot error cannot leave the sidebar empty forever.
   await renderSessionList();
-  await _workspaceListReady;
-  await _onboardingReady;
+
+  // Non-chat bundles are requested after the first session-list paint. A panel
+  // click can start the same singleton promise sooner; either path hydrates the
+  // workspace metadata once the panel module is available.
+  const _panelsReady=window._hermesScheduleClientModule('panels');
+  const _workspaceListReady=_panelsReady.then(()=>{
+    if(typeof loadWorkspaceList!=='function')throw new Error('panels.js did not expose loadWorkspaceList');
+    return loadWorkspaceList();
+  }).catch(error=>{
+    console.warn('[hermes] workspace panel bootstrap deferred:',error);
+    return {workspaces:[],last:''};
+  });
+  void _workspaceListReady;
+  if(!_bootSettings.onboarding_completed){
+    void _panelsReady
+      .then(()=>window._hermesEnsureClientModule('onboarding'))
+      .then(()=>typeof loadOnboardingWizard==='function'?loadOnboardingWizard():false)
+      .catch(error=>console.warn('[hermes] onboarding bootstrap deferred:',error));
+  }
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
