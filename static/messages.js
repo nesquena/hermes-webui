@@ -1885,6 +1885,17 @@ async function send(){
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
   if(typeof updateSendBtn==='function') updateSendBtn();
+  // Synchronise the optimistic user row's timestamp to the server-issued
+  // start stamp BEFORE any optional/throwing post-start UI operation.  If
+  // a later guarded step (e.g. localStorage.setItem) throws, the sync must
+  // not be swallowed — otherwise the client keeps its old timestamp and
+  // the duplicate user row returns (review finding #4).
+  if(startData && typeof startData.pending_started_at==='number'){
+    if(S.session) S.session.pending_started_at=startData.pending_started_at;
+    if(userMsg && typeof userMsg==='object'){
+      userMsg._ts=startData.pending_started_at;
+    }
+  }
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
     const _modelState=modelStateForPostStart || _chatPayloadModelState();
     const _explicitPick=explicitPickForPostStart;
@@ -1909,9 +1920,6 @@ async function send(){
       if(typeof syncTopbar==='function') syncTopbar();
     }
 
-    if(S.session&&typeof startData.pending_started_at==='number'){
-      S.session.pending_started_at=startData.pending_started_at;
-    }
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else if(typeof appendThinking==='function') appendThinking('',{pending:true});
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
