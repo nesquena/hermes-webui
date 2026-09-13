@@ -15514,6 +15514,102 @@ function clearMessageRenderCache(){
   _clearMessageVirtualHeightCache();
 }
 
+function _extensionMessageActionContext(slot,includeText){
+  if(!slot||!S.session||!slot.closest) return null;
+  if(slot.closest('[hidden],[aria-hidden="true"],[data-live-assistant="1"]')) return null;
+  const owner=slot.closest('[data-msg-idx][data-session-msg-idx][data-raw-text]');
+  const roleOwner=slot.closest('[data-role]');
+  const role=roleOwner&&roleOwner.dataset?roleOwner.dataset.role:'';
+  if(!owner||(role!=='user'&&role!=='assistant')) return null;
+  const rawIdx=Number(owner.dataset.msgIdx);
+  const messageIndex=Number(owner.dataset.sessionMsgIdx);
+  if(!Number.isSafeInteger(rawIdx)||rawIdx<0||!Number.isSafeInteger(messageIndex)||messageIndex<0) return null;
+  if(_messageSessionIndexForRawIdx(rawIdx)!==messageIndex) return null;
+  const message=S.messages&&S.messages[rawIdx];
+  if(!message||message.role!==role) return null;
+  const context={sessionId:String(S.session.session_id||''),messageIndex,role};
+  if(!context.sessionId) return null;
+  if(includeText) context.text=String(owner.dataset.rawText||'');
+  return context;
+}
+
+function _extensionMessageActionButtonHtml(action,context){
+  const label=esc(String(action.label||''));
+  const pending=action.pending===true;
+  return `<button type="button" class="msg-action-btn extension-msg-action" data-extension-message-action="1" data-extension-id="${esc(String(action.extensionId||''))}" data-extension-action-id="${esc(String(action.id||''))}" data-session-id="${esc(context.sessionId)}" data-message-index="${context.messageIndex}" data-message-role="${context.role}" title="${label}" aria-label="${label}" aria-pressed="${action.pressed===true?'true':'false'}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''} onclick="invokeExtensionMessageAction(this)">${li(action.icon,13)}</button>`;
+}
+
+function _syncExtensionMessageActionSlots(root){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._messageActionsForContext!=='function') return;
+  const scope=root&&typeof root.querySelectorAll==='function'?root:document;
+  for(const slot of scope.querySelectorAll('[data-extension-message-actions]')){
+    const context=_extensionMessageActionContext(slot,false);
+    const actions=context?runtime._messageActionsForContext(context):[];
+    const existing=Array.from(slot.children||[]);
+    const sameActions=existing.length===actions.length&&existing.every((button,index)=>{
+      const action=actions[index];
+      return !!(
+        button&&button.dataset&&action&&
+        button.dataset.extensionId===action.extensionId&&
+        button.dataset.extensionActionId===action.id
+      );
+    });
+    if(sameActions){
+      existing.forEach((button,index)=>{
+        const action=actions[index];
+        const pending=action.pending===true;
+        button.dataset.sessionId=context.sessionId;
+        button.dataset.messageIndex=String(context.messageIndex);
+        button.dataset.messageRole=context.role;
+        button.setAttribute('aria-pressed',action.pressed===true?'true':'false');
+        button.setAttribute('aria-busy',pending?'true':'false');
+        button.disabled=pending;
+      });
+      continue;
+    }
+    const html=actions.map(action=>_extensionMessageActionButtonHtml(action,context)).join('');
+    if(slot.innerHTML!==html) slot.innerHTML=html;
+  }
+}
+
+function invokeExtensionMessageAction(button){
+  if(!button||button.disabled) return false;
+  const slot=button.closest&&button.closest('[data-extension-message-actions]');
+  const context=_extensionMessageActionContext(slot,true);
+  if(!context) return false;
+  if(
+    button.dataset.sessionId!==context.sessionId||
+    Number(button.dataset.messageIndex)!==context.messageIndex||
+    button.dataset.messageRole!==context.role
+  ) return false;
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._invokeMessageAction!=='function') return false;
+  return runtime._invokeMessageAction(
+    button.dataset.extensionId,
+    button.dataset.extensionActionId,
+    context,
+    {
+      opener:button,
+      onError(){
+        if(typeof showToast==='function') showToast('Extension message action failed',4000,'error');
+      },
+    }
+  );
+}
+
+let _extensionMessageActionChangeUnsubscribe=null;
+window._bindHermesExtensionMessageActions=function(){
+  if(_extensionMessageActionChangeUnsubscribe) return;
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._onMessageActionChange!=='function') return;
+  _extensionMessageActionChangeUnsubscribe=runtime._onMessageActionChange(()=>{
+    clearMessageRenderCache();
+    _syncExtensionMessageActionSlots(document.getElementById('msgInner'));
+  });
+  _syncExtensionMessageActionSlots(document.getElementById('msgInner'));
+};
+
 // #6999: feed a structured payload field's string form through the FNV-1a
 // loop IN FULL, without materializing clipped copies or skipping the middle.
 // The previous length+head+tail clip made same-length middle-only edits
@@ -16802,6 +16898,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -17254,7 +17351,8 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const extensionActionsSlot='<span class="extension-message-actions" data-extension-message-actions></span>';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${extensionActionsSlot}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -18363,6 +18461,7 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
+  if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   // Skip caching while the just-settled keep-open token is armed: that render
