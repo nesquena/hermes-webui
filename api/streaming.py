@@ -69,6 +69,7 @@ from api.models import (
     StateDBSessionMessagesSnapshot,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
+    _message_matches_pending_checkpoint,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
     record_process_wakeup_provider_unavailable_pause,
@@ -1725,6 +1726,11 @@ def _active_turn_authority(session, stream_id, msg_text):
         'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
         'checkpoint': checkpoint,
         'current_turn_user_idx': None,
+        # WebUI checkpoint identity (#6407 re-gate): the pending turn's
+        # stream-owned id, separate from the Agent's independent turn id.
+        # Settlement paths stamp THIS id (not the Agent's) on user rows so
+        # the shared strict matcher recognizes the exact turn.
+        'pending_turn_id': str(getattr(session, 'pending_turn_id', None) or stream_id),
         'turn_id': '',
     }
 
@@ -1812,6 +1818,13 @@ def _mark_active_turn_checkpoint(message, identity):
         and identity.get('token')
     ):
         message['_active_turn_token'] = identity['token']
+        # WebUI checkpoint identity (#6407 re-gate): when the Agent result
+        # already contains the user row, stamp the WebUI pending_turn_id too —
+        # not just the token — so the shared strict matcher recognizes this
+        # exact turn and a one-sided legacy row can never be claimed.
+        _webui_turn_id = str(identity.get('pending_turn_id') or '').strip()
+        if _webui_turn_id:
+            message['_turn_id'] = _webui_turn_id
     return message
 
 
@@ -1944,6 +1957,19 @@ def _materialize_active_turn_user(identity, msg_text, source):
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
+        # WebUI checkpoint identity (#6407 re-gate): prefer the stream-owned
+        # pending_turn_id over the Agent's independent turn id. The Agent turn
+        # id is a boundary hint; the WebUI pending_turn_id is what the shared
+        # strict matcher compares, so a synthesized settlement row must carry
+        # the WebUI id when it exists.
+        _webui_turn_id = str(identity.get('pending_turn_id') or '').strip()
+        _turn_id = _webui_turn_id or str(identity.get('turn_id') or '').strip()
+        if _turn_id:
+            # Per-turn identity (#6407): the deferred success merge must stamp
+            # the SAME _turn_id the pending checkpoint uses, so the recovery
+            # matcher recognizes this exact turn (and a stale recovery can
+            # never claim a newer turn with identical text).
+            message['_turn_id'] = _turn_id
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',
@@ -2329,6 +2355,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_turn_id = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -2348,6 +2375,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_turn_id = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -8121,6 +8149,11 @@ def _materialize_pending_user_turn_before_error(
         recovered_ts = int(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+    # Authoritative per-turn identity (#6407): the pending turn's stream id.
+    # Same legacy/fail-safe policy as _message_matches_pending_checkpoint
+    # callers — prefer the explicit pending_turn_id, fall back to the active
+    # stream id for sessions started before that field existed.
+    pending_turn_id = getattr(session, 'pending_turn_id', None) or getattr(session, 'active_stream_id', None)
 
     # A returned Agent result is settled into ``session.messages`` before its
     # terminal classification runs.  In that path the current user row can
@@ -8147,6 +8180,11 @@ def _materialize_pending_user_turn_before_error(
                 and message.get('_active_turn_token') == active_turn_token
             ):
                 continue
+            # #6407 re-gate: pending_turn_id is the sole authority. A tokened
+            # row that lacks (or mismatches) the current per-turn ID is never a
+            # match — text/token identity alone must not suppress materialization.
+            if pending_turn_id and message.get('_turn_id') != pending_turn_id:
+                continue
             normalized_user = _normalize_user_text(
                 _message_text(message.get('content'))
             )
@@ -8162,19 +8200,29 @@ def _materialize_pending_user_turn_before_error(
     def is_exact_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
             return False
-        existing = messages[-1]
-        if not isinstance(existing, dict) or existing.get('role') != 'user':
+        # #6407 re-gate: the eager session-save checkpoint prefixes the user
+        # content with a workspace sentinel (`[Workspace::v1: …]`), so the
+        # strict matcher must compare with the workspace-stripped normalize
+        # (same one-sided turn-id rule as _message_matches_pending_checkpoint;
+        # a one-sided missing row id is never a match).
+        last = messages[-1]
+        if not (isinstance(last, dict) and last.get('role') == 'user'):
             return False
-        existing_source = existing.get('_source') or 'webui'
+        msg_turn_id = last.get('_turn_id')
+        if pending_turn_id:
+            if not msg_turn_id or str(msg_turn_id) != str(pending_turn_id):
+                return False
         try:
-            existing_ts = int(existing.get('timestamp'))
+            msg_ts = int(last.get('timestamp'))
+            exp_ts = int(recovered_ts)
         except (TypeError, ValueError):
             return False
         return (
-            _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
-            and existing_source == pending_source
-            and list(existing.get('attachments') or []) == pending_attachments
+            _normalize_user_text(_message_text(last.get('content')))
+            == _normalize_user_text(pending_text)
+            and msg_ts == exp_ts
+            and (last.get('_source') or 'webui') == (pending_source or 'webui')
+            and list(last.get('attachments') or []) == list(pending_attachments or [])
         )
 
     if is_exact_checkpoint(getattr(session, 'messages', None)):
@@ -8187,6 +8235,8 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
+    if pending_turn_id:
+        recovered['_turn_id'] = pending_turn_id
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
@@ -11692,6 +11742,7 @@ def _run_agent_streaming(
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
+                        s.pending_turn_id = None
                         try:
                             _snapshot_and_append_partial_on_error(
                                 s,
@@ -11894,6 +11945,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_turn_id = None
                 # Tag the matching user message with attachment filenames for display on reload
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -13019,6 +13071,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_turn_id = None
                 try:
                     _snapshot_and_append_partial_on_error(
                         s,
@@ -13597,8 +13650,31 @@ def cancel_stream(stream_id: str) -> bool:
                             # must NOT short-circuit synthesis — that would re-introduce
                             # the data-loss bug this guard is supposed to prevent.
                             if isinstance(_last_content, str) and _last_ts >= _pending_started:
+                                # Identity gate (#6407 re-gate): when the pending side
+                                # carries a turn id, the tail row must carry the SAME
+                                # non-empty _turn_id to be considered already-persisted.
+                                # A one-sided missing/different id means this is a
+                                # different turn — synthesize the prompt instead of
+                                # suppressing it (fail-safe, never destructive).
+                                _cancel_turn_id = (
+                                    getattr(_cs, 'pending_turn_id', None) or stream_id
+                                )
+                                _last_turn_id = _last_user.get('_turn_id')
+                                _identity_ok = (
+                                    not _cancel_turn_id
+                                    or (
+                                        bool(_last_turn_id)
+                                        and str(_last_turn_id) == str(_cancel_turn_id)
+                                    )
+                                )
                                 # Tolerate the workspace prefix the streaming thread prepends.
-                                if _pending_user == _last_content or _pending_user in _last_content:
+                                if (
+                                    _identity_ok
+                                    and (
+                                        _pending_user == _last_content
+                                        or _pending_user in _last_content
+                                    )
+                                ):
                                     _already_persisted = True
                         if not _already_persisted:
                             _recovered_ts = int(time.time())
@@ -13612,6 +13688,15 @@ def cancel_stream(stream_id: str) -> bool:
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
+                            # Per-turn identity (#6407): stamp the SAME _turn_id
+                            # the pending checkpoint carries so a stale recovery
+                            # of this cancelled turn can never claim a NEWER
+                            # turn that happens to reuse the same prompt text.
+                            _cancel_turn_id = (
+                                getattr(_cs, 'pending_turn_id', None) or stream_id
+                            )
+                            if _cancel_turn_id:
+                                _user_turn['_turn_id'] = _cancel_turn_id
                             _msgs_for_recovery.append(_user_turn)
                 except Exception:
                     logger.debug(
@@ -13623,6 +13708,7 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
                 _cs.pending_user_source = None
+                _cs.pending_turn_id = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True
