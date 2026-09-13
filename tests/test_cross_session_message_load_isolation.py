@@ -207,6 +207,11 @@ function createEnvironment() {
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
+  // Absolute index of the stashed snapshot's first row. Module-level `let` in
+  // sessions.js, read AND written by _ensureMessagesLoaded's retained-prefix
+  // re-join; ES modules are strict, so leaving it undeclared throws a
+  // ReferenceError mid-load and stalls the ordered api() harness.
+  globalThis._pendingCarryForwardOldestIdx = 0;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;
