@@ -91,12 +91,12 @@ class TestActiveProviderNormalization:
     def test_x_dot_ai_normalized_to_xai(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, "x.ai", monkeypatch)
         ap = result.get("active_provider", "")
-        assert ap in ("xai", ""), f"active_provider should be 'xai', got {ap!r}"
+        assert ap in ("x-ai", ""), f"active_provider should be 'x-ai', got {ap!r}"
 
     def test_google_normalized_to_gemini(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, "google", monkeypatch)
         ap = result.get("active_provider", "")
-        assert ap in ("gemini", ""), f"active_provider should be 'gemini', got {ap!r}"
+        assert ap in ("google", ""), f"active_provider should be 'google', got {ap!r}"
 
     def test_normalization_code_present(self):
         """Source-level check: config.py must call _PROVIDER_ALIASES for active_provider."""
@@ -142,11 +142,11 @@ class TestLiveModelsProviderNormalization:
             src,
         )
         pmi_call_match = re.search(
-            r"ids\s*=\s*_pmi\(provider\)",
+            r"ids\s*=\s*_pmi\(agent_provider\)",
             src,
         )
         assert alias_match, "_resolve_provider_alias call not found in routes.py"
-        assert pmi_call_match, "ids = _pmi(provider) call not found"
+        assert pmi_call_match, "ids = _pmi(agent_provider) call not found"
         assert alias_match.start() < pmi_call_match.start(), (
             "alias normalization must occur before ids = _pmi(provider)"
         )
@@ -413,7 +413,7 @@ class TestLiveModelsCustomProviderFallback:
         resp = self._call_live_models(monkeypatch, cfg, "mistralai")
 
         assert requests == []
-        assert resp["provider"] == "mistralai"
+        assert resp["provider"] == "mistral"
         assert resp["models"], "static fallback models should still be returned"
 
     def test_standard_provider_live_fetch_can_use_matching_top_level_key(self, monkeypatch):
@@ -461,7 +461,7 @@ class TestLiveModelsCustomProviderFallback:
                 "timeout": 8,
             }
         ]
-        assert resp["provider"] == "mistralai"
+        assert resp["provider"] == "mistral"
 
     def test_standard_provider_live_fetch_allows_matching_active_provider_alias(self, monkeypatch):
         """Alias-equivalent active providers should still count as the same provider."""
