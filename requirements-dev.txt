@@ -9,6 +9,16 @@ pytest-asyncio
 pytest-shard
 ruff
 mcp>=1.28,<2
+# Browserregressioner använder den lokala Chromium-versionen i
+# ~/.cache/ms-playwright. Pinna klienten så att en ny repo-venv får en klient
+# som stöds av värdens Ubuntu-version och matchar den delade browser-cachen.
+# Rollback: när browserregressionerna flyttas till en separat CI-profil eller
+# ersätts av repoets standardharness, ta bort denna rad, "playwright" från
+# missing_dev_deps och Chromium-blocket i scripts/test.sh. De berörda testerna
+# använder pytest.importorskip, så detta avvecklar enbart browser-täckning och
+# ändrar aldrig produktionsberoenden. Rensa då valfritt lokal cache med
+# `python -m playwright uninstall --all`.
+playwright==1.62.0
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but
 # installed here so the workspace Office-preview tests (tests/test_issue540_*.py)
 # run under the documented ./scripts/test.sh entry point. These files

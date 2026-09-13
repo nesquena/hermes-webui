@@ -572,14 +572,39 @@ function cmdHelp(){
   showToast(t('type_slash'));
 }
 
-function cmdClear(){
-  if(!S.session)return;
-  S.messages=[];S.toolCalls=[];
-  clearLiveToolCards();
-  if(typeof clearCompressionUi==='function') clearCompressionUi();
-  renderMessages();
-  $('emptyState').style.display='';
-  showToast(t('conversation_cleared'));
+async function cmdClear(){
+  if(!S.session||!S.session.session_id)return;
+  const sid=S.session.session_id;
+  try{
+    // The server owns durable transcript state.  Do not only clear S.messages:
+    // a reload would rehydrate the old transcript from the session sidecar.
+    const data=await api('/api/session/clear',{method:'POST',body:JSON.stringify({session_id:sid})});
+    if(!data||!data.session||data.session.session_id!==sid){
+      throw new Error('Clear did not return the active session');
+    }
+    // A clear can resolve after the user has opened another session. The clear
+    // remains durable for `sid`, but its response must never pull the active
+    // pane back to that old session or replace the newer transcript.
+    const stillActive=!!S.session&&S.session.session_id===sid&&
+      (!window._loadingSessionId||window._loadingSessionId===sid);
+    if(stillActive){
+      S.session=data.session;
+      S.messages=data.session.messages||[];
+      S.toolCalls=data.session.tool_calls||[];
+      clearLiveToolCards();
+      if(typeof clearCompressionUi==='function') clearCompressionUi();
+      if(typeof syncTopbar==='function') syncTopbar();
+      if(typeof _setSessionViewedCount==='function') _setSessionViewedCount(sid,Number(data.session.message_count||0));
+      renderMessages();
+      $('emptyState').style.display='';
+    }
+    // Refresh the sidebar in either case: the cleared session's metadata has
+    // changed even if the user moved to a different active pane while waiting.
+    if(typeof renderSessionList==='function') await renderSessionList();
+    showToast(t('conversation_cleared'));
+  }catch(e){
+    showToast(t('clear_failed')+(e&&e.message?e.message:String(e||'')),4000,'error');
+  }
 }
 
 // Find the best matching model <option> for a slash-command query.
