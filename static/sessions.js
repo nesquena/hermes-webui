@@ -46,11 +46,23 @@ function _sessionLoadInFlightFor(sid){
 // that text on screen with no way out: clicking the session again hit the same
 // bail, so the pane stayed stuck until the page was thrown away. Settle it with
 // an explicit, retryable state instead of an endless pseudo-spinner.
-function _settleStrandedConversationLoading(settleSid){
+function _settleStrandedConversationLoading(settleSid, expectedStamp){
   try {
     const inner = $('msgInner');
     if (!inner || typeof inner.textContent !== 'string') return;
     if (inner.textContent.indexOf('Loading conversation') === -1) return; // already rendered/replaced
+    // Timer path: if a newer load re-stamped the placeholder since this
+    // timer was scheduled, the newer load owns the pane — leave it alone
+    // (its own timer or render will settle it). Skip for the immediate
+    // cancel-path call (no expectedStamp) where this guard is N/A.
+    if (expectedStamp !== undefined && expectedStamp !== null) {
+      const currentStamp = inner.dataset && inner.dataset.conversationLoadingSince
+        ? Number(inner.dataset.conversationLoadingSince) : null;
+      if (currentStamp !== expectedStamp) return;
+    }
+    // Belt-and-suspenders: a different session's load is still in flight
+    // and owns the pane — do not touch it.
+    if (_loadingSessionId !== settleSid && _sessionLoadInFlightFor(_loadingSessionId)) return;
     if (_sessionLoadInFlightFor(settleSid)) return;                       // a load still owns the pane
     if (S.session && S.session.session_id === settleSid) return;          // loaded after all
     inner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Couldn\u2019t load this conversation.<button type="button" id="conversationLoadRetry" style="margin-left:10px;font:inherit;color:inherit;cursor:pointer;background:none;border:1px solid currentColor;border-radius:4px;padding:2px 10px;">Retry</button></div>';
@@ -1900,12 +1912,13 @@ async function loadSession(sid){
       // The dataset guard also keeps this inert for the extracted-function test
       // harnesses, whose msgInner is a plain stub.
       if (_msgInner.dataset) {
-        _msgInner.dataset.conversationLoadingSince = String(Date.now());
+        const loadingStamp = Date.now();
+        _msgInner.dataset.conversationLoadingSince = String(loadingStamp);
         // Escape hatch: the placeholder is otherwise only cleared by
         // renderMessages(), so any terminal path that never renders (this is the
         // last synchronous point before the metadata fetch) strands it. The
         // helper no-ops when a render or a newer load already took over.
-        setTimeout(() => _settleStrandedConversationLoading(sid), 4000);
+        setTimeout(() => _settleStrandedConversationLoading(sid, loadingStamp), 4000);
       }
     }
   }

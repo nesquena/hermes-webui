@@ -175,10 +175,14 @@ function runLatchScenarios() {
   return results;
 }
 
-function runSettleScenario({ text, stamp, loadingSid, sessionId, settleSid }) {
+function runSettleScenario({ text, stamp, loadingSid, sessionId, settleSid, expectedStamp }) {
   M.loadCalls.length = 0;
   const inner = installEnv({ text, stamp, loadingSid, sessionId });
-  _settleStrandedConversationLoading(settleSid);
+  // The placeholder's live stamp is set by installEnv via makeMsgInner when
+  // `stamp` is provided. The timer path passes expectedStamp separately —
+  // do NOT overwrite the dataset with it; the whole point of the
+  // stale-timer guard is that expectedStamp may differ from the live stamp.
+  _settleStrandedConversationLoading(settleSid, expectedStamp);
   const wroteRetry = inner._innerHTML.indexOf('conversationLoadRetry') !== -1;
   if (inner._retryHandler) inner._retryHandler();
   return {
@@ -191,11 +195,19 @@ function runSettleScenario({ text, stamp, loadingSid, sessionId, settleSid }) {
 const results = {
   latch: runLatchScenarios(),
   settle: {
-    clearedLatch: runSettleScenario({ text: 'Loading conversation...', stamp: null, loadingSid: null, sessionId: 'sid-other', settleSid: 'sid-a' }),
+    clearedLatch: runSettleScenario({ text: 'Loading conversation...', stamp: Date.now() - (_SESSION_LOAD_IN_FLIGHT_MAX_MS + 1000), loadingSid: null, sessionId: 'sid-other', settleSid: 'sid-a' }),
     staleLatch: runSettleScenario({ text: 'Loading conversation...', stamp: Date.now() - (_SESSION_LOAD_IN_FLIGHT_MAX_MS + 1000), loadingSid: 'sid-a', sessionId: 'sid-other', settleSid: 'sid-a' }),
     freshInflight: runSettleScenario({ text: 'Loading conversation...', stamp: Date.now(), loadingSid: 'sid-a', sessionId: 'sid-other', settleSid: 'sid-a' }),
     sameSession: runSettleScenario({ text: 'Loading conversation...', stamp: null, loadingSid: null, sessionId: 'sid-a', settleSid: 'sid-a' }),
     noLoadingText: runSettleScenario({ text: 'Already rendered transcript', stamp: null, loadingSid: null, sessionId: 'sid-other', settleSid: 'sid-a' }),
+    // Overlapping-timer race: A stamps live t1, B re-stamps the placeholder to a
+    // newer stamp and owns the latch. A's timer fires with expectedStamp=t0
+    // (stale, the original stamp A wrote), which now differs from the live t1
+    // B overwrote → stamp guard bails, pane stays untouched (still B's Loading text).
+    staleTimerSuperseded: runSettleScenario({ text: 'Loading conversation...', stamp: 1100, loadingSid: 'sid-b', sessionId: 'sid-other', settleSid: 'sid-a', expectedStamp: 1000 }),
+    // Current-load timer fires with expectedStamp matching the live stamp, and the
+    // load is stranded (past max-age / no live latch) → Retry must be written.
+    liveTimerWritesRetry: runSettleScenario({ text: 'Loading conversation...', stamp: Date.now() - (_SESSION_LOAD_IN_FLIGHT_MAX_MS + 1000), loadingSid: 'sid-a', sessionId: 'sid-other', settleSid: 'sid-a', expectedStamp: Date.now() - (_SESSION_LOAD_IN_FLIGHT_MAX_MS + 1000) }),
   },
 };
 
@@ -282,3 +294,32 @@ def test_settle_writes_retry_only_when_stranded():
         assert case["loadCalls"] == [], (
             f"{label}: no Retry handler may be installed"
         )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_overlapping_timer_does_not_clobber_newer_load():
+    """A's timer fires with a stale stamp (B re-stamped the placeholder) → pane untouched."""
+    body = _run_node(_build_script())
+    case = body["settle"]["staleTimerSuperseded"]
+    assert case["wroteRetry"] is False, (
+        "a stale expectedStamp must not overwrite a newer load's placeholder"
+    )
+    assert case["textContentAfter"].find("Loading conversation") != -1, (
+        "the pane must still show the newer load's Loading text"
+    )
+    assert case["loadCalls"] == [], (
+        "Retry must not fire for a superseded timer"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_timer_with_matching_stamp_writes_retry():
+    """B's timer fires with expectedStamp matching the live stamp → stranded → Retry written."""
+    body = _run_node(_build_script())
+    case = body["settle"]["liveTimerWritesRetry"]
+    assert case["wroteRetry"] is True, (
+        "a current-load timer whose stamp still matches must write Retry"
+    )
+    assert case["loadCalls"] == [{"sid": "sid-a", "opts": {"force": True}}], (
+        "clicking Retry must call loadSession(sid, {force: true})"
+    )
