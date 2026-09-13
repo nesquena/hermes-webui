@@ -2,6 +2,7 @@ from pathlib import Path
 
 from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
+from tests._i18n_bundles import read_i18n_bundles
 from api.streaming import (
     _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG,
     _compressed_context_tool_result_summary,
@@ -1134,7 +1135,7 @@ def test_reference_message_inserted_before_future_assistant_anchor():
 
 def test_frontend_uses_context_engine_metadata_for_indexed_context_copy():
     src = _read("static/ui.js")
-    i18n = _read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
 
     assert "function _compressionEngineForSession" in src
     assert "S.session.compression_anchor_engine" in src

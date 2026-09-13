@@ -12,13 +12,14 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 

@@ -1,9 +1,10 @@
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO)
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 

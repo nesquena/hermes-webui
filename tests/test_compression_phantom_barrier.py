@@ -18,9 +18,15 @@ STATIC = ROOT / "static"
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (STATIC / "messages.js").read_text(encoding="utf-8")
+# Locale bundles were split out of i18n.js (issue #6652); load the runtime plus
+# every locale file, mirroring the index.html <script defer> order, so t() can
+# resolve English strings in the harness.
+_I18N_LOCALE_ORDER = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi")
 SUPPORT_SCRIPTS = [
-    (STATIC / name).read_text(encoding="utf-8")
-    for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
+    (STATIC / "i18n.js").read_text(encoding="utf-8"),
+    *[(STATIC / "locales" / f"{lang}.js").read_text(encoding="utf-8") for lang in _I18N_LOCALE_ORDER],
+    (STATIC / "icons.js").read_text(encoding="utf-8"),
+    (STATIC / "assistant_turn_anchors.js").read_text(encoding="utf-8"),
 ]
 
 def _matching_brace(source: str, opening: int) -> int:

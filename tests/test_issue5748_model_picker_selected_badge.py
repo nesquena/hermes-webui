@@ -1,11 +1,12 @@
 """Regression coverage for #5748 model picker selected badge and scroll state."""
 
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 ROOT = Path(__file__).resolve().parents[1]
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(ROOT)
 
 
 def _body_between(src: str, start: str, end: str) -> str:

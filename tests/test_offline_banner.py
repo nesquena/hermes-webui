@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -10,7 +11,7 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 
 
 def test_offline_banner_markup_styles_and_copy_exist():

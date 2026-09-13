@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(ROOT)
 NODE = shutil.which("node")
 
 

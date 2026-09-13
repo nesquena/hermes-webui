@@ -1,5 +1,8 @@
 """Tests for #1116 — composer placeholder reflects active profile name."""
 import re
+from pathlib import Path
+
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def _src(name: str) -> str:
@@ -64,7 +67,7 @@ class TestComposerPlaceholderProfile:
     def test_settings_copy_names_default_assistant_scope(self):
         """The preference copy must say that only the default profile is renamed."""
         index_src = _src("index.html")
-        i18n_src = _src("i18n.js")
+        i18n_src = read_i18n_bundles(Path(__file__).parent.parent)
         assert "Default assistant name" in index_src
         assert "Used for the default profile only. Other profiles use their own profile names." in index_src
         assert "settings_label_bot_name: 'Default assistant name'" in i18n_src

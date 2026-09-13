@@ -13,12 +13,13 @@ import urllib.request
 from pathlib import Path
 
 from tests._pytest_port import BASE
+from tests._i18n_bundles import read_i18n_bundles
 
 
 BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(Path(__file__).parent.parent)
 
 
 def _function_block(src: str, name: str) -> str:

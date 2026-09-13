@@ -6,12 +6,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parent.parent
 PANELS_JS = ROOT / "static" / "panels.js"
 STYLE_CSS = ROOT / "static" / "style.css"
-I18N_JS = ROOT / "static" / "i18n.js"
+I18N_JS = read_i18n_bundles(ROOT)
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -84,7 +85,7 @@ console.log(JSON.stringify({
 def test_cron_attention_ui_has_recovery_and_diagnostics_actions():
     panels = PANELS_JS.read_text(encoding="utf-8")
     style = STYLE_CSS.read_text(encoding="utf-8")
-    i18n = I18N_JS.read_text(encoding="utf-8")
+    i18n = I18N_JS
 
     assert "cron_status_needs_attention" in panels
     assert "resumeCurrentCron()" in panels

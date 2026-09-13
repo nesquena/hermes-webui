@@ -1,11 +1,12 @@
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(ROOT)
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 SHARE_HTML = (ROOT / "static" / "share.html").read_text(encoding="utf-8")
 SHARE_JS = (ROOT / "static" / "share.js").read_text(encoding="utf-8")

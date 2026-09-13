@@ -1,9 +1,10 @@
 """Tests for skill toggle (enable/disable) API and frontend."""
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 PANELS_JS = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text("utf-8")
-I18N_JS = (Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text("utf-8")
+I18N_JS = read_i18n_bundles(Path(__file__).resolve().parent.parent)
 STYLE_CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text("utf-8")
 
 

@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def read(path: str) -> str:
@@ -571,7 +572,7 @@ class TestPluginCollisionDetection:
         assert "plugin.enabled===false" in segment
 
     def test_plugins_panel_i18n_strings_present(self):
-        i18n = read("static/i18n.js")
+        i18n = read_i18n_bundles(Path(__file__).resolve().parents[1])
 
         assert "plugins_active_provider:" in i18n
         assert "plugins_provider_no_hooks:" in i18n

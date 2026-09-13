@@ -18,6 +18,7 @@ from tests.conftest import TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def _read(rel_path: str) -> str:
@@ -228,7 +229,7 @@ class TestI18nProviderMismatch:
 
     def test_all_locales_have_warning_key(self):
         """provider_mismatch_warning must appear in all locales."""
-        src = _read("static/i18n.js")
+        src = read_i18n_bundles(REPO_ROOT)
         locale_count = len(self._locale_names(src))
         count = self._count_key(src, "provider_mismatch_warning")
         assert count >= locale_count, (
@@ -238,7 +239,7 @@ class TestI18nProviderMismatch:
 
     def test_all_locales_have_label_key(self):
         """provider_mismatch_label must appear in all locales."""
-        src = _read("static/i18n.js")
+        src = read_i18n_bundles(REPO_ROOT)
         locale_count = len(self._locale_names(src))
         count = self._count_key(src, "provider_mismatch_label")
         assert count >= locale_count, (
@@ -247,7 +248,7 @@ class TestI18nProviderMismatch:
 
     def test_warning_is_function_in_en(self):
         """English provider_mismatch_warning must be a function (m, p) => ..."""
-        src = _read("static/i18n.js")
+        src = read_i18n_bundles(REPO_ROOT)
         # Find the en block
         en_start = src.find("\n  en: {")
         es_start = src.find("\n  es: {")
@@ -263,7 +264,7 @@ class TestI18nProviderMismatch:
 
     def test_spanish_locale_key_coverage(self):
         """Spanish locale must have the new keys (parity with English)."""
-        src = _read("static/i18n.js")
+        src = read_i18n_bundles(REPO_ROOT)
         es_start = src.find("\n  es: {")
         de_start = src.find("\n  de: {")
         es_block = src[es_start:de_start]

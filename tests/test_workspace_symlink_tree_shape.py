@@ -4,11 +4,12 @@ The renderer _renderTreeItems must use isDirLike (type==='dir' || (type==='symli
 && is_dir)) for all expand/navigate/delete gates rather than type==='dir' alone.
 """
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 ICONS_JS = (REPO_ROOT / "static" / "icons.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 WS_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 

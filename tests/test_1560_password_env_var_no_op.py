@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 # ── Settings-file isolation ──────────────────────────────────────────────────
@@ -264,7 +265,7 @@ def test_post_set_password_succeeds_when_env_var_unset(monkeypatch):
 REPO_ROOT = Path(__file__).parent.parent
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 
 
 def test_index_html_has_password_lock_banner_div():
