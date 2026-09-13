@@ -353,6 +353,66 @@ def test_supported_raster_requires_exact_terminal_boundary(mime, raw):
     assert helpers._is_native_raster_data_uri(trailing) is False
 
 
+def test_multi_picture_jpeg_bypasses_text_redactor(monkeypatch):
+    """A complete JPEG sequence, as stored by MPO phone images, stays opaque."""
+    raw = _ONE_PIXEL_JPEG + _ONE_PIXEL_JPEG
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+    calls = []
+    monkeypatch.setattr(
+        helpers,
+        "_redact_fn_cached",
+        lambda text: calls.append(text) or "unexpected-redaction",
+    )
+
+    content_part = {"type": "image_url", "image_url": {"url": uri}}
+    assert helpers._is_native_raster_data_uri(uri) is True
+    result = helpers.redact_session_data(
+        {"messages": [{"role": "user", "content": [content_part]}]}
+    )
+
+    assert result["messages"][0]["content"][0] == content_part
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _ONE_PIXEL_JPEG + b"trailing-bytes" + _ONE_PIXEL_JPEG,
+        _ONE_PIXEL_JPEG + _ONE_PIXEL_JPEG[:-2],
+        _ONE_PIXEL_JPEG + _ONE_PIXEL_JPEG + b"trailing-bytes",
+    ],
+)
+def test_malformed_multi_picture_jpeg_keeps_security_boundary(raw):
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+
+    assert helpers._is_native_raster_data_uri(uri) is False
+
+
+def test_multi_picture_jpeg_trailing_credential_is_redacted(monkeypatch):
+    raw = _ONE_PIXEL_JPEG * 3 + base64.b64decode(
+        _FAKE_AWS_KEY,
+        validate=True,
+    )
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+    assert uri.endswith(_FAKE_AWS_KEY)
+    calls = []
+
+    def redact(text):
+        calls.append(text)
+        return text.replace(_FAKE_AWS_KEY, "[REDACTED]")
+
+    monkeypatch.setattr(helpers, "_redact_fn_cached", redact)
+    content_part = {"type": "image_url", "image_url": {"url": uri}}
+    result = helpers.redact_session_data(
+        {"messages": [{"role": "user", "content": [content_part]}]}
+    )
+
+    redacted_uri = result["messages"][0]["content"][0]["image_url"]["url"]
+    assert _FAKE_AWS_KEY not in redacted_uri
+    assert calls == [uri]
+    assert helpers._is_native_raster_data_uri(uri) is False
+
+
 def test_webp_animation_frame_requires_real_nested_image_chunk():
     fake_frame = b"\x00" * 16
     anmf = b"ANMF" + struct.pack("<I", len(fake_frame)) + fake_frame
