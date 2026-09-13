@@ -3,11 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import quote
 
 import api.config as api_config
 import api.routes as routes
-from api.updates import WEBUI_VERSION
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,7 +80,7 @@ def test_service_worker_and_favicon_follow_selected_static_root(tmp_path, monkey
 
     sw_handler = _get("/sw.js")
     expected = sw_path.read_text(encoding="utf-8").replace(
-        "__WEBUI_VERSION__", quote(WEBUI_VERSION, safe="")
+        "__WEBUI_VERSION__", routes._assets_cache_bust_token(static_root)
     ).encode("utf-8")
     assert sw_handler.status == 200
     assert sw_handler.header("Service-Worker-Allowed") == "/"

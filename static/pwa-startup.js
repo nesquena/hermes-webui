@@ -5,6 +5,32 @@
   'use strict';
   var root=document.documentElement;
 
+  // The server stamps one asset fingerprint token into shell URLs and this page,
+  // but stale-client detection compares a semantic WebUI version. Keep those
+  // identities separate: retain the raw asset token for cache/debug consumers
+  // while exposing only the release version through the historical bundle
+  // global consumed by checkWebUIVersionSkew().
+  function semanticBundleVersion(value){
+    if(value===null||value===undefined) return '';
+    var raw=String(value);
+    var decoded=raw;
+    try{decoded=decodeURIComponent(raw);}catch(_){}
+    return decoded.replace(/\+a[0-9a-f]{10}$/i,'');
+  }
+  try{
+    var bundleVersion='';
+    Object.defineProperty(window,'__HERMES_WEBUI_BUNDLE_VERSION__',{
+      configurable:true,
+      enumerable:true,
+      get:function(){return bundleVersion;},
+      set:function(value){
+        var raw=value===null||value===undefined?'':String(value);
+        window.__HERMES_WEBUI_ASSET_VERSION__=raw;
+        bundleVersion=semanticBundleVersion(raw);
+      }
+    });
+  }catch(_){}
+
   function mql(query){
     try{return window.matchMedia&&window.matchMedia(query).matches;}catch(_){return false;}
   }

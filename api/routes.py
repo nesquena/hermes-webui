@@ -12682,6 +12682,22 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _serve_worker_identity_unavailable(handler) -> bool:
+    """Refuse a worker update when complete static-byte identity is unavailable."""
+    data = (
+        "// Hermes static asset identity is unavailable; "
+        "service-worker update refused.\n"
+    ).encode("utf-8")
+    handler.send_response(503)
+    handler.send_header("Content-Type", "application/javascript; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Service-Worker-Allowed", "/")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+    return True
+
+
 _SHUTDOWN_LOG_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -12802,9 +12818,9 @@ def _save_saved_prompts(prompts: list) -> None:
 # `/session/<id>` routes are the hottest navigations and each re-read the
 # ~190 KB static/index.html from disk and re-ran the two process-constant
 # substitutions (__WEBUI_VERSION__, __MAX_UPLOAD_BYTES__) on every request.
-# Those values are fixed for the process lifetime, so we cache the partially
-# rendered template here, keyed by (size, nanosecond mtime) exactly like
-# _STATIC_CACHE so a redeploy is picked up without a restart. The two values
+# The version token also includes the byte identity of every static resource,
+# and that identity is checked *before* this cache lookup so a bundle edit
+# invalidates the shell even when index.html itself is unchanged. The values
 # that genuinely vary per request — the per-session CSRF token and the runtime
 # extension tags (inject_extension_tags) — are still applied on each request
 # against the cached base, so caching changes no observable output.
@@ -12812,25 +12828,117 @@ _INDEX_SHELL_CACHE: dict = {}
 _INDEX_SHELL_CACHE_LOCK = threading.Lock()
 
 
+_ASSET_IDENTITY_UNAVAILABLE_SUFFIX = "%2Fidentity-unavailable"
+_ASSET_IDENTITY_UNAVAILABLE_TOKEN = "asset-identity-unavailable"
+
+
+def _asset_identity_is_available(version_token: str) -> bool:
+    return not version_token.endswith(_ASSET_IDENTITY_UNAVAILABLE_SUFFIX)
+
+
+def _static_content_identity(static_root: Path) -> str:
+    """Hash normalized paths and current bytes for every static resource.
+
+    The recursive walk is the one authoritative shell inventory: it includes
+    nested vendor assets, the worker itself, index/manifest resources, and PWA
+    icons without maintaining a second top-level list that can drift. File
+    metadata is deliberately excluded because a replacement can preserve it.
+    """
+    root = Path(static_root).resolve()
+
+    def inventory_files():
+        # Path.rglob() can silently omit a directory whose listing fails (for
+        # example a POSIX 0111 directory). Enumerate explicitly and let both
+        # scandir() and entry classification raise so identity becomes unknown.
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entry_mode = entry.stat(follow_symlinks=False).st_mode
+                    if _stat.S_ISDIR(entry_mode):
+                        pending.append(Path(entry.path))
+                    elif _stat.S_ISREG(entry_mode):
+                        yield Path(entry.path)
+                    elif _stat.S_ISLNK(entry_mode):
+                        # rglob()+is_file() followed file symlinks. Preserve
+                        # that inventory behavior; an unresolvable symlink is
+                        # an unclassifiable entry and therefore fails closed.
+                        target_mode = entry.stat(follow_symlinks=True).st_mode
+                        if _stat.S_ISREG(target_mode):
+                            yield Path(entry.path)
+                    # Other classified non-directory, non-file entries are not
+                    # servable static resources and intentionally do not enter
+                    # the byte identity.
+
+    fingerprint = hashlib.sha256()
+    paths = sorted(
+        inventory_files(),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    for path in paths:
+        relative_path = path.relative_to(root).as_posix().encode("utf-8")
+        content_digest = hashlib.sha256(path.read_bytes()).digest()
+        # Length framing prevents adjacent path/content fields from being
+        # interpreted as another normalized resource boundary.
+        fingerprint.update(len(relative_path).to_bytes(8, "big"))
+        fingerprint.update(relative_path)
+        fingerprint.update(content_digest)
+    return fingerprint.hexdigest()
+
+
+def _assets_cache_bust_token(static_root: Path) -> str:
+    """Return a cache token covering the WebUI's served static shell.
+
+    After bounded freshness expiry, changes to any recursive static resource
+    change its byte identity, even with stable version or metadata (non-git
+    installs). Cache name must change on bundle edits or the service-worker
+    cache serves stale bundles indefinitely; hard refresh does not bypass
+    service-worker caches.
+    """
+    from urllib.parse import quote
+    from api.updates import WEBUI_VERSION
+    from api.asset_identity_cache import ASSET_IDENTITY_CACHE
+
+    try:
+        identity = ASSET_IDENTITY_CACHE.get(static_root, _static_content_identity)
+        if identity is None:
+            return quote(WEBUI_VERSION, safe="") + _ASSET_IDENTITY_UNAVAILABLE_SUFFIX
+        fingerprint = hashlib.sha256(identity.encode("ascii"))
+        return quote(f"{WEBUI_VERSION}+a{fingerprint.hexdigest()[:10]}", safe="")
+    except Exception:
+        # Preserve the historical string-returning helper for callers that only
+        # need a display/version fallback, while marking that identity is absent.
+        # Cache consumers must reject this explicit suffix as a cache signature.
+        return quote(WEBUI_VERSION, safe="") + _ASSET_IDENTITY_UNAVAILABLE_SUFFIX
+
+
 def _render_index_shell_base() -> str:
     """Return static/index.html with the process-constant tokens substituted.
 
-    Cached and invalidated on (size, mtime_ns) change. The CSRF token and
-    extension-tag injection are intentionally NOT applied here — they vary per
-    request and are applied by the caller against this base string.
+    Cached and invalidated on index metadata and asset-byte identity. The CSRF
+    token and extension-tag injection are intentionally NOT applied here — they
+    vary per request and are applied by the caller against this base string.
     """
-    from api.updates import WEBUI_VERSION
-
     index_path = api_config.get_index_html_path()
+    version_token = _assets_cache_bust_token(api_config.get_static_root())
+    if not _asset_identity_is_available(version_token):
+        # Metadata cannot authorize reuse when some inventoried bytes could not
+        # be read. Evict any earlier shell, read the current index every time,
+        # and never cache this path.
+        with _INDEX_SHELL_CACHE_LOCK:
+            _INDEX_SHELL_CACHE.pop("base", None)
+        return (
+            index_path.read_text(encoding="utf-8")
+            .replace("__WEBUI_VERSION__", _ASSET_IDENTITY_UNAVAILABLE_TOKEN)
+            .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
+        )
     st = index_path.stat()
-    sig = (index_path, st.st_size, st.st_mtime_ns)
+    sig = (index_path, version_token, st.st_size, st.st_mtime_ns)
     with _INDEX_SHELL_CACHE_LOCK:
         cached = _INDEX_SHELL_CACHE.get("base")
         if cached and cached[0] == sig:
             return cached[1]
-    from urllib.parse import quote
-
-    version_token = quote(WEBUI_VERSION, safe="")
     base = (
         index_path.read_text(encoding="utf-8")
         .replace("__WEBUI_VERSION__", version_token)
@@ -13639,11 +13747,11 @@ def handle_get(handler, parsed) -> bool:
         static_root = api_config.get_static_root()
         sw_path = (static_root / "sw.js").resolve()
         if sw_path.exists():
-            # Inject the current git-derived version as the cache name so the
-            # service worker cache busts automatically on every new deploy.
-            from urllib.parse import quote
-            from api.updates import WEBUI_VERSION
-            version_token = quote(WEBUI_VERSION, safe="")
+            # Inject a cache name covering both version and bundle bytes.
+            # The token also changes for bundle edits via _assets_cache_bust_token, not only for a new WEBUI_VERSION deploy.
+            version_token = _assets_cache_bust_token(static_root)
+            if not _asset_identity_is_available(version_token):
+                return _serve_worker_identity_unavailable(handler)
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
             )
@@ -17725,10 +17833,10 @@ _COMPRESSIBLE_MIME = {
     "application/json", "text/plain",
 }
 
-# In-process cache for raw bytes, compressed bytes, and ETag. The cache is keyed
-# by absolute path and invalidated on (size, high-precision mtime) change, so a
-# redeploy is picked up without a process restart. Missing/random paths never
-# enter the cache; memory cost is bounded by the static/ tree's served files.
+# In-process cache for compressed representations keyed by absolute path and
+# the digest of the bytes just read. Every request reads and hashes the file
+# before selecting a representation, so metadata-preserving replacements cannot
+# reuse stale bytes or a stale ETag. Missing/random paths never enter the cache.
 _STATIC_CACHE: dict = {}
 _STATIC_CACHE_LOCK = threading.Lock()
 
@@ -17754,36 +17862,28 @@ def _serve_static(handler, parsed):
         ct = guessed_type if guessed_type and not content_encoding else "application/octet-stream"
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
 
-    # Look up or populate the per-file cache (raw, optional gzip, ETag).
-    # Keyed by absolute path; invalidated by (size, nanosecond mtime).
-    st = static_file.stat()
-    sig = (st.st_size, st.st_mtime_ns)
+    # Read once, then derive the ETag and cache lookup from that exact buffer.
+    # Separate stat/read sequences are not coherent enough to identify content.
+    raw = static_file.read_bytes()
+    content_digest = hashlib.sha256(raw).hexdigest()
     cache_key = str(static_file)
-    raw = gz = etag = None
+    gz = None
+    etag = f'W/"{content_digest}"'
     with _STATIC_CACHE_LOCK:
         cached = _STATIC_CACHE.get(cache_key)
-        if cached and cached[0] == sig:
-            _, raw, gz, etag = cached
-    if raw is None:
-        raw = static_file.read_bytes()
-        # Weak ETag: equality semantics, derived from filesystem identity.
-        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
-        gz = (gzip.compress(raw, compresslevel=6)
-              if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
-              else None)
-        with _STATIC_CACHE_LOCK:
-            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+        if cached and cached[0] == content_digest:
+            gz = cached[1]
+        else:
+            gz = (gzip.compress(raw, compresslevel=6)
+                  if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
+                  else None)
+            _STATIC_CACHE[cache_key] = (content_digest, gz)
 
-    # The page template substitutes __WEBUI_VERSION__ at request time (see the
-    # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
-    # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
-    # is safe to cache aggressively: any redeploy changes the URL.
-    version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = bool(version_values[0])
-    cache_control = (
-        "public, max-age=31536000, immutable" if has_fingerprint
-        else "public, max-age=300"
-    )
+    # The static tree is mutable in-place and ?v= is client-controlled. Matching
+    # a token at request time still does not prove that these exact bytes belong
+    # to a coherent snapshot across the separate inventory/read operations, so
+    # every URL must revalidate; byte ETags keep that inexpensive.
+    cache_control = "public, max-age=0, must-revalidate"
 
     # 304 short-circuit on conditional GET.
     if handler.headers.get("If-None-Match") == etag:
