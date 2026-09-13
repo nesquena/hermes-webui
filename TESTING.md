@@ -91,6 +91,50 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+## Repeat notification ownership gate (#6673)
+
+`tests/browser_issue6673_service_worker.py` serves the real build, exercises a
+handler-less worker update window, and uses controlled pages. The pages invoke
+the production `attachLiveStream()` listener with a boundary EventSource, so the
+gate covers listener, sender, worker presenter, displayed-record lookup, and
+click-data composition. It checks registration-only delivery with the page
+constructor unavailable, constructor-only delivery with service workers blocked,
+worker activation, exact same-event suppression, distinct-event re-alert with
+`renotify:true`, degraded two-tab delivery, and expired-lease displayed-record
+precedence against the served registration. Degraded two-tab delivery must
+produce exactly one registration display; zero or duplicate delivery fails the
+gate. A forced registration rejection during a worker transition must retry
+through the newly activated registration. The deterministic teardown proof
+forces presentation and release settlement failure, closes the owner context,
+and verifies fresh-context recovery; the native browser gate covers the
+registration-owned displayed-record side of that contract. Journal-less
+frames carry no durable SSE id; notification-producing payloads use a bounded
+delivery-only identity without advancing replay state.
+
+The browser owns the native display boundary. The page's finite `presenting`
+lease prevents concurrent degraded tabs from both starting an eligible display
+for the lease window, while browser-owned displayed records outrank lease
+expiry. Failed settlement remains recoverable, and a bounded duplicate is
+accepted when a constructor display cannot be observed by the browser or
+durably settled. The worker suppresses only an exact event id in the browser's
+currently displayed records; all other eligible fallback displays use the
+registration-first presenter.
+
+The focused storage matrix distinguishes proven capability absence from
+uncertain ownership. Missing `indexedDB` and a synchronous `indexedDB.open()`
+throw use the registration-first fallback; async open errors, `blocked`,
+upgrade aborts, transaction errors, and transaction aborts return `ambiguous`
+without presenting.
+
+```bash
+python tests/browser_issue6673_service_worker.py
+```
+
+The test requires Playwright, Chromium, granted notification permission, and a
+served service-worker lifecycle. An unavailable browser environment exits 2 and
+is an un-reached proof gate, not a passing result. The visible Windows toast and
+Action Center presentation remain manual browser-owner checks.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic

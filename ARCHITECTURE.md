@@ -103,6 +103,57 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 > `git ls-files | xargs wc -l` (or your editor) for current sizes; the role of
 > each file above is the durable part.
 
+Browser notification ownership:
+
+    api/streaming.py    Emits journal-provided SSE ids and a delivery-only
+                        notification identity when journal persistence fails.
+    api/gateway_chat.py Mirrors the streaming delivery-only identity contract.
+    static/messages.js  Owns eligibility, canonical or delivery-only identity
+                        capture, payload construction, and the registration-first
+                        page presentation router.
+    static/sw.js        Owns displayed-record duplicate suppression for the
+                        versioned presentation protocol.
+
+Identity-bearing approval, clarification, and completion notifications use the
+canonical `(streamId, lastEventId)` tuple when the journal provides a positive
+sequence id. Journal-less notification payloads carry a bounded
+`notification_event_id` for cross-tab coordination; it never becomes the SSE id
+or replay cursor. The worker queries browser-owned displayed records for the
+same tag and exact event id, then calls `showNotification()` only when no exact
+displayed duplicate exists. The page then reads the same browser-owned records
+when worker coordination is unavailable, nonterminal, or delayed. An exact
+displayed event id returns `duplicate`; every other result uses one local
+presentation primitive that calls `registration.showNotification()` when the
+registration is callable and otherwise calls `new Notification()`. Unkeyed
+manual notifications use the same registration-first primitive without identity
+deduplication. Journal-less frames carry no durable SSE id. Notification click
+routing remains owned by the existing `notificationclick` handler.
+
+The page uses a small IndexedDB owner record only for the degraded path where a
+service worker cannot conclusively present the event. The record is an advisory
+`presenting` lease with a finite expiry, or a terminal `delivered` record after
+successful presentation. A transaction returns `duplicate` for a delivered
+row, `defer` only for an unexpired peer lease, and replaces expired or legacy
+transient rows with a new token and lease. Every settlement checks that token,
+so a late page cannot release or deliver a replacement lease. Exact
+browser-owned displayed records are checked before leasing, while waiting, and
+before presentation; they outrank lease expiry. Only a missing IndexedDB API or
+a synchronous `indexedDB.open()` throw proves that owner coordination is
+unavailable, so those cases use the existing registration-first presenter as a
+fallback. Async open errors, blocked or aborted upgrades, and transaction
+failures leave ownership uncertain and return `ambiguous` without presenting.
+Permission, visibility, and notification-enabled gates still run before this
+router.
+
+Presentation and settlement are separate browser boundaries. A successful
+presentation returns `shown` even when the terminal settlement write fails,
+leaving only the finite lease for later recovery. A rejected presentation
+returns `ambiguous`; a failed release cannot create a permanent suppression
+record because the lease expires. When a constructor notification may have
+displayed but no browser-owned record or durable settlement exists, one bounded
+duplicate is accepted after lease expiry. Permanent suppression is not an
+accepted outcome.
+
 State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
