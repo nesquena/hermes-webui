@@ -1804,6 +1804,45 @@ def _active_turn_has_checkpoint(messages, identity):
     return any(_active_turn_token_matches(message, identity) for message in messages or [])
 
 
+def _collapse_active_turn_checkpoints(messages, identity):
+    messages = list(messages or [])
+    if not isinstance(identity, dict) or not identity.get('token'):
+        return messages
+    matching = [
+        index
+        for index, message in enumerate(messages)
+        if _active_turn_token_matches(message, identity)
+    ]
+    if len(matching) < 2:
+        return messages
+    checkpoint = identity.get('checkpoint')
+    checkpoint_key = _message_replay_key(checkpoint) if isinstance(checkpoint, dict) else None
+    expected_text = identity.get('text')
+    normalized_expected = (
+        _normalize_user_text(_message_text(expected_text))
+        if expected_text is not None
+        else None
+    )
+    keep_index = max(
+        matching,
+        key=lambda index: (
+            checkpoint_key is not None
+            and _message_replay_key(messages[index]) == checkpoint_key,
+            normalized_expected is not None
+            and _normalize_user_text(_message_text(messages[index].get('content')))
+            == normalized_expected,
+            bool(messages[index].get('_db_persisted')),
+            index,
+        ),
+    )
+    matching = set(matching)
+    return [
+        message
+        for index, message in enumerate(messages)
+        if index == keep_index or index not in matching
+    ]
+
+
 def _mark_active_turn_checkpoint(message, identity):
     if (
         isinstance(message, dict)
@@ -1812,6 +1851,7 @@ def _mark_active_turn_checkpoint(message, identity):
         and identity.get('token')
     ):
         message['_active_turn_token'] = identity['token']
+        stamp_message_source(message, identity.get('source'))
     return message
 
 
@@ -1819,7 +1859,12 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
     messages = list(messages or [])
     if not isinstance(identity, dict):
         return messages, False
+    messages = _collapse_active_turn_checkpoints(messages, identity)
     if _active_turn_has_checkpoint(messages, identity):
+        for message in messages:
+            if _active_turn_token_matches(message, identity):
+                _mark_active_turn_checkpoint(message, identity)
+                break
         return messages, True
     if not allow_index_fallback:
         return messages, False
@@ -1963,7 +2008,7 @@ def _materialize_active_turn_user(identity, msg_text, source):
 
 def _settle_current_turn_boundary(previous_context, result_messages, identity, msg_text, source):
     """Insert the pending turn before assistant/tool output when it is absent."""
-    result_messages = list(result_messages or [])
+    result_messages = _collapse_active_turn_checkpoints(result_messages, identity)
     if not result_messages or not isinstance(identity, dict):
         return result_messages
     _checkpoint_idx = _find_active_turn_checkpoint_index(
@@ -1982,6 +2027,12 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
                 and existing_checkpoint.get('id') is not None
             ):
                 retained_checkpoint['id'] = existing_checkpoint['id']
+            if (
+                not retained_checkpoint.get('_db_persisted')
+                and isinstance(existing_checkpoint, dict)
+                and existing_checkpoint.get('_db_persisted')
+            ):
+                retained_checkpoint['_db_persisted'] = existing_checkpoint['_db_persisted']
             result_messages[_checkpoint_idx] = retained_checkpoint
         else:
             _mark_active_turn_checkpoint(existing_checkpoint, identity)
@@ -2014,12 +2065,19 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
     )
 
 
-def _align_current_turn_display(previous_display, previous_context, identity):
+def _align_current_turn_display(
+    previous_display,
+    previous_context,
+    identity,
+    *,
+    allow_context_checkpoint_append=False,
+):
     """Make a context-only exact checkpoint visible before shared settlement."""
     display = list(previous_display or [])
     context = list(previous_context or [])
     if not isinstance(identity, dict):
         return display, context
+    context = _collapse_active_turn_checkpoints(context, identity)
     display, _ = _mark_active_turn_checkpoint_in_history(
         display,
         identity,
@@ -2027,6 +2085,10 @@ def _align_current_turn_display(previous_display, previous_context, identity):
         allow_index_fallback=False,
     )
     if _active_turn_has_checkpoint(display, identity):
+        if allow_context_checkpoint_append and not _active_turn_has_checkpoint(context, identity):
+            checkpoint = _owner_projection_current_turn_row(display, identity)
+            if checkpoint is not None:
+                context.append(checkpoint)
         return display, context
     checkpoint = _owner_projection_current_turn_row(
         context,
@@ -2143,7 +2205,10 @@ def _settle_result_messages(
         if result_messages
         else list(next_context_messages or [])
     )
-    if result_messages:
+    if result_messages or _active_turn_has_checkpoint(
+        session.context_messages,
+        active_turn_identity,
+    ):
         session.context_messages = _settle_current_turn_boundary(
             previous_context_messages,
             session.context_messages,
@@ -2155,6 +2220,7 @@ def _settle_result_messages(
         previous_messages,
         session.context_messages,
         active_turn_identity,
+        allow_context_checkpoint_append=not result_messages,
     )
     session.messages = _merge_display_messages_after_agent_result(
         previous_display_for_writeback,
