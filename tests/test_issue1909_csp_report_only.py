@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler
 from types import SimpleNamespace
 
 import api.routes as routes
+from api.profiles import TabContextResolution
 from server import Handler
 
 
@@ -146,7 +147,12 @@ def test_server_bypasses_auth_for_csp_report(monkeypatch):
 
     monkeypatch.setattr("server.check_auth", fail_auth)
     monkeypatch.setattr("server.clear_request_profile", lambda: None)
-    monkeypatch.setattr("server.get_profile_cookie", lambda _handler: None)
+    # _handle_write resolves the request profile through the tab-context aware
+    # resolver (#6559); stub it so this test stays about the auth bypass.
+    monkeypatch.setattr(
+        "server.resolve_profile_with_tab_context",
+        lambda _handler: TabContextResolution(None, False),
+    )
 
     Handler._handle_write(handler, fake_route)
 

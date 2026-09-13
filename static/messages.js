@@ -4,6 +4,10 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
+// Absolute URL for a profile-sensitive endpoint. The tab context is attached
+// by _tabContextFetch(), which also owns the reissue/retry recovery — building
+// the URL with a token but sending it through a bare fetch() left these two
+// call sites unable to recover a token that died mid-session.
 function _apiUrl(path) {
   return new URL(path, document.baseURI || location.href).href;
 }
@@ -2660,7 +2664,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected',1000);
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(_tabContextEventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
         }
@@ -6760,12 +6764,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st&&st.active){
               setComposerStatus('Reconnected',1000);
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(_tabContextEventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
             if(st&&st.replay_available){
               setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(_tabContextEventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
           }catch(_){
@@ -7207,7 +7211,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId,{
       startedAt:_extensionTurnStartedAt,
     });
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
+    _wireSSE(_tabContextEventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
 }
@@ -8050,7 +8054,7 @@ function _startHiddenActiveStreamPoll(sid) {
     if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
-      fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
+      _tabContextFetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
         .then(r => r.ok ? r.json() : null)
         .then(d => {
           if (!d || _sessionStreamHiddenPollSid !== sid) return;
@@ -8201,7 +8205,7 @@ function startSessionStream(sid) {
     } catch (_) {}
     const _streamUrl = 'api/session/stream?session_id=' + encodeURIComponent(sid)
       + (_knownCount !== '' ? '&known_count=' + encodeURIComponent(_knownCount) : '');
-    const es = new EventSource(_apiUrl(_streamUrl));
+    const es = _tabContextEventSource(new URL(_streamUrl, document.baseURI || location.href).href);
     _sessionEventSource = es;
     es.addEventListener('initial', () => { /* connection confirmed */ });
     es.addEventListener('bg_task_complete', e => {
@@ -8342,7 +8346,17 @@ function startSessionStream(sid) {
         }
         _sessionStreamReconnectTimer = setTimeout(() => {
           _sessionStreamReconnectTimer = null;
-          if (_sessionStreamSessionId === sid) startSessionStream(sid);
+          // #6559: a handshake refused for a stale per-tab profile context
+          // also lands here. Reissue first so the re-open carries a live
+          // token bound to THIS tab's profile.
+          void _revalidateTabContextAfterSseError().then((hasContext) => {
+            // No context after the probe means the reissue failed. Reopening
+            // now would reconnect with no token at all, and the server would
+            // serve the stream under the browser-wide cookie — i.e. another
+            // profile's events. Stay closed; the next user action reissues.
+            if (!hasContext) return;
+            if (_sessionStreamSessionId === sid) startSessionStream(sid);
+          });
         }, 5000);
       }
     };
@@ -8403,7 +8417,7 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     // in api/background_process._process_one → start_session_turn; the
     // browser is no longer in the wakeup path at all.)
     try {
-      fetch(_apiUrl('api/bg-task-complete-ack'), {
+      _tabContextFetch(_apiUrl('api/bg-task-complete-ack'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         credentials: 'include',
@@ -9236,7 +9250,7 @@ function sendBrowserNotification(title,body,options={}){
 
 function attachBtwStream(parentSid, streamId, question){
   if(!parentSid||!streamId) return;
-  const src=new EventSource(new URL('api/chat/stream?stream_id='+encodeURIComponent(streamId), document.baseURI||location.href).href);
+  const src=_tabContextEventSource(new URL('api/chat/stream?stream_id='+encodeURIComponent(streamId), document.baseURI||location.href).href);
   let answer='';
   let btwRow=null;
   let _streamDone=false;

@@ -197,7 +197,7 @@ class TestLoadHtmlInlineFunction:
         body = ui[idx:idx + 1200]
         assert 'const mediaSessionId=' in body
         assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
-        assert "fetch(mediaUrl, {cache:'no-store'})" in body, (
+        assert "_profileFetch(mediaUrl, {cache:'no-store'})" in body, (
             "loadHtmlInline must fetch with cache:'no-store' to bypass "
             "browser cache for stale HTML preview (got body without no-store)"
         )
@@ -214,7 +214,7 @@ class TestLoadHtmlInlineFunction:
         body = ui[idx:idx + 1200]
         assert 'const mediaSessionId=' in body
         assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
-        assert 'fetch(mediaUrl)' in body
+        assert '_profileFetch(mediaUrl)' in body
         assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
         assert "const dlUrl=publicMediaUrl+'&download=1'+snapQuery;" in body, (
             "PDF download/fallback links must carry the message's snapshot "

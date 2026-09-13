@@ -1258,6 +1258,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Stop the Hermes WebUI server?',
     settings_shutdown_confirm_btn: 'Stop',
     settings_shutdown_stopped_message: 'Server stopped. You can close this tab.',
+    profile_context_boot_failed: 'Could not start this tab under the requested profile. Reload the page to try again.',
     // Providers panel
     providers_tab_title: 'Providers',
     providers_section_title: 'Providers',
@@ -3022,6 +3023,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Vuoi arrestare il server Hermes WebUI?',
     settings_shutdown_confirm_btn: 'Arresta',
     settings_shutdown_stopped_message: 'Server arrestato. Puoi chiudere questa scheda.',
+    profile_context_boot_failed: 'Impossibile avviare questa scheda con il profilo richiesto. Ricarica la pagina per riprovare.',
     // Providers panel
     providers_tab_title: 'Provider',
     providers_section_title: 'Provider',
@@ -4786,6 +4788,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Hermes WebUI サーバーを停止しますか？',
     settings_shutdown_confirm_btn: '停止',
     settings_shutdown_stopped_message: 'サーバーは停止しました。このタブを閉じて構いません。',
+    profile_context_boot_failed: '要求されたプロファイルでこのタブを開始できませんでした。ページを再読み込みして再試行してください。',
     // Providers panel
     providers_tab_title: 'プロバイダ',
     providers_section_title: 'プロバイダ',
@@ -6174,6 +6177,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Остановить сервер Hermes WebUI?',
     settings_shutdown_confirm_btn: 'Остановить',
     settings_shutdown_stopped_message: 'Сервер остановлен. Можно закрыть эту вкладку.',
+    profile_context_boot_failed: 'Не удалось запустить эту вкладку с запрошенным профилем. Перезагрузите страницу, чтобы повторить попытку.',
     // Providers panel
     providers_tab_title: 'Провайдеры',
     providers_section_title: 'Провайдеры',
@@ -7897,6 +7901,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: '¿Detener el servidor Hermes WebUI?',
     settings_shutdown_confirm_btn: 'Detener',
     settings_shutdown_stopped_message: 'Servidor detenido. Puedes cerrar esta pestaña.',
+    profile_context_boot_failed: 'No se pudo iniciar esta pestaña con el perfil solicitado. Recarga la página para volver a intentarlo.',
     // Providers panel (English fallback — native translations welcome in follow-up PRs)
     providers_tab_title: 'Providers',
     providers_section_title: 'Providers',
@@ -9568,6 +9573,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Hermes WebUI-Server stoppen?',
     settings_shutdown_confirm_btn: 'Stoppen',
     settings_shutdown_stopped_message: 'Server gestoppt. Du kannst diesen Tab schließen.',
+    profile_context_boot_failed: 'Dieser Tab konnte nicht mit dem angeforderten Profil gestartet werden. Lade die Seite neu, um es erneut zu versuchen.',
     // Providers panel (English fallback — native translations welcome in follow-up PRs)
     providers_tab_title: 'Providers',
     providers_section_title: 'Providers',
@@ -11282,6 +11288,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: '停止 Hermes WebUI 服务器？',
     settings_shutdown_confirm_btn: '停止',
     settings_shutdown_stopped_message: '服务器已停止。你可以关闭此标签页。',
+    profile_context_boot_failed: '无法使用请求的配置文件启动此标签页。请重新加载页面后重试。',
     // Providers panel (English fallback — native translations welcome in follow-up PRs)
     providers_tab_title: '提供商',
     providers_section_title: '提供商',
@@ -13382,6 +13389,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: '停止 Hermes WebUI 伺服器？',
     settings_shutdown_confirm_btn: '停止',
     settings_shutdown_stopped_message: '伺服器已停止。可以關閉這個分頁。',
+    profile_context_boot_failed: '無法使用要求的設定檔啟動這個分頁。請重新載入頁面後再試一次。',
     // Providers panel
     providers_tab_title: '供應商',
     providers_section_title: '供應商',
@@ -14960,6 +14968,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Parar o servidor Hermes WebUI?',
     settings_shutdown_confirm_btn: 'Parar',
     settings_shutdown_stopped_message: 'Servidor parado. Você pode fechar esta aba.',
+    profile_context_boot_failed: 'Não foi possível iniciar esta aba com o perfil solicitado. Recarregue a página para tentar novamente.',
     // Providers panel
     providers_tab_title: 'Provedores',
     providers_section_title: 'Provedores',
@@ -16616,6 +16625,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Hermes WebUI 서버를 중지할까요?',
     settings_shutdown_confirm_btn: '중지',
     settings_shutdown_stopped_message: '서버가 중지되었습니다. 이 탭을 닫아도 됩니다.',
+    profile_context_boot_failed: '요청한 프로필로 이 탭을 시작하지 못했습니다. 페이지를 새로고침한 후 다시 시도하세요.',
     // Providers panel
     providers_tab_title: 'Providers',
     providers_section_title: 'Providers',
@@ -18457,6 +18467,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Arrêter le serveur Hermes WebUI ?',
     settings_shutdown_confirm_btn: 'Arrêter',
     settings_shutdown_stopped_message: 'Serveur arrêté. Vous pouvez fermer cet onglet.',
+    profile_context_boot_failed: 'Impossible de démarrer cet onglet avec le profil demandé. Rechargez la page pour réessayer.',
     providers_tab_title: 'Fournisseurs',
     providers_section_title: 'Fournisseurs',
     providers_section_meta: 'Gérer les clés API pour les fournisseurs d\'IA. Les modifications prennent effet immédiatement.',
@@ -20030,6 +20041,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Zastavit Hermes WebUI server?',
     settings_shutdown_confirm_title: 'Zastavit Hermes WebUI',
     settings_shutdown_stopped_message: 'Server zastaven. Tuto záložku můžete zavřít.',
+    profile_context_boot_failed: 'Tuto kartu se nepodařilo spustit s požadovaným profilem. Znovu načtěte stránku a zkuste to znovu.',
     settings_sidebar_density_compact: 'Kompaktní',
     settings_sidebar_density_detailed: 'Detailní',
     settings_tab_appearance: 'Vzhled',
@@ -21832,6 +21844,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Hermes WebUI sunucusu durdurulsun mu?',
     settings_shutdown_confirm_btn: 'Durdur',
     settings_shutdown_stopped_message: 'Sunucu durduruldu. Bu sekmeyi kapatabilirsiniz.',
+    profile_context_boot_failed: 'Bu sekme istenen profille başlatılamadı. Yeniden denemek için sayfayı yenileyin.',
     // Providers panel
     providers_tab_title: 'Sağlayıcılar',
     providers_section_title: 'Sağlayıcılar',
@@ -23676,6 +23689,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Zatrzymać serwer Hermes WebUI?',
     settings_shutdown_confirm_btn: 'Zatrzymaj',
     settings_shutdown_stopped_message: 'Serwer został zatrzymany. Możesz zamknąć tę kartę.',
+    profile_context_boot_failed: 'Nie udało się uruchomić tej karty z żądanym profilem. Odśwież stronę, aby spróbować ponownie.',
     // Providers panel
     providers_tab_title: 'Dostawcy',
     providers_section_title: 'Dostawcy',
@@ -25265,6 +25279,7 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Dừng máy chủ Hermes WebUI?',
     settings_shutdown_confirm_btn: 'Dừng',
     settings_shutdown_stopped_message: 'Server đã dừng. Bạn có thể đóng tab này.',
+    profile_context_boot_failed: 'Không thể khởi động tab này với hồ sơ đã yêu cầu. Hãy tải lại trang để thử lại.',
     // Providers panel
     providers_tab_title: 'Provider',
     providers_section_title: 'Nhà cung cấp',

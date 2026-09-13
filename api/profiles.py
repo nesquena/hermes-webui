@@ -15,9 +15,11 @@ import re
 import shutil
 import sys
 import threading
+import time  # needed for tab-context TTL
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
+from urllib.parse import parse_qs, urlparse
 
 import yaml
 
@@ -497,6 +499,185 @@ def clear_request_profile() -> None:
     Safe to call even if set_request_profile() was never called.
     """
     _tls.profile = None
+
+
+# ── Per-tab opaque profile context (#6559) ───────────────────────────────────
+# A browser tab's profile identity is an opaque server-issued token, not the
+# browser-wide ``hermes_profile`` cookie. The client keeps the token in
+# sessionStorage and sends it as ``?tab_context=<token>`` on every API and SSE
+# request, so two tabs of the same browser can run two different profiles.
+_TAB_CONTEXT_TTL = 300  # 5 minutes — refreshed on each use
+_TAB_CONTEXT_LOCK = threading.Lock()
+_TAB_CONTEXT_MAP: dict[str, tuple[str, float]] = {}  # token → (profile_name, expiry_ts)
+
+# Wire-level error code returned when a request supplies a tab context the
+# server cannot resolve. The client clears its stored token, reissues one bound
+# to its own active profile, and retries.
+TAB_CONTEXT_INVALID_ERROR = 'tab_context_invalid'
+TAB_CONTEXT_ENDPOINT_PATH = '/api/profile/tab-context'
+
+
+class TabContextResolution(NamedTuple):
+    """Outcome of resolving the profile for one request.
+
+    ``profile`` is the resolved profile name (or ``None`` for "use the process
+    default"). ``invalid_tab_context`` is True when the request *supplied* a
+    tab context that could not be resolved — the transport layer must answer
+    with an explicit error instead of serving the request under some other
+    profile.
+    """
+
+    profile: Optional[str]
+    invalid_tab_context: bool
+
+
+def issue_tab_context(profile_name: str) -> str:
+    """Create an opaque tab context token bound to the given profile.
+
+    The token is a short random string stored server-side. The client keeps it
+    in sessionStorage and sends it as ?tab_context=<token> on every API and SSE
+    request. The server resolves it back to the profile without trusting an
+    arbitrary client-supplied profile name.
+    """
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(24)
+    now = time.time()
+    with _TAB_CONTEXT_LOCK:
+        # Evict expired entries
+        expired = [k for k, (_, t) in _TAB_CONTEXT_MAP.items() if t < now]
+        for k in expired:
+            del _TAB_CONTEXT_MAP[k]
+        _TAB_CONTEXT_MAP[token] = (profile_name, now + _TAB_CONTEXT_TTL)
+    return token
+
+
+def resolve_tab_context(token: str) -> Optional[str]:
+    """Resolve an opaque tab context token to a profile name.
+
+    Returns None if the token is unknown or expired.
+    On successful resolution, refreshes the TTL.
+    """
+    now = time.time()
+    with _TAB_CONTEXT_LOCK:
+        entry = _TAB_CONTEXT_MAP.get(token)
+        if entry is None:
+            return None
+        profile_name, expiry = entry
+        if expiry < now:
+            del _TAB_CONTEXT_MAP[token]
+            return None
+        # Refresh TTL on successful use
+        _TAB_CONTEXT_MAP[token] = (profile_name, now + _TAB_CONTEXT_TTL)
+    return profile_name
+
+
+def is_known_profile_name(name: object) -> bool:
+    """Return True when *name* is a profile this server actually knows about.
+
+    Used to validate the profile a client declares when it reissues a tab
+    context. The client is allowed to say "my tab is running as B" — it is not
+    allowed to invent a profile name, so the declaration is checked against the
+    server's own profile list. Unknown names (and any failure to enumerate
+    profiles) are rejected rather than trusted.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if name != 'default' and not _PROFILE_ID_RE.fullmatch(name):
+        return False
+    try:
+        rows = list_profiles_api()
+    except Exception:
+        logger.warning("Could not enumerate profiles to validate %r", name, exc_info=True)
+        return False
+    for row in rows:
+        if isinstance(row, dict) and row.get('name') == name:
+            return True
+    return False
+
+
+def _tab_context_token_from_path(path: object) -> Optional[str]:
+    """Extract the raw ``tab_context`` query value from a request path.
+
+    Returns ``None`` when the request carries no tab context at all, and the
+    raw (possibly empty or unparseable) value when it does. A present-but-
+    unreadable parameter is deliberately reported as an empty token so it
+    resolves to "invalid" rather than "absent" — an unparseable context must
+    not silently downgrade to the shared cookie.
+    """
+    raw = path if isinstance(path, str) else ''
+    if 'tab_context' not in raw:
+        return None
+    try:
+        values = parse_qs(urlparse(raw).query, keep_blank_values=True).get('tab_context')
+    except Exception:
+        return ''
+    if not values:
+        return None
+    return values[0]
+
+
+def resolve_profile_with_tab_context(handler, *, url_profile: Optional[str] = None) -> TabContextResolution:
+    """Resolve the active profile for a request, tab context before cookie.
+
+    Priority:
+      1. ``url_profile`` (from ``?profile=``, pre-validated by the caller)
+      2. ``?tab_context=`` query param → the profile the token was issued for
+      3. ``hermes_profile`` cookie (browser-wide fallback)
+
+    Fail-closed: a request that supplies a ``tab_context`` the server cannot
+    resolve NEVER falls back to the cookie. It is reported via
+    ``invalid_tab_context`` so the transport answers with an explicit error and
+    the client reissues a context bound to its own profile. Requests that
+    supply no tab context keep the historical cookie behaviour.
+    """
+    # If an explicit url_profile was already extracted from ?profile= and it's
+    # valid, that takes priority (tab is booting with a known target profile).
+    if url_profile is not None:
+        return TabContextResolution(url_profile, False)
+
+    token = _tab_context_token_from_path(getattr(handler, 'path', None))
+    if token is not None:
+        resolved = resolve_tab_context(token) if token else None
+        if resolved is not None:
+            return TabContextResolution(resolved, False)
+        return TabContextResolution(None, True)
+
+    from api.helpers import get_profile_cookie
+    return TabContextResolution(get_profile_cookie(handler), False)
+
+
+# Access-log redaction: a tab context is a bearer credential for a profile, so
+# it must never land in the access log.
+_REDACT_TAB_CONTEXT_RE = re.compile(r'(?<=[?&])tab_context=[^&\s]+')
+
+
+def redact_tab_context(path: str) -> str:
+    """Replace any ``tab_context`` query value in *path* with a placeholder."""
+    return _REDACT_TAB_CONTEXT_RE.sub('tab_context=<redacted>', path)
+
+
+def reject_invalid_tab_context(handler, resolution: TabContextResolution, parsed) -> bool:
+    """Answer with an explicit error when a supplied tab context is dead.
+
+    Fail-closed rule: a request carrying a ``tab_context`` the server cannot
+    resolve must NOT be served under the browser-wide ``hermes_profile``
+    cookie — that is how a dormant tab silently resumes under someone else's
+    profile. Tell the client instead, so it can clear the dead token and
+    reissue one bound to its own profile.
+
+    The reissue endpoint itself is exempt: it is the recovery path, and
+    answering it with the very error it exists to resolve would strand a tab
+    that still has a stale token attached.
+
+    Returns True when the request has been answered and must not be routed.
+    """
+    if not resolution.invalid_tab_context:
+        return False
+    if getattr(parsed, 'path', None) == TAB_CONTEXT_ENDPOINT_PATH:
+        return False
+    from api.helpers import j
+    j(handler, {'error': TAB_CONTEXT_INVALID_ERROR}, status=409)
+    return True
 
 
 def _resolve_profile_home_for_name(name: str) -> Path:

@@ -23,6 +23,19 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+// #6559: profile-sensitive raw transport for ui.js.
+//
+// workspace.js owns the per-tab profile context and defines _tabContextFetch(),
+// the primitive that attaches this tab's token and recovers a refused one.
+// ui.js is also loaded by share.html, which renders the same message DOM
+// WITHOUT workspace.js and has no tab context to carry — a public share view
+// has no profile identity at all. So delegate whenever the primitive exists,
+// which is every load of the app shell, and fall back to a bare fetch only on
+// the page where there is provably no token to drop. One delegator, not a
+// typeof guard sprinkled over every call site.
+function _profileFetch(url,init){
+  return (typeof _tabContextFetch==='function')?_tabContextFetch(url,init):fetch(url,init);
+}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
@@ -3551,7 +3564,7 @@ function _modelStateFromAppliedDropdown(sel, modelValue){
 }
 function _persistSessionModelCorrection(model, provider, opts){
   if(!S.session) return;
-  const request=fetch(new URL('api/session/update',document.baseURI||location.href).href,{
+  const request=_profileFetch(new URL('api/session/update',document.baseURI||location.href).href,{
     method:'POST',credentials:'include',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:model,model_provider:provider||null})
@@ -3591,7 +3604,7 @@ async function populateModelDropdown(opts={}){
     const modelsUrl=new URL('api/models',document.baseURI||location.href);
     const requestedFreshness=opts&&opts.freshness?String(opts.freshness):'';
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
-    const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
+    const _modelsRes=await _profileFetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
@@ -3839,7 +3852,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
-    const _liveRes=await fetch(url.href,{credentials:'include'});
+    const _liveRes=await _profileFetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
@@ -9154,7 +9167,7 @@ function _playEdgeTtsChunked(text, btn){
     let rate='', pitch='';
     if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
     if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    _profileFetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
@@ -9272,7 +9285,7 @@ function _playElevenLabsTts(text, btn){
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+  _profileFetch(new URL('api/tts', document.baseURI || location.href).href, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({text:text, engine:'elevenlabs'})
@@ -9299,7 +9312,7 @@ function _playOpenaiTts(text, btn){
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+  _profileFetch(new URL('api/tts', document.baseURI || location.href).href, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({text:text, engine:'openai'})
@@ -10734,6 +10747,8 @@ function _healthResponseServerIdentity(data){
 
 async function _readHealthServerIdentity() {
   try {
+    // Exempt from the tab context (#6559): /health reports process liveness and
+    // server identity, which are the same answer under every profile.
     const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
     if(!r.ok) return null;
     const data=await r.json();
@@ -10817,6 +10832,8 @@ async function _waitForServerThenReload(opts){
   await new Promise(r=>setTimeout(r, interval));
   while(Date.now()<deadline){
     try{
+      // Exempt from the tab context (#6559): a restart probe against /health,
+      // which is process-scoped and identical under every profile.
       const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
       if(r.ok){
         let data={};
@@ -19844,7 +19861,7 @@ function loadDiffInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const snapQuery=_mediaSnapQuery(el);
-    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
+    _profileFetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -19927,7 +19944,7 @@ function loadCsvInline(container){
     const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
     const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
     const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
-    fetch(mediaUrl)
+    _profileFetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
@@ -19946,7 +19963,7 @@ function loadExcalidrawInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const snapQuery=_mediaSnapQuery(el);
-    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
+    _profileFetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -20079,7 +20096,7 @@ function loadPdfInline(container){
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     const loadPdf=(pdfjsLib)=>{
-      fetch(mediaUrl)
+      _profileFetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
@@ -20174,7 +20191,7 @@ function loadHtmlInline(container){
     const snapQuery=_mediaSnapQuery(el);
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
-    fetch(mediaUrl, {cache:'no-store'})
+    _profileFetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
@@ -21852,7 +21869,7 @@ async function uploadPendingFiles(options={}){
       fd.append('session_id',sessionId);fd.append('file',f,f.name);
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
-      const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
+      const res=await _profileFetch(url,{method:'POST',credentials:'include',body:fd});
       if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();

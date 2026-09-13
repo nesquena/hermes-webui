@@ -439,12 +439,12 @@ def test_session_stream_pauses_while_chat_stream_is_active():
     assert "if (_chatStreamActiveForSession(sid))" in start_src
     assert "_sessionStreamHiddenSid = sid;" in start_src
     assert "return;" in start_src
-    assert start_src.index("if (_chatStreamActiveForSession(sid))") < start_src.index("new EventSource(")
+    assert start_src.index("if (_chatStreamActiveForSession(sid))") < start_src.index("_tabContextEventSource(")
 
     attach_ix = js.index("function attachLiveStream")
     attach_src = js[attach_ix:js.index("function transcript()", attach_ix)]
     assert "_suspendSessionStreamForLiveChat(activeSid);" in attach_src
-    assert attach_src.index("_suspendSessionStreamForLiveChat(activeSid);") < attach_src.index("new EventSource(")
+    assert attach_src.index("_suspendSessionStreamForLiveChat(activeSid);") < attach_src.index("_tabContextEventSource(")
 
     resume_src = _js_function_decl(js, "_resumeSessionStreamAfterLiveChat")
     assert "S.session.session_id !== sid" in resume_src

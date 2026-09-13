@@ -4190,6 +4190,23 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+function _profileTabUrl(profileName){
+  // Build a ?profile=<name> URL suitable for anchor href.
+  // Preserves existing query/hash params; replaces 'profile' so nested
+  // profiles from a new-tab-to-new-tab chain work correctly.
+  //
+  // #6559: never embed a tab_context here. This link names profile <B> but the
+  // token would be the CURRENT tab's, bound to profile A — the target tab would
+  // then resolve every request to A, because tab context outranks the cookie.
+  // The opened tab issues its own context bound to B during boot.
+  if(typeof window==='undefined'||!window.location) return '?'+new URLSearchParams({profile:profileName}).toString();
+  try{
+    const current=new URL(window.location.href);
+    current.searchParams.set('profile',profileName);
+    current.searchParams.delete('tab_context');
+    return current.pathname+(current.search||'')+(current.hash||'');
+  }catch(_e){return '?'+new URLSearchParams({profile:profileName}).toString();}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
@@ -6189,7 +6206,7 @@ function ensureSessionEventsSSE(){
   if(_sessionEventsSSE) return;
   try{
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
-    _sessionEventsSSE = new EventSource('api/sessions/events');
+    _sessionEventsSSE = _tabContextEventSource('api/sessions/events');
     _sessionEventsSSE.onopen = () => {
       _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
@@ -6220,7 +6237,14 @@ function ensureSessionEventsSSE(){
       _sessionEventsReconnectAttempt = Math.min(_sessionEventsReconnectAttempt + 1, 6);
       _sessionEventsReconnectTimer = setTimeout(() => {
         _sessionEventsReconnectTimer = 0;
-        ensureSessionEventsSSE();
+        // #6559: the stream may have been refused because this tab's profile
+        // context expired. Reissue before reconnecting, or the retry reopens
+        // against the same dead token forever.
+        // A failed reissue leaves this tab with no context; reconnecting then
+        // would open the stream against the shared cookie's profile.
+        void _revalidateTabContextAfterSseError().then((hasContext) => {
+          if (hasContext) ensureSessionEventsSSE();
+        });
       }, delayMs);
     };
   }catch(e){
@@ -6293,7 +6317,7 @@ async function probeGatewaySSEStatus(){
   if(_gatewayProbeInFlight || !window._showCliSessions) return;
   _gatewayProbeInFlight = true;
   try{
-    const resp = await fetch(new URL('api/sessions/gateway/stream?probe=1', document.baseURI || location.href).href, { credentials:'same-origin' });
+    const resp = await _tabContextFetch(new URL('api/sessions/gateway/stream?probe=1', document.baseURI || location.href).href, { credentials:'same-origin' });
     const data = await resp.json().catch(() => ({}));
     if(resp.ok && data.watcher_running){
       stopGatewayPollFallback();
@@ -6339,7 +6363,7 @@ function startGatewaySSE(){
   // saves connection pool slots (#4151).
   if(_sidebarSseBackgrounded()) return;
   try{
-    _gatewaySSE = new EventSource('api/sessions/gateway/stream');
+    _gatewaySSE = _tabContextEventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
       try{
         const data = JSON.parse(ev.data);
@@ -6403,7 +6427,11 @@ function startGatewaySSE(){
         try{if(_gatewaySSE.readyState!==2)_gatewaySSE.close();}catch(_){ }
         _gatewaySSE = null;
       }
-      void probeGatewaySSEStatus();
+      // #6559: reissue a stale per-tab profile context before the probe
+      // decides whether to reopen the stream.
+      void _revalidateTabContextAfterSseError().then((hasContext) => {
+        if (hasContext) probeGatewaySSEStatus();
+      });
     };
   }catch(e){
     void probeGatewaySSEStatus();

@@ -153,6 +153,11 @@ const document = {
 };
 const window = { _botName: 'Hermes', _defaultModel: null, _activeProvider: null };
 function fetch(url, opts) { calls.fetches.push({url: String(url), body: opts && opts.body || ''}); return Promise.resolve({ok: true}); }
+// ui.js's real transport for profile-sensitive requests (#6559). This driver
+// has no tab-context machinery loaded, so it falls back to the local fetch()
+// shim above exactly as the real _profileFetch() does when _tabContextFetch
+// is undefined.
+function _profileFetch(url, opts) { return fetch(url, opts); }
 
 for (const name of [
   'assistantDisplayName',

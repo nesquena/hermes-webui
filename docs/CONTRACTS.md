@@ -78,6 +78,85 @@ contributor guidance; it does not change runtime behavior or CI gates.
   proof gates. Prefer the RFC's **Authoritative emitted events** table (live
   `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
   writing clients against current source.
+- [`Per-tab profile context (#6559)`](../api/profiles.py):
+  implemented opaque server-issued tab context for simultaneous profile tabs.
+  A short-lived random token is issued by `GET /api/profile/tab-context`,
+  stored in the client's `sessionStorage`, and sent as `?tab_context=<token>`
+  on every API and SSE request. `resolve_profile_with_tab_context()` resolves
+  the token to the profile it was issued for, ahead of the browser-wide
+  `hermes_profile` cookie. Tokens expire after 5 minutes of inactivity
+  (refreshed on each use). The query parameter is redacted from access-log
+  output. Start here for any work that touches multi-tab profile isolation,
+  tab context lifecycle, or the profile resolution priority chain. The
+  contract in force:
+  - **Error semantics, not silent fallback.** A request that supplies a
+    `tab_context` the server cannot resolve is answered
+    `409 {"error": "tab_context_invalid"}` and is NEVER served under the
+    cookie profile — falling back is how a dormant tab silently resumes as
+    whoever the shared cookie currently names. A request that supplies no
+    `tab_context` keeps the historical cookie behaviour. The reissue endpoint
+    itself is exempt, since it is the recovery path.
+  - **Client recovery, fail-closed.** `api()` in `static/workspace.js` detects
+    that error, drops the dead token, reissues a context bound to the tab's own
+    active profile, and retries the request once. If the reissue FAILS the tab
+    does not revert to "no token": it stays blocked, so the next request
+    retries the reissue and, failing that, is refused
+    (`tab_context_blocked`) rather than sent bare — a request with no token is
+    served under the shared cookie, which is the downgrade being prevented.
+    The declared profile name survives the clear; a reissue that has forgotten
+    which profile the tab belongs to would itself fall back to the cookie.
+    SSE reconnect paths call `_revalidateTabContextAfterSseError()` before
+    reopening; it reports success only when a token is actually stored after
+    the probe, so a failed recovery cannot license a cookie-scoped reconnect.
+  - **Reissue binding.** The client stores the profile it believes it is
+    running as alongside the token (`hermes-tab-profile-ctx-profile`) and
+    declares it as `GET /api/profile/tab-context?profile=<name>`. The server
+    validates the name against its own profile list (`is_known_profile_name`,
+    unknown → `400 {"error": "unknown_profile"}`) and binds the token to it.
+    Without a declared profile the endpoint falls back to
+    `get_active_profile_name()`. Binding a reissue to the cookie would undo
+    the isolation: an expired tab running profile B would come back as A.
+  - **No token in profile links.** `_profileTabUrl()` never embeds a
+    `tab_context`; a link that names profile B must not carry the current
+    tab's token, which is bound to A.
+  - **Raw transports carry the context too.** `api()` is the client for JSON
+    endpoints, but call sites that need the `Response` itself (TTS audio,
+    media/diff previews, uploads, `/api/models`, `/api/session/update`,
+    `/api/chat/cancel`, transcription, the gateway probe, background-task
+    polling) go through `_tabContextFetch()` in `static/workspace.js` — the
+    one raw-transport primitive, which attaches the token, recovers a refused
+    context and honours the same fail-closed gate. `static/ui.js` reaches it
+    through the single `_profileFetch()` delegator, because `share.html` loads
+    `ui.js` without `workspace.js` and a public share page has no profile
+    identity to carry. Exempt, by nature rather than by omission: `/health`
+    probes and external sidecar health URLs (process-scoped), `login.js` (runs
+    before any profile context exists), `share.js`, `sw.js` (a service worker
+    has no `sessionStorage` and passes every `/api/` request straight to the
+    network), and the issuance request itself, which must not carry the token
+    it is replacing. `api/terminal/close` on `beforeunload` attaches the token
+    but cannot recover — the document is going away.
+  - **Boot ordering: binding precedes the first profile-sensitive request.**
+    Nothing profile-sensitive may run before the tab is bound. Boot's first
+    act is `_ensureTabContextForBoot()` — before `/api/settings`, before
+    `/api/profile/active` — with the `?profile=<B>` target parsed from the URL
+    (any inherited, opener-copied `sessionStorage` context having been dropped
+    at script-parse time). Tabs without `?profile=` bind too, to the
+    cookie-resolved profile. **Fail-closed:** if the binding cannot be
+    obtained, boot STOPS rather than letting the first requests fall through
+    to the shared cookie; the single recoverable case is a target the server
+    does not know (`unknown_profile`), where the tab binds to its own profile
+    and continues, as it already did for a malformed `?profile=` value. Because
+    the tab boots already bound to B, the later `switchToProfile(B)` is
+    normally a no-op; it remains for the paths where the resolved profile still
+    differs. The issue response also reports `active_profile` — what the
+    request resolved to before binding — so boot can tell "this tab moved to
+    another profile" (and must not restore the browser-wide saved session,
+    #5682) from "it was already there". Any code path that changes a tab's own
+    active profile must rebind the context, because the context outranks the
+    cookie.
+  - **Single EventSource chokepoint.** `_tabContextEventSource()` is the only
+    place `static/` constructs an `EventSource`, so no stream URL can silently
+    lose the tab context.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

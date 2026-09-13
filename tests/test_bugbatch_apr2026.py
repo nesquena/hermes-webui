@@ -165,11 +165,11 @@ def test_590_transcribing_status_shown_before_fetch():
     assert transcribe_fn_start != -1, "_transcribeBlob not found in boot.js"
     fn_body = BOOT_JS[transcribe_fn_start:transcribe_fn_start + 600]
     status_pos = fn_body.find("setComposerStatus('Transcribing")
-    fetch_pos  = fn_body.find("await fetch(")
+    fetch_pos  = fn_body.find("await _tabContextFetch(")
     assert status_pos != -1, (
         "setComposerStatus('Transcribing…') must be called before the fetch in _transcribeBlob"
     )
-    assert fetch_pos != -1, "await fetch not found in _transcribeBlob"
+    assert fetch_pos != -1, "await _tabContextFetch not found in _transcribeBlob"
     assert status_pos < fetch_pos, (
         "setComposerStatus('Transcribing…') must appear before 'await fetch' "
         "so the UI shows a spinner immediately on stop (#590)"

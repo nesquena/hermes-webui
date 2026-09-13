@@ -118,6 +118,12 @@ globalThis.fetch = (url, opts) => {
     json: () => Promise.resolve({ ok: false, cancelled: false, stream_id: 'stream-1' }),
   });
 };
+// cancelSessionStream() (boot.js) sends its cancel request through
+// _tabContextFetch() (#6559), the workspace.js primitive that attaches this
+// tab's profile context. This harness has no tab-context machinery loaded, so
+// it falls back to the local fetch() shim above exactly as the real
+// _tabContextFetch() does when no context helpers are available.
+globalThis._tabContextFetch = (url, opts) => globalThis.fetch(url, opts);
 
 __CANCEL_SESSION_STREAM_SRC__
 

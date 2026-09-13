@@ -14640,6 +14640,33 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/profile/tab-context":
+        # Issue a per-tab profile context (#6559). A client that already knows
+        # which profile its tab is running as declares it with ?profile=<name>;
+        # the token is then bound to THAT profile instead of to whatever the
+        # browser-wide cookie currently resolves to. Binding a reissue to the
+        # cookie is exactly the leak this endpoint exists to close: an expired
+        # tab running profile B would come back as profile A.
+        from api import profiles as profiles_api
+        # The profile this request resolves to WITHOUT the requested binding —
+        # i.e. what the browser-wide cookie names. The client needs it to tell
+        # "this tab moved to another profile" from "it was already there";
+        # boot uses that to decide whether the browser-wide saved session
+        # belongs to this tab's profile (#5682).
+        current_profile = profiles_api.get_active_profile_name()
+        requested_profile = (parse_qs(parsed.query).get("profile") or [""])[0].strip()
+        if requested_profile:
+            if not profiles_api.is_known_profile_name(requested_profile):
+                return j(handler, {"error": "unknown_profile"}, status=400)
+            bound_profile = requested_profile
+        else:
+            bound_profile = current_profile
+        token = profiles_api.issue_tab_context(bound_profile)
+        return j(
+            handler,
+            {"token": token, "profile": bound_profile, "active_profile": current_profile},
+        )
+
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         return j(handler, _gateway_status_payload())

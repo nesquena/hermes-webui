@@ -344,7 +344,7 @@ def test_boot_js_media_recorder_fallback_posts_to_transcribe_api():
     """Desktop fallback must send recorded audio to /api/transcribe for transcription."""
     js, _ = get_text("/static/boot.js")
     assert 'api/transcribe' in js
-    assert 'fetch(' in js
+    assert '_tabContextFetch(' in js
 
 
 def test_boot_js_prefers_server_side_stt_by_default():
@@ -353,7 +353,7 @@ def test_boot_js_prefers_server_side_stt_by_default():
     assert "const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);" in js
     assert "let _serverSttAvailable=false" in js
     assert "_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):" in js
-    assert "fetch('api/transcribe/capability'" in js
+    assert "_tabContextFetch(new URL('api/transcribe/capability'" in js
 
 
 def test_boot_js_no_server_stt_first_click_uses_browser_speech_recognition():
