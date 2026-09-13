@@ -7770,7 +7770,64 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
             text = str(preview)
     except Exception:
         pass
-    return text[:limit]
+    # Keep enough lookahead for a credential that starts near the display
+    # boundary, then cap the redacted result to the public preview limit.
+    return _redact_text(text[:limit + 512])[:limit]
+
+
+def _canonical_tool_result_is_error(tool_name, function_result, *, detector=None) -> bool:
+    """Project the Agent's canonical tool-failure classification into WebUI.
+
+    Structured callbacks may carry a result object while the Agent classifier
+    accepts its serialized tool-result form. Preserve multimodal objects as-is
+    (the Agent deliberately treats those as successful) and serialize other
+    JSON-shaped values before classification. A missing or incompatible older
+    Agent must not break completion delivery, so classification failure keeps
+    the historical non-error default.
+    """
+    if detector is None:
+        try:
+            from agent.display import _detect_tool_failure as detector
+        except (ImportError, AttributeError):
+            return False
+
+    candidate = function_result
+    if isinstance(function_result, (dict, list, tuple)) and not (
+        isinstance(function_result, dict) and function_result.get('_multimodal') is True
+    ):
+        try:
+            candidate = json.dumps(function_result, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            candidate = str(function_result)
+
+    try:
+        classified = detector(str(tool_name or ''), candidate)
+        return bool(classified[0] if isinstance(classified, tuple) else classified)
+    except Exception:
+        logger.debug('Failed to classify structured tool result', exc_info=True)
+        return False
+
+
+def _settle_live_tool_completion(
+    tool_calls,
+    *,
+    tool_call_id,
+    name,
+    snippet,
+    is_error,
+) -> bool:
+    """Settle the matching live tool record with one authoritative status."""
+    for tool_call in reversed(tool_calls or []):
+        if not isinstance(tool_call, dict) or tool_call.get('done'):
+            continue
+        if tool_call.get('tid') == tool_call_id or (
+            not tool_call.get('tid') and tool_call.get('name') == name
+        ):
+            tool_call['done'] = True
+            tool_call['snippet'] = snippet
+            tool_call['is_error'] = bool(is_error)
+            return True
+    return False
 
 
 def _truncate_tool_args(args, limit: int = 6) -> dict:
@@ -7855,6 +7912,15 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             tool_msg_sequence.append(seq)
 
     live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get('name') and tc.get('name') != 'clarify']
+    live_by_tid = {
+        str(tc.get('tid')): tc
+        for tc in live
+        if tc.get('tid')
+    }
+    for tool_call in tool_calls:
+        live_match = live_by_tid.get(str(tool_call.get('tid') or ''))
+        if live_match is not None and live_match.get('is_error') is not None:
+            tool_call['is_error'] = bool(live_match.get('is_error'))
     if live:
         for seq_idx, seq in enumerate(tool_msg_sequence):
             if seq.get('resolved'):
@@ -7862,13 +7928,16 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if seq_idx >= len(live):
                 break
             live_tc = live[seq_idx]
-            tool_calls.append({
+            persisted_call = {
                 'name': live_tc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
-            })
+            }
+            if live_tc.get('is_error') is not None:
+                persisted_call['is_error'] = bool(live_tc.get('is_error'))
+            tool_calls.append(persisted_call)
 
     return tool_calls
 
@@ -10244,21 +10313,22 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
-                        for live_tc in reversed(_live_tool_calls):
-                            if live_tc.get('done'):
-                                continue
-                            if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
-                                live_tc['done'] = True
-                                live_tc['snippet'] = result_snippet
-                                break
+                        is_error = _canonical_tool_result_is_error(name, function_result)
+                        _settle_live_tool_completion(
+                            _live_tool_calls,
+                            tool_call_id=tool_call_id,
+                            name=name,
+                            snippet=result_snippet,
+                            is_error=is_error,
+                        )
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
-                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                if shared_tc.get('done'):
-                                    continue
-                                if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
-                                    shared_tc['done'] = True
-                                    shared_tc['snippet'] = result_snippet
-                                    break
+                            _settle_live_tool_completion(
+                                STREAM_LIVE_TOOL_CALLS[stream_id],
+                                tool_call_id=tool_call_id,
+                                name=name,
+                                snippet=result_snippet,
+                                is_error=is_error,
+                            )
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
                             'event_type': 'tool.completed',
@@ -10266,7 +10336,7 @@ def _run_agent_streaming(
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
+                            'is_error': is_error,
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
