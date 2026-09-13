@@ -5,6 +5,11 @@ def test_format_wakeup_prompt_skips_empty_event():
     assert format_wakeup_prompt({}) is None
 
 
+def test_format_wakeup_prompt_skips_whitespace_only_completion():
+    for command in (" ", "\t", "\n", "\r", "\r\n", " \t\r\n "):
+        assert format_wakeup_prompt({"command": command}) is None
+
+
 def test_format_wakeup_prompt_skips_non_dict_event():
     assert format_wakeup_prompt(None) is None
     assert format_wakeup_prompt(42) is None
@@ -133,7 +138,20 @@ def test_format_wakeup_prompt_keeps_normal_completion():
         "output": "done",
     }
     result = format_wakeup_prompt(evt)
-    assert result is not None
-    assert "Background process proc_abc completed" in result
-    assert "Command: sleep 1" in result
-    assert "Output:\ndone" in result
+    assert result == (
+        "[IMPORTANT: Background process proc_abc completed (exit_code=0).\n"
+        "Command: sleep 1\nOutput:\ndone]"
+    )
+
+
+def test_format_wakeup_prompt_keeps_single_line_watch_match():
+    assert format_wakeup_prompt({
+        "type": "watch_match",
+        "session_id": "w1",
+        "command": "tail -f app.log",
+        "pattern": "ERROR.*timeout",
+        "output": "ERROR timeout\n",
+    }) == (
+        '[IMPORTANT: Background process w1 matched watch pattern "ERROR.*timeout".\n'
+        "Command: tail -f app.log\nMatched output:\nERROR timeout\n]"
+    )

@@ -41,6 +41,7 @@ this module routes them to the same listener so the frontend's single
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
@@ -526,15 +527,22 @@ def _truncate(text: str, limit: int) -> str:
 def format_wakeup_prompt(evt: object) -> str | None:
     """Build the synthetic [IMPORTANT: …] message the agent will see.
 
-    Mirrors ``cli._format_process_notification`` so wakeup payloads look the
-    same in CLI and WebUI sessions.
+    Legacy single-line output mirrors ``cli._format_process_notification``.
+    Multiline commands use WebUI's ``Command JSON:`` field to keep its inverse
+    grammar unambiguous.
     """
     if not isinstance(evt, dict) or not evt:
         return None
 
     evt_type = evt.get("type", "completion")
     sid = str(evt.get("session_id") or "").strip()
-    cmd = str(evt.get("command") or "").strip()
+    cmd = str(evt.get("command") or "")
+    # JSON keeps multiline commands on one physical line, clear of output delimiters.
+    if "\r" in cmd or "\n" in cmd:
+        command_field = f"Command JSON: {json.dumps(cmd)}"
+    else:
+        cmd = cmd.strip()
+        command_field = f"Command: {cmd}"
     # The current server-side wakeup drain drops global watch-overflow events
     # before this formatter because they intentionally carry no session_key.
     # Keep this branch defensive so any future routable overflow summary is not
@@ -551,7 +559,7 @@ def format_wakeup_prompt(evt: object) -> str | None:
         sup = evt.get("suppressed", 0)
         body = (
             f"[IMPORTANT: Background process {sid} matched watch pattern \"{pat}\".\n"
-            f"Command: {cmd}\n"
+            f"{command_field}\n"
             f"Matched output:\n{out}"
         )
         if sup:
@@ -579,7 +587,7 @@ def format_wakeup_prompt(evt: object) -> str | None:
     if evt_type != "completion":
         return None
 
-    if not (sid or cmd or "exit_code" in evt or evt.get("output")):
+    if not (sid or cmd.strip() or "exit_code" in evt or evt.get("output")):
         return None
 
     # Default: completion event
@@ -587,7 +595,7 @@ def format_wakeup_prompt(evt: object) -> str | None:
     out = _truncate(evt.get("output", ""), 4000)
     return (
         f"[IMPORTANT: Background process {sid} completed (exit_code={exit_code}).\n"
-        f"Command: {cmd}\n"
+        f"{command_field}\n"
         f"Output:\n{out}]"
     )
 
