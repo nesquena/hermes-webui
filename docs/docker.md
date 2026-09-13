@@ -297,9 +297,13 @@ services:
       # a registered provider. Set DASHBOARD_PASSWORD in your .env.
       - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${DASHBOARD_USER:-admin}
       - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
-      # Gateway API key: the agent opens port 8642 only when this is
-      # a usable value (>=16 chars) — it is what the WebUI talks to.
-      - API_SERVER_KEY=${API_SERVER_KEY:-}
+      # Gateway API (port 8642): the listener must be enabled AND bound
+      # off-loopback inside the container, otherwise the WebUI in the sibling
+      # container cannot reach http://hermes-agent:8642. The key (>=16 chars)
+      # is what authenticates the WebUI health probe and Tasks calls.
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY:?set a >=16-char API_SERVER_KEY in .env}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -324,7 +328,7 @@ services:
       # Same gateway over the compose network, authenticated with the
       # matching key, so the health pill and the Tasks surfaces work.
       - HERMES_API_URL=http://hermes-agent:8642
-      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:?set a >=16-char API_SERVER_KEY in .env}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -344,9 +348,10 @@ by its own basic-auth provider — the browser will prompt for the `DASHBOARD_US
 `DASHBOARD_PASSWORD` you set. `API_SERVER_KEY` does not cover the dashboard; it
 guards only the gateway API on port 8642.
 Set `API_SERVER_KEY` (a random string of at least 16 characters) in `.env`
-before `docker compose up`: without it the agent leaves port 8642 closed and
-the WebUI reports the agent gateway as unreachable in System Settings and in
-the Tasks panel. `HERMES_API_URL` together with the matching
+before `docker compose up`: without it — or without `API_SERVER_ENABLED=true`
+and `API_SERVER_HOST=0.0.0.0`, which the snippet above sets — the agent leaves
+port 8642 closed and the WebUI reports the agent gateway as unreachable in
+System Settings and in the Tasks panel. `HERMES_API_URL` together with the matching
 `HERMES_WEBUI_GATEWAY_API_KEY` is what points the UI at that gateway and
 authenticates its health probe.
 Check `hermes gateway run --help` for the exact flag names for your agent release —
