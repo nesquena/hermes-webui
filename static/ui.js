@@ -13606,6 +13606,117 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+// -- Live activity-scene repaint memo (streaming frame budget) --------------
+// renderLiveAnchorActivityScene repaints the live worklog by tearing the whole
+// row list down (list.innerHTML='' / node.remove()) and rebuilding every row,
+// bracketed by _captureMessageScrollSnapshot() before and
+// _restoreMessageScrollSnapshotSameFrame() + _restoreLiveAnchorScrollSnapshot-
+// AfterRebuild() after. Both brackets READ layout (scrollHeight / clientHeight /
+// getBoundingClientRect) immediately around those DOM writes, so every call
+// forces a synchronous layout of the ENTIRE transcript -- cost that scales with
+// the whole session, not with what changed.
+//
+// During a live turn the same scene is REQUESTED far more often than it
+// changes. One _doRender asks twice (_renderLiveThinking -> updateThinking ->
+// appendThinking -> here, then _upsertAnchorProcessProse -> _renderAnchorLive-
+// Scene -> here), and every `reasoning` SSE event asks again. Measured on a
+// 2000-message session with a live streaming turn: 26.4 repaints/s against a
+// 15 fps render throttle, 49% of wall-clock inside this function, of which
+// 39% was the scroll capture/restore reflow pairs alone -- and roughly half of
+// those repaints produced byte-identical DOM.
+//
+// The repaint is a pure function of (mode, ids, rendering rows, _showThinking,
+// worklog-open default, turn start). When those inputs match the scene we last
+// PAINTED, the rebuild is provably a no-op, so skip it and return the same
+// result the caller got last time (callers such as _upsertAnchorReasoning use
+// the boolean to decide whether to fall back to the legacy thinking card, so
+// the return value must stay truthful).
+//
+// Fail closed: the skip is only taken when the exact turn element and row
+// container we painted are still connected, still owned by this stream, and
+// still hold the same number of children. Anything that touches the live DOM
+// behind our back (removeThinking(), _dedupeLiveProcessedWorklogAnchors(), a
+// renderMessages() rebuild, a session switch, a snapshot restore) invalidates
+// the memo and the full repaint runs.
+let _liveAnchorSceneRepaintMemo=null;
+function _liveAnchorSceneRepaintKey(sceneMode, streamId, opts){
+  return [
+    String(sceneMode||''),
+    String(streamId||''),
+    String((opts&&opts.sessionId)||''),
+    String((typeof S!=='undefined'&&S.session&&S.session.session_id)||''),
+    String((typeof S!=='undefined'&&S.activeStreamId)||''),
+    (typeof window!=='undefined'&&window._showThinking===false)?'0':'1',
+    (typeof _worklogDetailsExpandedDefault==='function'&&_worklogDetailsExpandedDefault())?'1':'0',
+    String((typeof S!=='undefined'&&S.session&&S.session.pending_started_at)||''),
+  ].join('|');
+}
+// Structural compare rather than a hand-picked field list: the renderers read a
+// wide, mode-dependent slice of each row (text, tool.*, thinking.*, payload.*,
+// group.*, timestamps), and an omitted field would silently freeze a live row.
+// Row text/payload strings are shared by reference with the anchor registry, so
+// the common case short-circuits on `===`. Depth-bounded and fail-closed: an
+// unexpectedly deep or non-plain value forces the repaint.
+function _liveAnchorSceneValueUnchanged(a, b, depth){
+  if(a===b) return true;
+  if(depth>8) return false;
+  if(a===null||b===null||a===undefined||b===undefined) return false;
+  const type=typeof a;
+  if(type!==typeof b) return false;
+  if(type!=='object') return type==='number'&&Number.isNaN(a)&&Number.isNaN(b);
+  const aIsArray=Array.isArray(a);
+  if(aIsArray!==Array.isArray(b)) return false;
+  if(aIsArray){
+    if(a.length!==b.length) return false;
+    for(let i=0;i<a.length;i++){
+      if(!_liveAnchorSceneValueUnchanged(a[i],b[i],depth+1)) return false;
+    }
+    return true;
+  }
+  const proto=Object.getPrototypeOf(a);
+  if(proto!==null&&proto!==Object.prototype) return false;
+  if(Object.getPrototypeOf(b)!==proto) return false;
+  const keys=Object.keys(a);
+  if(keys.length!==Object.keys(b).length) return false;
+  for(const key of keys){
+    if(!Object.prototype.hasOwnProperty.call(b,key)) return false;
+    if(!_liveAnchorSceneValueUnchanged(a[key],b[key],depth+1)) return false;
+  }
+  return true;
+}
+// Returns the remembered result when the repaint can be skipped, `undefined`
+// when it must run. Never exposes the memo itself, so renderLiveAnchorActivity-
+// Scene and its transparent sibling reach the memo only through typeof-guarded
+// function calls -- the same partial-extraction contract the rest of this
+// renderer already honours for _moveLiveRunStatusToTurnEnd, scrollIfPinned, etc.
+function _liveAnchorSceneRepaintSkip(key, rows){
+  const memo=_liveAnchorSceneRepaintMemo;
+  if(!memo||memo.key!==key) return undefined;
+  const turn=$('liveAssistantTurn');
+  if(!turn||turn!==memo.turn||turn.isConnected===false) return undefined;
+  const container=memo.container;
+  if(!container||container.isConnected===false) return undefined;
+  if(container.childElementCount!==memo.childElementCount) return undefined;
+  if(String((turn.getAttribute&&turn.getAttribute('data-anchor-stream-id'))||'')!==memo.streamId) return undefined;
+  if(!_liveAnchorSceneValueUnchanged(memo.rows,rows,0)) return undefined;
+  return memo.result;
+}
+function _liveAnchorSceneRepaintRemember(key, rows, streamId, turn, container, result){
+  if(!result||!turn||!container){
+    _liveAnchorSceneRepaintMemo=null;
+    return result;
+  }
+  _liveAnchorSceneRepaintMemo={
+    key,
+    rows,
+    streamId:String(streamId||''),
+    turn,
+    container,
+    childElementCount:container.childElementCount,
+    result,
+  };
+  return result;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -13637,6 +13748,13 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
   const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  // Identical to the scene already painted -> the teardown/rebuild below would
+  // reproduce the same DOM at the cost of two full-transcript reflows. Skip it.
+  const repaintKey=(typeof _liveAnchorSceneRepaintKey==='function')
+    ? _liveAnchorSceneRepaintKey(sceneMode,streamId,opts) : '';
+  const repaintSkip=(typeof _liveAnchorSceneRepaintSkip==='function')
+    ? _liveAnchorSceneRepaintSkip(repaintKey,rows) : undefined;
+  if(repaintSkip!==undefined) return repaintSkip;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -13682,7 +13800,10 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
-  return true;
+  // Memo the element the rows actually live in (the worklog list), so a row
+  // removed behind our back changes childElementCount and invalidates the skip.
+  if(typeof _liveAnchorSceneRepaintRemember!=='function') return true;
+  return _liveAnchorSceneRepaintRemember(repaintKey,rows,streamId,turn,(group&&_toolWorklogListEl(group))||group,true);
 }
 function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   opts=opts||{};
@@ -13691,6 +13812,13 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(streamId&&S.activeStreamId!==streamId) return false;
   const rows=_anchorSceneRowsForRendering(scene,{settled:false});
   if(!rows.length) return false;
+  // Same repaint memo as the compact path -- both modes rebuild from the same
+  // rows and pay the same capture/restore reflow pair, so both need the guard.
+  const repaintKey=(typeof _liveAnchorSceneRepaintKey==='function')
+    ? _liveAnchorSceneRepaintKey('transparent_stream',streamId,opts) : '';
+  const repaintSkip=(typeof _liveAnchorSceneRepaintSkip==='function')
+    ? _liveAnchorSceneRepaintSkip(repaintKey,rows) : undefined;
+  if(repaintSkip!==undefined) return repaintSkip;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -13788,7 +13916,8 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
-  return !!renderedRows.length;
+  if(typeof _liveAnchorSceneRepaintRemember!=='function') return !!renderedRows.length;
+  return _liveAnchorSceneRepaintRemember(repaintKey,rows,streamId,turn,blocks,!!renderedRows.length);
 }
 
 function _transparentLiveRowKey(node, streamId){
