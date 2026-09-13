@@ -7693,6 +7693,15 @@ function _attachProjectQuickCreateButton(chip, project){
 }
 
 
+// Always-visible quick-switch roster, rendered between the Profiles tab
+// (full list) and the Projects filter bar in the chat sidebar.
+const PINNED_BOTS=[
+  {name:'diana',label:'Diana'},
+  {name:'lamb',label:'Lamb'},
+  {name:'scout-deep',label:'Scout'},
+  {name:'techops',label:'TechOps'},
+];
+
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
   // PREVIOUS profile's rows until /api/sessions resolves, so any unrelated caller
@@ -7803,6 +7812,22 @@ function renderSessionListFromCache(){
       sourceTabs.appendChild(btn);
     }
     list.appendChild(sourceTabs);
+  }
+  // Pinned bots — always-visible quick switch for the core bot roster,
+  // between the Profiles tab (full list) and the Projects filter below.
+  {
+    const pinnedBar=document.createElement('div');
+    pinnedBar.className='pinned-bots-bar';
+    for(const bot of PINNED_BOTS){
+      const chip=document.createElement('button');
+      chip.type='button';
+      chip.className='pinned-bot-chip'+(bot.name===S.activeProfile?' active':'');
+      chip.textContent=bot.label;
+      chip.title='Switch to '+bot.label;
+      chip.onclick=()=>{ if(bot.name!==S.activeProfile) switchToProfile(bot.name); };
+      pinnedBar.appendChild(chip);
+    }
+    list.appendChild(pinnedBar);
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).

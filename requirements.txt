@@ -16,3 +16,12 @@ cryptography>=42.0
 # The workspace file routes return 503 with an install hint when they are absent.
 # Install them only if you want .docx/.xlsx/.pptx preview support:
 #   pip install python-docx>=1.1.2 openpyxl>=3.1.5 python-pptx>=1.0.2
+#
+# OPTIONAL: Web Push notifications (wakes a backgrounded/closed PWA install for
+# a time-sensitive prompt, e.g. an execute_code approval -- local
+# Notification()/showNotification() calls can't do this, they need the page or
+# its service worker to already be alive) need `pywebpush`. VAPID keypair
+# generation alone only needs `cryptography` above, already required; only the
+# actual send (api/push_notifications.py) is gated on this and no-ops silently
+# without it. Install it only if you want push-woken approval alerts:
+#   pip install pywebpush>=2.0
