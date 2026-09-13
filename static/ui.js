@@ -7546,6 +7546,7 @@ function _gatewayModelWarningText(routing){
 }
 function _latestGatewayRoutingForSession(session){
   if(!session)return null;
+  const fromHistory=!session.gateway_routing;
   const routing=session.gateway_routing||(Array.isArray(session.gateway_routing_history)&&session.gateway_routing_history.length?session.gateway_routing_history[session.gateway_routing_history.length-1]:null);
   if(!routing)return null;
   if(routing.requested_model&&session.model&&String(routing.requested_model)!==String(session.model)){
@@ -7554,6 +7555,8 @@ function _latestGatewayRoutingForSession(session){
   // Canonical provider identity matching: case-insensitive, preserves legacy/empty
   const reqProvider=String(routing.requested_provider||'').trim().toLowerCase();
   const sessProvider=String(session.model_provider||'').trim().toLowerCase();
+  // Fail closed on provider-less history candidate when active route has an explicit provider
+  if(fromHistory && sessProvider && !reqProvider) return null;
   if(reqProvider && sessProvider && reqProvider !== sessProvider) return null;
   return routing;
 }

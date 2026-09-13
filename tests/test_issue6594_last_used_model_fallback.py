@@ -444,6 +444,67 @@ def test_chat_start_preparation_route_invalidation_scenarios():
     assert pub_proj.get("last_used_model") is None
     assert pub_proj.get("gateway_routing") is None
 
+    # 4. Composed case: start with gpt-4o/provider-a + legacy provider-less history,
+    # submit direct chat-start for gpt-4o/provider-b, persist/project session,
+    # then run production composer and sidebar formatters.
+    s4 = Session(
+        session_id="chat_start_legacy_history_switch_test",
+        title="Chat Start Legacy History Switch",
+        model="gpt-4o",
+        model_provider="provider-a",
+        last_used_model="gpt-4o-mini",
+        gateway_routing={"used_model": "gpt-4o-mini", "provider": "provider-a", "requested_model": "gpt-4o"},
+        gateway_routing_history=[{"used_model": "gpt-4o-mini", "provider": "provider-a", "requested_model": "gpt-4o"}],
+    )
+    s4.save = MagicMock()
+    with patch("api.routes.register_session_writeback_owner"):
+        routes._prepare_chat_start_session_for_stream(
+            s4,
+            msg="Switch to provider-b for gpt-4o",
+            attachments=[],
+            workspace="/tmp",
+            model="gpt-4o",
+            model_provider="provider-b",
+            stream_id="stream_prov_b_1",
+            defer_save=True,
+        )
+    # Session state updated and invalidated
+    assert s4.model == "gpt-4o"
+    assert s4.model_provider == "provider-b"
+    assert s4.last_used_model is None
+    assert s4.gateway_routing is None
+    assert len(s4.gateway_routing_history) == 1
+    assert s4.gateway_routing_history == [{"used_model": "gpt-4o-mini", "provider": "provider-a", "requested_model": "gpt-4o"}]
+
+    # Project session through public_session_projection
+    proj_s4 = public_session_projection({k: v for k, v in s4.__dict__.items() if not callable(v)})
+    assert proj_s4["model"] == "gpt-4o"
+    assert proj_s4["model_provider"] == "provider-b"
+    assert proj_s4.get("last_used_model") is None
+    assert proj_s4.get("gateway_routing") is None
+    assert proj_s4.get("gateway_routing_history") == [{"used_model": "gpt-4o-mini", "provider": "provider-a", "requested_model": "gpt-4o"}]
+
+    # Run through production composer and sidebar formatters in Node harness
+    composed_script = f"""
+S.session = {json.dumps(proj_s4)};
+elements.modelSelect.value = 'gpt-4o';
+syncModelChip();
+const res = {{
+  chip: elements.composerModelLabel.textContent,
+  sidebar: _formatSessionModelWithGateway(S.session),
+  routing_match: !!_latestGatewayRoutingForSession(S.session),
+  history_len: Array.isArray(S.session.gateway_routing_history) ? S.session.gateway_routing_history.length : 0
+}};
+console.log(JSON.stringify(res));
+"""
+    harness_res = json.loads(_production_event_harness(composed_script))
+    # Both composer and sidebar must show requested provider-b route without provider-a historical failover
+    assert harness_res["routing_match"] is False
+    assert harness_res["chip"] == "Model(gpt-4o)"
+    assert harness_res["sidebar"] == "Model(gpt-4o)"
+    # History remains unchanged
+    assert harness_res["history_len"] == 1
+
 
 def test_production_model_selection_lifecycle_observable_behavior():
     """Test full production sequence: selectModelFromDropdown -> modelSelect.onchange -> syncModelChip -> session update -> in flight."""
@@ -608,9 +669,9 @@ run();
     assert results["provider_route_turn_in_flight"]["chip"] == "Model(gpt-4o)"
     assert results["provider_route_turn_in_flight"]["sidebar"] == "Model(gpt-4o)"
 
-    # Phase 10: Legacy history without requested_provider preserved when model matches
-    assert results["legacy_history_without_requested_provider"]["chip"] == "Model(gpt-4o-mini) via provider-a"
-    assert results["legacy_history_without_requested_provider"]["sidebar"] == "Model(gpt-4o-mini) via provider-a"
+    # Phase 10: Legacy history without requested_provider fails closed when active route has an explicit provider
+    assert results["legacy_history_without_requested_provider"]["chip"] == "Model(gpt-4o)"
+    assert results["legacy_history_without_requested_provider"]["sidebar"] == "Model(gpt-4o)"
 
 
 def test_production_composed_provider_route_dimension_scenarios():
