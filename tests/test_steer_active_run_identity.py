@@ -77,6 +77,38 @@ def test_ambiguous_or_inactive_worker_is_never_steered_or_closed(scene, bad):
     agent._session_db.close.assert_not_called()
 
 
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("invalid", [None, "owner", "run-owner", "missing-owner", "missing-run-owner", "dead", "cancelling"])
+def test_gateway_ownership_is_terminal_before_matching_local_cache(scene, registered, invalid):
+    agent, other, _ = scene
+    agent.session_id = "original"
+    config.ACTIVE_RUNS["run"]["backend"] = "gateway"
+    if not registered:
+        config.AGENT_INSTANCES.pop("run")
+    if invalid == "owner":
+        config.STREAM_SESSION_OWNERS["run"] = "other-session"
+    elif invalid == "run-owner":
+        config.ACTIVE_RUNS["run"]["session_id"] = "other-session"
+    elif invalid == "missing-owner":
+        config.STREAM_SESSION_OWNERS.pop("run")
+    elif invalid == "missing-run-owner":
+        config.ACTIVE_RUNS["run"].pop("session_id")
+    elif invalid == "dead":
+        config.STREAMS.pop("run")
+    elif invalid == "cancelling":
+        config.ACTIVE_RUNS["run"]["phase"] = "cancelling"
+    before = dict(config.SESSION_AGENT_CACHE)
+    expected = ({"accepted": False, "fallback": "gateway_steer_queued", "stream_id": "run"}
+                if invalid is None else
+                {"accepted": False, "fallback": "stream_dead", "stream_id": None})
+    assert steer() == expected
+    agent.steer.assert_not_called()
+    other.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    agent._session_db.close.assert_not_called()
+    assert config.SESSION_AGENT_CACHE == before
+
+
 def test_cache_only_mismatch_does_not_close_an_agent_owned_by_another_run(scene):
     agent, other, _ = scene
     config.AGENT_INSTANCES.pop("run")

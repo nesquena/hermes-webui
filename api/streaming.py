@@ -13213,6 +13213,14 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         owner = cfg.stream_owner_session_id(stream_id)
         with cfg.ACTIVE_RUNS_LOCK:
             run = dict(cfg.ACTIVE_RUNS.get(stream_id) or {})
+        # Gateway owns transport even when no in-process worker is registered.
+        # A reusable local cache entry must never override that authority.
+        if run.get("backend") == "gateway":
+            if (stream_id not in cfg.STREAMS
+                    or owner != sid or run.get("session_id") != sid
+                    or run.get("phase") == "cancelling"):
+                return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+            return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
         if agent is None:
             if ((owner and owner != sid)
                     or (run.get("session_id") and run["session_id"] != sid)
