@@ -244,6 +244,25 @@ EXPECT:
   - No message is sent (no user message appears in chat)
 FAIL: Message sent on Shift+Enter.
 
+### T2.3b: Phone With Stylus Keeps Enter = Newline
+SETUP: A phone whose digitizer exposes a fine pointer as co-existing —
+Galaxy S23/S24/S25 Ultra with the S-Pen, or any phone with a paired
+Bluetooth mouse (check `matchMedia('(any-pointer:fine)').matches` in the
+browser console: it must return true alongside `(pointer:coarse)` true).
+STEPS:
+  1. Open the WebUI on the phone, focus the composer
+  2. Type "Line one"
+  3. Press the keyboard's newline/Enter key (no Shift, no Ctrl)
+  4. Type "Line two"
+EXPECT:
+  - Two lines of text appear in the input box
+  - No message is sent
+FAIL: Message sent on plain Enter. (The co-existing fine pointer used to be
+read as proof of a hardware keyboard, disabling the mobile Enter=newline
+default; only tablet-class screens should fall back to desktop semantics.)
+Note: a tablet with a hardware keyboard must still send on plain Enter —
+re-run T2.2 there to confirm no regression.
+
 ### T2.4: Reload Restores Session
 SETUP: A session exists with at least one exchange (user + assistant).
 STEPS:
