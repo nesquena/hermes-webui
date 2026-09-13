@@ -66,7 +66,7 @@ class TestSessionOwnedRuntimeInvariants:
         normalized = done.replace(" ", "")
         assert (
             "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in normalized
-            or "_setActivePaneIdleIfOwner();" in done
+            or "_setActivePaneIdleIfOwner(source);" in done
         ), (
             "The done handler should only idle composer state through an active-pane guard, "
             "not from background completions owned by another session."
@@ -82,7 +82,7 @@ class TestSessionOwnedRuntimeInvariants:
         normalized = finalize.replace(" ", "")
         assert (
             "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in normalized
-            or "_setActivePaneIdleIfOwner();" in finalize
+            or "_setActivePaneIdleIfOwner(source);" in finalize
         ), (
             "The fallback server-finalize path should use the same active-pane guard as the live done event."
         )

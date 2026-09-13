@@ -100,6 +100,7 @@ function buildRuntime() {
     '_anchor_activity_scene',
   ];
   globalThis._isActiveSession = () => scenario.isActiveSession !== false;
+  globalThis._ownsAttachmentSource = () => true;
   globalThis._isSessionCurrentPane = () => scenario.isSessionCurrentPane !== false;
   globalThis._isSessionActivelyViewed = () => !!scenario.isSessionActivelyViewed;
   globalThis._closeSource = () => calls.push('closeSource');

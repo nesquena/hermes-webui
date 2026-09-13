@@ -179,8 +179,14 @@ def test_restore_settled_session_projects_through_production_path(browser):
               window._latestGoalStatus = null;
               window._isActiveSession = () => true;
               window._isSessionActivelyViewed = () => false;
+              // The extracted production closure normally captures these
+              // attachment-ownership predicates from attachLiveStream().
+              // This harness models the current, unreplaced owner.
+              window._ownsAttachmentSource = () => true;
+              window._ownsAttachmentSourceOrReleasedGeneration = () => true;
               window._clearSource = () => {};
               window._closeSource = () => {};
+              window._closeTransportOnly = () => {};
               window._isSessionCurrentPane = sid => !!S.session && S.session.session_id === sid;
               window._streamFinalized = false;
               window._persistTimer = null;
