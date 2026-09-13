@@ -1903,17 +1903,71 @@ function cmdReasoning(args){
     return true;
   }
   if(EFFORTS.includes(arg)){
-    // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
-    // Takes effect on the NEXT session/turn (agent re-reads config at
-    // construction time), matching CLI semantics where `/reasoning high`
-    // also forces an agent re-init.
-    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+    // Scope the write to the active session, exactly like the composer chip.
+    // Before this, /reasoning <effort> POSTed a bare {effort} and hit the
+    // profile-global default, so a session holding a persisted override kept
+    // its old effort while this toast claimed the new value applied.
+    // _reasoningEffortContext() adds session_id only when a session is active;
+    // with no session there is no override to scope to and the global write is
+    // the correct behaviour (it is what /reasoning does before the first chat).
+    //
+    // These four ui.js symbols are MANDATORY, called directly with no `typeof`
+    // fallback. index.html loads ui.js (1775) before commands.js (1779), both
+    // `defer`, so ui.js has run to completion before this handler can exist. A
+    // fallback here therefore never covers a legitimate load order — it only
+    // covers dependency failure or bundle skew, and in both of those cases the
+    // old fallbacks FAILED OPEN into exactly the two defects this change set
+    // exists to close: a missing context helper POSTed a bare {effort} and
+    // mutated the PROFILE-GLOBAL default, and a missing sequence or predicate
+    // helper applied a superseded chip write and toast. Fail closed instead.
+    //
+    // A missing symbol now raises a ReferenceError. We catch it here rather
+    // than let it escape: messages.js:1494 invokes this handler with no
+    // try/catch, so an escaping throw would abort send() before it clears the
+    // composer and hides the command dropdown, and send() is async and called
+    // unawaited (ui.js:8418) so the throw would surface only as an unhandled
+    // rejection. Report it as a toast and mutate nothing.
+    let payload,key,seq,current;
+    try{
+      const ctx=_reasoningEffortContext();
+      payload=Object.assign({effort:arg},ctx);
+      // Same stale-context guard as the chip POST: a request dispatched from
+      // session A can resolve after the user switches to session B, and applying
+      // it there would poison B's chip and cache. Snapshot the dispatch key and
+      // sequence number now, then discard a superseded response silently — no
+      // chip write, no toast.
+      key=_reasoningEffortQuery();
+      seq=++_reasoningFetchSeq;
+      // Bind the predicate EAGERLY rather than referencing it inside current().
+      // A lazy reference resolves only when the response settles, which is
+      // AFTER the POST has already gone out: the ReferenceError would then fire
+      // inside .then() as an unhandled rejection, having already mutated
+      // server state. Capturing it here moves the failure ahead of dispatch, so
+      // an unavailable predicate sends nothing at all.
+      const isCurrent=_reasoningDispatchIsCurrent;
+      current=function(){return isCurrent(seq,key);};
+    }catch(e){
+      // Fail closed: no /api/reasoning POST, no chip write, and no toast that
+      // claims an effort was saved. The message is a literal, matching the
+      // status branch's '/reasoning — status unavailable' above: a handler
+      // whose purpose is surviving a missing dependency must not itself depend
+      // on t() from i18n.js.
+      showToast(BRAIN+' /reasoning '+arg+' \u2014 unavailable: '
+        +(e&&e.message?e.message:'reasoning helpers missing'));
+      return true;
+    }
+    // Takes effect on the NEXT turn (the agent re-reads its effort at
+    // construction time), matching CLI semantics where `/reasoning high` also
+    // forces an agent re-init.
+    api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
       .then(function(st){
+        if(!current()) return;
         const eff=(st && st.reasoning_effort)||arg;
         showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
         if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff, st||{});
       })
       .catch(function(e){
+        if(!current()) return;
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
       });
     return true;
