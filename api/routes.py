@@ -22142,7 +22142,30 @@ def _read_active_project_context(workspace: Path | None) -> dict:
     return payload
 
 
+def _memory_config_flags():
+    """Return (memory_enabled, user_profile_enabled) from the active profile config.
+
+    Falls back to (True, True) on any error so a broken config doesn't lock
+    the user out of the Memory panel entirely.
+    """
+    config_path = _active_profile_config_path()
+    try:
+        if config_path.exists():
+            cfg = _load_yaml_config_file(config_path)
+            if isinstance(cfg, dict):
+                mem_cfg = cfg.get("memory", {})
+                if isinstance(mem_cfg, dict):
+                    return (
+                        mem_cfg.get("memory_enabled", True),
+                        mem_cfg.get("user_profile_enabled", True),
+                    )
+    except Exception:
+        pass
+    return True, True
+
+
 def _handle_memory_read(handler, parsed=None):
+    memory_enabled, user_profile_enabled = _memory_config_flags()
     try:
         from api.profiles import get_active_hermes_home
 
@@ -22167,12 +22190,12 @@ def _handle_memory_read(handler, parsed=None):
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file and mem_file.exists()
+        if mem_file and mem_file.exists() and memory_enabled
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file and user_file.exists()
+        if user_file and user_file.exists() and user_profile_enabled
         else ""
     )
     soul = (
