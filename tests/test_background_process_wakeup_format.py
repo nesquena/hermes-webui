@@ -5,6 +5,11 @@ def test_format_wakeup_prompt_skips_empty_event():
     assert format_wakeup_prompt({}) is None
 
 
+def test_format_wakeup_prompt_skips_whitespace_only_completion():
+    for command in (" ", "\t", "\n", "\r", "\r\n", " \t\r\n "):
+        assert format_wakeup_prompt({"command": command}) is None
+
+
 def test_format_wakeup_prompt_skips_non_dict_event():
     assert format_wakeup_prompt(None) is None
     assert format_wakeup_prompt(42) is None

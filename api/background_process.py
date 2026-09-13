@@ -587,7 +587,7 @@ def format_wakeup_prompt(evt: object) -> str | None:
     if evt_type != "completion":
         return None
 
-    if not (sid or cmd or "exit_code" in evt or evt.get("output")):
+    if not (sid or cmd.strip() or "exit_code" in evt or evt.get("output")):
         return None
 
     # Default: completion event
