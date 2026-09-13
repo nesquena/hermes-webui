@@ -4433,20 +4433,27 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
-def get_reasoning_status(
+def reasoning_status_for_config(
+    config_data,
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Compute the effective reasoning status from a supplied config dict.
+
+    Same keys and the same provider/model capability + effort-coercion
+    authority as :func:`get_reasoning_status`, but the config data comes from
+    the caller instead of the active profile — used by the profile switch
+    path to resolve the DESTINATION profile's effective reasoning status
+    without mutating process-global state (#7206).
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
-      - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - reasoning_effort: str — COERCED effort for the resolved model/provider
+        ('' = default); raw ``agent.reasoning_effort`` is never exposed
+        verbatim, matching what streaming actually sends.
     """
-    config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
@@ -4498,6 +4505,31 @@ def get_reasoning_status(
         # toggle but not the effort ladder. False hides the chip entirely.
         "supports_thinking_toggle": supports_thinking_toggle,
     }
+
+
+def get_reasoning_status(
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> dict:
+    """Return current reasoning configuration from the active profile's
+    config.yaml — the same source of truth the CLI reads from.
+
+    Delegates to :func:`reasoning_status_for_config` so the /api/profile/switch
+    contract (#7206) shares the exact same coercion authority.
+
+    Keys:
+      - show_reasoning: bool — from ``display.show_reasoning`` (default True)
+      - reasoning_effort: str — COERCED effort ('' = default)
+    """
+    config_data = _load_yaml_config_file(_get_config_path())
+    return reasoning_status_for_config(
+        config_data,
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
 
 
 def _parse_positive_int_config_value(raw) -> int | None:

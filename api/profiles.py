@@ -1750,7 +1750,46 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         'default_model': default_model,
         'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,
+        # Effective reasoning status for the DESTINATION profile — explicit
+        # response contract so the frontend can reseed the reasoning chip the
+        # moment the switch completes (#7206). Computed through the same
+        # provider/model capability + effort-coercion authority as GET
+        # /api/reasoning (reasoning_status_for_config / get_reasoning_status),
+        # but against the destination profile's config.yaml (`cfg` above)
+        # instead of the process-global active config. Only the COERCED
+        # effective effort is exposed — never the raw agent.reasoning_effort,
+        # which could be unsupported for the destination's default model.
+        'reasoning': _destination_reasoning_status(
+            cfg, default_model, default_model_provider, model_cfg
+        ),
     }
+
+
+def _destination_reasoning_status(cfg, default_model, default_model_provider, model_cfg):
+    """Best-effort effective reasoning status for a destination profile.
+
+    Returns None (frontend falls back to the /api/reasoning GET) if the
+    destination config cannot be resolved — the switch itself must never fail
+    because reasoning metadata could not be computed.
+    """
+    try:
+        from api.config import reasoning_status_for_config
+
+        base_url = None
+        if isinstance(model_cfg, dict):
+            base_url = str(model_cfg.get('base_url') or '').strip() or None
+        return reasoning_status_for_config(
+            cfg,
+            model_id=default_model,
+            provider_id=default_model_provider,
+            base_url=base_url,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to resolve destination reasoning status for profile switch",
+            exc_info=True,
+        )
+        return None
 
 
 _SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
