@@ -1014,6 +1014,70 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
     return resolved
 
 
+_DOCKER_PERSISTENT_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def resolve_docker_sandbox_mirror(
+    profile_home: Path,
+    terminal_cfg: dict | None,
+    requested: str,
+) -> tuple[Path, Path, str] | None:
+    """Resolve a persistent Docker container path to its host-side mirror.
+
+    Hermes records paths as ``/root/...`` or ``/workspace/...`` while the
+    persistent Docker backend stores those files below the active profile's
+    ``sandboxes/docker/default`` directory. Only those two container roots are
+    mapped, and the returned target is resolved through the normal workspace
+    containment guard so mirror symlinks cannot escape their mount root.
+    """
+    if not isinstance(terminal_cfg, dict):
+        return None
+    backend = str(
+        terminal_cfg.get("backend") or terminal_cfg.get("env_type") or ""
+    ).strip().lower()
+    if backend != "docker":
+        return None
+
+    persistent = terminal_cfg.get("container_persistent", True)
+    if isinstance(persistent, bool):
+        persistent_enabled = persistent
+    elif isinstance(persistent, (int, float)):
+        persistent_enabled = persistent == 1
+    else:
+        persistent_enabled = (
+            str(persistent).strip().lower() in _DOCKER_PERSISTENT_TRUE_VALUES
+        )
+    if not persistent_enabled:
+        return None
+
+    raw = str(requested or "").strip()
+    if not raw or "\x00" in raw or "\\" in raw:
+        return None
+    parts = raw.lstrip("/").split("/")
+    if not parts or parts[0] not in {"root", "workspace"}:
+        return None
+    if any(part == ".." for part in parts[1:]):
+        return None
+    relative_parts = [part for part in parts[1:] if part not in {"", "."}]
+    relative = "/".join(relative_parts) or "."
+
+    mount_name = "home" if parts[0] == "root" else "workspace"
+    configured_sandbox_dir = terminal_cfg.get("sandbox_dir") or os.getenv(
+        "TERMINAL_SANDBOX_DIR"
+    )
+    sandbox_root = (
+        Path(str(configured_sandbox_dir)).expanduser()
+        if configured_sandbox_dir
+        else Path(profile_home).expanduser() / "sandboxes"
+    )
+    mirror_root = (sandbox_root / "docker" / "default" / mount_name).resolve()
+    try:
+        target = safe_resolve_ws(mirror_root, relative)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return mirror_root, target, parts[0]
+
+
 # ── Race-safe (TOCTOU) anchored open ─────────────────────────────────────────
 # safe_resolve_ws() validates a path, but if callers then re-open by pathname a
 # symlink swapped in AFTER the check could still escape the workspace. To close
