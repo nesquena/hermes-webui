@@ -313,7 +313,11 @@ def test_read_only_source_badge_ui_guards_are_present():
     assert 'data-source-key="claude_code"' in style_css
     assert ".session-item.read-only-session:hover .session-source-chip" in style_css
     assert "Read-only imported sessions cannot be deleted" in routes_py
-    assert "Read-only imported sessions cannot be archived" in routes_py
+    # #6843: archiving a read-only imported row is WebUI-local view state and
+    # now works via _set_state_db_session_archived (a state.db flag flip, no
+    # sidecar materialization) instead of a blanket 400; deletion stays refused
+    # because it would destroy the foreign store's transcript.
+    assert "_set_state_db_session_archived" in routes_py
 
 
 def test_messaging_source_badge_not_gated_on_is_cli_session():
