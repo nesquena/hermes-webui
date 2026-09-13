@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 from unittest.mock import patch
 
+import pytest
+
 import api.agent_sessions as agent_sessions
 import api.routes as routes
 
@@ -57,6 +59,24 @@ def _insert_message(conn, sid, *, timestamp=None, role="user"):
         (f"msg_{sid}_{role}", sid, role, timestamp or time.time()),
     )
     conn.commit()
+
+
+@pytest.mark.parametrize("started_at, expected", [(104.95, True), (103.0, False)])
+def test_continuation_boundary_tolerance(started_at, expected):
+    parent = {
+        "id": "parent",
+        "source": "webui",
+        "ended_at": 105.0,
+        "end_reason": "compression",
+    }
+    child = {
+        "id": "child",
+        "source": "webui",
+        "parent_session_id": "parent",
+        "started_at": started_at,
+    }
+
+    assert agent_sessions._is_continuation_session(parent, child) is expected
 
 
 def test_lineage_report_returns_bounded_read_only_tip_and_hidden_segments(tmp_path):
