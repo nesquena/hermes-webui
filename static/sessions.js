@@ -2477,6 +2477,20 @@ function _externalImportPayload(session) {
   return payload;
 }
 
+// #7549: with the all-profiles sidebar on, a row may belong to a profile other
+// than the active one. The archive endpoint resolves the session against the
+// profile named in the request, so every archive request has to carry the row's
+// own profile — otherwise the server looks the row up under the active profile
+// and answers 404. Mirrors _externalImportPayload() above.
+function _archivePayload(session, archived=true, sessionId=null) {
+  const payload = {session_id: sessionId || (session && session.session_id), archived};
+  if (_showAllProfiles && session && typeof session.profile === 'string' && session.profile) {
+    payload.all_profiles = true;
+    payload.profile = session.profile;
+  }
+  return payload;
+}
+
 function _sidebarSessionProfileName(session){
   const raw=session&&typeof session.profile==='string'?session.profile.trim():'';
   return raw||'';
@@ -4329,7 +4343,7 @@ function _renderBatchActionBar(){
     if(!ok)return;
     try{
       const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
+        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_archivePayload(sessionsById.get(sid)||null,true,sid))});
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
@@ -4862,7 +4876,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_archivePayload(session,archived))});
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
@@ -4975,7 +4989,7 @@ function _openSessionActionMenu(session, anchorEl){
       async()=>{
         closeSessionActionMenu();
         try{
-          await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:true})});
+          await api('/api/session/archive',{method:'POST',body:JSON.stringify(_archivePayload(session,true))});
           _optimisticallyArchiveSessionInList(session.session_id,true);
           session.archived=true;
           if(S.session&&S.session.session_id===session.session_id) S.session.archived=true;

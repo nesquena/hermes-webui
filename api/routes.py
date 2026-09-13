@@ -17000,8 +17000,30 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
+        # #7549: the all-profiles sidebar lists rows owned by a profile OTHER than
+        # the active one, so the request carries the row's own profile. Resolve
+        # every lookup below against THAT profile instead of the process-wide
+        # active profile — the request already carries the identity, so no global
+        # profile context is switched here (mirrors the /api/session/import gate).
+        requested_profile = _normalize_import_profile_value((body or {}).get("profile"))
+        if requested_profile == "":
+            return bad(handler, "invalid profile", 400)
+        allow_all_profiles = _request_wants_all_profiles_import(body)
+        if allow_all_profiles and _is_isolated_profile_mode():
+            return bad(handler, "all_profiles archive is not allowed in isolated profile mode", 403)
+        if allow_all_profiles and not requested_profile:
+            return bad(handler, "profile is required for all_profiles archive", 400)
+        # Request-scoped profile threaded into the CLI reads, the materialized
+        # sidecar and the sidebar invalidation below. An unqualified request
+        # leaves this None and keeps resolving exactly as before.
+        archive_profile = requested_profile or None
         try:
             s = get_session(sid)
+            # Never trust the client profile on its own: a qualified request has
+            # to match the stored sidecar's profile, otherwise the CLI-store
+            # fallback below has to confirm that ownership.
+            if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+                raise KeyError(sid)
             # #1558: save() refuses metadata-only session stubs because their
             # messages list is intentionally empty. If a sidebar/status preload
             # left one in the LRU cache, upgrade to a full disk load before
@@ -17013,7 +17035,15 @@ def handle_post(handler, parsed) -> bool:
                 with LOCK:
                     SESSIONS[sid] = s
         except KeyError:
-            cli_meta = _lookup_cli_session_metadata(sid)
+            # #7549: look the session up in the profile the request names (the
+            # all-profiles sidebar row's own profile) instead of the active
+            # profile, and let the CLI store confirm that ownership so a spoofed
+            # (session_id, profile) pair can never reach another profile.
+            cli_meta = _resolve_cli_import_metadata(
+                sid,
+                requested_profile=requested_profile,
+                allow_all_profiles=allow_all_profiles,
+            )
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
@@ -17028,10 +17058,11 @@ def handle_post(handler, parsed) -> bool:
             if _is_messaging_session_record(cli_meta):
                 s = Session(
                     session_id=sid,
-                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=archive_profile), "CLI Session"),
                     workspace=get_last_workspace(),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
+                    profile=archive_profile,
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
@@ -17048,7 +17079,7 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
-                msgs = get_cli_session_messages(sid)
+                msgs = get_cli_session_messages(sid, profile=archive_profile)
                 if not msgs:
                     return bad(handler, "Session not found", 404)
                 s = import_cli_session(
@@ -17056,7 +17087,7 @@ def handle_post(handler, parsed) -> bool:
                     cli_meta.get("title") or title_from(msgs, "CLI Session"),
                     msgs,
                     cli_meta.get("model") or "unknown",
-                    profile=cli_meta.get("profile"),
+                    profile=archive_profile or cli_meta.get("profile"),
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
@@ -17076,7 +17107,10 @@ def handle_post(handler, parsed) -> bool:
             s.save(touch_updated_at=False)
         publish_session_list_changed(
             "session_archive",
-            profile=getattr(s, "profile", None),
+            # #7549: a freshly materialized foreign-profile row carries its owner's
+            # profile from the request, so the invalidation targets the sidebar
+            # cache entry that actually holds that row.
+            profile=archive_profile or getattr(s, "profile", None),
             session_id=getattr(s, "session_id", sid),
         )
         return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
