@@ -378,6 +378,7 @@ def test_cron_recent_does_not_cross_match_newer_long_prefix_session_when_only_sh
             "status": "success",
             "completed_at": 250.0,
             "toast_notifications": True,
+            "badge_notifications": True,
             "session_id": "cron_backup_20260610_090000",
             "message_count": 4,
         }
