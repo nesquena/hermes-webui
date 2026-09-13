@@ -6296,6 +6296,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
           _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          // The settled transcript can be rebuilt by a concurrent session refresh
+          // immediately after the done event. Retry the idempotent anchor-scene
+          // handoff on the refreshed message object so a transient miss cannot
+          // leave the durable scene with zero persistence requests.
+          if(lastAsst){
+            const _retryIndex=S.messages.indexOf(lastAsst);
+            const _retryOwnerKey=_settledAnchorRetryOwnerKey(S.messages,_retryIndex,_settledStreamId);
+            setTimeout(()=>{
+              _retrySettledAnchorScene(lastAsst,_retryIndex,_settledStreamId,_anchorRegistry,_retryOwnerKey);
+            },0);
+          }
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
