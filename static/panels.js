@@ -5274,11 +5274,61 @@ let _notesSelectedSource = 'joplin';
 let _notesPreviewNote = null;
 let _notesSearchError = '';
 let _notesSearchLoading = false;
-let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'project_context' | 'external_notes'
+// Hindsight state — first-class long-term memory (server-proxies with Hermes auth)
+let _hindsightStatus = null; // {enabled, reachable, api_url, bank_id, ...}
+let _hindsightResults = [];
+let _hindsightReflectText = '';
+let _hindsightReflectQuery = '';
+let _hindsightMemories = [];
+let _hindsightMemoriesTotal = 0;
+let _hindsightLoading = false; // recall
+let _hindsightReflectLoading = false;
+let _hindsightMemoriesLoading = false;
+let _hindsightError = '';
+let _hindsightReflectError = '';
+let _hindsightListError = '';
+let _hindsightLastQuery = '';
+let _hindsightLastElapsed = 0;
+let _hindsightStatusProfile = '';
+let _hindsightMemoriesProfile = '';
+let _hindsightStatusSeq = 0;
+let _hindsightRecallSeq = 0;
+let _hindsightReflectSeq = 0;
+let _hindsightMemoriesSeq = 0;
+let _hindsightRetainSeq = 0;
+let _hindsightRetainLoading = false;
+let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'project_context' | 'external_notes' | 'hindsight'
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
+
+function _hindsightProfileName() { return (S && S.activeProfile) || 'default'; }
+function _resetHindsightState() {
+  ++_hindsightStatusSeq;
+  ++_hindsightRecallSeq;
+  ++_hindsightReflectSeq;
+  ++_hindsightMemoriesSeq;
+  ++_hindsightRetainSeq;
+  _hindsightStatus = null;
+  _hindsightResults = [];
+  _hindsightReflectText = '';
+  _hindsightReflectQuery = '';
+  _hindsightMemories = [];
+  _hindsightMemoriesTotal = 0;
+  _hindsightLoading = false;
+  _hindsightReflectLoading = false;
+  _hindsightMemoriesLoading = false;
+  _hindsightRetainLoading = false;
+  _hindsightError = '';
+  _hindsightReflectError = '';
+  _hindsightListError = '';
+  _hindsightLastQuery = '';
+  _hindsightLastElapsed = 0;
+  _hindsightStatusProfile = '';
+  _hindsightMemoriesProfile = '';
+}
 
 const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
+  { key: 'hindsight', labelKey: 'hindsight', emptyKey: 'hindsight_disabled', iconKey: 'eye', readOnly: true },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
   { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
@@ -5342,6 +5392,252 @@ function _setMemoryHeaderButtons(mode) {
   }
   else if (mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); show(cancelBtn); show(saveBtn); }
   else { if (header) header.style.display = 'none'; hide(editBtn); hide(cancelBtn); hide(saveBtn); }
+}
+
+ // ── Hindsight (first-class long-term memory) ──
+async function loadHindsightStatus(force) {
+  const profile = _hindsightProfileName();
+  if (_hindsightStatus && !force && _hindsightStatusProfile === profile) return _hindsightStatus;
+  // Sequence guard, not just a profile guard: two overlapping status loads in
+  // the SAME profile (e.g. a double-clicked "Re-check") can resolve out of
+  // order, and a slow earlier failure would otherwise land after a newer
+  // success and repaint the panel as unreachable. Same contract the recall/
+  // reflect/retain/memories loaders already hold.
+  const seq = ++_hindsightStatusSeq;
+  try {
+    const status = await api('/api/hindsight/status');
+    if (seq !== _hindsightStatusSeq || profile !== _hindsightProfileName()) return null;
+    _hindsightStatus = status;
+    _hindsightStatusProfile = profile;
+  } catch (e) {
+    if (seq !== _hindsightStatusSeq || profile !== _hindsightProfileName()) return null;
+    _hindsightStatus = { enabled: !!(_memoryData && _memoryData.hindsight_enabled), error: e && e.message ? e.message : String(e), reachable: false };
+    _hindsightStatusProfile = profile;
+  }
+  return _hindsightStatus;
+}
+async function loadHindsightMemories(force) {
+  const profile = _hindsightProfileName();
+  if (_hindsightMemories.length && !force && _hindsightMemoriesProfile === profile) return;
+  const enabled = _memoryData && _memoryData.hindsight_enabled;
+  if (!enabled) return;
+  // Sequence-guard like recall/reflect: two overlapping loads (e.g. a manual
+  // refresh racing the auto-refresh retain triggers) must not let the older
+  // response overwrite the newer one.
+  const seq = ++_hindsightMemoriesSeq;
+  _hindsightMemoriesLoading = true;
+  _hindsightMemoriesProfile = profile;
+  _renderHindsight();
+  try {
+    const data = await api('/api/hindsight/memories?limit=20');
+    if (seq !== _hindsightMemoriesSeq || profile !== _hindsightProfileName()) return;
+    _hindsightMemories = Array.isArray(data.memories) ? data.memories : [];
+    _hindsightMemoriesTotal = data.total || _hindsightMemories.length;
+    _hindsightListError = '';
+  } catch (e) {
+    if (seq !== _hindsightMemoriesSeq || profile !== _hindsightProfileName()) return;
+    _hindsightListError = e && e.message ? e.message : String(e);
+  } finally {
+    if (seq !== _hindsightMemoriesSeq || profile !== _hindsightProfileName()) return;
+    _hindsightMemoriesLoading = false;
+    _renderHindsight();
+  }
+}
+async function recallHindsight() {
+  if (_hindsightLoading) return;
+  const seq = ++_hindsightRecallSeq;
+  const profile = _hindsightProfileName();
+  const input = $('hindsightRecallQuery');
+  const budgetEl = $('hindsightRecallBudget');
+  const q = input ? input.value.trim() : '';
+  if (!q) { _hindsightError = t('hindsight_query_required'); _renderHindsight(); return; }
+  _hindsightLastQuery = q;
+  _hindsightLoading = true; _hindsightError = ''; _renderHindsight();
+  try {
+    const budget = budgetEl ? budgetEl.value : 'mid';
+    const data = await api('/api/hindsight/recall', { method: 'POST', body: JSON.stringify({ query: q, budget }) });
+    if (seq !== _hindsightRecallSeq || profile !== _hindsightProfileName()) return;
+    _hindsightResults = Array.isArray(data.results) ? data.results : [];
+    _hindsightLastElapsed = data.elapsed_ms || 0;
+    _hindsightError = '';
+  } catch (e) {
+    if (seq !== _hindsightRecallSeq || profile !== _hindsightProfileName()) return;
+    _hindsightResults = [];
+    _hindsightError = e && e.message ? e.message : String(e);
+  } finally {
+    if (seq !== _hindsightRecallSeq || profile !== _hindsightProfileName()) return;
+    _hindsightLoading = false;
+    _renderHindsight();
+    const inp = $('hindsightRecallQuery'); if (inp) { inp.value = q; inp.focus(); }
+  }
+}
+async function reflectHindsight() {
+  if (_hindsightReflectLoading) return;
+  const seq = ++_hindsightReflectSeq;
+  const profile = _hindsightProfileName();
+  const input = $('hindsightReflectQuery');
+  const q = input ? input.value.trim() : '';
+  if (!q) { _hindsightReflectError = t('hindsight_question_required'); _renderHindsight(); return; }
+  _hindsightReflectQuery = q;
+  _hindsightReflectLoading = true; _hindsightReflectError = ''; _renderHindsight();
+  try {
+    const data = await api('/api/hindsight/reflect', { method: 'POST', body: JSON.stringify({ query: q, budget: 'low', include_facts: true }) });
+    if (seq !== _hindsightReflectSeq || profile !== _hindsightProfileName()) return;
+    _hindsightReflectText = data.text || '';
+    _hindsightReflectError = '';
+  } catch (e) {
+    if (seq !== _hindsightReflectSeq || profile !== _hindsightProfileName()) return;
+    _hindsightReflectText = '';
+    _hindsightReflectError = e && e.message ? e.message : String(e);
+  } finally {
+    if (seq !== _hindsightReflectSeq || profile !== _hindsightProfileName()) return;
+    _hindsightReflectLoading = false;
+    _renderHindsight();
+    const inp = $('hindsightReflectQuery'); if (inp) { inp.value = q; inp.focus(); }
+  }
+}
+async function retainHindsight() {
+  if (_hindsightRetainLoading) return;
+  const seq = ++_hindsightRetainSeq;
+  const profile = _hindsightProfileName();
+  const contentEl = $('hindsightRetainContent');
+  const ctxEl = $('hindsightRetainContext');
+  const errEl = $('hindsightRetainError');
+  const content = contentEl ? contentEl.value.trim() : '';
+  if (!content) { if (errEl) { errEl.textContent = t('hindsight_content_required'); errEl.style.display=''; } return; }
+  const context = ctxEl ? ctxEl.value.trim() : '';
+  if (errEl) errEl.style.display='none';
+  // Drive the button's disabled/loading state from _renderHindsight() instead
+  // of a direct DOM reference: any other in-flight Hindsight call (recall,
+  // reflect, status, recent-memories) re-renders this section and replaces
+  // the button node, which would silently re-enable a stale `btn` reference
+  // and let a second click submit the same memory twice.
+  _hindsightRetainLoading = true;
+  _renderHindsight();
+  try {
+    await api('/api/hindsight/retain', { method: 'POST', body: JSON.stringify({ content, context }) });
+    if (seq !== _hindsightRetainSeq || profile !== _hindsightProfileName()) return;
+    const c = $('hindsightRetainContent'); if (c) c.value = '';
+    const cx = $('hindsightRetainContext'); if (cx) cx.value = '';
+    showToast(t('hindsight_saved'));
+    _hindsightMemories = [];
+    loadHindsightMemories(true);
+  } catch (e) {
+    if (seq !== _hindsightRetainSeq || profile !== _hindsightProfileName()) return;
+    const err = $('hindsightRetainError');
+    if (err) { err.textContent = e && e.message ? e.message : String(e); err.style.display=''; }
+  } finally {
+    if (seq !== _hindsightRetainSeq || profile !== _hindsightProfileName()) return;
+    _hindsightRetainLoading = false;
+    _renderHindsight();
+  }
+}
+function _renderHindsight() {
+  const title = $('memoryDetailTitle');
+  const body = $('memoryDetailBody');
+  const empty = $('memoryDetailEmpty');
+  const previousRetainContent = $('hindsightRetainContent') ? $('hindsightRetainContent').value : '';
+  const previousRetainContext = $('hindsightRetainContext') ? $('hindsightRetainContext').value : '';
+  if (!title || !body) return;
+  title.textContent = t('hindsight');
+  const hs = _hindsightStatus;
+  const mdEnabled = _memoryData && _memoryData.hindsight_enabled;
+  const bankId = (hs && hs.bank_id) || (_memoryData && _memoryData.hindsight_bank_id) || 'shared-agent-memory';
+  const apiUrl = (hs && hs.api_url) || (_memoryData && _memoryData.hindsight_api_url) || '';
+  const host = apiUrl ? (()=>{ try{ return new URL(apiUrl).host; } catch(_){ return apiUrl; } })() : '';
+  const enabled = hs ? !!hs.enabled : !!mdEnabled;
+  const reachable = hs ? !!hs.reachable : null;
+  let statusBadge = '';
+  if (!enabled) statusBadge = `<span class="detail-badge" style="background:var(--error);color:#fff">${esc(t('hindsight_disabled'))}</span>`;
+  else if (reachable === false) statusBadge = `<span class="detail-badge" style="background:var(--warning);color:#fff">${esc(t('hindsight_unreachable'))}</span>`;
+  else if (reachable === true) statusBadge = `<span class="detail-badge active">${li('eye',10)} ${esc(t('hindsight_connected'))}</span>`;
+  else statusBadge = `<span class="detail-badge">${esc(t('hindsight_checking'))}</span>`;
+  let hintHtml = '';
+  if (!enabled) {
+    const hint = (hs && hs.hint) || t('hindsight_disabled_hint') + ' Run: hermes memory setup';
+    hintHtml = `<div class="memory-detail-mtime" style="color:var(--warning)">${esc(hint)}</div><div class="memory-detail-mtime">API: ${esc(apiUrl || '—')} · Bank: ${esc(bankId)}</div>`;
+  } else {
+    const total = hs && hs.total_memories != null ? `${hs.total_memories} memories` : (_hindsightMemoriesTotal ? `${_hindsightMemoriesTotal} memories` : '');
+    const probe = hs && hs.probe_status ? ` · probe ${hs.probe_status}` : '';
+    hintHtml = `<div class="memory-detail-mtime">${esc(host)} · <code>${esc(bankId)}</code> ${total ? `· ${esc(total)}` : ''}${probe} ${statusBadge}</div>`;
+    if (hs && hs.hint) hintHtml += `<div class="memory-detail-mtime">${esc(hs.hint)}</div>`;
+  }
+  if (!enabled) {
+    body.innerHTML = `<div class="main-view-content"><div class="memory-detail-mtime" style="display:flex;align-items:center;gap:8px">${li('eye',16)} ${esc(t('hindsight'))} — long-term memory ${statusBadge}</div>${hintHtml}<div class="memory-empty" style="margin-top:12px">${esc(_memorySectionEmpty(_memorySectionMeta('hindsight')))}</div><div class="detail-form-row" style="margin-top:12px"><button class="btn-secondary" onclick="loadHindsightStatus(true).then(()=>_renderHindsight())">${li('refresh-cw',12)} ${esc(t('hindsight_recheck'))}</button></div></div>`;
+    body.style.display=''; if(empty) empty.style.display='none'; _memoryMode='read'; _setMemoryHeaderButtons('read'); return;
+  }
+  const recallError = _hindsightError ? `<div class="detail-form-error">${esc(_hindsightError)}</div>` : '';
+  const recallLoading = _hindsightLoading ? `<div class="memory-detail-mtime">${li('loader',12)} recalling… recall can take 30–60s on first hit</div>` : '';
+  const recallResultsHtml = _hindsightResults.length
+    ? `<div class="notes-search-results" style="margin-top:8px">${_hindsightResults.map(r=>{
+        const when = r.occurred_start ? new Date(r.occurred_start).toLocaleDateString() : (r.created_at ? new Date(r.created_at).toLocaleDateString() : '');
+        const tags = Array.isArray(r.tags) && r.tags.length ? `<span class="detail-badge">${esc(r.tags.slice(0,3).join(', '))}</span>` : '';
+        const typ = r.type ? `<span class="detail-badge">${esc(r.type)}</span>` : '';
+        const ctx = r.context ? `<em>${esc(r.context)}</em>` : '';
+        return `<div class="notes-result-card" style="cursor:default;text-align:left"><strong>${esc((r.text||'').slice(0,280))}${(r.text||'').length>280?'…':''}</strong><span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px">${typ} ${tags} ${when?`${li('clock',10)} ${esc(when)}`:''} ${ctx?`· ${ctx}`:''}</span></div>`;
+      }).join('')}</div><div class="memory-detail-mtime">${_hindsightResults.length} results${_hindsightLastElapsed ? ` · ${Math.round(_hindsightLastElapsed)}ms` : ''}${_hindsightLastQuery ? ` for "${esc(_hindsightLastQuery)}"` : ''}</div>`
+    : (_hindsightLastQuery && !_hindsightLoading ? `<div class="memory-empty">No results for "${esc(_hindsightLastQuery)}"</div>` : `<div class="memory-empty">${esc(t('hindsight_search_empty'))}</div>`);
+  const reflectError = _hindsightReflectError ? `<div class="detail-form-error">${esc(_hindsightReflectError)}</div>` : '';
+  const reflectLoading = _hindsightReflectLoading ? `<div class="memory-detail-mtime">${li('loader',12)} reflecting…</div>` : '';
+  // Hindsight reflect text is rendered as markdown (same trust boundary as LLM output).
+  // The backing bank is profile-scoped and server-proxied; treat stored memories as
+  // semi-trusted and avoid rendering raw HTML from upstream without escaping.
+  const reflectHtml = _hindsightReflectText
+    ? `<div class="memory-content preview-md" style="margin-top:8px">${renderMd(_hindsightReflectText)}</div>`
+    : (_hindsightReflectQuery && !_hindsightReflectLoading ? `<div class="memory-empty">No answer yet</div>` : '');
+  const listError = _hindsightListError ? `<div class="detail-form-error">${esc(_hindsightListError)}</div>` : '';
+  const memLoading = _hindsightMemoriesLoading ? `<div class="memory-detail-mtime">${li('loader',12)} loading…</div>` : '';
+  const memList = _hindsightMemories.length
+    ? `<div style="margin-top:8px">${_hindsightMemories.map(m=>{ const d=m.created_at?new Date(m.created_at).toLocaleDateString():''; return `<div class="notes-result-card" style="cursor:default;text-align:left"><strong>${esc((m.text||'').slice(0,220))}${(m.text||'').length>220?'…':''}</strong><span>${esc(m.type||'')}${m.type&&d?' · ':''}${esc(d)}${Array.isArray(m.tags)&&m.tags.length?` · ${esc(m.tags.slice(0,3).join(', '))}`:''}</span></div>`; }).join('')}</div><div class="memory-detail-mtime">${_hindsightMemoriesTotal || _hindsightMemories.length} total · <button class="btn-secondary" style="padding:2px 8px;font-size:11px" onclick="loadHindsightMemories(true)">${li('refresh-cw',10)} ${esc(t('hindsight_refresh'))}</button></div>`
+    : (memLoading || `<div class="memory-empty">${esc(t('hindsight_no_recent'))}</div>`);
+  const authNote = `<div class="memory-detail-mtime" style="opacity:.7">${esc(t('hindsight_auth_note'))} <code>${esc(host)}</code>. <a href="#" onclick="event.preventDefault(); loadHindsightStatus(true).then(()=>_renderHindsight())" style="color:var(--accent)">${esc(t('hindsight_recheck'))}</a> · <a href="#" onclick="event.preventDefault(); loadHindsightMemories(true)" style="color:var(--accent)">${esc(t('hindsight_refresh'))}</a></div>`;
+  body.innerHTML = `<div class="main-view-content">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">${li('eye',16)} <strong>Hindsight</strong> ${statusBadge}</div>
+    ${hintHtml}
+    ${authNote}
+    <section class="notes-source-card" style="margin-top:12px">
+      <div class="notes-source-card-head"><strong>${li('search',14)} ${esc(t('hindsight_recall'))}</strong><span class="detail-badge">${esc(bankId)}</span></div>
+      <form class="notes-search-form" onsubmit="event.preventDefault(); recallHindsight();" style="display:flex;gap:8px;align-items:center">
+        <input id="hindsightRecallQuery" aria-label="${esc(t('hindsight_recall_aria'))}" type="search" placeholder="${esc(t('hindsight_search_placeholder'))}" maxlength="4000" style="flex:1 1 200px" value="${esc(_hindsightLastQuery)}" />
+        <label class="sr-only" for="hindsightRecallBudget">Recall budget</label>
+        <select id="hindsightRecallBudget" aria-label="Recall budget">
+          <option value="low" ${(_memoryData && _memoryData.hindsight_budget)==='low'?'selected':''}>low</option>
+          <option value="mid" ${(!_memoryData || _memoryData.hindsight_budget==='mid' || !_memoryData.hindsight_budget)?'selected':''}>mid</option>
+          <option value="high" ${(_memoryData && _memoryData.hindsight_budget)==='high'?'selected':''}>high</option>
+        </select>
+        <button type="submit" class="btn-secondary" ${_hindsightLoading?'disabled':''}>${_hindsightLoading?li('loader',12)+' '+esc(t('hindsight_recall')): esc(t('hindsight_recall'))}</button>
+      </form>
+      ${recallError}${recallLoading}${recallResultsHtml}
+    </section>
+    <section class="notes-source-card">
+      <div class="notes-source-card-head"><strong>${li('sparkles',14)} ${esc(t('hindsight_reflect'))}</strong><span class="detail-badge">${esc(t('hindsight_synthesis'))}</span></div>
+      <form class="notes-search-form" onsubmit="event.preventDefault(); reflectHindsight();" style="display:flex;gap:8px;align-items:center">
+        <input id="hindsightReflectQuery" aria-label="${esc(t('hindsight_reflect_aria'))}" type="search" placeholder="${esc(t('hindsight_reflect_placeholder'))}" maxlength="4000" style="flex:1 1 200px" value="${esc(_hindsightReflectQuery)}" />
+        <button type="submit" class="btn-secondary" ${_hindsightReflectLoading?'disabled':''}>${_hindsightReflectLoading?li('loader',12)+' '+esc(t('hindsight_reflect')): esc(t('hindsight_reflect'))}</button>
+      </form>
+      ${reflectError}${reflectLoading}${reflectHtml}
+    </section>
+    <section class="notes-source-card">
+      <div class="notes-source-card-head"><strong>${li('clock',14)} ${esc(t('hindsight_recent'))}</strong><button class="btn-secondary" style="padding:2px 8px;font-size:11px" onclick="loadHindsightMemories(true)">${li('refresh-cw',10)} ${esc(t('hindsight_refresh'))}</button></div>
+      ${listError}${memList}
+    </section>
+    <section class="notes-source-card">
+      <div class="notes-source-card-head"><strong>${li('save',14)} ${esc(t('hindsight_retain'))}</strong><span class="detail-badge">${esc(t('hindsight_store'))}</span></div>
+      <div class="detail-form-row" style="margin:0">
+        <textarea id="hindsightRetainContent" aria-label="${esc(t('hindsight_content_aria'))}" rows="3" maxlength="20000" placeholder="New memory — e.g. Keith prefers concise diffs, or the .11 host holds..." style="width:100%"></textarea>
+      </div>
+      <div class="detail-form-row" style="margin-top:8px">
+        <input id="hindsightRetainContext" aria-label="${esc(t('hindsight_context_aria'))}" type="text" maxlength="4000" placeholder="Context (optional) — e.g. user preference" style="width:100%" />
+      </div>
+      <div id="hindsightRetainError" class="detail-form-error" style="display:none"></div>
+      <div style="margin-top:8px;display:flex;justify-content:flex-end"><button id="hindsightRetainBtn" class="btn-secondary" onclick="retainHindsight()" ${_hindsightRetainLoading?'disabled':''}>${_hindsightRetainLoading?li('loader',12)+' '+esc(t('hindsight_retain')):li('plus',12)+' '+esc(t('hindsight_retain'))}</button></div>
+    </section>
+  </div>`;
+  const restoredContent = $('hindsightRetainContent');
+  const restoredContext = $('hindsightRetainContext');
+  if (restoredContent) restoredContent.value = previousRetainContent;
+  if (restoredContext) restoredContext.value = previousRetainContext;
+  body.style.display=''; if(empty) empty.style.display='none'; _memoryMode='read'; _setMemoryHeaderButtons('read');
 }
 
 function _renderExternalNotesSources() {
@@ -5414,6 +5710,10 @@ function _renderExternalNotesSources() {
 function _renderMemoryDetail(section) {
   if (section === 'external_notes') {
     _renderExternalNotesSources();
+    return;
+  }
+  if (section === 'hindsight') {
+    _renderHindsight();
     return;
   }
 
@@ -5540,6 +5840,12 @@ async function openMemorySection(section, el) {
   if (el) el.classList.add('active');
   if (section === 'external_notes') {
     await loadNotesSources(false);
+  }
+  if (section === 'hindsight') {
+    await loadHindsightStatus(false);
+    if (_memoryData && _memoryData.hindsight_enabled) {
+      await loadHindsightMemories(false);
+    }
   }
   _renderMemoryDetail(section);
   _closeMobileSidebarAfterPanelSelection();
@@ -6590,6 +6896,7 @@ async function _profileSwitchPanelLoad(){
   _cronPreFormDetail = null;
   _editingCronId = null;
   _cronIsDuplicate = false;
+  _resetHindsightState();
   _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
@@ -7453,6 +7760,10 @@ async function loadMemory(force) {
     if (_currentMemorySection === 'external_notes') {
       await loadNotesSources(!!force);
     }
+    if (_currentMemorySection === 'hindsight') {
+      await loadHindsightStatus(!!force);
+      if (data.hindsight_enabled) await loadHindsightMemories(!!force);
+    }
     if (panel) {
       panel.innerHTML = '';
       for (const s of MEMORY_SECTIONS) {
@@ -7461,9 +7772,21 @@ async function loadMemory(force) {
         el.type = 'button';
         el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
-        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
+        if (s.key === 'hindsight') {
+          const enabled = !!(_memoryData && _memoryData.hindsight_enabled);
+          const dot = enabled
+            ? `<span style="margin-left:auto;width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 6px var(--success);flex-shrink:0" title="enabled · ${_memoryData.hindsight_bank_id || ''}"></span>`
+            : `<span style="margin-left:auto;opacity:.4;font-size:10px;flex-shrink:0">off</span>`;
+          el.innerHTML = `${li(s.iconKey,16)}<span style="flex:1">${esc(_memorySectionLabel(s))}</span>${dot}`;
+        } else {
+          el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
+        }
         const sectionPath = _memorySectionPath(s.key);
         if (sectionPath) el.title = sectionPath;
+        if (s.key === 'hindsight' && _memoryData) {
+          const hsHint = _memoryData.hindsight_api_url ? `${_memoryData.hindsight_api_url} · ${_memoryData.hindsight_bank_id}` : '';
+          if (hsHint) el.title = hsHint;
+        }
         el.onclick = () => openMemorySection(s.key, el);
         panel.appendChild(el);
       }
