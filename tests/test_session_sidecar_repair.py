@@ -2117,3 +2117,298 @@ class TestWslPageCacheRace:
         assert len(interrupted_markers) == 1
         recovered = [m for m in s.messages if m.get("_recovered_from_run_journal")]
         assert sum(1 for m in recovered if "ConcurrentTokens" in m.get("content", "")) == 1
+
+
+@pytest.mark.parametrize('role', ['user', 'assistant'])
+def test_core_repair_keeps_lcm_envelopes_only_in_context(hermes_home, role):
+    marker = {'role': role, 'content': '[Recent Summary (d0, node 418)]\nEarlier work'}
+    prompt = {'role': 'user', 'content': 'Continue the work', 'timestamp': 100}
+    answer = {'role': 'assistant', 'content': 'Done', 'timestamp': 101}
+    session = _make_stale_session(pending_msg=prompt['content'])
+    core_path = _write_core_transcript(hermes_home, session.session_id, [marker, prompt, answer])
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    assert session.messages == [prompt, answer]
+    assert session.context_messages == [marker, prompt, answer]
+    loaded = Session.load(session.session_id)
+    assert loaded.messages == session.messages
+    assert loaded.context_messages == session.context_messages
+
+
+@pytest.mark.parametrize('role', ['user', 'assistant'])
+def test_state_reconciliation_filters_lcm_only_from_display(role):
+    marker = {'role': role, 'content': '[Current user objective preserved from compacted history]'}
+    prompt = {'role': 'user', 'content': 'Current request', 'timestamp': 100}
+    answer = {'role': 'assistant', 'content': 'Done', 'timestamp': 101}
+    session = _make_session(messages=[prompt])
+    rows = [marker, prompt, answer]
+
+    assert models.reconciled_state_db_messages_for_session(session, state_messages=rows) == [prompt, answer]
+    assert marker in models.reconciled_state_db_messages_for_session(
+        session, state_messages=rows, prefer_context=True,
+    )
+    assert rows == [marker, prompt, answer]
+
+
+@pytest.mark.parametrize('output', [
+    [],
+    [{'role': 'assistant', 'content': 'Done'}],
+    [
+        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call_1'}]},
+        {'role': 'tool', 'content': 'Result', 'tool_call_id': 'call_1'},
+        {'role': 'assistant', 'content': 'Done'},
+    ],
+])
+@pytest.mark.parametrize('part_type', [None, 'text', 'input_text', 'output_text'])
+def test_core_repair_does_not_claim_lcm_envelope_as_pending_turn(hermes_home, output, part_type):
+    history = {'role': 'assistant', 'content': 'Earlier answer', 'timestamp': 99}
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 100}
+    session = _make_stale_session(pending_msg=marker['content'])
+    session.pending_started_at = 100.25
+    if part_type:
+        marker['content'] = [{'type': part_type, 'text': marker['content']}]
+    core_path = _write_core_transcript(hermes_home, session.session_id, [history, marker, *output])
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    assert len(session.messages) == 2 + len(output)
+    recovered = session.messages[1]
+    assert recovered['_active_turn_token'] == streaming.build_active_turn_token('stream_1', 100.25)
+    assert session.messages == [history, recovered, *output]
+    assert session.context_messages == [history, marker, recovered, *output]
+    assert '_active_turn_token' not in session.context_messages[1]
+    loaded = Session.load(session.session_id)
+    assert loaded.messages == [history, recovered, *output]
+    assert loaded.context_messages == [history, marker, recovered, *output]
+
+
+@pytest.mark.parametrize('timestamp', [100, None])
+def test_core_repair_keeps_existing_owned_lcm_current_turn(hermes_home, timestamp):
+    marker = '[Recent Summary (d0, node 418)]'
+    token = streaming.build_active_turn_token('stream_1', 100.25)
+    current = {'role': 'user', 'content': marker, 'timestamp': timestamp,
+               '_active_turn_token': token}
+    answer = {'role': 'assistant', 'content': 'Current answer'}
+    session = _make_stale_session(pending_msg=marker)
+    session.pending_started_at = 100.25
+    core_path = _write_core_transcript(hermes_home, session.session_id, [current, answer])
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    assert session.messages == [current, answer]
+    assert Session.load(session.session_id).messages == [current, answer]
+
+
+def test_core_repair_uses_latest_matching_lcm_envelope(hermes_home):
+    history = {'role': 'assistant', 'content': 'Historical context', 'timestamp': 1}
+    old = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 10}
+    old_answer = {'role': 'assistant', 'content': 'Old answer', 'timestamp': 11}
+    current = dict(old, timestamp=100)
+    answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    session = _make_stale_session(pending_msg=current['content'])
+    session.pending_started_at = 100.25
+    core_path = _write_core_transcript(
+        hermes_home, session.session_id, [history, old, old_answer, current, answer],
+    )
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    owned = next(m for m in session.messages if m.get('_active_turn_token'))
+    assert owned['_active_turn_token'] == streaming.build_active_turn_token('stream_1', 100.25)
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == [history, old_answer, owned, answer]
+        assert snapshot.context_messages == [history, old, old_answer, current, owned, answer]
+
+
+def test_core_repair_preserves_same_second_historical_owned_lcm_turn(hermes_home):
+    marker = '[Recent Summary (d0, node 418)]'
+    old = {'role': 'user', 'content': marker, 'timestamp': 100,
+           '_active_turn_token': streaming.build_active_turn_token('old_stream', 100.125)}
+    answer = {'role': 'assistant', 'content': 'Historical answer'}
+    session = _make_stale_session(pending_msg=marker)
+    session.pending_started_at = 100.25
+    core_path = _write_core_transcript(hermes_home, session.session_id, [old, answer])
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages[:2] == [old, answer]
+        assert len(snapshot.messages) == 3
+        assert snapshot.messages[2]['_active_turn_token'] == streaming.build_active_turn_token('stream_1', 100.25)
+
+
+def test_core_repair_does_not_use_historical_owner_as_pending_checkpoint(hermes_home):
+    heading = '[Recent Summary (d0, node 418)]'
+    old = {'role': 'user', 'content': heading, 'timestamp': 10,
+           '_active_turn_token': streaming.build_active_turn_token('old_stream', 10)}
+    envelope = {'role': 'user', 'content': heading, 'timestamp': 100}
+    session = _make_stale_session(pending_msg=heading)
+    session.pending_started_at = 100.25
+    core_path = _write_core_transcript(hermes_home, session.session_id, [old, envelope])
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    for snapshot in (session, Session.load(session.session_id)):
+        assert len(snapshot.messages) == 2
+        current = snapshot.messages[1]
+        assert current['_active_turn_token'] == streaming.build_active_turn_token('stream_1', 100.25)
+        assert snapshot.messages == [old, current]
+        assert snapshot.context_messages == [old, envelope, current]
+
+
+def test_core_repair_does_not_claim_same_second_tokenless_repeated_prompt(hermes_home):
+    attachments = [{'name': 'same.txt'}]
+    old_prompt = {
+        'role': 'user', 'content': 'Repeat', 'timestamp': 100,
+        'attachments': attachments,
+    }
+    old_answer = {'role': 'assistant', 'content': 'Earlier answer', 'timestamp': 101}
+    session = _make_stale_session(pending_msg='Repeat')
+    session.pending_started_at = 100.25
+    session.pending_attachments = attachments
+    session.save()
+    _write_core_transcript(hermes_home, session.session_id, [old_prompt, old_answer])
+    append_run_event(session.session_id, 'stream_1', 'token', {'text': 'Recovered current output'})
+
+    assert _repair_stale_pending(session)
+
+    token = streaming.build_active_turn_token('stream_1', 100.25)
+    for snapshot in (session, Session.load(session.session_id)):
+        users = [row for row in snapshot.messages if row.get('role') == 'user']
+        assert [row.get('_active_turn_token') for row in users] == [None, token]
+        assert snapshot.messages[:2] == [old_prompt, old_answer]
+        current_idx = snapshot.messages.index(users[1])
+        output_idx = next(
+            index for index, row in enumerate(snapshot.messages)
+            if row.get('_recovered_from_run_journal')
+            and 'Recovered current output' in row.get('content', '')
+        )
+        assert current_idx < output_idx
+        assert snapshot.pending_user_message is None
+        assert snapshot.active_stream_id is None
+
+
+def test_core_repair_keeps_precisely_timed_prompt_before_core_output(hermes_home):
+    current_prompt = {
+        'role': 'user', 'content': 'Repeat', 'timestamp': 100.25,
+    }
+    current_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    session = _make_stale_session(pending_msg='Repeat')
+    session.pending_started_at = 100.25
+    session.save()
+    _write_core_transcript(hermes_home, session.session_id, [current_prompt, current_answer])
+
+    assert _repair_stale_pending(session)
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == [current_prompt, current_answer]
+        assert snapshot.pending_user_message is None
+        assert snapshot.active_stream_id is None
+
+
+@pytest.mark.parametrize('part_type', [None, 'text', 'input_text', 'output_text'])
+@pytest.mark.parametrize('marker_timestamp', [10, 100, 100.1, None])
+def test_core_repair_historical_marker_boundary(hermes_home, part_type, marker_timestamp):
+    heading = '[Recent Summary (d0, node 418)]'
+    marker = {'role': 'user', 'content': heading, 'timestamp': marker_timestamp}
+    if part_type:
+        marker['content'] = [{'type': part_type, 'text': heading}]
+    answer = {'role': 'assistant', 'content': 'Answer', 'timestamp': (marker_timestamp or 100) + 1}
+    session = _make_stale_session(pending_msg=heading)
+    session.pending_started_at = 100.25
+    core_path = _write_core_transcript(hermes_home, session.session_id, [marker, answer])
+
+    assert _apply_core_sync_or_error_marker(session, core_path)
+    for snapshot in (session, Session.load(session.session_id)):
+        owned = next(row for row in snapshot.messages if row.get('_active_turn_token'))
+        assert owned['_active_turn_token'] == streaming.build_active_turn_token('stream_1', 100.25)
+        expected = [answer, owned] if marker_timestamp == 10 else [owned, answer]
+        assert snapshot.messages == expected
+        assert snapshot.context_messages == [marker, *expected]
+
+
+@pytest.mark.parametrize('store', ['core', 'state'])
+@pytest.mark.parametrize('owner_timestamp', [100, 100.125])
+@pytest.mark.parametrize('boundary', ['owned', 'ordinary', 'current'])
+def test_lcm_recovery_does_not_cross_historical_user(hermes_home, monkeypatch, store, boundary, owner_timestamp):
+    heading = '[Recent Summary (d0, node 418)]'
+    envelope = {'role': 'user', 'content': heading, 'timestamp': 100}
+    old = {'role': 'user', 'content': heading, 'timestamp': owner_timestamp,
+           '_active_turn_token': 'old:100.125'}
+    if boundary == 'ordinary':
+        old = {'role': 'user', 'content': 'Historical request', 'timestamp': 100}
+    answer = {'role': 'assistant', 'content': 'Historical answer', 'timestamp': 100.2}
+    rows = [envelope, answer] if boundary == 'current' else [envelope, old, answer]
+    session = _make_stale_session(pending_msg=heading, stream_id='new')
+    session.pending_started_at = 100.25
+    session.save()
+    if store == 'core':
+        core_path = _write_core_transcript(hermes_home, session.session_id, rows)
+        assert _apply_core_sync_or_error_marker(session, core_path)
+    else:
+        monkeypatch.setattr(models, 'get_state_db_session_summary', lambda *a, **k: {
+            'message_count': len(rows), 'last_message_at': 100.2,
+        })
+        monkeypatch.setattr(models, 'get_state_db_session_messages', lambda *a, **k: rows)
+        assert models._sync_sidecar_from_state_db_if_newer(session)
+    for snapshot in (session, Session.load(session.session_id)):
+        current = next(row for row in snapshot.messages if row.get('_active_turn_token') == 'new:100.25')
+        expected = [current, answer] if boundary == 'current' else [old, answer, current]
+        assert snapshot.messages == expected
+        assert snapshot.context_messages == [envelope, *expected]
+        assert snapshot.pending_user_message is None
+
+
+@pytest.mark.parametrize('terminal', ['apperror', 'cancel', 'done', None])
+def test_pending_recovery_preserves_conflicting_token_owner(hermes_home, terminal):
+    heading = '[Recent Summary (d0, node 418)]'
+    old = {'role': 'user', 'content': heading, 'timestamp': 100, '_active_turn_token': 'old:100.125'}
+    session = _make_stale_session(pending_msg=heading, stream_id='new')
+    session.pending_started_at = 100.75
+    session.messages = [old]
+    session.context_messages = [dict(old)]
+    if terminal:
+        RunJournalWriter(session.session_id, 'new').append_sse_event(terminal, {'session_id': session.session_id})
+    assert _apply_core_sync_or_error_marker(session, hermes_home / 'missing.json')
+    for snapshot in (session, Session.load(session.session_id)):
+        users = [row for row in snapshot.messages if row.get('role') == 'user']
+        context_users = [row for row in snapshot.context_messages if row.get('role') == 'user']
+        assert [row.get('_active_turn_token') for row in users] == ['old:100.125', 'new:100.75']
+        assert context_users == users
+        assert snapshot.pending_user_message is None
+
+
+def test_recovered_context_does_not_dedupe_conflicting_token(hermes_home):
+    heading = '[Recent Summary (d0, node 418)]'
+    old = {'role': 'user', 'content': heading, 'timestamp': 100, '_active_turn_token': 'old:100.125'}
+    session = _make_stale_session(pending_msg=heading, stream_id='new')
+    session.pending_started_at = 100.75
+    session.messages = [old]
+    session.context_messages = [dict(old)]
+    recovered = models._append_recovered_pending_turn(session, timestamp=100)
+    session.save()
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == [old, recovered]
+        assert snapshot.context_messages == [old, recovered]
+
+
+@pytest.mark.parametrize('heading', ['Ordinary request', '[Recent Summary (d0, node 418)]'])
+@pytest.mark.parametrize('existing_token', ['old:100.125', 'new:100.75', None])
+@pytest.mark.parametrize('path', ['helper', 'cancel'])
+def test_terminal_materialization_rejects_conflicting_owner(hermes_home, heading, existing_token, path):
+    old = {'role': 'user', 'content': heading, 'timestamp': 100}
+    if existing_token:
+        old['_active_turn_token'] = existing_token
+    session = _make_stale_session(pending_msg=heading, stream_id='new')
+    session.pending_started_at = 100.75
+    session.messages = [old]
+    session.context_messages = [dict(old)]
+    needs_owner = existing_token == 'old:100.125' or (existing_token is None and heading.startswith('['))
+    if path == 'helper':
+        assert streaming._materialize_pending_user_turn_before_error(session, active_turn_identity={}) is needs_owner
+        assert streaming._materialize_pending_user_turn_before_error(session) is False
+        session.save()
+    else:
+        streaming._persist_cancelled_turn(session)
+        session.save()
+    for snapshot in (session, Session.load(session.session_id)):
+        users = [row for row in snapshot.messages if row.get('role') == 'user']
+        context_users = [row for row in snapshot.context_messages if row.get('role') == 'user']
+        assert len(users) == 1 + int(needs_owner)
+        assert context_users == users
+        if needs_owner:
+            assert users[-1]['_active_turn_token'] == 'new:100.75'

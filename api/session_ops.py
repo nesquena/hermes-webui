@@ -18,7 +18,11 @@ from bisect import bisect_left
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
-from api.models import get_session, SESSIONS
+from api.compression_anchor import is_lcm_context_recovery_marker
+from api.models import (
+    get_session, SESSIONS, _message_private_identity_compatible,
+    _stable_message_identity_details, _state_db_row_identity,
+)
 from api.agent_sessions import normalize_agent_session_source
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,8 @@ def _regeneration_source_allowed(value):
 def _selected_regeneration_turn_owned(session, row) -> bool:
     """Accept only a final row whose provenance proves WebUI ownership."""
     if getattr(session, "read_only", False) or not isinstance(row, dict):
+        return False
+    if is_lcm_context_recovery_marker(row):
         return False
     session_source = _regeneration_source_class(getattr(session, "session_source", None))
     imported_session = bool(
@@ -647,7 +653,12 @@ def truncate_context_for_display_keep(
     # made wire-safe on the send path (streaming: ``_sanitize_messages_for_api``
     # strips unanswered tool_calls; gateway: it forwards no tool_calls/tool rows
     # at all), so we do not re-do that trimming here.
-    if len(ctx) == len(msgs):
+    if len(ctx) == len(msgs) and all(
+        not isinstance(row, dict) or not row.get('_active_turn_token')
+        or (isinstance(context_row, dict)
+            and context_row.get('_active_turn_token') == row['_active_turn_token'])
+        for row, context_row in zip(msgs, ctx, strict=True)
+    ):
         return _result(ctx[:keep], min(keep, len(ctx)) - 1)
 
     def _row_signature(row: Any) -> tuple[str, ...] | None:
@@ -678,6 +689,7 @@ def truncate_context_for_display_keep(
         context_records.append((row, row_signature))
     message_signatures = [_row_signature(message) for message in msgs]
     id_positions: dict[Any, list[int]] = {}
+    token_positions: dict[str, list[int]] = {}
     signature_positions: dict[tuple[str, ...], list[int]] = {}
     signature_no_id_positions: dict[tuple[str, ...], list[int]] = {}
     signature_no_timestamp_positions: dict[tuple[str, ...], list[int]] = {}
@@ -712,6 +724,9 @@ def truncate_context_for_display_keep(
             signature_positions.setdefault(context_sig, []).append(idx)
         if not isinstance(context_row, dict):
             continue
+        token = context_row.get('_active_turn_token')
+        if isinstance(token, str) and token.strip():
+            token_positions.setdefault(token, []).append(idx)
         context_id = context_row.get('id')
         context_ts = context_row.get('timestamp')
         if context_sig is not None:
@@ -791,6 +806,25 @@ def truncate_context_for_display_keep(
     ) -> tuple[int | None, int | None]:
         msg_sig = message_signatures[message_idx]
         if msg_sig is None:
+            return None, None
+        token = message.get('_active_turn_token')
+        if isinstance(token, str) and token.strip():
+            exact = _first_at_or_after(token_positions.get(token), start_idx)
+            if exact is not None:
+                return exact, None
+            stable_id, _ = _stable_message_identity_details(message)
+            row_id = _state_db_row_identity(message)
+            for idx in signature_positions.get(msg_sig, []):
+                candidate = ctx[idx]
+                if idx < start_idx or candidate.get('_active_turn_token'):
+                    continue
+                if not _message_private_identity_compatible(message, candidate):
+                    continue
+                if (
+                    (stable_id is not None and _stable_message_identity_details(candidate)[0] == stable_id)
+                    or (row_id is not None and _state_db_row_identity(candidate) == row_id)
+                ):
+                    return idx, None
             return None, None
         msg_id = message.get('id')
         msg_ts = message.get('timestamp')

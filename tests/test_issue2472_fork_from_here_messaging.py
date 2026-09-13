@@ -75,17 +75,17 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
     session = SimpleNamespace(
         messages=[
             {"role": "assistant", "content": "prior answer", "timestamp": 100.0},
-            {"role": "user", "content": "first prompt", "timestamp": 101.0},
-            {"role": "assistant", "content": "first answer", "timestamp": 101.0},
-            {"role": "user", "content": "second prompt", "timestamp": 101.0},
-            {"role": "assistant", "content": "second answer", "timestamp": 101.0},
+            {"role": "user", "content": "first prompt", "timestamp": 101.0, "message_id": "u1"},
+            {"role": "assistant", "content": "first answer", "timestamp": 101.0, "message_id": "a1"},
+            {"role": "user", "content": "second prompt", "timestamp": 101.0, "message_id": "u2"},
+            {"role": "assistant", "content": "second answer", "timestamp": 101.0, "message_id": "a2"},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "first prompt", "timestamp": 101.1},
-        {"role": "assistant", "content": "first answer", "timestamp": 101.2},
-        {"role": "user", "content": "second prompt", "timestamp": 101.3},
-        {"role": "assistant", "content": "second answer", "timestamp": 101.4},
+        {"role": "user", "content": "first prompt", "timestamp": 101.1, "message_id": "u1"},
+        {"role": "assistant", "content": "first answer", "timestamp": 101.2, "message_id": "a1"},
+        {"role": "user", "content": "second prompt", "timestamp": 101.3, "message_id": "u2"},
+        {"role": "assistant", "content": "second answer", "timestamp": 101.4, "message_id": "a2"},
     ]
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)

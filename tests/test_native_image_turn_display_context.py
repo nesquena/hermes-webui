@@ -2138,3 +2138,49 @@ def test_agent_index_and_turn_id_do_not_claim_unrelated_user_row():
         identity,
         "Describe this image",
     ) == 0
+
+
+def test_trusted_input_fallback_rejects_foreign_token_on_rich_row():
+    text = "Describe this image"
+    trusted_text = "Queued process update.\n\nDescribe this image"
+    _, identity, _ = _settle_image_turn(text=text)
+    identity["trusted_agent_input_text"] = trusted_text
+    row = {
+        "role": "user",
+        "content": _native_user_content(trusted_text, IMAGE_A),
+        "_active_turn_token": "foreign-token",
+    }
+
+    assert _find_active_turn_checkpoint_index([row], [], identity, text) is None
+
+
+@pytest.mark.parametrize("rich", [False, True])
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "[Recent Summary (d0, node 418)]",
+        "[Current user objective preserved from compacted history]",
+    ],
+)
+def test_trusted_input_fallback_rejects_lcm_envelope_row(heading, rich):
+    text = "Describe this image"
+    _, identity, _ = _settle_image_turn(text=text)
+    identity["trusted_agent_input_text"] = heading
+    content = (
+        [{"type": "text", "text": heading}, {"type": "image_url", "image_url": {"url": IMAGE_A}}]
+        if rich
+        else heading
+    )
+    row = {"role": "user", "content": content}
+
+    assert _find_active_turn_checkpoint_index([row], [], identity, text) is None
+
+
+def test_trusted_input_fallback_accepts_rich_submitted_text():
+    text = "Describe this image"
+    trusted_text = "Queued process update.\n\nDescribe this image"
+    _, identity, _ = _settle_image_turn(text=text)
+    identity["trusted_agent_input_text"] = trusted_text
+    row = {"role": "user", "content": _native_user_content(trusted_text, IMAGE_A)}
+
+    assert _find_active_turn_checkpoint_index([row], [], identity, text) == 0
