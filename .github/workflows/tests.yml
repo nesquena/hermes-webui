@@ -181,7 +181,14 @@ jobs:
       # failure picture across the matrix in a single run.
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
+        # Positive, explicit reduction: the FULL suite executes on Python 3.12 ONLY
+        # for `pull_request` events (5 shards instead of 15 — the 3.11/3.13 shards
+        # were near-duplicate execution). Every OTHER event — `push` to master today,
+        # and any manual/reusable/scheduled event added in the future — falls back to
+        # the full 3.11/3.12/3.13 matrix. The expression selects the reduced set only
+        # when the event IS a pull request, so a future event type can never
+        # silently reduce coverage.
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.11", "3.12", "3.13"]') }}
         # Split the suite across 5 parallel shards per Python version. pytest-shard
         # partitions tests deterministically by test-id hash; the suite was made
         # shard-safe (no cross-test state leakage) so every shard passes
@@ -250,3 +257,63 @@ jobs:
       - name: Run tests (shard ${{ matrix.shard }} of 5)
         if: needs.changes.outputs.docs_only != 'true'
         run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5
+
+  # Fast cross-version compatibility gate for pull requests. The full suite runs on
+  # 3.12 only for PRs (see the `test` matrix above); this job keeps the 3.11/3.13
+  # signal before merge by installing the same dependencies, byte-compiling the whole
+  # tree, and collecting (importing) every test module — without executing the suite.
+  # That catches version-specific syntax errors, import failures, and dependency
+  # install breakage in ~1-2 minutes per version instead of 10 duplicate execution
+  # shards. Push to master still executes the full 3-version matrix as a backstop, so
+  # this job is PR-only.
+  #
+  # Docs-only integration: same contract as `test`/`lint` — `needs: changes` plus
+  # `always()` so a failed detector degrades to running compat (never to a skipped
+  # required check), while an affirmative docs-only PR short-circuits before any
+  # setup/collection work.
+  compat:
+    needs: changes
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
+
+    steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping compat ${{ matrix.python-version }} (no executable change)."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
+
+      - name: Set up Python ${{ matrix.python-version }}
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            **/setup.cfg
+            **/requirements*.txt
+            **/pyproject.toml
+
+      # Same dependency set as the `test` job so install breakage on 3.11/3.13
+      # surfaces here. Playwright browsers are NOT installed — collection imports
+      # test modules but never launches a browser.
+      - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard python-docx openpyxl python-pptx playwright
+          pip install ruff || echo "ruff install failed — non-blocking, mirrors the test job"
+          pip install "mcp<2" || echo "mcp install failed — non-blocking, mirrors the test job"
+
+      - name: Byte-compile whole tree (version-specific syntax gate)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python3 -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts
+
+      - name: Collect full test suite (imports every test module, no execution)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: pytest tests/ --collect-only -q
