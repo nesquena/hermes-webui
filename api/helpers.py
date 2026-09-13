@@ -3,12 +3,15 @@ Hermes Web UI -- HTTP helper functions.
 """
 import base64 as _base64
 import binascii as _binascii
+import collections
 import functools
 import json as _json
 import logging
 import os
 import re as _re
 import ssl
+import threading
+import weakref
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -460,23 +463,122 @@ def _build_redact_fn():
 
 _redact_fn_uncached = _build_redact_fn()
 
+
+def _content_digest(path) -> str | None:
+    """sha256 of a file's bytes — a CONTENT identity, not metadata. Returns
+    ``None`` when ``path`` is unreadable so callers can fail closed."""
+    import hashlib
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+# Capture the rules CONTENT identity ONCE at import. The redactor
+# (`_redact_fn_uncached`) is frozen at import time; re-hashing on-disk bytes on
+# every cache-key call (as the previous implementation did) can diverge from the
+# in-force policy after a mid-process edit to helpers.py / agent.redact, so a
+# stale projection could be re-stamped with the new on-disk key and served after
+# restart (TOCTOU). Reading the bytes actually imported here ties the key to the
+# policy in force for this process; a real policy change is recognized only
+# across a restart, when these are recomputed from the new bytes.
+_REDACT_RULES_HELPERS_DIGEST = _content_digest(__file__)
+_REDACT_RULES_AGENT_ABSENT = False
+_REDACT_RULES_AGENT_DIGEST = None
+try:
+    import agent.redact as _rules_agent_redact
+    _REDACT_RULES_AGENT_DIGEST = _content_digest(_rules_agent_redact.__file__)
+except ImportError:
+    _REDACT_RULES_AGENT_ABSENT = True
+except Exception:
+    # Indeterminate -> the key function fails closed (agent digest stays None).
+    _REDACT_RULES_AGENT_DIGEST = None
+
+
+# Per-entry max sizes (bytes) for the two memo tiers — the SAME values the
+# caches enforce below. Defined here (single source of truth) so the per-tier
+# byte-budget ceilings below are derived from them and can't silently drift if
+# an entry cap is tuned later. Small tier: <= 16 KiB. Big tier: <= 256 KiB.
+# Strings above the big cap bypass the decision cache entirely (still redacted).
+_REDACT_CACHE_MAX_TEXT_LEN = 16384
+_REDACT_TEXT_BIG_CACHE_MAX = 262144
+
+# Per-tier entry ceilings so a raised env knob can't exceed a bounded byte
+# footprint. A SHARED count cap would let the 256KiB big tier retain ~32GiB at a
+# 131072-entry ceiling while the 16KiB small tiers hold a fraction of that
+# (greptile P1). Each cap is derived from a 1GiB-per-tier byte budget (keys+
+# values), so small tiers (16KiB) cap at 32768 and the big tier (256KiB) at
+# 2048. Defaults (16384/16384/256) sit below these; env knobs stay tunable but
+# never balloon.
+_REDACT_MEMO_BYTE_BUDGET = 1024 * 1024 * 1024  # 1 GiB per tier (keys+values)
+_REDACT_SMALL_TIER_CAP = _REDACT_MEMO_BYTE_BUDGET // (2 * _REDACT_CACHE_MAX_TEXT_LEN)
+_REDACT_BIG_TIER_CAP = _REDACT_MEMO_BYTE_BUDGET // (2 * _REDACT_TEXT_BIG_CACHE_MAX)
+
+
+def _lru_size(default: int, env: str, cap: int) -> int:
+    """Return a positive LRU ``maxsize``, overridable via env var ``env`` and
+    clamped to ``cap`` (the tier's byte-budget-derived ceiling).
+
+    The redaction/decision memos are process-wide and retained across sessions
+    (deliberate: the perf win is that repeat loads skip re-scanning and
+    re-redacting). Each is bounded by its LRU ``maxsize``; the shipped defaults
+    are conservative, and the caps are exposed as env knobs
+    (``HERMES_WEBUI_REDACT_*``) so a host can tune them. ``cap`` keeps an errant
+    entry from ballooning past the tier's RSS budget.
+    """
+    try:
+        val = int(os.getenv(env, default))
+        if val >= 1:
+            return min(val, cap)
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
 # Repeated dashboard polls re-request the same unchanged session payloads, so
 # the combined redactor (~15 regex passes per string) was the dominant CPU cost
 # under concurrent polling — enough to wedge the single-process server behind
 # the GIL and surface as "Mất kết nối" in the browser. The redactor is pure and
 # deterministic (force=True, fixed masking), so identical strings always map to
 # identical output and are safe to memoize without invalidation.
-_redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
-
-# Cap per-entry size so a handful of giant tool-output dumps can't evict the
-# thousands of small recurring strings that actually benefit, or balloon RSS.
-_REDACT_CACHE_MAX_TEXT_LEN = 16384
-
+_redact_fn_lru = functools.lru_cache(
+    maxsize=_lru_size(16384, "HERMES_WEBUI_REDACT_FN_MEMO", _REDACT_SMALL_TIER_CAP)
+)(_redact_fn_uncached)
 
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
         return _redact_fn_uncached(text)
     return _redact_fn_lru(text)
+
+
+# perf(conversation-switch latency, 2026-09-03): profiling a live switch to a
+# 2101-message / 14MB session showed that even with the redactor memoized,
+# ~100% of the remaining per-pass cost was `_might_contain_sensitive_text`
+# re-scanning every string of every message on EVERY load. The prefilter is
+# pure/deterministic like the redactor, so the entire clean-or-redacted
+# DECISION is memoized here: warm passes become dict lookups, and CPython
+# caches str hashes on the string objects themselves, so sessions held in the
+# compact-session LRU skip even the hash cost. Two tiers mirror the redactor
+# memo: small (≤16KiB, 16384 entries) and big (≤256KiB, 256 entries).
+# Worst-case tier RSS (keys+values at the caps): big tier 256·256KiB ≈ 128MB,
+# small decision tier 16384·16KiB ≈ 512MB, redactor memo 16384·16KiB ≈ 512MB — a
+# ~1.1GB theoretical ceiling. Realistic occupancy is far lower (clean strings
+# alias their key objects, most transcript strings are short), and strings above
+# the caps bypass the cache entirely. All three capacities are tunable via
+# HERMES_WEBUI_REDACT_* env vars, each clamped to a per-tier byte-budget cap.
+def _redact_text_impl(text: str) -> str:
+    if not _might_contain_sensitive_text(text):
+        return text
+    return _redact_fn_cached(text)
+
+
+_redact_text_lru = functools.lru_cache(
+    maxsize=_lru_size(16384, "HERMES_WEBUI_REDACT_DECISION_MEMO", _REDACT_SMALL_TIER_CAP)
+)(_redact_text_impl)
+_redact_text_big_lru = functools.lru_cache(
+    maxsize=_lru_size(256, "HERMES_WEBUI_REDACT_BIG_DECISION_MEMO", _REDACT_BIG_TIER_CAP)
+)(_redact_text_impl)
 
 
 _SENSITIVE_CASE_MARKERS = (
@@ -558,15 +660,33 @@ _SENSITIVE_TELEGRAM_MARKER_RE = _re.compile(r"(?:bot)?\d{8,}:[-A-Za-z0-9_]{30,}"
 _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
+# perf(conversation-switch latency, 2026-09-03): this prefilter runs over
+# every string of every message on every session load; ~30 per-marker `in`
+# scans plus a text.lower() full-string copy made it the dominant per-byte
+# cost. Two compiled alternations preserve exact membership semantics (case
+# set = case-sensitive substring; lower set = case-insensitive substring).
+# Longest-first ordering avoids the re engine stopping at a shorter prefix.
+_SENSITIVE_CASE_MARKER_RE = _re.compile(
+    "|".join(
+        sorted((_re.escape(m) for m in _SENSITIVE_CASE_MARKERS if m), key=len, reverse=True)
+    )
+)
+_SENSITIVE_LOWER_MARKER_RE = _re.compile(
+    "|"
+    .join(
+        sorted((_re.escape(m) for m in _SENSITIVE_LOWER_MARKERS if m), key=len, reverse=True)
+    ),
+    _re.IGNORECASE,
+)
+
 
 def _might_contain_sensitive_text(text: str) -> bool:
     """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
-    if any(marker in text for marker in _SENSITIVE_CASE_MARKERS):
+    if _SENSITIVE_CASE_MARKER_RE.search(text):
         return True
-    lower = text.lower()
-    if any(marker in lower for marker in _SENSITIVE_LOWER_MARKERS):
+    if _SENSITIVE_LOWER_MARKER_RE.search(text):
         return True
     if ":" in text and _SENSITIVE_TELEGRAM_MARKER_RE.search(text):
         return True
@@ -584,6 +704,11 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
     redact many strings in a single response — `redact_session_data()` reads
     the setting once and threads it through ``_redact_value`` so we avoid
     re-loading settings.json from disk per string. (Opus pre-release perf fix.)
+
+    perf(2026-09-03): routes through the per-string decision memo so repeat
+    loads of the same session skip both the prefilter and the redaction pass
+    (see `_redact_text_impl`). Enabled=False bypasses the memo entirely, so
+    the cache only ever holds enabled=True results — no staleness on toggle.
     """
     if not isinstance(text, str) or not text:
         return text
@@ -592,9 +717,12 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
         _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not _enabled:
         return text
-    if not _might_contain_sensitive_text(text):
-        return text
-    return _redact_fn_cached(text)
+    n = len(text)
+    if n <= _REDACT_CACHE_MAX_TEXT_LEN:
+        return _redact_text_lru(text)
+    if n <= _REDACT_TEXT_BIG_CACHE_MAX:
+        return _redact_text_big_lru(text)
+    return _redact_text_impl(text)
 
 
 _RASTER_IMAGE_DATA_URI_PREFIXES = (
@@ -1242,6 +1370,377 @@ def redact_session_data(session_dict: dict) -> dict:
             # above carry free-form user/model text worth redacting).
             result[key] = _copy_json_value(value)
     return result
+
+
+# ── Session transcript redaction cache (perf: conversation-switch cold load) ──
+# `redact_session_data()` re-sweeps every message string on every load. With the
+# per-string decision memo (above) repeat loads of the same in-memory objects
+# are fast, but each /api/session request re-parses the session file into FRESH
+# string objects, so a cold first touch of a large session still paid the full
+# sweep (~1.5s for a 2101-message / 14MB transcript).
+#
+# NOTE: the on-disk cache survives process restarts and upgrades (unlike the
+# in-memory LRUs), so validation includes a rules fingerprint that is a CONTENT
+# identity (sha256 of this module's + agent/redact.py's policy source bytes,
+# plus the schema version) — NOT a WebUI version stamp or pathname metadata.
+# Metadata equality does not imply byte equality, and a version stamp can be a
+# constant ('unknown'/None), so the fingerprint hashes the policy bytes that
+# actually shape the projection. Bump _REDACT_SESSION_CACHE_VERSION only when
+# the cache FILE format changes.
+#
+# This derived cache persists the redacted public projection of a session's
+# transcript lists on disk, keyed by per-message content digests. Loads splice
+# cached projections for unchanged messages (zero redaction work — transcripts
+# are append-mostly) and recompute only appended/changed items. The cache file
+# is a derived artifact: any parse/validation failure falls back to plain
+# redaction, and stored projections are DECORATION-FREE — the per-request
+# `_active_turn_user` flag is applied after retrieval from the CURRENT
+# request's turn token, never persisted. Delete the file when the session is
+# deleted (delete_redaction_session_cache) so a deleted conversation is not
+# recoverable from redaction_cache/ — the deletion FENCE + per-session GUARD
+# below make that contract hold even when a load races the delete.
+_REDACT_SESSION_CACHE_VERSION = 1
+
+
+def _redact_session_cache_rules_key() -> str | None:
+    """Fingerprint of everything the cached projections depend on besides the
+    message content: a manual schema version plus the CONTENT identity of every
+    implementation that shapes the projection — this module (the local fallback
+    redactor, sensitive markers, image exemption, and projection-field policy)
+    and the agent redactor module used to build ``_redact_fn_uncached``.
+
+    Identity is content (sha256 of the policy source bytes), not pathname
+    metadata or a version stamp. Metadata equality does not imply byte equality
+    — distinct policy bytes can share ``mtime_ns``/``size``, and a WebUI version
+    stamp degrades to a constant (``'unknown'``/``None``) when git and generated
+    version files are unavailable. Hashing policy source bytes is the guard that
+    keeps a stale projection from serving text the CURRENT redactor would remove.
+
+    The digests are captured ONCE at import (``_REDACT_RULES_*``) because the
+    redactor is frozen at import: re-reading on-disk bytes on every call would
+    mismatch the in-force policy after a mid-process edit, letting a stale
+    projection be re-stamped with the new key and served after restart (TOCTOU).
+
+    Returns ``None`` when no trustworthy identity can be computed, so the caller
+    skips the persistent cache rather than accept a best-effort hint at a hard
+    safety boundary. ``None`` results when this module's own source is
+    unreadable, or when ``agent.redact`` is importable but its source cannot be
+    hashed (zipimport/frozen build, ``None`` ``__file__``) — in that state
+    ``_redact_fn_uncached`` is the agent-backed combined redactor, so the key
+    must not stay constant. When ``agent.redact`` is genuinely unimportable,
+    redaction falls back to THIS module's own patterns (already captured), so
+    the fixed ``absent`` marker is a real state, not a hidden change source.
+
+    Residual limitation: transitive modules/data imported by ``agent/redact.py``
+    are not hashed (a generated build digest would cover those). A real policy
+    change is recognized at process start (when these digests are recomputed),
+    so a restart with a new redactor invalidates stale projections.
+    """
+    import hashlib
+    if _REDACT_RULES_HELPERS_DIGEST is None:
+        return None
+    parts = [str(_REDACT_SESSION_CACHE_VERSION), _REDACT_RULES_HELPERS_DIGEST]
+    if _REDACT_RULES_AGENT_ABSENT:
+        parts.append("agent-redactor:absent")
+    elif _REDACT_RULES_AGENT_DIGEST is not None:
+        parts.append(_REDACT_RULES_AGENT_DIGEST)
+    else:
+        # Agent importable but its source is unhashable (see docstring) — no
+        # trustworthy identity; fail closed.
+        return None
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _redact_session_cache_path(session_id):
+    # session_id is interpolated into a filename — reject traversal shapes.
+    if (not isinstance(session_id, str) or not session_id
+            or "/" in session_id or "\\" in session_id
+            or session_id in (".", "..")):
+        raise ValueError(f"unsafe session id for redaction cache: {session_id!r}")
+    from api.config import STATE_DIR
+    return STATE_DIR / "redaction_cache" / f"{session_id}.json"
+
+
+def _redact_item_digest(value) -> str:
+    import hashlib
+    return hashlib.sha256(
+        _json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+# ── Deletion fence + per-session write guard (deletion-race fix) ──────────────
+# A full-transcript GET spends up to seconds redacting a large cold session
+# while holding NO session lock (the load path only locks agent mutation). A
+# session delete that completes during that window used to be undone by the
+# GET's final os.replace(): the projection file was RECREATED after deletion
+# had already unlinked it, and the redaction pass repopulated the
+# plaintext-keyed process memos that the delete had just cleared — so a
+# deleted conversation stayed recoverable on disk and in RAM. Two mechanisms
+# close that, whichever thread wins the race:
+#
+#   fence — delete_redaction_session_cache() records the sid in a bounded
+#           in-process registry; any cache write for a fenced sid is refused,
+#           and a load that observes the fence clears the memos on its way
+#           out (the load itself still serves its legitimately-read payload).
+#   guard — a per-sid Lock (weak registry, same lifecycle pattern as the
+#           session agent locks in api/config.py) serializes the delete
+#           side's {mark-deleted + unlink} against the write side's
+#           {fence-check + os.replace}, so an unlink and a recreate cannot
+#           interleave.
+_REDACT_CACHE_DELETED_MAX = 8192
+_REDACT_CACHE_DELETED_IDS: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_REDACT_CACHE_DELETED_LOCK = threading.Lock()
+_REDACT_CACHE_GUARD_LOCKS = weakref.WeakValueDictionary()
+_REDACT_CACHE_GUARD_LOCKS_LOCK = threading.Lock()
+
+
+def _redact_session_cache_guard(session_id: str) -> threading.Lock:
+    """Per-session Lock serializing projection deletion against projection
+    writes. Weak values keep one lock per overlapping holder/waiter without
+    leaking a permanent registry entry per deleted session; a caller's local
+    reference keeps the lock alive for the whole critical section."""
+    with _REDACT_CACHE_GUARD_LOCKS_LOCK:
+        lock = _REDACT_CACHE_GUARD_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _REDACT_CACHE_GUARD_LOCKS[session_id] = lock
+        return lock
+
+
+def _redact_cache_mark_deleted(session_id: str) -> None:
+    """Record ``session_id`` in the bounded deletion fence (FIFO eviction at
+    ``_REDACT_CACHE_DELETED_MAX`` so the registry cannot grow unboundedly)."""
+    with _REDACT_CACHE_DELETED_LOCK:
+        _REDACT_CACHE_DELETED_IDS.pop(session_id, None)
+        _REDACT_CACHE_DELETED_IDS[session_id] = None
+        while len(_REDACT_CACHE_DELETED_IDS) > _REDACT_CACHE_DELETED_MAX:
+            _REDACT_CACHE_DELETED_IDS.popitem(last=False)
+
+
+def _redact_cache_is_deleted(session_id: str) -> bool:
+    with _REDACT_CACHE_DELETED_LOCK:
+        return session_id in _REDACT_CACHE_DELETED_IDS
+
+
+def _redact_clear_process_memos() -> None:
+    """Best-effort clear of the process-wide redaction memos (see
+    delete_redaction_session_cache for the RAM-retention rationale)."""
+    try:
+        _redact_fn_lru.cache_clear()
+        _redact_text_lru.cache_clear()
+        _redact_text_big_lru.cache_clear()
+    except Exception:
+        pass
+
+
+def _redact_unlink_projection(path) -> bool:
+    """Remove a projection file if present; True only if actually removed."""
+    try:
+        if not path.exists():
+            return False
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return not path.exists()
+
+
+def _redact_apply_turn_decoration(raw_items, projected_items, _active_turn_token):
+    """Mirror `_public_message_projection`'s active-turn flag onto a cached
+    (decoration-free) projection, using the CURRENT request's token."""
+    if _active_turn_token is None or not isinstance(raw_items, list) or not isinstance(projected_items, list):
+        return projected_items
+    for raw_msg, out_msg in zip(raw_items, projected_items, strict=False):
+        if (
+            isinstance(raw_msg, dict) and isinstance(out_msg, dict)
+            and raw_msg.get("role") == "user"
+            and raw_msg.get("_active_turn_token") == _active_turn_token
+        ):
+            out_msg["_active_turn_user"] = True
+    return projected_items
+
+
+def redact_session_lists_cached(session_id, lists: dict, *, _active_turn_token=None) -> dict:
+    """Redact transcript lists (`messages`, `context_messages`, ...) through the
+    persistent per-message derived cache.
+
+    Falls back to plain redaction on ANY cache failure — this is a derived
+    artifact, never a correctness dependency. Respects `api_redact_enabled`
+    (the setting is part of cache validation, so toggling it recomputes).
+    """
+    from api.config import load_settings
+    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    if not _enabled:
+        # perf(conversation-switch, review follow-up): never persist an
+        # UNREDACTED projection cache — with redaction off, the derived file
+        # would be a second on-disk copy of the very secrets this boundary
+        # exists to keep out of derived artifacts. Passthrough is cheap.
+        return {
+            key: _redact_messages(items, _enabled=False, _active_turn_token=_active_turn_token)
+            for key, items in lists.items()
+        }
+
+    out = {}
+    want = {}
+    wrote = False
+    path = None
+    try:
+        rules_key = _redact_session_cache_rules_key()
+        path = _redact_session_cache_path(session_id)
+        if _redact_cache_is_deleted(session_id):
+            # Deletion race (load side): the session was deleted BEFORE this
+            # load started (slow client, or a Session object grabbed just
+            # before the delete popped it). Serve the payload that was
+            # legitimately read, but never read from or (re)create the on-disk
+            # projection for a deleted session, and drop whatever plaintext
+            # this pass memoizes — the same RAM contract as the delete hook.
+            fenced_out = {
+                key: _redact_messages(items, _enabled=_enabled, _active_turn_token=_active_turn_token)
+                for key, items in lists.items()
+            }
+            _redact_clear_process_memos()
+            return fenced_out
+        cache = None
+        # A valid rules_key is a HARD prerequisite for authorizing a cached read.
+        # If no trustworthy content identity could be computed (rules_key is
+        # None), do not even open the cache: rederive the projection from the
+        # current policy. This is the fail-closed branch the stale-redaction
+        # boundary requires — metadata/version identity is not content identity.
+        if rules_key is not None and path.exists():
+            try:
+                loaded = _json.loads(path.read_text(encoding="utf-8"))
+                if (isinstance(loaded, dict)
+                        and loaded.get("v") == _REDACT_SESSION_CACHE_VERSION
+                        and loaded.get("rules_key") == rules_key
+                        and loaded.get("enabled") == _enabled):
+                    cache = loaded
+            except Exception:
+                cache = None
+        cached_digests = (cache or {}).get("digests") or {}
+        cached_lists = (cache or {}).get("lists") or {}
+        projected_by_key = {}
+        for key, items in lists.items():
+            if not isinstance(items, list):
+                out[key] = _redact_messages(items, _enabled=_enabled, _active_turn_token=_active_turn_token)
+                continue
+            digests = [_redact_item_digest(it) for it in items]
+            want[key] = digests
+            old_digests = cached_digests.get(key) if isinstance(cached_digests, dict) else None
+            old_items = cached_lists.get(key) if isinstance(cached_lists, dict) else None
+            projected = [None] * len(items)
+            reused = 0
+            if (isinstance(old_digests, list) and isinstance(old_items, list)):
+                # Transcripts are append-mostly: splice the common prefix and
+                # recompute only appended/changed items.
+                common = min(len(old_digests), len(digests), len(old_items))
+                for i in range(common):
+                    if old_digests[i] == digests[i] and old_items[i] is not None:
+                        projected[i] = old_items[i]
+                        reused += 1
+            for i, item in enumerate(items):
+                if projected[i] is None:
+                    projected[i] = _redact_messages([item], _enabled=_enabled)[0]
+            projected_by_key[key] = projected
+            out[key] = projected
+            if reused != len(digests):
+                wrote = True
+        if wrote and path is not None and rules_key is not None:
+            # Write DECORATION-FREE projections (must happen before the
+            # response-only turn decoration below mutates `out`).
+            payload = {
+                "v": _REDACT_SESSION_CACHE_VERSION,
+                "rules_key": rules_key,
+                "enabled": _enabled,
+                "digests": want,
+                "lists": {k: projected_by_key[k] for k in want},
+            }
+            try:
+                import tempfile
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.stem}.", suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write(_json.dumps(payload, ensure_ascii=False))
+                    # Deletion race (write side): a delete that ran while this
+                    # GET was redacting must be the last word. The per-session
+                    # guard serializes {fence-check + replace} against the
+                    # delete hook's {mark-deleted + unlink}, so the projection
+                    # cannot be recreated after deletion unlinked it.
+                    with _redact_session_cache_guard(session_id):
+                        if not _redact_cache_is_deleted(session_id):
+                            os.replace(tmp_name, path)
+                finally:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+            except Exception:
+                pass
+        for key, items in lists.items():
+            if key in projected_by_key:
+                _redact_apply_turn_decoration(items, projected_by_key[key], _active_turn_token)
+        # Deletion race (RAM side): if the session was deleted at ANY point
+        # during this load, this pass just (re)populated the plaintext-keyed
+        # process memos that the delete hook clears — drop them again so a
+        # racing load cannot resurrect the deleted session's strings in RAM.
+        if _redact_cache_is_deleted(session_id):
+            _redact_clear_process_memos()
+        return out
+    except Exception:
+        # Cache is best-effort; never fail a response over it.
+        return {
+            key: _redact_messages(items, _enabled=_enabled, _active_turn_token=_active_turn_token)
+            for key, items in lists.items()
+        }
+
+
+def delete_redaction_session_cache(session_id) -> bool:
+    """Remove the persisted redaction projection for ``session_id`` and drop the
+    deleted session's strings from the process-wide redaction memos.
+
+    Hooked into the session-deletion paths so a deleted conversation is not
+    recoverable from ``STATE_DIR/redaction_cache/`` (same rationale as #3802
+    for the turn/run journals: the file holds redacted projections, but the
+    surviving conversation text still belongs to the deleted session).
+
+    The in-memory decision/redactor LRUs key on the ORIGINAL string, so a
+    deleted session's plaintext (including any secrets) would otherwise be held
+    until LRU eviction. Clearing them here extends the same deletion contract to
+    RAM. ``lru_cache`` has no per-key eviction, so the whole memo is cleared —
+    cheap, and only ever reached on a real deletion path. Unsafe ids and a
+    missing projection file are a no-op for the on-disk artifact; returns True
+    only if a file was actually removed. Best-effort — never raises.
+
+    Deletion-race contract: the full-transcript GET that builds projections
+    holds no session lock, so a load can still be redacting when this delete
+    runs — and without fencing, its final ``os.replace`` would RECREATE the
+    projection after this unlink, while its redaction pass repopulated the
+    memos this function clears. This hook therefore (1) records the sid in a
+    bounded in-process deletion fence that refuses any later cache write for
+    that sid, and (2) holds the per-session cache guard around
+    {mark-deleted + unlink} so it cannot interleave with a concurrent
+    writer's {fence-check + os.replace} critical section. A racing load that
+    observes the fence clears the memos on its way out, so its own
+    repopulation is also dropped.
+    """
+    try:
+        path = _redact_session_cache_path(session_id)
+    except Exception:
+        return False
+    file_removed = False
+    try:
+        with _redact_session_cache_guard(session_id):
+            _redact_cache_mark_deleted(session_id)
+            file_removed = _redact_unlink_projection(path)
+    except Exception:
+        # Cache bookkeeping must never break a deletion path: still fence the
+        # sid and attempt the unlink best-effort (outside the guard).
+        try:
+            _redact_cache_mark_deleted(session_id)
+            file_removed = _redact_unlink_projection(path)
+        except Exception:
+            pass
+    # AFTER the fence is recorded: a racing load that repopulates the memos
+    # past this clear sees the fence on its final check and clears again.
+    _redact_clear_process_memos()
+    return file_removed
 
 
 def read_body(handler) -> dict:
