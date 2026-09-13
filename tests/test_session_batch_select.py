@@ -1,5 +1,4 @@
 """Test: session batch select mode functions exist in sessions.js (#568)"""
-import re
 
 
 def test_batch_select_state_variables():
@@ -70,55 +69,93 @@ def test_batch_select_escape_handler():
         "Should have Escape key handler for select mode"
 
 
-def test_batch_select_toggle_button():
-    """Verify select mode toggle button is rendered."""
+def test_batch_select_scope_changes_clear_stale_ids():
+    """Profile/source replacements must not retain actionable IDs from another scope."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert 'session-select-toggle' in src, "Missing session-select-toggle class"
-    assert 'toggleSessionSelectMode' in src, "Missing toggleSessionSelectMode call"
+    assert "function _resetSessionSelectionForScopeChange()" in src
+    assert "function _pruneSessionSelectionToCurrentScope(sessions,referenceSessions)" in src
+    assert "_pruneSessionSelectionToCurrentScope(_allSessions,_sidebarReferenceSessions)" in src
+    source_start = src.index("function _setSessionSourceFilter")
+    source_filter = src[source_start:src.index("function _restoreSessionSourceFilter", source_start)]
+    skeleton_start = src.index("function showSessionListSkeleton")
+    profile_skeleton = src[skeleton_start:src.index("\nfunction ", skeleton_start + 1)]
+    assert "_resetSessionSelectionForScopeChange()" in source_filter
+    assert "_resetSessionSelectionForScopeChange()" in profile_skeleton
+
+
+def test_batch_select_visible_ids_exclude_read_only_sessions():
+    """Select All must not include rows that intentionally have no selection checkbox."""
+    with open('static/sessions.js', encoding="utf-8") as f:
+        src = f.read()
+    assignment = src[src.index("_sessionVisibleSidebarIds=flatSessionRows"):]
+    assignment = assignment[:assignment.index("for(const row of flatSessionRows)")]
+    assert "!_isReadOnlySession(session)" in assignment
+
+
+def test_batch_select_toggle_button():
+    """Verify the persistent select-mode toggle is a semantic button."""
+    with open('static/index.html', encoding="utf-8") as f:
+        html = f.read()
+    assert 'id="sessionSelectToggle"' in html, "Missing persistent session select toggle"
+    assert 'class="session-select-toggle"' in html, "Missing session-select-toggle class"
+    assert 'onclick="toggleSessionSelectMode()"' in html, "Toggle must enter select mode"
 
 
 def test_batch_select_bar_element():
-    """Verify batch action bar DOM element is created."""
+    """Verify the persistent batch action toolbar exists in Chat panel markup."""
+    with open('static/index.html', encoding="utf-8") as f:
+        html = f.read()
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert 'batchActionBar' in src, "Missing batchActionBar element"
-    assert 'batch-action-bar' in src, "Missing batch-action-bar CSS class"
+    assert 'id="batchActionBar"' in html, "Missing batchActionBar element"
+    assert 'class="batch-action-bar"' in html, "Missing batch-action-bar CSS class"
+    assert 'role="toolbar"' in html, "Batch actions need toolbar semantics"
     assert 'batch-action-btn' in src, "Missing batch-action-btn class"
 
 
-def test_batch_action_bar_overrides_css_hidden_state():
-    """Selected sessions must make the fixed action bar visible."""
+def test_batch_action_bar_stays_visible_at_zero_selection():
+    """Select mode must retain its controls while actions are inapplicable."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert "if(count>0){_renderBatchActionBar();}" in src, \
-        "Updating selected count must render action buttons, not just reveal an empty bar"
-    assert "t('session_selected_count',_selectedSessions.size)" in src, \
+    assert "function _updateBatchActionBar(){\n  _renderBatchActionBar();\n}" in src, \
+        "Every selection change must rerender the persistent toolbar"
+    assert "bar.hidden=!_sessionSelectMode" in src, \
+        "Toolbar visibility should follow select mode, not selected count"
+    assert "archiveBtn.disabled=count===0" in src, \
+        "Archive should be disabled, not hidden, when the selection is empty"
+    assert "moveBtn.disabled=count===0" in src, \
+        "Move should be disabled, not hidden, when the selection is empty"
+    assert "deleteBtn.disabled=count===0" in src, \
+        "Delete should be disabled, not hidden, when the selection is empty"
+    assert "t('session_selected_count',count)" in src, \
         "Selected count must pass the selected session count to i18n"
     assert "t('session_batch_archive_confirm',ids.length)" in src, \
         "Batch archive confirmation must pass selected session count to i18n"
     assert "t('session_batch_delete_confirm',ids.length)" in src, \
         "Batch delete confirmation must pass selected session count to i18n"
-    assert "bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'flex':'none'" in src, \
-        "Rendering the action bar must explicitly show it when selections exist"
-    assert "batchBar.style.display='flex'" in src, \
-        "Session list render must explicitly show the action bar in select mode"
 
 
-def test_batch_action_bar_is_sidebar_inline_not_global_footer():
-    """Batch actions should appear in the session list, not over the composer."""
+def test_batch_action_bar_is_docked_below_the_scrolling_session_list():
+    """Batch controls belong to Chat panel chrome, not the list or composer."""
+    with open('static/index.html', encoding="utf-8") as f:
+        html = f.read()
     with open('static/sessions.js', encoding="utf-8") as f:
         js = f.read()
     with open('static/style.css', encoding="utf-8") as f:
         css = f.read()
-    assert "list.appendChild(batchBar)" in js, \
-        "Batch action bar should be rendered inside the session list"
+    list_pos = html.index('id="sessionList"')
+    dock_pos = html.index('id="sessionBatchDock"')
+    tasks_pos = html.index('<!-- Tasks (cron) panel -->')
+    assert list_pos < dock_pos < tasks_pos, \
+        "Session action dock should be the session list's sibling inside Chat panel"
+    assert "list.appendChild(batchBar)" not in js, \
+        "List rerenders must not move the persistent dock into scrolling content"
     assert "document.body.appendChild(batchBar)" not in js, \
         "Batch action bar must not be mounted as a global footer"
-    assert ".batch-action-bar{display:none;margin:" in css, \
-        "Batch action bar should use inline sidebar spacing"
-    assert "position:fixed" not in css[css.find(".batch-action-bar{"):css.find(".batch-count{")], \
-        "Batch action bar must not be fixed to the bottom of the viewport"
+    dock_css = css[css.find(".session-batch-dock{"):css.find(".session-select-toggle{")]
+    assert "flex:0 0 auto" in dock_css, "Dock should reserve non-scrolling flex space"
+    assert "position:fixed" not in dock_css, "Dock must stay scoped to the Chat panel"
 
 
 def test_batch_project_picker_is_anchored_to_batch_actions():
@@ -184,16 +221,8 @@ def test_batch_select_i18n_keys():
         'session_batch_archive_confirm',
         'session_no_selection',
     ]
-    locales = ['en', 'ru', 'es', 'de', 'zh', 'zh-Hant', 'ko']
     for key in required_keys:
-        for locale in locales:
-            # Check if the key exists in the locale block
-            if locale == 'zh-Hant':
-                pattern = rf"'{locale}'\s*:.*?{key}"
-            else:
-                pattern = rf"{locale}\s*:.*?{key}"
-            # Simpler check: just verify the key string with colon exists
-            assert f"{key}:" in src, f"Missing i18n key '{key}' in i18n.js"
+        assert f"{key}:" in src, f"Missing i18n key '{key}' in i18n.js"
     # Count occurrences - each key should appear in all 7 locales
     for key in required_keys:
         count = src.count(f"{key}:")
@@ -215,14 +244,16 @@ def test_batch_select_css_exists():
     with open('static/style.css', encoding="utf-8") as f:
         src = f.read()
     required_classes = [
+        'session-batch-dock',
         'session-select-toggle',
-        'session-select-bar',
+        'batch-selection-controls',
         'batch-exit-btn',
         'batch-select-all-btn',
         'session-select-cb-wrapper',
         'session-select-cb',
         'session-item.selected',
         'batch-action-bar',
+        'batch-action-buttons',
         'batch-count',
         'batch-action-btn',
         'batch-action-btn-danger',
