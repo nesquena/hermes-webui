@@ -405,7 +405,10 @@ def test_error_reconnect_path_can_restore_from_journal():
     # `Reconnecting… (1/${_retryDelays.length})` (staged-probe counter), so the
     # old single-quoted "setComposerStatus('Reconnecting" anchor no longer exists.
     reconnect_pos = MESSAGES_SRC.index("_reconnectAttempted=true;")
-    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 1100]
+    # Window widened to 1500: the #6381 ownership guard added to the error path
+    # (deferral + staged-probe authorization) grew the reconnect block, pushing
+    # the replay assertions below past the old 1100-character slice.
+    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 1500]
 
     assert "st.active" in block
     assert "st.replay_available" in block
@@ -420,7 +423,10 @@ def test_frontend_replay_cursor_uses_eventsource_last_event_id():
     assert "e.lastEventId" in block
     assert "lastIndexOf(':')" in block
     assert "_lastRunJournalSeq=seq" in block
-    assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
+    # #6381: the cursor listener is now registered as an ownership-guarded arrow
+    # that delegates to _rememberRunJournalCursor(e).
+    assert "source.addEventListener(_runJournalEventName,e=>{" in MESSAGES_SRC
+    assert "_rememberRunJournalCursor(e);" in MESSAGES_SRC
     assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
     assert "after_seq=0" not in MESSAGES_SRC
 
