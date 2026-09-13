@@ -9528,6 +9528,7 @@ def _run_agent_streaming(
                 snapshot_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
+                _root_only_env_names_for_profile,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
             )
@@ -9536,10 +9537,17 @@ def _run_agent_streaming(
             _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
+            # #7048: root-scoped keys this profile must not inherit. Mirrored
+            # below so an overlapping turn of another profile cannot read them
+            # out of the process env.
+            _root_only_env_names = _root_only_env_names_for_profile(
+                _profile_home_path, _safe_profile_runtime_env
+            )
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
             _safe_profile_runtime_env = {}
+            _root_only_env_names = set()
             patch_skill_home_modules = None
             snapshot_skill_home_modules = None
             restore_skill_home_modules = None
@@ -9645,7 +9653,13 @@ def _run_agent_streaming(
                 # failures can unwind without leaking either state.
                 _streaming_skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(Path(_profile_home))
-            old_profile_env = {key: os.environ.get(key) for key in _safe_profile_runtime_env}
+            old_profile_env = {
+                key: os.environ.get(key)
+                for key in (set(_safe_profile_runtime_env) | _root_only_env_names)
+            }
+            for _root_scope_key in _root_only_env_names:
+                if _root_scope_key not in _safe_profile_runtime_env:
+                    os.environ.pop(_root_scope_key, None)
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
