@@ -537,6 +537,7 @@ class TestForegroundExecutabilityGuard:
 
 def test_package_python_discovers_agent_before_skip_install_gate(import_bootstrap, clean_env, monkeypatch, tmp_path):
     bs = import_bootstrap
+    monkeypatch.setattr(bs._startup, "_platform_default_hermes_home", lambda: tmp_path / "default-hermes-home")
     agent_dir = tmp_path / "site-packages"
     agent_dir.mkdir()
     (agent_dir / "run_agent.py").write_text("class AIAgent:\n    pass\n", encoding="utf-8")
@@ -548,6 +549,7 @@ def test_package_python_discovers_agent_before_skip_install_gate(import_bootstra
     monkeypatch.setenv("HERMES_WEBUI_DISABLE_LOCAL_VENV", "1")
     monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(state_dir))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
     monkeypatch.setenv("PYTHONPATH", str(agent_dir))
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "webui")
@@ -575,11 +577,13 @@ def test_package_python_discovers_agent_before_skip_install_gate(import_bootstra
 
 def test_package_python_without_agent_stays_fail_closed(import_bootstrap, clean_env, monkeypatch, tmp_path):
     bs = import_bootstrap
+    monkeypatch.setattr(bs._startup, "_platform_default_hermes_home", lambda: tmp_path / "default-hermes-home")
     python_exe = sys.executable
 
     monkeypatch.setenv("HERMES_WEBUI_PYTHON", python_exe)
     monkeypatch.setenv("HERMES_WEBUI_DISABLE_LOCAL_VENV", "1")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "webui")
     monkeypatch.setattr(bs.Path, "home", classmethod(lambda cls: tmp_path / "home"))
