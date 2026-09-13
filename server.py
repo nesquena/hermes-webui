@@ -671,6 +671,16 @@ def main() -> None:
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
+    # Start the kanban notifier AFTER the port is bound so a duplicate/failed
+    # startup does not steal wakeups from the real server. If any later
+    # startup step fails, the finally block below calls stop_notifier_thread().
+    try:
+        from api.kanban_notifier import start_notifier_thread
+        if start_notifier_thread():
+            print('[ok] kanban notifier thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: kanban notifier failed to start: {e}', flush=True)
+
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:
@@ -740,6 +750,11 @@ def main() -> None:
             stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
+        try:
+            from api.kanban_notifier import stop_notifier_thread
+            stop_notifier_thread()
+        except Exception:
+            logger.debug("Failed to stop kanban notifier thread during shutdown", exc_info=True)
         try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()
