@@ -2547,7 +2547,7 @@ function _isCliSession(session) {
     || session.source_label
     || ''
   ).toLowerCase();
-  if (raw === 'cli' || raw === 'tui' || raw === 'acp') return true;
+  if (raw === 'cli' || raw === 'tui' || raw === 'acp' || raw === 'desktop') return true;
   // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
   if (_isMessagingSession(session)) return false;
   return session.is_cli_session === true;
