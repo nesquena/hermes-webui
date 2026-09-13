@@ -30,6 +30,10 @@ scanner resolves symlinks inside the single-flight callback; lexical `..` is
 not collapsed before symlink resolution.
 
 At most **32 followers** wait, with a **2-second** monotonic waiting budget.
+The original absolute deadline is checked again after a notified follower
+reacquires the lock. A completed generation is shared only while its own
+completion-based expiry remains valid. A delayed follower fails closed and
+never starts a replacement scan just because its generation has expired.
 Extra or timed-out callers receive unavailable identity, rather than stale
 success or permission to launch another scan. Existing route behavior then
 keeps shell output out of its cache and returns a no-store 503 for the worker.
@@ -48,7 +52,8 @@ release their slot. Coordination cleanup also runs if publication fails.
 
 `ASSET_IDENTITY_CACHE.snapshot()` returns an independent, fixed-key in-process
 snapshot. It includes requests, warm/negative hits, refresh attempts/successes/
-failures, shared results, waiter rejections/timeouts, current and peak waiters,
+failures, shared results, expired shared results, waiter rejections/timeouts,
+current and peak waiters,
 entry/eviction counts, in-flight state, and last/total/maximum refresh seconds.
 
 There are no request identifiers, paths, roots, tokens, digests, exception

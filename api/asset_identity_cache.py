@@ -21,6 +21,7 @@ class _Flight:
     key: str
     done: bool = False
     value: str | None = None
+    expires_at: float | None = None
 
 
 class AssetIdentityCache:
@@ -44,9 +45,9 @@ class AssetIdentityCache:
         for value in (freshness_seconds, failure_seconds, wait_seconds):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("cache durations must be finite and positive")
-        if not isinstance(max_entries, int) or max_entries < 1:
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
-        if not isinstance(max_waiters, int) or max_waiters < 1:
+        if isinstance(max_waiters, bool) or not isinstance(max_waiters, int) or max_waiters < 1:
             raise ValueError("max_waiters must be a positive integer")
         self._freshness_seconds = freshness_seconds
         self._failure_seconds = failure_seconds
@@ -66,6 +67,7 @@ class AssetIdentityCache:
             "refresh_successes": 0,
             "refresh_failures": 0,
             "shared_results": 0,
+            "expired_shared_results": 0,
             "wait_timeouts": 0,
             "wait_rejections": 0,
             "peak_waiters": 0,
@@ -113,13 +115,18 @@ class AssetIdentityCache:
                     )
                 finally:
                     self._waiters -= 1
-                if not completed:
+                # Notification is not timely delivery. A follower may only
+                # regain this lock after its original waiting budget expired.
+                if not completed or time.monotonic() >= deadline:
                     self._stats["wait_timeouts"] += 1
                     return None
                 if flight.key == key:
-                    # Consume this generation's result even if a later flight
-                    # has already begun. Never turn awakened followers into a
-                    # second burst of scans after a slow refresh or failure.
+                    # Share only a still-fresh published generation. A delayed
+                    # follower must not return expired bytes or become another
+                    # scanner merely because its original flight completed.
+                    if flight.expires_at is None or self._clock() >= flight.expires_at:
+                        self._stats["expired_shared_results"] += 1
+                        return None
                     self._stats["shared_results"] += 1
                     return flight.value
                 # A changed server-selected root may wait behind another root,
@@ -147,7 +154,8 @@ class AssetIdentityCache:
                         self._freshness_seconds if value is not None
                         else self._failure_seconds
                     )
-                    self._entries[key] = (value, self._clock() + lifetime)
+                    expires_at = self._clock() + lifetime
+                    self._entries[key] = (value, expires_at)
                     self._entries.move_to_end(key)
                     while len(self._entries) > self._max_entries:
                         self._entries.popitem(last=False)
@@ -161,6 +169,7 @@ class AssetIdentityCache:
                         self._stats["max_refresh_seconds"], elapsed
                     )
                     flight.value = value
+                    flight.expires_at = expires_at
                 except BaseException:
                     self._entries.pop(key, None)
                     raise
