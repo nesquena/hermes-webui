@@ -78,6 +78,13 @@ contributor guidance; it does not change runtime behavior or CI gates.
   proof gates. Prefer the RFC's **Authoritative emitted events** table (live
   `/api/chat/stream` wire names) over the aspirational semantic taxonomy when
   writing clients against current source.
+- [`docs/architecture/models-cache-invalidation.md`](architecture/models-cache-invalidation.md):
+  current contract for the `/api/models` catalog cache identity: the
+  `config.yaml`, `auth.json`, and catalog source-fingerprint axes, the
+  one-directional volatile-key deny-lists (auth rotation and Codex's
+  `models_cache.json` refresh timestamps), the stat-identity fallbacks, and the
+  schema/version stamps. Start here before changing model-catalog caching, the
+  `/api/models` cache keys, or the Codex catalog dependency (#2443, #7540).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,
