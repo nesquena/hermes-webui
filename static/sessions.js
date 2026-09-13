@@ -6764,6 +6764,14 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isResetSuccessor(s){
+  return !!(s&&s.relationship_type==='reset_successor');
+}
+
+function _showsForkOrBranchIndicator(s){
+  return !!(s&&s.parent_session_id&&!_isResetSuccessor(s));
+}
+
 function _isForkWithResolvableParent(s, sessionIdsInList){
   return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
@@ -6828,7 +6836,7 @@ function _resolveSessionIdFromSidebarLineage(sid){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row);
-    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
+    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
       candidates.push(row);
     }
   }
@@ -8187,8 +8195,11 @@ function renderSessionListFromCache(){
       wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
       titleRow.appendChild(wtInd);
     }
-    // Parent session indicator for forked/branched sessions (#465)
-    if(s.parent_session_id){
+    // Reset successors retain parent_session_id as durable lineage but are
+    // independent top-level conversations. Suppress the historical parent-linked
+    // branch indicator only for a positively classified reset successor so legacy
+    // /branch rows without modern fork metadata keep their provenance (#7178).
+    if(_showsForkOrBranchIndicator(s)){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
       branchInd.innerHTML=li('git-branch',12);
