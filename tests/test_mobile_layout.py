@@ -16,13 +16,16 @@ Run as part of the standard test suite:
     ./scripts/test.sh tests/test_mobile_layout.py -v
 """
 
+import json
 import pathlib
 import re
+import pytest
 from html.parser import HTMLParser
 
 REPO = pathlib.Path(__file__).parent.parent
 HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 CSS  = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+BOOT = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 
 
 def _max_width_media_blocks(width_px):
@@ -244,6 +247,472 @@ def test_rightpanel_mobile_slide_over_css():
         "open mobile rightpanel should keep the edge shadow"
     assert re.search(r'\.rightpanel\s+\.panel-header\{[^}]*row-gap:\s*8px', rightpanel_block), \
         "mobile workspace header should keep comfortable row spacing"
+
+
+def test_rightpanel_slide_over_at_900px_compact_band():
+    """The right-panel slide-over drawer must exist at the 900px compact band.
+
+    _isCompactWorkspaceViewport() treats <=900px as compact and opens the
+    workspace panel via .mobile-open, so the drawer CSS must live in the
+    @media(max-width:900px) block — not just the 640px phone block — or the
+    panel stays display:none on foldable/tablet inner screens (641-900px).
+    """
+    compact_900 = "\n".join(_max_width_media_blocks(900))
+    assert compact_900, "Missing @media(max-width:900px) block in style.css"
+    # There are two .rightpanel rules in the 900px block: the base display:none
+    # and the slide-over drawer. Find the drawer rule (position:fixed).
+    drawer = re.search(r'\.rightpanel\{[^}]*position:\s*fixed[^}]*\}', compact_900, re.DOTALL)
+    assert drawer, "900px compact .rightpanel must have a position:fixed drawer rule"
+    assert "display:flex!important" in drawer.group(0), \
+        "900px compact .rightpanel drawer must be display:flex (visible)"
+    open_rule = re.search(r'\.rightpanel\.mobile-open\{[^}]*\}', compact_900, re.DOTALL)
+    assert open_rule and re.search(r'right:\s*0\s*!important', open_rule.group(0)), \
+        "900px compact .rightpanel.mobile-open must slide in to right:0"
+
+
+def test_sidebar_collapse_available_from_641px():
+    """Sidebar desktop collapse must work in the foldable band (641-900px).
+
+    The sidebar needs position:relative from min-width:641px so the desktop
+    collapse mechanism (.sidebar-collapsed -> width:0) applies on foldable
+    inner screens, not only at >=901px.
+    """
+    assert "@media(min-width:641px)" in CSS, "Missing @media(min-width:641px) block"
+    # Find the 641px block that sets .sidebar{position:relative}
+    pattern = re.compile(r'@media\s*\(\s*min-width\s*:\s*641px\s*\)\s*\{')
+    found = False
+    for match in pattern.finditer(CSS):
+        open_brace = match.end() - 1
+        depth = 0
+        for idx in range(open_brace, len(CSS)):
+            if CSS[idx] == "{":
+                depth += 1
+            elif CSS[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    block = CSS[open_brace + 1:idx]
+                    if ".sidebar{position:relative" in block.replace(" ", ""):
+                        found = True
+                    break
+    assert found, "641px block must set .sidebar{position:relative} for foldable-band collapse"
+
+
+def test_rightpanel_in_flow_only_at_901px():
+    """Right panel must stay a fixed overlay through 900px, in-flow at >=901px.
+
+    If .rightpanel{position:relative} were applied at 641px it would sit in-flow
+    at 300px next to the sidebar and squeeze the chat on foldable inner screens.
+    """
+    pattern = re.compile(r'@media\s*\(\s*min-width\s*:\s*901px\s*\)\s*\{')
+    found = False
+    for match in pattern.finditer(CSS):
+        open_brace = match.end() - 1
+        depth = 0
+        for idx in range(open_brace, len(CSS)):
+            if CSS[idx] == "{":
+                depth += 1
+            elif CSS[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    block = CSS[open_brace + 1:idx]
+                    if ".rightpanel{position:relative" in block.replace(" ", ""):
+                        found = True
+                    break
+    assert found, "901px block must set .rightpanel{position:relative}"
+
+
+def test_sidebar_tristate_helper_present():
+    """boot.js must centralize the tri-state sidebar collapse decision.
+
+    Explicit '1' = collapsed, '0' = open, unset = collapsed only in the
+    compact band (641-900px). All restore paths (boot, bfcache, resize) must
+    call this single helper so they agree on the default.
+    """
+    assert "function _sidebarShouldCollapse" in BOOT, \
+        "boot.js must define the _sidebarShouldCollapse tri-state helper"
+    assert "_SIDEBAR_COLLAPSED_KEY" in BOOT, "sidebar key constant missing"
+
+
+def test_sidebar_tristate_used_in_bfcache_restore():
+    """bfcache restore must use the shared tri-state helper, not the old boolean.
+
+    The old code compared the preference only against '1', so an unset compact
+    page that was collapsed would be re-expanded on back/forward navigation.
+    """
+    assert "_sidebarShouldCollapse()" in BOOT, \
+        "boot.js must call _sidebarShouldCollapse in the bfcache restore path"
+    # The bfcache path must not read the key directly with a bare === '1'
+    assert "localStorage.getItem('hermes-webui-sidebar-collapsed') === '1'" not in BOOT, \
+        "bfcache restore must not use the old boolean-only comparison"
+
+
+def test_sidebar_tristate_used_on_resize():
+    """Viewport-change handling must re-apply the tri-state sidebar default.
+
+    Unfolding a foldable (phone 640px -> inner 804px) or resizing desktop ->
+    inner must collapse the sidebar when no preference is set, without
+    persisting the derived default as an explicit '1'. The resize handler
+    routes through the shared _applySidebarState helper (which uses the
+    tri-state calculation and never writes localStorage).
+    """
+    assert "_sidebarShouldCollapse()" in BOOT, \
+        "boot.js must define and use _sidebarShouldCollapse (via the apply helper)"
+    assert "_applySidebarState()" in BOOT, \
+        "boot.js must apply sidebar state via the shared non-persisting helper"
+    # The helper must not persist: no localStorage.setItem outside toggleSidebar
+    apply_fn = re.search(r'function _applySidebarState\(\)\{.*?\n\}', BOOT, re.DOTALL)
+    assert apply_fn and "localStorage.setItem" not in apply_fn.group(0), \
+        "the apply helper must never persist the derived state"
+
+
+def test_sidebar_prepaint_script_handles_compact_default():
+    """The inline pre-paint script must mirror the tri-state rule.
+
+    On a fresh 804px load with no preference, the sidebar must be collapsed
+    from first paint (no flash) — the inline script in index.html must set
+    data-sidebar-collapsed for the compact band, not just for explicit '1'.
+    """
+    assert "hermes-webui-sidebar-collapsed" in HTML, "pre-paint script missing"
+    assert "max-width: 900px" in HTML and "min-width: 641px" in HTML, \
+        "pre-paint script must detect the 641-900px compact band"
+    assert "p==='1'" in HTML, "pre-paint script must keep explicit '1' collapse"
+    assert "p==null" in HTML, "pre-paint script must default-collapse when unset in compact band"
+
+
+# ── Executed decision-matrix tests for _sidebarShouldCollapse ────────────────
+# The static checks above prove the code exists; these execute the actual
+# tri-state logic with faked matchMedia/localStorage to prove the behavior.
+
+def _extract_sidebar_should_collapse():
+    """Extract the _sidebarShouldCollapse function source from boot.js."""
+    m = re.search(r'function _sidebarShouldCollapse\(\)\{.*?\n\}', BOOT, re.DOTALL)
+    assert m, "could not find _sidebarShouldCollapse in boot.js"
+    return m.group(0)
+
+
+def _run_sidebar_should_collapse(width, pref):
+    """Execute the real _sidebarShouldCollapse JS function via node, with
+    faked matchMedia/localStorage, and return its boolean result."""
+    import shutil
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS decision matrix")
+    import subprocess
+    fn = _extract_sidebar_should_collapse()
+    pref_js = 'null' if pref is None else repr(pref)
+    script = f"""
+{fn}
+// fakes
+const _width = {width};
+globalThis.matchMedia = (q) => {{
+  q = q.replace(/\\s+/g, '');
+  if (q === '(min-width:641px)') return {{ matches: _width >= 641 }};
+  if (q === '(max-width:900px)') return {{ matches: _width <= 900 }};
+  return {{ matches: false }};
+}};
+const _store = {{}};
+const _SIDEBAR_COLLAPSED_KEY = 'hermes-webui-sidebar-collapsed';
+if ({pref_js} !== null) _store[_SIDEBAR_COLLAPSED_KEY] = {pref_js};
+globalThis.localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = v; }},
+  removeItem: (k) => {{ delete _store[k]; }},
+}};
+function _isDesktopWidth() {{ return _width >= 641; }}
+function _isCompactWorkspaceViewport() {{ return _width <= 900; }}
+console.log(JSON.stringify(_sidebarShouldCollapse()));
+"""
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    return json.loads(r.stdout.strip())
+
+
+_BOOT_JS = BOOT  # alias used by the lifecycle harness
+
+
+def _extract_boot_js_functions(*names):
+    """Extract named function definitions from boot.js source (simple
+    brace-matching extraction, adequate for the sidebar helper functions)."""
+    out = []
+    for name in names:
+        m = re.search(r'function %s\(' % re.escape(name), _BOOT_JS)
+        assert m, f"function {name} not found in boot.js"
+        start = m.start()
+        depth = 0
+        i = _BOOT_JS.index('{', m.end() - 1)
+        for j in range(i, len(_BOOT_JS)):
+            if _BOOT_JS[j] == '{':
+                depth += 1
+            elif _BOOT_JS[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    out.append(_BOOT_JS[start:j + 1])
+                    break
+    return '\n'.join(out)
+
+
+def _run_sidebar_lifecycle(start_width, start_drawer_open, end_width, pref):
+    """Execute the real _applySidebarState() against fake DOM stubs and
+    return the post-transition class/storage/ARIA state as a dict.
+
+    Simulates: boot at start_width (drawer optionally open), then a viewport
+    transition to end_width. Uses fake classList/querySelector stubs — no
+    browser required.
+    """
+    import shutil
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS decision matrix")
+    import subprocess
+    helpers = _extract_boot_js_functions(
+        'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
+        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState')
+    pref_js = 'null' if pref is None else repr(pref)
+    script = f"""
+{helpers}
+// ── fake DOM ──
+function fakeClassList(initial) {{
+  const s = new Set(initial || []);
+  return {{
+    set: s,
+    add: (...c) => c.forEach(x => s.add(x)),
+    remove: (...c) => c.forEach(x => s.delete(x)),
+    toggle: (c, force) => {{
+      if (force === undefined) {{ s.has(c) ? s.delete(c) : s.add(c); return s.has(c); }}
+      if (force) s.add(c); else s.delete(c); return force;
+    }},
+    contains: (c) => s.has(c),
+  }};
+}}
+const els = {{
+  '.layout':    {{ classList: fakeClassList([]) }},
+  '.sidebar':   {{ classList: fakeClassList({json.dumps(['mobile-open', 'mobile-session-page', 'mobile-panel-drawer'] if start_drawer_open else [])}) }},
+  '#mobileOverlay': {{ classList: fakeClassList({json.dumps(['visible'] if start_drawer_open else [])}) }},
+}};
+globalThis.document = {{
+  querySelector: (sel) => els[sel] || null,
+  querySelectorAll: () => [],
+  documentElement: {{ classList: fakeClassList([]), removeAttribute() {{}} }},
+}};
+globalThis.$ = (id) => els['#' + id] || null;
+// ── fake viewport + storage ──
+let _width = {start_width};
+globalThis.matchMedia = (q) => {{
+  q = q.replace(/\\s+/g, '');
+  if (q === '(min-width:641px)') return {{ matches: _width >= 641 }};
+  if (q === '(max-width:900px)') return {{ matches: _width <= 900 }};
+  return {{ matches: false }};
+}};
+globalThis.window = {{ matchMedia: globalThis.matchMedia }};
+const _store = {{}};
+const _SIDEBAR_COLLAPSED_KEY = 'hermes-webui-sidebar-collapsed';
+if ({pref_js} !== null) _store[_SIDEBAR_COLLAPSED_KEY] = {pref_js};
+const _writes = [];
+globalThis.localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _writes.push([k, v]); _store[k] = v; }},
+  removeItem: (k) => {{ delete _store[k]; }},
+}};
+function _isCompactWorkspaceViewport() {{ return _width <= 900; }}
+let _ariaCalls = 0;
+function _syncSidebarAria() {{ _ariaCalls++; }}
+// ── run: boot-time apply at start_width, then transition to end_width ──
+_applySidebarState();
+_width = {end_width};
+_applySidebarState();
+console.log(JSON.stringify({{
+  layout: [...els['.layout'].classList.set],
+  sidebar: [...els['.sidebar'].classList.set],
+  overlay: [...els['#mobileOverlay'].classList.set],
+  storage: _store,
+  writes: _writes,
+  ariaCalls: _ariaCalls,
+}}));
+"""
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    return json.loads(r.stdout.strip())
+
+
+def test_sidebar_lifecycle_unfold_drawer_open_640_to_804():
+    """The round-3 blocker, executed: drawer open at 640px, unfold to 804px
+    with no stored preference. The shared apply helper must clear the mobile
+    drawer classes, apply the compact-band collapse default, and leave
+    localStorage untouched."""
+    st = _run_sidebar_lifecycle(640, True, 804, None)
+    assert st['layout'] == ['sidebar-collapsed']
+    assert st['sidebar'] == [], "mobile drawer classes must be cleared on unfold"
+    assert st['overlay'] == [], "mobile overlay must be hidden on unfold"
+    assert st['storage'] == {}, "derived compact default must not be persisted"
+    assert st['writes'] == []
+
+
+def test_sidebar_lifecycle_fold_804_to_640_drawer_reowned_by_mobile():
+    """Inverse transition: 804px (collapsed) -> fold to 640px. The desktop
+    collapse class must be dropped; the mobile drawer owns the sidebar again."""
+    st = _run_sidebar_lifecycle(804, False, 640, None)
+    assert st['layout'] == [], "sidebar-collapsed must be removed at phone width"
+    assert st['sidebar'] == []
+    assert st['storage'] == {}
+
+
+def test_sidebar_lifecycle_unfold_explicit_open_pref():
+    """Unfold with an explicit '0' (user chose open): no collapse applied."""
+    st = _run_sidebar_lifecycle(640, True, 804, '0')
+    assert st['layout'] == []
+    assert st['sidebar'] == []
+    assert st['storage'] == {'hermes-webui-sidebar-collapsed': '0'}
+
+
+def test_sidebar_lifecycle_unfold_explicit_closed_pref():
+    """Unfold with an explicit '1' (user chose closed): collapse applied."""
+    st = _run_sidebar_lifecycle(640, False, 804, '1')
+    assert st['layout'] == ['sidebar-collapsed']
+    assert st['sidebar'] == []
+    assert st['storage'] == {'hermes-webui-sidebar-collapsed': '1'}
+
+
+def test_sidebar_lifecycle_desktop_wide_transition():
+    """804 -> 1200 (desktop, no pref): drawer classes cleared, sidebar open."""
+    st = _run_sidebar_lifecycle(804, True, 1200, None)
+    assert st['layout'] == [], "no pref on wide desktop -> sidebar open"
+    assert st['sidebar'] == []
+
+
+def test_apply_sidebar_state_delegates_to_close_mobile_sidebar():
+    """_applySidebarState must reuse closeMobileSidebar() rather than inlining
+    the same three class removals + overlay hide (keeps one shared path)."""
+    body = _js_function_body(_BOOT_JS, "_applySidebarState")
+    assert "closeMobileSidebar()" in body, \
+        "apply helper should delegate mobile-class clearing to closeMobileSidebar()"
+    assert "classList.remove('mobile-open'" not in body, \
+        "apply helper should not re-inline the closeMobileSidebar body"
+
+
+def test_sidebar_lifecycle_unfold_drawer_open_640_to_804_universal():
+    """Source-level guard kept alongside the executed matrix: the apply helper
+    must exist and route through the shared close helper."""
+    assert "function _applySidebarState()" in _BOOT_JS
+    assert "closeMobileSidebar()" in _BOOT_JS
+
+
+def test_sidebar_should_collapse_decision_matrix():
+    """Executed decision matrix for _sidebarShouldCollapse.
+
+    unset preference: collapsed only in 641-900px (not on phones <641px)
+    explicit '1': collapsed everywhere
+    explicit '0': open everywhere
+    """
+    cases = [
+        # (width, pref, expected_collapsed)
+        (804, None, True),   # foldable inner, no pref -> collapsed
+        (1200, None, False), # desktop, no pref -> open
+        (600, None, False),  # phone, no pref -> open (mobile drawer, not desktop collapse)
+        (804, '1', True),    # explicit closed -> collapsed
+        (1200, '1', True),   # explicit closed -> collapsed even on desktop
+        (804, '0', False),   # explicit open -> open
+        (1200, '0', False),  # explicit open -> open
+        (900, None, True),   # boundary 900 -> collapsed
+        (901, None, False),  # boundary 901 -> open
+        (641, None, True),   # boundary 641 -> collapsed
+        (640, None, False),  # boundary 640 -> open (phone)
+    ]
+    for width, pref, expected in cases:
+        got = _run_sidebar_should_collapse(width, pref)
+        assert got is expected, (
+            f"width={width} pref={pref}: expected collapsed={expected}, got {got}"
+        )
+
+
+def test_sidebar_bfcache_does_not_persist_derived_default():
+    """The bfcache path must reconcile via the shared non-persisting apply
+    helper, never persisting a derived compact-band default as an explicit
+    '1' (which would leak into widths above 900px)."""
+    pageshow_block = BOOT[BOOT.find("window.addEventListener('pageshow'"):]
+    # The bfcache reconciliation section:
+    idx = pageshow_block.find("Re-sync sidebar")
+    assert idx >= 0, "bfcache sidebar reconciliation section missing"
+    section = pageshow_block[idx:idx + 900]
+    assert "toggleSidebar(" not in section, \
+        "bfcache path must not call toggleSidebar (would persist derived default)"
+    assert "_applySidebarState()" in section, \
+        "bfcache path must reconcile via the shared _applySidebarState helper"
+
+
+def test_sidebar_lifecycle_paths_use_shared_apply_helper():
+    """Boot restore, resize, and bfcache restore must all route sidebar state
+    application through the shared _applySidebarState helper so the lifecycle
+    paths cannot drift apart (round-3 maintainer review)."""
+    assert "function _applySidebarState" in BOOT, \
+        "boot.js must define the shared _applySidebarState helper"
+    # boot restore
+    restore_idx = BOOT.find("_restoreSidebarState")
+    restore_block = BOOT[restore_idx:restore_idx + 400]
+    assert "_applySidebarState()" in restore_block, \
+        "boot restore must use the shared apply helper"
+    # resize handler
+    resize_idx = BOOT.find("window.addEventListener('resize'")
+    resize_block = BOOT[resize_idx:resize_idx + 1200]
+    assert "_applySidebarState()" in resize_block, \
+        "resize handler must use the shared apply helper"
+    # bfcache (pageshow)
+    pageshow_block = BOOT[BOOT.find("window.addEventListener('pageshow'"):]
+    assert "_applySidebarState()" in pageshow_block, \
+        "bfcache path must use the shared apply helper"
+
+
+def test_apply_sidebar_state_clears_mobile_drawer_on_desktop():
+    """When at desktop width, _applySidebarState must clear the mobile drawer
+    classes (mobile-open etc.) so they cannot block the desktop collapse
+    selector .sidebar:not(.mobile-open) — the round-3 foldable-unfold bug.
+
+    The clearing itself is delegated to closeMobileSidebar(); the executed
+    lifecycle matrix above proves the behavior, this checks the wiring and
+    the no-persist contract."""
+    body = _js_function_body(BOOT, "_applySidebarState")
+    assert "closeMobileSidebar()" in body, \
+        "apply helper must delegate mobile drawer clearing to closeMobileSidebar()"
+    assert "sidebar-collapsed" in body, \
+        "apply helper must apply the desktop collapse class"
+    assert "localStorage.setItem" not in body, \
+        "apply helper must never persist to localStorage"
+
+
+def test_sidebar_phone_does_not_set_desktop_collapse():
+    """On phones (<641px) the helper must return false (no desktop collapse),
+    so the mobile slide-in drawer's ARIA stays accurate."""
+    assert _run_sidebar_should_collapse(600, None) is False, \
+        "phone width with no pref must not apply desktop collapse"
+    assert _run_sidebar_should_collapse(600, '1') is True, \
+        "explicit '1' still collapses (user choice) — but CSS masks it on phone"
+
+
+def test_workspace_toggle_close_race_guard_present():
+    """The stuck-open drawer fix must keep its pointerdown guard.
+
+    closeMobileWorkspacePanelFromChat fires on any pointerdown inside #mainChat
+    (the composer and the workspace toggle button live inside it). Without the
+    closest() guard, tapping the folder toggle while the panel is open closes
+    the panel on pointerdown and the button's own click immediately reopens it —
+    the drawer appears stuck open. This is one of the three headline bugs the
+    PR fixes, so lock the guard in.
+    """
+    fn = _js_function_body(BOOT, "closeMobileWorkspacePanelFromChat")
+    # The guard must short-circuit before closeWorkspacePanel()
+    assert "#btnWorkspacePanelToggle" in fn, \
+        "pointerdown close must ignore taps on the workspace panel toggle"
+    for selector in ("#btnWorkspacePanelEdgeToggle", ".workspace-toggle-btn", ".mobile-files-btn"):
+        assert selector in fn, f"toggle guard must also cover {selector}"
+    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel()"), \
+        "the guard must return before closeWorkspacePanel() runs"
+
+
+def test_executed_sidebar_tests_skip_cleanly_without_node():
+    """The executed decision-matrix tests require node; skip cleanly when it's
+    absent instead of failing with an opaque FileNotFoundError."""
+    import shutil
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS decision matrix")
+    # sanity: the runner is importable and works when node exists
+    assert _run_sidebar_should_collapse(804, None) is True
 
 
 def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
