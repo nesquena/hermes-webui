@@ -44,7 +44,6 @@ from unittest.mock import patch
 import pytest
 
 from api import models
-from api import route_approvals as ra
 from api import routes
 
 try:
@@ -177,7 +176,7 @@ def test_raw_pending_entry_respond_with_minted_id_pops_entry():
     """An exact-id response must pop the raw entry and report ok (no waiter
     exists behind this shape — draining is the correct resolution)."""
     sid = f"raw-resp-{uuid.uuid4().hex[:8]}"
-    entry = _seed_raw_pending(sid)
+    _seed_raw_pending(sid)
     # The incident session had a LIVE run pointer; the stale stream-pointer
     # guard must not 409 the click before the legacy resolver pops the entry.
     _register_session(sid, active_stream_id="stream-raw-resp-live")
@@ -231,7 +230,7 @@ def test_raw_pending_entry_yolo_skip_all_drains():
     """Skip-all (yolo release) must drain the raw entry instead of leaving the
     phantom card, and report the yolo state truthfully."""
     sid = f"raw-yolo-{uuid.uuid4().hex[:8]}"
-    entry = _seed_raw_pending(sid)
+    _seed_raw_pending(sid)
     _register_session(sid)
     try:
         approval_id = _poll_pending(sid)["pending"]["approval_id"]
