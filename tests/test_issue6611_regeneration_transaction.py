@@ -19,13 +19,13 @@ from api.session_ops import (
 from tests._issue6611_fixture import load_issue6611_fixture
 
 
-def _session():
+def _session(session_id="transaction6611"):
     rows = [
         {"role": "user", "content": "prompt", "id": "u1", "_source": "webui"},
         {"role": "assistant", "content": "failed"},
     ]
     return Session(
-        session_id="transaction6611",
+        session_id=session_id,
         messages=copy.deepcopy(rows),
         context_messages=copy.deepcopy(rows),
         workspace="C:/workspace",
@@ -152,6 +152,131 @@ def test_locked_unexpected_plan_error_does_not_restore_a_request_time_snapshot(m
     assert session.__dict__ == current_state
 
 
+def test_regeneration_retired_run_journal_authority_rejects_before_mutation(monkeypatch):
+    from api import routes, run_journal
+
+    session = _session("regeneration-retired-before-mutation")
+    plan = plan_regeneration(session)
+    before = copy.deepcopy(session.__dict__)
+
+    def retired(_session_id):
+        raise run_journal.RunJournalRetiredAuthorityError("retired")
+
+    monkeypatch.setattr(run_journal, "validate_run_journal_session_activation", retired)
+    result = routes._start_regeneration_stream_locked(
+        session,
+        turn=plan.turn,
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=False,
+    )
+
+    assert result == {
+        "error": "retired",
+        "type": "run_journal_authority_unavailable",
+        "_status": 409,
+    }
+    assert session.__dict__ == before
+
+
+def test_regeneration_activation_retirement_restores_before_worker_or_journal(monkeypatch):
+    from api import routes, run_journal, turn_journal
+
+    session = _session("regeneration-retired-after-prepare")
+    plan = plan_regeneration(session)
+    before = copy.deepcopy(session.__dict__)
+
+    monkeypatch.setattr(run_journal, "validate_run_journal_session_activation", lambda _sid: None)
+
+    def retired(_session_id):
+        raise run_journal.RunJournalRetiredAuthorityError("retired after prepare")
+
+    monkeypatch.setattr(run_journal, "activate_run_journal_session", retired)
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("journal submitted")),
+    )
+    monkeypatch.setattr(
+        routes.threading,
+        "Thread",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("worker created")),
+    )
+
+    result = routes._start_regeneration_stream_locked(
+        session,
+        turn=plan.turn,
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=False,
+    )
+
+    assert result == {
+        "error": "retired after prepare",
+        "type": "run_journal_authority_unavailable",
+        "_status": 409,
+    }
+    assert session.__dict__ == before
+
+
+def test_regeneration_passes_active_run_journal_incarnation_to_worker(monkeypatch):
+    from api import routes, run_journal, turn_journal
+
+    session = _session("regeneration-incarnation-worker")
+    plan = plan_regeneration(session)
+    worker_called = threading.Event()
+    captured = {}
+
+    monkeypatch.setattr(run_journal, "validate_run_journal_session_activation", lambda _sid: None)
+    monkeypatch.setattr(run_journal, "activate_run_journal_session", lambda _sid: "incarnation-6611")
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes, "STREAMS", {})
+    monkeypatch.setattr(
+        turn_journal,
+        "append_turn_journal_event",
+        lambda *_args, **_kwargs: {"turn_id": "turn-6611"},
+    )
+    monkeypatch.setattr(Session, "save", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args: None)
+
+    def worker(*_args, **kwargs):
+        captured.update(kwargs)
+        worker_called.set()
+
+    monkeypatch.setattr(routes, "_run_agent_streaming", worker)
+    result = routes._start_regeneration_stream_locked(
+        session,
+        turn=plan.turn,
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=False,
+    )
+
+    assert result["turn_id"] == "turn-6611"
+    assert worker_called.wait(1)
+    assert captured["run_journal_incarnation"] == "incarnation-6611"
+
+
 def test_locked_preacceptance_exception_restores_the_transaction_snapshot(monkeypatch):
     from api import routes
 
@@ -231,8 +356,7 @@ def test_chat_start_losing_regeneration_preserves_locked_send_winner(monkeypatch
     from api import models as models_api
     import api.runtime_adapter as runtime_adapter
 
-    session = _session()
-    session.session_id = "route-race-6611"
+    session = _session("route-race-6611")
     session.model_explicit_pick_signature = "before-regeneration"
     revision = plan_regeneration(session).revision
     monkeypatch.setattr(models_api, "SESSION_DIR", tmp_path)
@@ -521,8 +645,7 @@ def test_concurrent_normal_winner_survives_regeneration_409_in_memory_and_after_
     from api import routes
     from api import models as models_api
 
-    session = _session()
-    session.session_id = "race-6611"
+    session = _session("race-6611")
     session.active_stream_id = "stale-stream"
     session.pending_user_message = "stale prompt"
     session.pending_started_at = 111.0

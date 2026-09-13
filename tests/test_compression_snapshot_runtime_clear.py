@@ -35,31 +35,61 @@ class FakeSession:
 
 
 def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring_continuation_state(tmp_path, monkeypatch):
+    from api.models import Session
+
     monkeypatch.setattr(streaming, "SESSION_DIR", tmp_path)
-    (tmp_path / "old_session.json").write_text(json.dumps({"messages": []}), encoding="utf-8")
-    session = FakeSession()
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    models.SESSIONS.clear()
+
+    parent = Session(
+        session_id="old_session",
+        parent_session_id="original_parent",
+        messages=[{"role": "user", "content": "older prompt"}],
+    )
+    parent.save()
+    session = Session(
+        session_id="new_session",
+        parent_session_id="original_parent",
+        pre_compression_snapshot=False,
+        pinned=True,
+        active_stream_id="live-stream",
+        pending_user_message="current prompt",
+        pending_attachments=[{"name": "file.txt"}],
+        pending_started_at=123.0,
+        pending_user_source="webui",
+        messages=[
+            {"role": "user", "content": "older prompt"},
+            {"role": "assistant", "content": "current answer"},
+        ],
+    )
+    continuation_before = {
+        "session_id": session.session_id,
+        "parent_session_id": session.parent_session_id,
+        "pre_compression_snapshot": session.pre_compression_snapshot,
+        "pinned": session.pinned,
+        "active_stream_id": session.active_stream_id,
+        "pending_user_message": session.pending_user_message,
+        "pending_attachments": list(session.pending_attachments),
+        "pending_started_at": session.pending_started_at,
+        "pending_user_source": session.pending_user_source,
+        "messages": list(session.messages),
+        "persistence_generation": session._persistence_generation,
+    }
 
     streaming._preserve_pre_compression_snapshot(session, "old_session")
 
-    assert session.saved_payload == {
-        "session_id": "old_session",
-        "parent_session_id": "original_parent",
-        "pre_compression_snapshot": True,
-        "pinned": False,
-        "active_stream_id": None,
-        "pending_user_message": None,
-        "pending_attachments": [],
-        "pending_started_at": None,
-        "touch_updated_at": False,
-        "skip_index": False,
-    }
-    assert session.session_id == "new_session"
-    assert session.pre_compression_snapshot is False
-    assert session.pinned is True
-    assert session.active_stream_id == "live-stream"
-    assert session.pending_user_message == "current prompt"
-    assert session.pending_attachments == [{"name": "file.txt"}]
-    assert session.pending_started_at == 123.0
+    assert session.session_id == continuation_before["session_id"]
+    assert session.parent_session_id == continuation_before["parent_session_id"]
+    assert session.pre_compression_snapshot is continuation_before["pre_compression_snapshot"]
+    assert session.pinned is continuation_before["pinned"]
+    assert session.active_stream_id == continuation_before["active_stream_id"]
+    assert session.pending_user_message == continuation_before["pending_user_message"]
+    assert session.pending_attachments == continuation_before["pending_attachments"]
+    assert session.pending_started_at == continuation_before["pending_started_at"]
+    assert session.pending_user_source == continuation_before["pending_user_source"]
+    assert session.messages == continuation_before["messages"]
+    assert session._persistence_generation is continuation_before["persistence_generation"]
 
     saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
     assert saved["pre_compression_snapshot"] is True
@@ -68,6 +98,8 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
     assert saved["pending_user_message"] is None
     assert saved["pending_attachments"] == []
     assert saved["pending_started_at"] is None
+    assert saved["pending_user_source"] is None
+    assert saved["messages"] == continuation_before["messages"]
 
 
 def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_fields(tmp_path, monkeypatch):
@@ -120,4 +152,3 @@ def test_preserve_pre_compression_snapshot_does_not_leave_continuation_marked_as
     session.save(touch_updated_at=False)
     continuation = json.loads((tmp_path / "new_session.json").read_text(encoding="utf-8"))
     assert continuation["pre_compression_snapshot"] is False
-

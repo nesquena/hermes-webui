@@ -2133,7 +2133,7 @@ def test_runtime_journal_anchor_scene_matches_settled_hydrated_visible_semantics
     -> _hydrate_anchor_activity_scenes(...)._anchor_activity_scene.
     """
     from api import models, routes
-    from api.run_journal import RunJournalWriter
+    from tests.run_journal_test_utils import RunJournalWriter
 
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

@@ -3,6 +3,7 @@ import io
 import queue
 
 from tests.conftest import requires_agent_modules
+from tests.run_journal_test_utils import append_run_event
 
 
 def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
@@ -127,8 +128,8 @@ def test_legacy_journal_adapter_observe_and_get_run_use_journal_and_live_state(t
     runtime = importlib.import_module("api.runtime_adapter")
     run_journal = importlib.import_module("api.run_journal")
 
-    run_journal.append_run_event("s1", "r1", "token", {"text": "a"}, session_dir=tmp_path)
-    run_journal.append_run_event("s1", "r1", "done", {"ok": True}, session_dir=tmp_path)
+    append_run_event("s1", "r1", "token", {"text": "a"}, session_dir=tmp_path)
+    append_run_event("s1", "r1", "done", {"ok": True}, session_dir=tmp_path)
 
     adapter = runtime.LegacyJournalRuntimeAdapter(
         session_dir=tmp_path,

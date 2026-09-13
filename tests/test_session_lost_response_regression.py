@@ -30,7 +30,7 @@ from api.models import (
     _apply_core_sync_or_error_marker,
     merge_session_messages_append_only,
 )
-from api.run_journal import append_run_event
+from tests.run_journal_test_utils import append_run_event
 
 
 # ── Fixtures (shape mirrors test_session_sidecar_repair.py) ────────────────

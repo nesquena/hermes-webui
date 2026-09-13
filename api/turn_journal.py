@@ -277,5 +277,35 @@ def delete_turn_journal(session_id: str, *, session_dir: Path | None = None) -> 
     return removed
 
 
+def delete_turn_journal_verified(session_id: str, *, session_dir: Path | None = None) -> int:
+    """Delete turn-journal shards and fail closed if any plaintext remains.
+
+    ``delete_turn_journal`` intentionally keeps its historical best-effort
+    behavior for recovery callers. Destructive session deletion uses this
+    wrapper as a commit-fence prerequisite: it delegates through the default
+    helper (so existing test doubles and callers remain compatible), then
+    rescans the exact shard set and raises when an unlink failed or a residual
+    shard survived.
+    """
+    if session_dir is None:
+        removed = delete_turn_journal(session_id)
+        root = _default_session_dir()
+    else:
+        removed = delete_turn_journal(session_id, session_dir=session_dir)
+        root = Path(session_dir)
+    sid = str(session_id or "").strip()
+    if not sid or sid in (".", "..") or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
+        return removed
+    journal_dir = root / TURN_JOURNAL_DIR_NAME
+    residual = list(journal_dir.glob(f"{sid}~*.jsonl")) if journal_dir.exists() else []
+    legacy = journal_dir / f"{sid}.jsonl"
+    if legacy.exists():
+        residual.append(legacy)
+    if residual:
+        names = ", ".join(path.name for path in residual)
+        raise OSError(f"turn journal cleanup left residual shards: {names}")
+    return removed
+
+
 def is_terminal_turn_event(event: dict) -> bool:
     return str((event or {}).get("event") or "") in _TERMINAL_EVENTS

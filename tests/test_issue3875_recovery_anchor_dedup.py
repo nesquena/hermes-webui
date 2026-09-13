@@ -21,7 +21,7 @@ import pytest
 
 import api.profiles as profiles
 from api.models import Session, _append_journaled_partial_output
-from api.run_journal import append_run_event
+from tests.run_journal_test_utils import append_run_event
 
 
 @pytest.fixture

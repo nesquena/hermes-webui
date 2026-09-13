@@ -11,7 +11,7 @@ from api.models import (
     _append_journaled_partial_output,
     _apply_core_sync_or_error_marker,
 )
-from api.run_journal import append_run_event
+from tests.run_journal_test_utils import append_run_event
 import api.streaming as streaming
 from api.streaming import _sanitize_messages_for_api
 

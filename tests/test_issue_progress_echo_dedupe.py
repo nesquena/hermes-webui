@@ -471,6 +471,8 @@ def test_final_answer_prefix_reasoning_echo_is_not_journaled_or_merged(cleanup_t
 
     fake_session = FakeSession()
     fake_stream_id = "stream_issue_final_answer_reasoning_echo"
+    from api.run_journal import activate_run_journal_session
+    run_journal_incarnation = activate_run_journal_session(fake_session.session_id)
     fake_session.active_stream_id = fake_stream_id
     fake_queue = queue.Queue()
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
@@ -508,6 +510,7 @@ def test_final_answer_prefix_reasoning_echo_is_not_journaled_or_merged(cleanup_t
                 model="gpt-test",
                 workspace="/tmp",
                 stream_id=fake_stream_id,
+                run_journal_incarnation=run_journal_incarnation,
             )
     finally:
         streaming.STREAMS.pop(fake_stream_id, None)
