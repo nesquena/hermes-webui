@@ -68,7 +68,10 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
-_CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, threading.Event]" = {}
+# Each in-flight event is tagged with the cache invalidation generation in
+# which its owner started. A clear must not let a follower that arrives just
+# after the clear race into a duplicate rebuild while that prior owner runs.
+_CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, tuple[threading.Event, int]]" = {}
 _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # LRU-bounded (drop-oldest) so a long-lived process under churn — where the
 # state.db fingerprint advances on every streamed message and the structural
@@ -80,7 +83,10 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
-_CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
+# Cold callers join a normal rebuild for up to one second. This comfortably
+# covers a scheduled owner handoff without duplicating an expensive projection;
+# callers that explicitly need fallback behavior override this in their scope.
+_CLI_SESSIONS_CACHE_WAIT_SECONDS = 1.0
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
 
@@ -7157,21 +7163,26 @@ def _cli_sessions_cache_invalidation_stamp() -> int:
         return int(_CLI_SESSIONS_CACHE_INVALIDATION_VERSION)
 
 
-def _cli_sessions_cache_claim_rebuild(cache_key: tuple) -> tuple[threading.Event, bool]:
+def _cli_sessions_cache_claim_rebuild(
+    cache_key: tuple,
+) -> tuple[threading.Event, bool, int]:
     with _CLI_SESSIONS_CACHE_LOCK:
         current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
         if current is not None:
-            return current, False
+            event, invalidation_stamp = current
+            return event, False, invalidation_stamp
         event = threading.Event()
-        _CLI_SESSIONS_CACHE_INFLIGHT[cache_key] = event
-        return event, True
+        invalidation_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+        _CLI_SESSIONS_CACHE_INFLIGHT[cache_key] = (event, invalidation_stamp)
+        return event, True, invalidation_stamp
 
 
 def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
         if event is None:
             return
-        if _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key) is event:
+        current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
+        if current is not None and current[0] is event:
             _CLI_SESSIONS_CACHE_INFLIGHT.pop(cache_key, None)
     if event is not None:
         event.set()
@@ -7258,7 +7269,7 @@ def _reload_cli_sessions_after_inflight(
     db_path: str,
 ) -> list:
     while True:
-        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        event, is_owner, event_invalidation_stamp = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
             break
         wait_finished = False
@@ -7272,6 +7283,16 @@ def _reload_cli_sessions_after_inflight(
             )
         except Exception:
             pass
+        # If a clear happened after this owner claimed its slot, this caller may
+        # have joined after the clear and therefore cannot infer the transition
+        # from its own entry timestamp. Wait for the obsolete owner to release,
+        # then re-contend so exactly one caller owns the next-generation rebuild.
+        if _cli_sessions_cache_invalidation_stamp() != event_invalidation_stamp:
+            try:
+                event.wait()
+            except Exception:
+                pass
+            continue
         cached_sessions = _copy_fresh_cli_sessions_cache_entry(cache_key)
         if cached_sessions is not None:
             return cached_sessions
@@ -8139,7 +8160,7 @@ def get_cli_sessions(
                 else:
                     stale_sessions = _copy_cli_sessions(cached_sessions)
                     stale_stamp = cached_stamp
-        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        event, is_owner, _event_invalidation_stamp = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
             try:
                 invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
