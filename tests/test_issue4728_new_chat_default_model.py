@@ -29,7 +29,18 @@ function extractFunction(src, signature) {
   throw new Error(signature + ' body not closed');
 }
 
+function extractNewSession(src) {
+  const start = src.indexOf('async function newSession(');
+  const end = src.indexOf('\n\n/**', start);
+  if (start < 0 || end < 0) throw new Error('newSession function not found');
+  return src.slice(start, end);
+}
+
 const src = fs.readFileSync(process.argv[2], 'utf8');
+const contextStart = src.indexOf('let _contextTransitionGeneration=0;');
+const contextEnd = src.indexOf('\nconst _newSessionPendingText', contextStart);
+if (contextStart < 0 || contextEnd < 0) throw new Error('context transition helpers not found');
+const contextTransitionSrc = src.slice(contextStart, contextEnd);
 const args = JSON.parse(process.argv[3]);
 const modelSelect = {
   value: args.currentModel || '',
@@ -157,7 +168,7 @@ globalThis.api = async (url, opts) => {
 };
 
 eval(extractFunction(src, 'function _adoptRegenerationRevision('));
-eval(extractFunction(src, 'async function newSession('));
+eval(contextTransitionSrc + '\n' + extractNewSession(src) + '\n;globalThis.newSession=newSession;');
 
 (async () => {
   await newSession(false, {});
