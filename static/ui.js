@@ -3592,6 +3592,22 @@ function _qualifiedCatalogOptionMeta(model, providerId){
   if(!raw.startsWith('@')||!raw.includes(':')||!prefix||!raw.toLowerCase().startsWith(prefix.toLowerCase())) return null;
   return {model:raw.slice(prefix.length),provider};
 }
+// Single stamping chokepoint for provider-qualified options (#7400): every
+// producer that creates an <option> for an @provider:model routing id must
+// expose the bare model plus its owning provider as option metadata.
+// renderModelDropdown() resolves the SELECTED option through
+// _modelStateForSelect() -> option.dataset.model, so a producer that skips the
+// stamp renders 0 active rows / 0 Selected badges in a picker whose other rows
+// look correct. Extend this helper, do not re-inline the pair of assignments.
+function _stampQualifiedOptionMeta(opt, modelId, providerId){
+  if(!opt||!opt.dataset) return opt;
+  const meta=_qualifiedCatalogOptionMeta(modelId, providerId);
+  if(meta){
+    opt.dataset.model=meta.model;
+    opt.dataset.provider=meta.provider;
+  }
+  return opt;
+}
 async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
@@ -3813,7 +3829,11 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.value=mid;
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
-    opt.dataset.provider=provider;
+    // #7400: a live @provider:model row must carry its bare model too. The
+    // dataset.provider-only stamp left _modelStateForSelect() returning the raw
+    // routing id for a selected live row, so its row lost `active` and the
+    // Selected badge while the catalog rows of the same picker kept theirs.
+    _stampQualifiedOptionMeta(opt, mid, provider);
     if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
       opt.dataset.fast='1';
     }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
@@ -4480,7 +4500,25 @@ function renderModelDropdown(){
     }
     return _raw;
   };
-  const _isSelectedModelRow=(m)=>String(_canonicalRowModelForCompare(m))===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  // #7400: canonicalize the SELECTED side too, not only the candidate row.
+  // _modelStateForSelect() only yields the bare model when the selected option
+  // was stamped by its producer; an unstamped qualified option (a producer that
+  // skipped _stampQualifiedOptionMeta — legacy DOM, older payload, third-party
+  // harness) exposes the raw routing id. Comparing that raw value against a
+  // canonicalized row never matched, so the row silently lost `active` and the
+  // Selected badge. Both sides now go through the same normalizer.
+  const _canonicalSelectedModelForCompare=()=>{
+    const _raw=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    if(!_raw.startsWith('@')||!_raw.includes(':')) return _raw;
+    const _provider=String((_selectedModelState&&_selectedModelState.model_provider)||'').trim();
+    if(_provider&&typeof _qualifiedCatalogOptionMeta==='function'){
+      const _meta=_qualifiedCatalogOptionMeta(_raw,_provider);
+      if(_meta&&_meta.model) return _meta.model;
+    }
+    return _raw;
+  };
+  const _selectedModelForCompare=_canonicalSelectedModelForCompare();
+  const _isSelectedModelRow=(m)=>String(_canonicalRowModelForCompare(m))===_selectedModelForCompare&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';

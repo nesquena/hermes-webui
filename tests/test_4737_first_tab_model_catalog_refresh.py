@@ -498,4 +498,3 @@ def test_populate_model_dropdown_stamps_qualified_row_metadata(driver_path):
     plain = next(opt for opt in payload["options"] if opt["value"] == "gemini-3.7-flash")
     assert plain["datasetModel"] is None
     assert plain["datasetProvider"] is None
-

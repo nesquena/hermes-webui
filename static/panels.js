@@ -9033,6 +9033,39 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
     : 'No override';
 }
 
+// Build the Settings picker's <option> list from /api/models groups (#7400).
+// Extracted from loadSettingsPanel() so the provider-qualified metadata contract
+// is covered by a behavioral test that runs this real producer: the Settings
+// picker renders through the same renderModelDropdown() row comparison as the
+// composer, so a qualified option that is selected must carry dataset.model /
+// dataset.provider or its row loses `active` and the Selected badge while the
+// catalog rows of the same list look correct.
+function _populateSettingsModelOptions(modelSel, groups){
+  if(!modelSel) return 0;
+  let created=0;
+  for(const g of (groups||[])){
+    const og=document.createElement('optgroup');
+    og.label=g.provider;
+    if(g.provider_id) og.dataset.provider=g.provider_id;
+    for(const m of [...(g.models||[]),...(g.extra_models||[])]){
+      const opt=document.createElement('option');
+      opt.value=m.id;opt.textContent=m.label;
+      if(typeof _stampQualifiedOptionMeta==='function'){
+        _stampQualifiedOptionMeta(opt, m&&m.id, g&&g.provider_id);
+      }
+      if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+        opt.dataset.fast='1';
+      }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+        opt.dataset.fast='0';
+      }
+      og.appendChild(opt);
+      created++;
+    }
+    modelSel.appendChild(og);
+  }
+  return created;
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -9268,22 +9301,7 @@ async function loadSettingsPanel(){
       let models=null;
       try{
         models=await api('/api/models');
-        for(const g of ((models||{}).groups||[])){
-          const og=document.createElement('optgroup');
-          og.label=g.provider;
-          if(g.provider_id) og.dataset.provider=g.provider_id;
-          for(const m of [...(g.models||[]),...(g.extra_models||[])]){
-            const opt=document.createElement('option');
-            opt.value=m.id;opt.textContent=m.label;
-            if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
-              opt.dataset.fast='1';
-            }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
-              opt.dataset.fast='0';
-            }
-            og.appendChild(opt);
-          }
-          modelSel.appendChild(og);
-        }
+        _populateSettingsModelOptions(modelSel, (models||{}).groups||[]);
         // Append live-fetched models for the active provider, same as the
         // chat-header dropdown does via _fetchLiveModels() (#872).
         if(models.active_provider && typeof _fetchLiveModels==='function'){

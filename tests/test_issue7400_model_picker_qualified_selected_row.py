@@ -47,28 +47,34 @@ QUALIFIED_OTHER = f"@custom:other:{BARE_MODEL}"
 _DRIVER = r"""
 const fs = require('fs');
 const ui = fs.readFileSync(process.argv[2], 'utf8');
+// static/panels.js hosts the Settings picker producer; optional so the
+// composer-only cases keep working when it is not passed.
+const panels = (() => {
+  try { return fs.readFileSync(process.argv[4], 'utf8'); } catch (e) { return ''; }
+})();
 
-function extractFunc(name) {
+function extractFunc(name, src) {
+  src = src || ui;
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const start = ui.search(re);
+  const start = src.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let openParen = ui.indexOf('(', start);
+  let openParen = src.indexOf('(', start);
   let i = openParen + 1;
   let parenDepth = 1;
-  while (parenDepth > 0 && i < ui.length) {
-    if (ui[i] === '(') parenDepth++;
-    else if (ui[i] === ')') parenDepth--;
+  while (parenDepth > 0 && i < src.length) {
+    if (src[i] === '(') parenDepth++;
+    else if (src[i] === ')') parenDepth--;
     i++;
   }
-  i = ui.indexOf('{', i);
+  i = src.indexOf('{', i);
   let depth = 1;
   i++;
-  while (depth > 0 && i < ui.length) {
-    if (ui[i] === '{') depth++;
-    else if (ui[i] === '}') depth--;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
     i++;
   }
-  return ui.slice(start, i);
+  return src.slice(start, i);
 }
 
 function makeClassList(initial) {
@@ -234,12 +240,16 @@ function makeNode(tag) {
   return node;
 }
 
-function makeOption(value, label, parent, providerId) {
+function makeOption(value, label, parent, providerId, stamp) {
   const opt = makeNode('option');
   opt.value = value;
   opt.textContent = label || value;
   opt.parentElement = parent || null;
   opt.parentNode = parent || null;
+  // stamp === false reproduces a producer that never stamped its options (the
+  // Settings population before #7400, a live row from an older client): the
+  // select then exposes only the qualified routing value.
+  if (stamp === false) return opt;
   // Real catalog stamping (#7241/#7400): provider-qualified option ids get the
   // bare model + owning provider derived by the same helper the population
   // loop and _appendOverflowOptionsToGroup use.
@@ -251,11 +261,25 @@ function makeOption(value, label, parent, providerId) {
   return opt;
 }
 
-function makeSelect(groups, selectedValue, rootOption) {
+function makeSelect(groups, selectedValue, rootOption, unstamped, selectId) {
   const sel = {
-    id: 'modelSelect', tagName: 'SELECT', children: [], options: [], selectedOptions: [],
+    id: selectId || 'modelSelect', tagName: 'SELECT', children: [], options: [], selectedOptions: [],
     value: selectedValue || '',
-    querySelectorAll() { return this.options.slice(); },
+    querySelectorAll(tag) {
+      // _addLiveModelsToSelect(provider, models, sel) looks its optgroup up by
+      // tag; every other caller wants the flat option list.
+      if (String(tag || '').toLowerCase() === 'optgroup') {
+        return this.children.filter(c => c.tagName === 'OPTGROUP');
+      }
+      return this.options.slice();
+    },
+    appendChild(child) {
+      child.parentElement = this;
+      child.parentNode = this;
+      this.children.push(child);
+      if (child.tagName === 'OPTION') this.options.push(child);
+      return child;
+    },
   };
   for (const group of groups || []) {
     const og = makeNode('optgroup');
@@ -266,7 +290,7 @@ function makeSelect(groups, selectedValue, rootOption) {
     og.parentNode = sel;
     if (group.extra_models) og.dataset.extraModels = JSON.stringify(group.extra_models);
     for (const model of group.models || []) {
-      og.appendChild(makeOption(model.id, model.label || model.id, og, group.provider_id));
+      og.appendChild(makeOption(model.id, model.label || model.id, og, group.provider_id, !unstamped));
     }
     sel.children.push(og);
     sel.options.push(...og.children);
@@ -275,7 +299,7 @@ function makeSelect(groups, selectedValue, rootOption) {
   // was picked via search lives at the <select> ROOT (populated by
   // _ensureModelOptionInDropdown), not inside its provider's optgroup.
   if (rootOption && rootOption.id) {
-    const ro = makeOption(rootOption.id, rootOption.label || rootOption.id, sel, rootOption.provider || '');
+    const ro = makeOption(rootOption.id, rootOption.label || rootOption.id, sel, rootOption.provider || '', !unstamped);
     sel.children.push(ro);
     sel.options.push(ro);
   }
@@ -318,11 +342,19 @@ const dropdown = makeNode('div');
 dropdown.classList.add('open');
 
 function $(id) {
-  if (id === 'composerModelDropdown') return dropdown;
-  if (id === 'modelSelect') return modelSelect;
+  const _settingsPicker = payload.settingsPicker === true;
+  if (id === (_settingsPicker ? 'settingsModelDropdown' : 'composerModelDropdown')) return dropdown;
+  if (id === (_settingsPicker ? 'settingsModel' : 'modelSelect')) return modelSelect;
   return null;
 }
-const window = { _configuredModelBadges: payload.configuredBadges || {} };
+const window = {
+  _configuredModelBadges: payload.configuredBadges || {},
+  _activeProvider: payload.activeProvider || '',
+};
+const S = { session: {} };
+const _dynamicModelLabels = {};
+function _applyModelToDropdown() { return false; }
+function syncModelChip() {}
 const document = { createElement(tag) { return makeNode(tag); } };
 function esc(v) { return String(v || ''); }
 function t(key, ...args) {
@@ -347,18 +379,52 @@ for (const name of [
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
   '_qualifiedCatalogOptionMeta',
+  '_stampQualifiedOptionMeta',
   '_modelStateForSelect',
   '_getOptionProviderId',
+  '_addLiveModelsToSelect',
   'renderModelDropdown',
 ]) {
-  eval(extractFunc(name));
+  eval(extractFunc(name, ui));
+}
+if (payload.mode === 'settings-stamp') eval(extractFunc('_populateSettingsModelOptions', panels));
+
+function collectOptions(sel) {
+  const out = [];
+  for (const child of (sel.children || [])) {
+    if (child.tagName === 'OPTION') out.push(child);
+    if (child.tagName === 'OPTGROUP') {
+      for (const o of (child.children || [])) if (o.tagName === 'OPTION') out.push(o);
+    }
+  }
+  return out.map(o => ({
+    value: o.value,
+    datasetModel: o.dataset ? (o.dataset.model || null) : null,
+    datasetProvider: o.dataset ? (o.dataset.provider || null) : null,
+    title: o.title || '',
+  }));
+}
+
+// Producer modes drive the REAL option-creation paths, so deleting the metadata
+// stamping in static/ui.js or static/panels.js fails these cases.
+if (payload.mode === 'settings-stamp') {
+  const settingsSel = makeSelect([], '', null, true);
+  const created = _populateSettingsModelOptions(settingsSel, payload.groups);
+  process.stdout.write(JSON.stringify({ mode: payload.mode, created, emitted: collectOptions(settingsSel) }));
+  process.exit(0);
+}
+if (payload.mode === 'live-stamp') {
+  const liveSel = makeSelect(payload.groups, payload.selectedValue, null, true);
+  const added = _addLiveModelsToSelect(payload.liveProvider, payload.liveModels, liveSel);
+  process.stdout.write(JSON.stringify({ mode: payload.mode, added, emitted: collectOptions(liveSel) }));
+  process.exit(0);
 }
 
 // Build the select AFTER the real helpers are eval'd — makeOption's metadata
 // stamping calls _qualifiedCatalogOptionMeta.
-const modelSelect = makeSelect(payload.groups, payload.selectedValue, payload.rootOption);
+const modelSelect = makeSelect(payload.groups, payload.selectedValue, payload.rootOption, payload.unstamped, payload.selectId);
 
-renderModelDropdown();
+renderModelDropdown(payload.renderOpts);
 const initial = snapshot(dropdown);
 
 // If the selected row sits in the overflow tail of a capped group, expand via
@@ -381,10 +447,12 @@ def driver_path(tmp_path_factory):
     return str(p)
 
 
-def _run(driver_path, groups, selected_value, root_option=None):
+def _run(driver_path, groups, selected_value, root_option=None, **extra):
+    payload = {"groups": groups, "selectedValue": selected_value, "rootOption": root_option}
+    payload.update(extra)
     result = subprocess.run(
-        [NODE, driver_path, str(REPO / "static" / "ui.js"),
-         json.dumps({"groups": groups, "selectedValue": selected_value, "rootOption": root_option})],
+        [NODE, driver_path, str(REPO / "static" / "ui.js"), json.dumps(payload),
+         str(REPO / "static" / "panels.js")],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
@@ -421,6 +489,24 @@ def _two_provider_groups():
             "provider": "Custom Omni",
             "provider_id": "custom:omni",
             "models": [{"id": QUALIFIED_CUSTOM, "label": BARE_MODEL}],
+        },
+        {
+            "provider": "Default",
+            "provider_id": "",
+            "models": [{"id": BARE_MODEL, "label": BARE_MODEL}],
+        },
+    ]
+
+
+def _live_root_injected_groups():
+    """The composer picker after a live/overflow pick: the qualified model was
+    injected at the <select> ROOT (it appears once), the provider group carries a
+    different model, and the active provider offers the same bare model."""
+    return [
+        {
+            "provider": "Custom Omni",
+            "provider_id": "custom:omni",
+            "models": [{"id": "custom:omni:other-model", "label": "Other"}],
         },
         {
             "provider": "Default",
@@ -531,3 +617,118 @@ def test_selected_root_injected_overflow_show_all_keeps_single_active(driver_pat
     assert BARE_MODEL not in active_after, (
         "the bare row of the other provider must stay inactive after the reveal"
     )
+
+
+def _settings_payload_extra(**kw):
+    """The Settings picker renders through the SAME renderModelDropdown() row
+    comparison as the composer, but resolves its nodes via the Settings ids."""
+    extra = {
+        "settingsPicker": True,
+        "selectId": "settingsModel",
+        "renderOpts": {
+            "selectId": "settingsModel",
+            "dropdownId": "settingsModelDropdown",
+            "autoFocusSearch": False,
+        },
+    }
+    extra.update(kw)
+    return extra
+
+
+def test_settings_unstamped_qualified_option_keeps_single_active_row_and_badge(driver_path):
+    """Settings producer contract (#7400 re-gate): a select that BEGINS with an
+    unstamped provider-qualified option (no dataset.model — the shape the
+    Settings population left behind, and what any producer skipping
+    _stampQualifiedOptionMeta still produces) must render exactly ONE active row
+    carrying the Selected badge. Before the fix the selected value stayed raw
+    (@custom:omni:model) while every candidate row was canonicalized to the bare
+    model, so the row rendered 0 active / 0 Selected."""
+    out = _run(driver_path, _two_provider_groups(), QUALIFIED_CUSTOM,
+               unstamped=True, **_settings_payload_extra())
+
+    active = _active_rows(out["initial"])
+    assert len(active) == 1, (
+        "the Settings picker must mark exactly one row active for an unstamped "
+        f"selected qualified option; got {[a['className'] for a in active]}"
+    )
+    row_html = active[0]["html"]
+    assert "model-opt-badge--selected" in row_html and "Selected" in row_html, (
+        "the active Settings row must carry the Selected badge"
+    )
+    active_ids = _row_model_ids(active)
+    assert QUALIFIED_CUSTOM in active_ids, active_ids
+    assert BARE_MODEL not in active_ids, (
+        f"the other provider's bare row must stay inactive; ids={active_ids}"
+    )
+
+
+def test_live_model_unstamped_qualified_option_keeps_single_active_row_and_badge(driver_path):
+    """Live-model case (#7400 re-gate): the composer picker with an unstamped
+    qualified option — the shape a live-fetched row had before
+    _addLiveModelsToSelect stamped dataset.model (and what an older client or a
+    third-party producer still emits). Exactly one active row + Selected badge."""
+    out = _run(driver_path, _live_root_injected_groups(), QUALIFIED_CUSTOM,
+               unstamped=True,
+               rootOption={"id": QUALIFIED_CUSTOM, "label": BARE_MODEL, "provider": "custom:omni"})
+
+    for label, snap in (("initial", out["initial"]), ("expanded", out["afterExpand"] or out["initial"])):
+        active = _active_rows(snap)
+        assert len(active) == 1, (
+            f"{label}: an unstamped live-model option that is selected must keep "
+            f"exactly ONE active row; got {[a['className'] for a in active]}"
+        )
+        assert "model-opt-badge--selected" in active[0]["html"], (
+            f"{label}: the active live-model row must carry the Selected badge"
+        )
+        active_ids = _row_model_ids(active)
+        assert QUALIFIED_CUSTOM in active_ids, active_ids
+        assert BARE_MODEL not in active_ids, (
+            f"{label}: the other provider's bare row must stay inactive; ids={active_ids}"
+        )
+
+
+def test_settings_population_stamps_qualified_row_metadata(driver_path):
+    """Mutation guard for the Settings producer: _populateSettingsModelOptions()
+    (the REAL function loadSettingsPanel() calls) must stamp the bare model and
+    the owning provider on a provider-qualified option. Deleting its
+    _stampQualifiedOptionMeta call turns this red."""
+    out = _run(driver_path, _two_provider_groups(), "", mode="settings-stamp")
+
+    assert out["created"] == 2, f"both catalog rows must be created; got {out['created']}"
+    by_value = {entry["value"]: entry for entry in out["emitted"]}
+    qualified = by_value[QUALIFIED_CUSTOM]
+    assert qualified["datasetModel"] == BARE_MODEL, (
+        "the Settings population must expose the bare model for a qualified row; "
+        f"got {qualified['datasetModel']!r}"
+    )
+    assert qualified["datasetProvider"] == "custom:omni", qualified["datasetProvider"]
+    # A plain row stays unstamped: the metadata is the qualified-row contract,
+    # not a blanket rewrite of every option.
+    assert by_value[BARE_MODEL]["datasetModel"] is None, by_value[BARE_MODEL]
+
+
+def test_live_model_insertion_stamps_qualified_row_metadata(driver_path):
+    """Mutation guard for the live-model producer: _addLiveModelsToSelect() (the
+    REAL function the live fetch calls) must stamp the bare model plus the
+    owning provider. Before the fix it wrote dataset.provider only, so a
+    selected live row could not be resolved by _modelStateForSelect()."""
+    groups = [
+        {"provider": "Custom Omni", "provider_id": "custom:omni",
+         "models": [{"id": "custom:omni:other-model", "label": "Other"}]},
+    ]
+    out = _run(driver_path, groups, "", mode="live-stamp",
+               liveProvider="custom:omni",
+               liveModels=[
+                   {"id": QUALIFIED_CUSTOM, "label": BARE_MODEL},
+                   {"id": "custom:omni:plain-live", "label": "Plain live"},
+               ])
+
+    assert out["added"] == 2, f"both live rows must be inserted; got {out['added']}"
+    by_value = {entry["value"]: entry for entry in out["emitted"]}
+    live = by_value[QUALIFIED_CUSTOM]
+    assert live["datasetModel"] == BARE_MODEL, (
+        f"the live row must expose its bare model; got {live['datasetModel']!r}"
+    )
+    assert live["datasetProvider"] == "custom:omni", live["datasetProvider"]
+    # Unqualified live ids keep the pre-existing shape (no bare-model stamp).
+    assert by_value["custom:omni:plain-live"]["datasetModel"] is None, by_value["custom:omni:plain-live"]
