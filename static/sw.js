@@ -44,6 +44,36 @@ const SHELL_ASSETS = [
   './manifest.json',
 ];
 
+// KaTeX webfonts (WOFF2 only — the @font-face src lists woff2 first). These
+// are NOT versioned with ?v: the @font-face urls in katex.min.css reference
+// them without a query string. They are pre-cached separately from the atomic
+// SHELL_ASSETS batch: cache.addAll is atomic, so one missing font must never
+// discard the core shell pre-cache. A failed font fetch would otherwise fall
+// back to the system √ glyph, which renders thin and nearly invisible on dark
+// themes.
+const FONT_ASSETS = [
+  './static/vendor/katex/0.16.22/fonts/KaTeX_AMS-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Caligraphic-Bold.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Caligraphic-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Fraktur-Bold.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Fraktur-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Main-Bold.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Main-BoldItalic.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Main-Italic.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Main-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Math-BoldItalic.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Math-Italic.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_SansSerif-Bold.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_SansSerif-Italic.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_SansSerif-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Script-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Size1-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Size2-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Size3-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Size4-Regular.woff2',
+  './static/vendor/katex/0.16.22/fonts/KaTeX_Typewriter-Regular.woff2',
+];
+
 function deleteOldShellCaches() {
   return caches.keys().then((keys) =>
     Promise.all(
@@ -64,6 +94,13 @@ self.addEventListener('install', (event) => {
           console.warn('[sw] Shell pre-cache partial failure:', err);
         });
       })
+    )
+  );
+  // KaTeX fonts are best-effort: add each font individually so one failed
+  // font can never reject the batch or jeopardize the core shell cache.
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.allSettled(FONT_ASSETS.map((font) => cache.add(font)))
     )
   );
   self.skipWaiting();
@@ -151,7 +188,7 @@ self.addEventListener('fetch', (event) => {
     ? url.pathname.slice(scopePath.length)
     : url.pathname.replace(/^\/+/, '');
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
-  if (!SHELL_ASSETS.includes(shellPath)) return;
+  if (!SHELL_ASSETS.includes(shellPath) && !FONT_ASSETS.includes(shellPath)) return;
 
   // Shell assets: network-first with cache fallback. This keeps offline support
   // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
