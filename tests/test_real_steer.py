@@ -135,12 +135,14 @@ class TestHandleChatSteerFallbacks:
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
 
-    def test_gateway_owned_stream_without_cached_agent_queues_fallback(self, _clear_caches):
+    def test_gateway_owned_stream_without_cached_agent_queues_fallback(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
+        from api import config
         from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
         import queue as _q
 
         sid, stream_id = "sid_gateway", "stream_gateway"
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
         with ACTIVE_RUNS_LOCK:
