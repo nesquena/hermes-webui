@@ -812,11 +812,31 @@ def _get_disabled_skill_names_for_profile() -> set:
     skills_cfg = cfg.get("skills")
     if not isinstance(skills_cfg, dict):
         return set()
-    # Check platform_disabled.webui first (mirrors agent platform resolution)
+    disabled = _normalize_disabled_set(skills_cfg.get("disabled"))
+    # A platform list ADDS to the global one, it does not replace it -- that is what
+    # agent/skill_utils.get_disabled_skill_names() does, and the two views of one config
+    # must not disagree: returning only platform_disabled.webui here re-enabled every
+    # globally disabled skill in this UI the moment a webui key existed.
     platform_disabled = skills_cfg.get("platform_disabled")
     if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
-        return _normalize_disabled_set(platform_disabled["webui"])
-    return _normalize_disabled_set(skills_cfg.get("disabled"))
+        disabled |= _normalize_disabled_set(platform_disabled["webui"])
+    # ...and the essential skills are never disabled, whatever the config says.
+    return disabled - _essential_skill_names()
+
+
+def _essential_skill_names() -> set:
+    """Skills the agent refuses to disable (agent/skill_utils.ESSENTIAL_SKILLS).
+
+    Read from the agent source the WebUI already imports from, so an upstream change to
+    that set moves this UI with it; the fallback keeps the panel usable if the agent dir
+    is not importable in this deployment.
+    """
+    try:
+        from agent.skill_utils import ESSENTIAL_SKILLS
+
+        return {str(n) for n in ESSENTIAL_SKILLS}
+    except Exception:
+        return {"hermes-agent"}
 
 
 def _parse_config_string_list(value) -> list:
