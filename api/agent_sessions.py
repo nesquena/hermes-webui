@@ -1,4 +1,5 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
 import sqlite3
 from contextlib import closing
@@ -316,14 +317,116 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
+_MODEL_CONFIG_LINEAGE_KEYS = ('_delegate_from', '_branched_from')
+
+
+def _model_config_lineage_markers(
+    row: dict | None,
+) -> tuple[str, dict[str, str]]:
+    """Return ``(state, markers)`` for a row's model-config lineage identity.
+
+    Hermes Agent records branch/delegate lineage inside ``model_config``
+    (``_delegate_from`` is authoritative, ``_branched_from`` marks manual
+    branches); ``session_source == 'fork'`` is only the legacy fallback for
+    rows created before those markers existed.
+
+    ``state`` is one of:
+
+    - ``'none'`` — no ``model_config``, or a parsed object carrying no branch
+      marker. There is no fork/delegate identity to honor.
+    - ``'markers'`` — every non-null marker is a usable session id, returned by
+      key. Both keys are preserved because either can independently establish a
+      direct branch boundary.
+    - ``'unknown'`` — identity evidence exists but cannot be trusted: the
+      payload is not JSON, is not a JSON object, or either marker value is not a
+      non-empty string. Callers must fail closed on this state (treat the row
+      as a lineage boundary, never as a compression continuation).
+
+    ``model_config`` is a TEXT JSON column, so parsing stays tolerant: hostile
+    or truncated payloads yield ``'unknown'`` instead of raising.
+    """
+    if not row:
+        return ('none', {})
+    raw = row.get('model_config')
+    if raw is None or raw == '':
+        return ('none', {})
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return ('unknown', {})
+    else:
+        parsed = raw
+    if not isinstance(parsed, dict):
+        return ('unknown', {})
+
+    markers: dict[str, str] = {}
+    for key in _MODEL_CONFIG_LINEAGE_KEYS:
+        if key not in parsed:
+            continue
+        value = parsed.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return ('unknown', {})
+        markers[key] = value.strip()
+    if markers:
+        return ('markers', markers)
+    return ('none', {})
+
+
+def _is_model_config_branch_boundary(parent: dict | None, child: dict | None) -> bool:
+    """Return True when ``child``'s ``model_config`` identity forbids stitching.
+
+    Genuine Agent branches must stay separate lineages even when their direct
+    parent ended by compression, so this is consulted before that durable edge
+    is accepted as a continuation.
+
+    Compression copies ``model_config`` verbatim onto the replacement session
+    (``publish_compression_child`` callers pass
+    ``agent._session_init_model_config``), so a delegate's own continuation
+    inherits ``_delegate_from=<the delegate's parent>``. Presence-only matching
+    would wrong-split that real continuation. Each inherited marker is therefore
+    preserved only when the same key and value occur on the parent; unexplained,
+    malformed, or partly malformed identity fails closed.
+    """
+    child_state, child_markers = _model_config_lineage_markers(child)
+    if child_state == 'unknown':
+        return True
+    if child_state == 'none':
+        return False
+
+    parent_id = (child or {}).get('parent_session_id') or (parent or {}).get('id')
+    if not parent_id:
+        # Match the Agent's no-parent fallback: marker presence is a boundary.
+        return True
+    parent_id = str(parent_id)
+    # Either marker can independently identify a real branch/delegate of this
+    # direct parent; never let one inherited marker mask the other.
+    if any(marker == parent_id for marker in child_markers.values()):
+        return True
+
+    parent_state, parent_markers = _model_config_lineage_markers(parent)
+    if parent_state == 'unknown':
+        return True
+    # Compression copies the complete model_config. Every foreign marker on the
+    # child must therefore be explained by the same marker on the parent.
+    return any(
+        parent_markers.get(key) != marker
+        for key, marker in child_markers.items()
+    )
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
     Compression rotates session ids automatically. A manual CLI close followed
     by ``hermes -c`` also records a new child session; for sidebar projection it
     should continue the same visible conversation rather than becoming a
-    separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    separate child-session row. Agent compression publication creates the child
+    before closing the parent, and that transaction has no duration ceiling, so
+    a guarded direct compression edge is authoritative without a timestamp test.
+    Manual ``cli_close`` continuations retain the exact timestamp boundary.
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -334,12 +437,21 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
         return False
+    # Branch/delegate identity lives in model_config in production
+    # (_delegate_from authoritative, _branched_from for manual branches).
+    # An inherited marker on a compression child must not split the lineage,
+    # but ambiguous or unexplained identity fails closed as a boundary.
+    if _is_model_config_branch_boundary(parent, child):
+        return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
     if parent_source and child_source and parent_source != child_source:
         return False
-    if parent.get('end_reason') not in {'compression', 'cli_close'}:
+    end_reason = parent.get('end_reason')
+    if end_reason not in {'compression', 'cli_close'}:
         return False
+    if end_reason == 'compression':
+        return True
     ended_at = parent.get('ended_at')
     if ended_at is None:
         # Older state.db rows/tests may not have ended_at populated. Preserve
@@ -586,6 +698,7 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        model_config_expr = _optional_col('model_config', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -707,6 +820,7 @@ def read_importable_agent_session_rows(
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
                    {session_source_expr},
+                   {model_config_expr},
                    {user_id_expr},
                    {chat_id_expr},
                    {chat_type_expr},
@@ -891,6 +1005,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
 
             source_expr = _optional_col('source', session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             title_expr = _optional_col('title', session_cols)
             started_expr = _optional_col('started_at', session_cols, '0')
             ended_expr = _optional_col('ended_at', session_cols)
@@ -905,6 +1020,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -951,6 +1067,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -1027,6 +1144,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             source_expr = _optional_col('source', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
@@ -1064,7 +1182,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1093,7 +1211,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,

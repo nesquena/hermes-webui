@@ -1,5 +1,6 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
 import time
 
@@ -45,6 +46,7 @@ def _ensure_state_db(path):
             id TEXT PRIMARY KEY,
             source TEXT,
             session_source TEXT,
+            model_config TEXT,
             title TEXT,
             model TEXT,
             started_at REAL NOT NULL,
@@ -79,14 +81,24 @@ def _insert_state_message(conn, sid, *, role, content, timestamp):
     conn.commit()
 
 
-def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
+def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None, model_config=None):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, model_config, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
         """,
-        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
+        (
+            sid,
+            source,
+            session_source,
+            json.dumps(model_config) if isinstance(model_config, dict) else model_config,
+            title or sid,
+            started_at or time.time(),
+            parent,
+            ended_at,
+            end_reason,
+        ),
     )
     conn.commit()
 
@@ -163,6 +175,105 @@ def test_all_sessions_keeps_explicit_forks_out_of_state_db_lineage_metadata(_iso
         assert fork.get("_parent_lineage_root_id") == "lineage_api_root"
         assert "_lineage_root_id" not in fork
         assert "_compression_segment_count" not in fork
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("child_model_config", "is_continuation"),
+    (
+        ({"_delegate_from": "lineage_marker_parent"}, False),
+        (
+            {
+                "_delegate_from": "lineage_marker_ancestor",
+                "_branched_from": "lineage_marker_parent",
+            },
+            False,
+        ),
+        ({"_delegate_from": "lineage_marker_ancestor"}, True),
+        (
+            {"_delegate_from": "lineage_marker_ancestor", "_branched_from": 123},
+            False,
+        ),
+    ),
+    ids=(
+        "direct-delegate",
+        "direct-branch-after-inherited-delegate",
+        "inherited-delegate",
+        "malformed-second-marker",
+    ),
+)
+def test_sessions_route_and_transcript_honor_all_model_config_markers(
+    _isolate, child_model_config, is_continuation
+):
+    """Public sidebar/transcript readers agree on production marker shapes."""
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    ancestor_id = "lineage_marker_ancestor"
+    parent_id = "lineage_marker_parent"
+    child_id = "lineage_marker_child"
+    try:
+        for sid, offset in ((ancestor_id, 0), (parent_id, 10), (child_id, 20)):
+            _save_webui_session(sid, title=sid, updated_at=t0 + offset)
+        _insert_state_row(
+            conn,
+            ancestor_id,
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="user_stop",
+        )
+        _insert_state_row(
+            conn,
+            parent_id,
+            parent=ancestor_id,
+            started_at=t0 + 10,
+            ended_at=t0 + 19,
+            end_reason="compression",
+            model_config={"_delegate_from": ancestor_id},
+        )
+        _insert_state_row(
+            conn,
+            child_id,
+            parent=parent_id,
+            started_at=t0 + 18,
+            model_config=child_model_config,
+        )
+        _insert_state_message(
+            conn,
+            parent_id,
+            role="user",
+            content="parent segment",
+            timestamp=t0 + 11,
+        )
+        _insert_state_message(
+            conn,
+            child_id,
+            role="user",
+            content="child segment",
+            timestamp=t0 + 20,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+        child = rows[child_id]
+        serialized = routes._sidebar_session_response_item(
+            child, redact_enabled=False
+        )
+        stitched = models.get_state_db_session_messages(
+            child_id, stitch_continuations=True
+        )
+
+        if is_continuation:
+            assert serialized["_lineage_root_id"] == parent_id
+            assert serialized["_compression_segment_count"] == 2
+            assert [row["content"] for row in stitched] == [
+                "parent segment",
+                "child segment",
+            ]
+        else:
+            assert serialized["relationship_type"] == "child_session"
+            assert "_lineage_root_id" not in serialized
+            assert [row["content"] for row in stitched] == ["child segment"]
     finally:
         conn.close()
 
