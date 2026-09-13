@@ -1421,7 +1421,8 @@ def test_kanban_model_badge_static_render_e2e():
         "const esc = (s) => String(s == null ? '' : s)"
                 "  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')\n"
                 "  .replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;');\n"
-                "const _kanbanTaskAge = () => '';\n"
+        "const jsArg = (v) => esc(JSON.stringify(String(v == null ? '' : v)));\n"
+        "const _kanbanTaskAge = () => '';\n"
                 "const _kanbanTaskBody = (task) => task.body || task.description || task.prompt || '';\n"
                 "const _kanbanCardStalenessClass = () => '';\n"
                 "const _kanbanTaskTitle = (task) => task.title || task.id || '';\n"
@@ -1615,6 +1616,7 @@ def _render_kanban_card(task: dict) -> str:
         "const esc = (s) => String(s == null ? '' : s)\n"
         "  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')\n"
         "  .replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;');\n"
+        "const jsArg = (v) => esc(JSON.stringify(String(v == null ? '' : v)));\n"
         "const _kanbanTaskAge = () => '';\n"
         "const _kanbanTaskBody = (x) => x.body || '';\n"
         "const _kanbanRenderMarkdown = (x) => String(x || '');\n"
@@ -2879,6 +2881,98 @@ run().then(() => console.log(JSON.stringify({{success: true}})))
     )
 
 
+def test_kanban_profile_default_clears_through_the_real_ensure_helper():
+    """Composed regression: _kanbanSelectModelFromDropdown() routed EVERY pick
+    through _ensureModelOptionInDropdown(), including the empty "Profile
+    default" value. The real helper (static/ui.js) opens with
+
+        if(!modelId||!sel) return null;
+
+    so a falsy modelId returns WITHOUT touching sel.value -- picking "Profile
+    default" on a select that already held an override left the override
+    selected and the chip still naming it. The other picker harnesses miss this
+    because they never define _ensureModelOptionInDropdown, so the typeof guard
+    falls through to the plain `sel.value = value` branch that does clear.
+
+    Run the real ui.js helper alongside the real panels.js picker: seed an
+    override through the helper, then pick Profile default and assert the
+    select clears to '' and the chip syncs back to "Profile default"."""
+    fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
+    fn_close_dd = extract_function(PANELS, "_kanbanCloseModelDropdown", prefix="function")
+    fn_select = extract_function(PANELS, "_kanbanSelectModelFromDropdown", prefix="function")
+    # The REAL helper plus the real chain it calls into, straight from ui.js.
+    fn_ensure = extract_function(UI, "_ensureModelOptionInDropdown", prefix="function")
+    fn_apply = extract_function(UI, "_applyModelToDropdown", prefix="function")
+    fn_find = extract_function(UI, "_findModelInDropdown", prefix="function")
+    fn_option_provider = extract_function(UI, "_getOptionProviderId", prefix="function")
+    fn_model_state = extract_function(UI, "_modelStateForSelect", prefix="function")
+    fn_value_provider = extract_function(UI, "_providerFromModelValue", prefix="function")
+
+    harness = f"""
+const assert = require("assert");
+{_KANBAN_DOM_ELEMENT_JS}
+
+const elements = {{
+  kanbanTaskModalModel: new Element("select"),
+  kanbanTaskModalModelChip: new Element("button"),
+  kanbanTaskModalModelDropdown: new Element("div"),
+}};
+global.document = {{
+  getElementById: (id) => elements[id] || null,
+  createElement: (tag) => new Element(tag),
+}};
+global.window = {{_configuredModelBadges: {{}}}};
+function t(k) {{ return k === "kanban_no_model_override" ? "Profile default" : k; }}
+function getModelLabel(v) {{ return String(v || ""); }}
+let _kanbanModelPopulateSeq = 3;
+
+{fn_value_provider}
+{fn_option_provider}
+{fn_model_state}
+{fn_find}
+{fn_apply}
+{fn_ensure}
+{fn_sync}
+{fn_close_dd}
+{fn_select}
+
+const sel = elements.kanbanTaskModalModel;
+const chip = elements.kanbanTaskModalModelChip;
+
+// A populated catalog: the leading "Profile default" row plus the override.
+const empty = new Element("option");
+empty.value = "";
+empty.textContent = "Profile default";
+sel.appendChild(empty);
+const opt = new Element("option");
+opt.value = "gpt-5.6-sol";
+opt.textContent = "gpt-5.6-sol";
+opt.dataset.provider = "openai";
+sel.appendChild(opt);
+
+// Seed the override through the SAME real helper the picker uses, so the
+// starting state is exactly what a prior pick would have left behind.
+_kanbanSelectModelFromDropdown("gpt-5.6-sol", "openai");
+assert.strictEqual(sel.value, "gpt-5.6-sol", "precondition: override is selected");
+assert.strictEqual(chip.textContent, "gpt-5.6-sol", "precondition: chip names it");
+
+// ── Now pick "Profile default" ──
+_kanbanSelectModelFromDropdown("", null);
+assert.strictEqual(sel.value, "",
+  "picking Profile default was routed through _ensureModelOptionInDropdown(), " +
+  "which bails on a falsy modelId without touching sel.value -- the previous " +
+  "override stayed selected and would be saved back onto the task");
+assert.strictEqual(chip.textContent, "Profile default",
+  "the chip still advertises the override the user just cleared");
+assert.strictEqual(chip.title, "Profile default");
+assert.strictEqual(sel.dataset.dirtySeq, "3",
+  "the clear must still be marked dirty for the populate pass it happened in, " +
+  "or an in-flight catalog load will restore the override over it");
+
+console.log(JSON.stringify({{success: true}}));
+"""
+    assert _run_node(harness)["success"] is True
+
 def test_kanban_populate_refreshes_open_model_dropdown():
     """renderModelDropdown() renders a SNAPSHOT of the hidden <select>. The
     create modal is shown immediately and populates un-awaited, so a user who
@@ -2887,9 +2981,15 @@ def test_kanban_populate_refreshes_open_model_dropdown():
     the modal, because nothing re-rendered it when the catalog arrived.
 
     Drive the REAL _kanbanOpenModelDropdown/_kanbanPopulateModelSelect/
-    _kanbanRefreshOpenModelDropdown against a recording renderModelDropdown and
-    assert the open picker is re-rendered with the full catalog (and that a
-    CLOSED picker is left alone)."""
+    _kanbanRefreshOpenModelDropdown against a renderModelDropdown that behaves
+    like the real one -- it REPLACES the search input, rebuilds the option rows
+    from the hidden <select>, and filters them through the input listener.
+
+    Assert the open picker is re-rendered with the full catalog (and that a
+    CLOSED picker is left alone), and that the re-render does not destroy live
+    user state: a half-typed search query and its filtered result survive the
+    refresh, keyboard focus is handed back to the replacement input when the
+    user had it, and is NOT stolen when they did not."""
     fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
     fn_populate = extract_function(PANELS, "_kanbanPopulateModelSelect", prefix="async function")
     fn_refresh = extract_function(PANELS, "_kanbanRefreshOpenModelDropdown", prefix="function")
@@ -2910,19 +3010,73 @@ global.document = {{
   getElementById: (id) => elements[id] || null,
   createElement: (tag) => new Element(tag),
   baseURI: "http://localhost/",
+  activeElement: null,
 }};
 function t(k) {{ return k === "kanban_no_model_override" ? "Profile default" : k; }}
 
-// Each render records the option ids visible to the picker AT THAT MOMENT --
-// exactly what the user would see in the popup.
+// ── DOM affordances the composed picker needs on top of the shared fake ──
+Element.prototype.addEventListener = function (type, handler) {{
+  if (!this._listeners) this._listeners = {{}};
+  this._listeners[type] = handler;
+}};
+Element.prototype.focus = function () {{ global.document.activeElement = this; }};
+// Supports both ".class" and bare tag selectors ("input"), matched in document
+// order, so production code that finds the search box by tag resolves to the
+// same element a real browser would hand it.
+Element.prototype.querySelector = function (sel) {{
+  const isClass = sel.charAt(0) === ".";
+  const want = isClass ? sel.slice(1) : sel.toUpperCase();
+  const hits = (el) => isClass ? el._classes.has(want) : el.tagName === want;
+  const walk = (el) => {{
+    for (const ch of el.children) {{
+      if (hits(ch)) return ch;
+      const hit = walk(ch);
+      if (hit) return hit;
+    }}
+    return null;
+  }};
+  return walk(this);
+}};
+
+// A render of the real picker REPLACES the popup's children -- the search input
+// included -- and rebuilds the option rows from a SNAPSHOT of the hidden
+// <select>, narrowed by whatever is in the search box. Model that faithfully so
+// the refresh has live user state (query, filtered rows, focus) to preserve.
 const renders = [];
 function renderModelDropdown(opts) {{
-  renders.push({{
+  const dd = elements.kanbanTaskModalModelDropdown;
+  const catalog = elements.kanbanTaskModalModel.options
+    .map(o => String(o.value)).filter(v => v !== "");
+  dd.children = [];
+  const input = new Element("input");
+  input._classes.add("model-search-input");
+  dd.appendChild(input);
+  const list = new Element("div");
+  list._classes.add("model-list");
+  dd.appendChild(list);
+  const record = {{
     dropdownId: opts.dropdownId,
     autoFocusSearch: opts.autoFocusSearch,
-    models: elements.kanbanTaskModalModel.options
-      .map(o => String(o.value)).filter(v => v !== ""),
-  }});
+    models: catalog,
+    visible: [],
+    input,
+  }};
+  const applyFilter = () => {{
+    const needle = String(input.value || "").trim().toLowerCase();
+    list.children = [];
+    for (const id of catalog) {{
+      if (needle && !id.toLowerCase().includes(needle)) continue;
+      const row = new Element("div");
+      row._classes.add("model-opt");
+      row.textContent = id;
+      list.appendChild(row);
+    }}
+    record.visible = list.children.map(r => r.textContent);
+  }};
+  input.addEventListener("input", applyFilter);
+  applyFilter();
+  if (opts.autoFocusSearch) input.focus();
+  renders.push(record);
 }}
 
 let _catalog = null;
@@ -2996,6 +3150,57 @@ async function run() {{
     "the picker stayed stuck on the pre-catalog snapshot");
   assert(renders[renders.length - 1].models.includes("gpt-5.6-sol"),
     "the refresh after an in-flight selection did not include the catalog");
+
+  // ── (5) an open, FOCUSED picker with a half-typed query keeps it ──
+  // The user opens the chip before the catalog lands and starts typing a
+  // filter. The re-render replaces the input underneath them; the query, the
+  // filtered list and the caret must all come back.
+  elements.kanbanTaskModalModel = new Element("select");
+  _kanbanCloseModelDropdown();
+  _catalog = deferred();
+  const fourth = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  const typing = dd.querySelector(".model-search-input");
+  assert(typing, "precondition: the render owns a search input");
+  typing.value = "mini";
+  typing._listeners.input();  // the user types
+  typing.focus();
+  assert.strictEqual(document.activeElement, typing,
+    "precondition: the search input has keyboard focus");
+  _catalog.resolve();
+  await fourth;
+  const live = dd.querySelector(".model-search-input");
+  assert(live && live !== typing,
+    "precondition: the refresh re-rendered and replaced the search input");
+  assert.strictEqual(live.value, "mini",
+    "the background refresh wiped the query the user was typing");
+  assert.strictEqual(document.activeElement, live,
+    "the refresh dropped keyboard focus out of the picker mid-typing");
+  assert.deepStrictEqual(renders[renders.length - 1].visible, ["gpt-5.6-mini"],
+    "the restored query was not reapplied through the input path, so the popup " +
+    "shows the whole catalog while the search box still says 'mini'");
+
+  // ── (6) an open but UNFOCUSED picker must not steal the caret ──
+  elements.kanbanTaskModalModel = new Element("select");
+  _kanbanCloseModelDropdown();
+  _catalog = deferred();
+  const fifth = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  const idle = dd.querySelector(".model-search-input");
+  idle.value = "sol";
+  idle._listeners.input();
+  const elsewhere = new Element("textarea");  // the modal's prompt field
+  elsewhere.focus();
+  _catalog.resolve();
+  await fifth;
+  const kept = dd.querySelector(".model-search-input");
+  assert.strictEqual(kept.value, "sol",
+    "the query must survive the refresh even when the picker is unfocused");
+  assert.deepStrictEqual(renders[renders.length - 1].visible, ["gpt-5.6-sol"],
+    "the unfocused picker's restored query was not reapplied to the catalog");
+  assert.strictEqual(document.activeElement, elsewhere,
+    "a background refresh of an unfocused picker yanked focus out of the field " +
+    "the user was actually typing in");
 }}
 
 run().then(() => console.log(JSON.stringify({{success: true}})))

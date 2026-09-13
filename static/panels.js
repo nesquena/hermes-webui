@@ -3311,7 +3311,13 @@ function _kanbanSelectModelFromDropdown(value, preferredProviderId){
   // skipped restoring B's saved override — the picker silently wiped it.
   if (sel.dataset) sel.dataset.dirtySeq = String(_kanbanModelPopulateSeq);
   const provider = String(preferredProviderId || '').trim() || null;
-  if (typeof _ensureModelOptionInDropdown === 'function') {
+  // "Profile default" is the empty value, and _ensureModelOptionInDropdown()
+  // bails on a falsy modelId WITHOUT touching sel.value — routing the clear
+  // through it left the previous override selected, so picking Profile default
+  // on a loaded catalog silently did nothing. Clear the select directly.
+  if (!value) {
+    sel.value = '';
+  } else if (typeof _ensureModelOptionInDropdown === 'function') {
     _ensureModelOptionInDropdown(value, sel, provider);
   } else {
     sel.value = value;
@@ -3462,6 +3468,19 @@ function _kanbanRefreshOpenModelDropdown(){
   const dd = document.getElementById('kanbanTaskModalModelDropdown');
   if (!dd || !dd.classList.contains('open')) return;
   if (typeof renderModelDropdown !== 'function') return;
+  // The re-render REPLACES the popup's children, search input included, so a
+  // query the user had already typed (and the caret behind it) would vanish the
+  // moment /api/models landed. Capture the query and whether the input owns
+  // focus BEFORE the render, then reinstate both on the replacement.
+  // Match the input by TAG, never by the shared renderer's CSS class: panels.js
+  // must not hard-code ui.js's internal class names (guarded by
+  // tests/test_issue5497_preferences_model_picker.py). The search row is the
+  // first thing renderModelDropdown() appends after the scope note, so the
+  // first <input> in document order is the search box.
+  const _search = () => (typeof dd.querySelector === 'function') ? dd.querySelector('input') : null;
+  const prevInput = _search();
+  const prevQuery = prevInput ? String(prevInput.value || '') : '';
+  const prevHadFocus = !!prevInput && document.activeElement === prevInput;
   renderModelDropdown({
     dropdownId: 'kanbanTaskModalModelDropdown',
     selectId: 'kanbanTaskModalModel',
@@ -3473,6 +3492,19 @@ function _kanbanRefreshOpenModelDropdown(){
     // it, so don't yank it back on a background refresh.
     autoFocusSearch: false,
   });
+  const nextInput = _search();
+  if (!nextInput) return;
+  if (prevQuery) {
+    nextInput.value = prevQuery;
+    // Reapply the filter through the INPUT path rather than poking the list
+    // directly, so the freshly-rendered catalog is narrowed by exactly the
+    // handler the user's own keystrokes drive.
+    if (nextInput._listeners && typeof nextInput._listeners.input === 'function') nextInput._listeners.input();
+    else if (typeof nextInput.dispatchEvent === 'function' && typeof Event === 'function') nextInput.dispatchEvent(new Event('input'));
+  }
+  // Only give focus back if the user had it — an open-but-unfocused picker must
+  // not steal the caret out of the field the user is actually typing in.
+  if (prevHadFocus && typeof nextInput.focus === 'function') nextInput.focus();
 }
 
 function _kanbanMountModelChip(){
