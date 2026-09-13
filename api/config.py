@@ -6182,6 +6182,94 @@ def _models_cache_file_fingerprint(path: Path) -> dict:
     return fingerprint
 
 
+# Codex's ~/.codex/models_cache.json is rewritten on Codex's own refresh timer.
+# Each rewrite bumps mtime_ns + size, but the payload usually only refreshes
+# the volatile timestamp fields (`fetched_at`, plus `updated_at` when present)
+# while the model catalog (client_version, etag, models[]) stays identical.
+# Fingerprinting that file by stat (#2443's _models_cache_file_fingerprint)
+# therefore invalidated the 24h /api/models cache on every Codex refresh, and
+# the next session visit paid a full live rebuild whose serial provider probes
+# starved the session-open path (#7540).
+#
+# This is a DENY-list, not an allow-list, on purpose — same safety direction as
+# _AUTH_FINGERPRINT_VOLATILE_KEYS: every other field (client_version, etag,
+# models, and any future model-affecting key) stays IN the fingerprint, so a
+# genuine catalog change still invalidates the cache.
+_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS = frozenset({
+    # Whole-file refresh timestamp, rewritten by every Codex models refresh.
+    "fetched_at",
+    # Same-family save timestamp (mirrors the auth.json deny-list).
+    "updated_at",
+})
+
+
+def _strip_volatile_codex_cache_fields(obj):
+    """Recursively drop refresh-timestamp-only keys from a Codex cache tree.
+
+    Pure structural transform; never mutates the input. Any key NOT in the
+    deny-list is preserved verbatim so real catalog changes still show through
+    in the fingerprint.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: _strip_volatile_codex_cache_fields(v)
+            for k, v in obj.items()
+            if k not in _CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS
+        }
+    if isinstance(obj, list):
+        return [_strip_volatile_codex_cache_fields(v) for v in obj]
+    return obj
+
+
+def _codex_models_cache_fingerprint(path: Path) -> dict:
+    """Return a content fingerprint of Codex's models_cache.json.
+
+    Unlike _models_cache_file_fingerprint() (mtime_ns + size), this hashes the
+    JSON content with the refresh-timestamp fields stripped, so a Codex
+    refresh that only bumps `fetched_at` does NOT invalidate the 24h
+    /api/models cache and therefore does not force the live rebuild that
+    stalled session opens (#7540). A change to anything that actually feeds the
+    Codex models we surface (client_version, etag, models[], an unknown future
+    field) still changes the hash and correctly busts the cache.
+
+    Failure modes are deliberately conservative — a missing file is recorded,
+    and an unreadable/undecodable file falls back to the stat-based fingerprint
+    so behaviour is never *less* safe than the stat-only version.
+    """
+    p = Path(path).expanduser()
+    fp: dict = {"path": str(p)}
+    try:
+        st = p.stat()
+    except OSError:
+        fp["missing"] = True
+        return fp
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        # Unreadable / corrupt / mid-write: keep the stat-based fingerprint.
+        # Strictly no less safe than the pre-fix behaviour (every write still
+        # invalidates) for this rare path only.
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "unparsed-fallback"
+        return fp
+    stripped = _strip_volatile_codex_cache_fields(raw)
+    try:
+        encoded = json.dumps(
+            stripped,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+        fp["semantic_sha256"] = hashlib.sha256(encoded).hexdigest()
+    except Exception:
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "encode-fallback"
+    return fp
+
+
 def _models_cache_catalog_fingerprint() -> dict:
     """Return non-secret model-catalog identity metadata for cache invalidation.
 
@@ -6191,6 +6279,13 @@ def _models_cache_catalog_fingerprint() -> dict:
     deterministic so a server restart after catalog changes does not keep
     serving an otherwise-valid persisted models_cache.json until the 24h TTL
     expires (#2443).
+
+    The Codex axis uses a *content* fingerprint that excludes the refresh
+    timestamp fields (see _codex_models_cache_fingerprint): Codex rewrites
+    ~/.codex/models_cache.json on its own timer, bumping mtime_ns + size while
+    the model payload stays identical, so a stat-based fingerprint invalidated
+    the 24h cache on every Codex refresh and the next session visit paid a live
+    rebuild (#7540).
     """
     catalog_payload = {
         "provider_models": _PROVIDER_MODELS,
@@ -6211,7 +6306,7 @@ def _models_cache_catalog_fingerprint() -> dict:
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     return {
         "provider_catalog_sha256": provider_catalog_sha,
-        "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
+        "codex_models_cache": _codex_models_cache_fingerprint(codex_home / "models_cache.json"),
     }
 
 
