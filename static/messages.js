@@ -2126,6 +2126,140 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
   }
 }
 
+// A steer is consumed at the finalized tool-batch boundary.  The agent drains
+// once per batch and appends it to the batch's last tool-role result.  Therefore
+// that boundary is an earlier reliable UI boundary than the next `tool` event,
+// which never arrives when the model continues with prose or finishes the turn.
+//
+// #7434: the arm carries a monotonic `boundaryEpoch` counter that advances
+// every time a finalized tool batch fires.  The epoch tracks how many
+// boundaries have been observed; accepted steers are always counted
+// (over-count is preferable to under-count).  The epoch may inform future
+// reconciliation once backend consumption attribution is available.
+const _STEER_CONSUMPTION_ARMED = {};
+const _STEER_TOOL_BATCHES = {};
+function _resetSteerToolBatch(sessionId, streamId, options={}){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  if(!sid || !activeStreamId) return;
+  const current = _STEER_TOOL_BATCHES[sid];
+  if(options && options.reconnecting && current && current.streamId === activeStreamId) return;
+  _STEER_TOOL_BATCHES[sid] = { streamId: activeStreamId, ids: new Set() };
+}
+function _clearSteerToolBatch(sessionId, streamId){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  if(!sid || !activeStreamId) return;
+  const current = _STEER_TOOL_BATCHES[sid];
+  if(current && current.streamId === activeStreamId) delete _STEER_TOOL_BATCHES[sid];
+}
+function _trackSteerToolStart(sessionId, streamId, toolCallId){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  const toolId = String(toolCallId || '');
+  if(!sid || !activeStreamId || !toolId) return;
+  const current = _STEER_TOOL_BATCHES[sid];
+  if(!current || current.streamId !== activeStreamId){
+    _resetSteerToolBatch(sid, activeStreamId);
+    _STEER_TOOL_BATCHES[sid].ids.add(toolId);
+  } else {
+    current.ids.add(toolId);
+  }
+}
+function _trackSteerToolComplete(sessionId, streamId, toolCallId){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  const toolId = String(toolCallId || '');
+  if(!sid || !activeStreamId || !toolId) return false;
+  const current = _STEER_TOOL_BATCHES[sid];
+  if(!current || current.streamId !== activeStreamId) return false;
+  if(!current.ids.has(toolId)){
+    // An untracked completion (e.g. the tool_start was missed across a
+    // same-stream reconnect) carries no batch-boundary information: the
+    // sibling tools of the batch may still be running and the backend only
+    // drains at batch finalize. Ignore it — do NOT destroy the tracked set
+    // and do NOT report a boundary (greptile P1 2026-09-04T15:33). A truly
+    // stalled batch is still bounded by done/setBusy/leftover clears.
+    return false;
+  }
+  current.ids.delete(toolId);
+  if(current.ids.size === 0){
+    delete _STEER_TOOL_BATCHES[sid];
+    return true;
+  }
+  return false;
+}
+function _clearSteerConsumptionForStream(sessionId, streamId){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  if(!sid) return;
+  const current = _STEER_CONSUMPTION_ARMED[sid];
+  const shouldClear = !activeStreamId || (current && current.streamId === activeStreamId);
+  if(shouldClear){
+    delete _STEER_CONSUMPTION_ARMED[sid];
+    if(typeof _setSteerPendingCount === 'function') _setSteerPendingCount(sid, 0);
+  }
+}
+function _armSteerConsumption(sessionId, streamId){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  if(!sid || !activeStreamId) return;
+  const current = _STEER_CONSUMPTION_ARMED[sid];
+  if(current && current.streamId === activeStreamId && current.armed){
+    // Re-arm on an already-armed slot: no state change needed.
+    return current.boundaryEpoch;
+  }
+  _STEER_CONSUMPTION_ARMED[sid] = { streamId: activeStreamId, armed: true, boundaryEpoch: 0 };
+  return 0;
+}
+function _resetSteerConsumptionArming(sessionId, streamId, options={}){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  if(!sid || !activeStreamId) return;
+  const current = _STEER_CONSUMPTION_ARMED[sid];
+  if(options && options.reconnecting && current && current.streamId === activeStreamId && current.armed) return;
+  // Greptile P1 (2026-09-05T04:07): the arm is a per-(session, stream) slot
+  // shared by concurrent steer submissions. A failed/queued fallback used to
+  // delete the whole slot even when a sibling steer had already been
+  // accepted (count > 0) and was still waiting for its tool-result boundary —
+  // stranding the accepted steer's count until turn end. The arm's lifetime
+  // follows the pending count: while count > 0 on this same stream there is
+  // real payload waiting for the boundary, so a submission-scoped release
+  // keeps the arm and only clears bare arms with no pending payload. Full
+  // clears still happen when the stream changes (attach/detach) and at turn
+  // completion via the done handler's clearSteerPending.
+  if(current && current.streamId === activeStreamId && current.armed
+     && typeof getSteerPendingCount === 'function' && getSteerPendingCount(sid) > 0){
+    return;
+  }
+  delete _STEER_CONSUMPTION_ARMED[sid];
+  if(current && current.streamId !== activeStreamId) _setSteerPendingCount(sid, 0);
+}
+function _consumeArmedSteer(sessionId, streamId){
+  const sid = String(sessionId || '');
+  const activeStreamId = String(streamId || '');
+  if(!sid || !activeStreamId) return false;
+  const current = _STEER_CONSUMPTION_ARMED[sid];
+  if(!current || !current.armed) return false;
+  if(current.streamId !== activeStreamId){
+    delete _STEER_CONSUMPTION_ARMED[sid];
+    return false;
+  }
+  const toolBatch = _STEER_TOOL_BATCHES[sid];
+  if(toolBatch && toolBatch.streamId === activeStreamId && toolBatch.ids.size > 0) return false;
+  // #7434: advance the epoch only after the batch gate, so a mid-batch
+  // tool_complete cannot falsely advance it before the batch finalizes.
+  current.boundaryEpoch++;
+  if(typeof getSteerPendingCount !== 'function' || getSteerPendingCount(sid) <= 0){
+    // count==0 but armed: no accepted steers to clear right now, but the
+    // epoch advance above ensures any in-flight POST will reconcile.
+    return false;
+  }
+  if(typeof clearSteerPending !== 'function') return false;
+  clearSteerPending(sid);
+  return true;
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -2161,6 +2295,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   INFLIGHT[activeSid].streamId=streamId;
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
+  if(typeof _resetSteerConsumptionArming === 'function') _resetSteerConsumptionArming(activeSid, streamId, options);
+  if(typeof _resetSteerToolBatch === 'function') _resetSteerToolBatch(activeSid, streamId, options);
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
   let assistantText='';
@@ -2299,6 +2435,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
+    if(typeof _clearSteerConsumptionForStream === 'function') _clearSteerConsumptionForStream(activeSid, streamId);
+    if(typeof _clearSteerToolBatch === 'function') _clearSteerToolBatch(activeSid, streamId);
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -5865,6 +6003,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
+      if(typeof _trackSteerToolStart === 'function') _trackSteerToolStart(activeSid, streamId, d.tid||d.id);
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const tc=upsertLiveToolCall(d,'start');
       if(!tc) return;
@@ -5901,6 +6040,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
+      // #7434: only a proven finalized batch boundary consumes the armed
+      // steer. Untracked or missing-ID completions return false and must
+      // NOT clear the pending count (conservative: retain until done).
+      const _steerBatchFinalized = typeof _trackSteerToolComplete === 'function'
+        && _trackSteerToolComplete(activeSid, streamId, d.tid||d.id);
+      if(_steerBatchFinalized && typeof _consumeArmedSteer === 'function')
+        _consumeArmedSteer(activeSid, streamId);
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const tc=upsertLiveToolCall(d,'complete');
       if(!tc) return;
@@ -6176,6 +6322,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
         _clearOwnerInflightState();
+        // The done handler runs for both active and background sessions, so
+        // this is the one point that reliably covers a non-viewed owner:
+        // clearSteerPending(completedSid) zeroes the owner's pending count
+        // even when the user is currently viewing a different session (the
+        // active-pane setBusy(false) clear cannot fire for background owners).
+        if(typeof clearSteerPending==='function') clearSteerPending(completedSid);
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -6479,6 +6631,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             profile:S.activeProfile||'default',
           });
           if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+          if(typeof clearSteerPending==='function') clearSteerPending(sid);
           showToast(t('steer_leftover_queued'),3000);
         }
       }catch(_){}
