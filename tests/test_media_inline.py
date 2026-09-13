@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pathlib
@@ -41,6 +42,48 @@ def _media_fixture_dir() -> pathlib.Path:
     fixture_dir = TEST_WORKSPACE / ".media-fixtures"
     fixture_dir.mkdir(parents=True, exist_ok=True)
     return fixture_dir
+
+
+# /api/media grants a few roots unconditionally, /tmp among them, so a plain
+# TemporaryDirectory() is never "outside every allowed root" — and neither is
+# one under REPO_ROOT when the checkout itself lives in /tmp (git worktrees, CI
+# scratch dirs). Tests that assert the fail-closed 403 must therefore pick a
+# fixture location verified against those roots rather than assume one.
+_UNCONDITIONAL_MEDIA_ROOTS = (
+    pathlib.Path("/tmp"),
+    pathlib.Path.home() / ".hermes",
+)
+
+
+def _is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+@contextlib.contextmanager
+def _outside_allowed_roots_dir():
+    """Yield a temp dir verified to sit outside every unconditional media root.
+
+    Skips the test when no candidate location qualifies, which beats asserting
+    403 on a path the endpoint is entitled to serve.
+    """
+    for parent in (REPO_ROOT, pathlib.Path.home() / ".cache"):
+        if any(_is_within(parent, root) for root in _UNCONDITIONAL_MEDIA_ROOTS):
+            continue
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        with tempfile.TemporaryDirectory(dir=parent) as outside:
+            yield pathlib.Path(outside)
+            return
+    raise unittest.SkipTest(
+        "no fixture directory available outside the /api/media allowed roots "
+        f"({', '.join(str(r) for r in _UNCONDITIONAL_MEDIA_ROOTS)})"
+    )
 
 
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
@@ -709,7 +752,7 @@ class TestMediaEndpointUnit(unittest.TestCase):
             def wfile(self):
                 return self._W(self)
 
-        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
             hermes_home = pathlib.Path(home) / ".hermes"
             hermes_home.mkdir(parents=True)
             ws = hermes_home / "workspace"
@@ -737,6 +780,169 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn("text/html", handler.headers.get("content-type", ""))
             self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
             self.assertIn(b"Report", handler.body)
+
+    def test_handle_media_session_authorizes_safe_text_artifacts_outside_roots(self):
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        cases = {
+            "sample.csv": ("name,value\nalpha,1\n", "text/csv"),
+            "sample.diff": ("--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n", "text/x-diff"),
+            "sample.patch": ("--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n", "text/x-diff"),
+            "board.excalidraw": (
+                '{"type":"excalidraw","version":2,"elements":[],"appState":{},"files":{}}',
+                "application/vnd.excalidraw+json",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            outside_root = pathlib.Path(outside)
+            files = []
+            for name, (content, _mime) in cases.items():
+                target = outside_root / name
+                target.write_text(content, encoding="utf-8")
+                files.append(target)
+            session = SimpleNamespace(
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": "\n".join(f"MEDIA:{target}" for target in files),
+                    }
+                ]
+            )
+
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                for target in files:
+                    handler = _Handler()
+                    routes._handle_media(
+                        handler,
+                        SimpleNamespace(
+                            query=(
+                                f"path={urllib.parse.quote(str(target.resolve()))}"
+                                "&session_id=s-media&inline=1"
+                            ),
+                            path="/api/media",
+                        ),
+                    )
+                    with self.subTest(suffix=target.suffix):
+                        self.assertEqual(handler.status, 200)
+                        self.assertIn(cases[target.name][1], handler.headers.get("content-type", ""))
+                        self.assertIn(cases[target.name][0].encode("utf-8"), handler.body)
+
+                    denied = _Handler()
+                    routes._handle_media(
+                        denied,
+                        SimpleNamespace(
+                            query=f"path={urllib.parse.quote(str(target.resolve()))}&inline=1",
+                            path="/api/media",
+                        ),
+                    )
+                    with self.subTest(suffix=target.suffix, mode="without_session"):
+                        self.assertEqual(denied.status, 403)
+
+    def test_handle_media_hard_deny_beats_session_token_grant(self):
+        """#3234 x session tokens: the state/secret deny guard must run BEFORE
+        the session-token grant, so a session whose transcript mentions a
+        hard-denied file (attacker-influenced agent output can do exactly
+        that) still gets 403 even with the owning session_id attached.
+
+        Uses a .csv inside the state sessions/ subdir so that, were the deny
+        guard ordered after the grant, the request WOULD succeed: the path is
+        within an allowed root, the MIME is session-grantable, and the token
+        mentions the exact path.
+        """
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            # deny-by-subdir with a session-grantable MIME (text/csv)
+            sess_dir = hermes_home / "sessions"
+            sess_dir.mkdir()
+            state_csv = sess_dir / "report.csv"
+            state_csv.write_text("name,value\nalpha,1\n", encoding="utf-8")
+            # deny-by-filename
+            settings = hermes_home / "settings.json"
+            settings.write_text('{"secret":"value"}', encoding="utf-8")
+            session = SimpleNamespace(
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": f"MEDIA:{state_csv}\nMEDIA:{settings}",
+                    }
+                ]
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                for target in (state_csv, settings):
+                    handler = _Handler()
+                    routes._handle_media(
+                        handler,
+                        SimpleNamespace(
+                            query=(
+                                f"path={urllib.parse.quote(str(target.resolve()))}"
+                                "&session_id=s-media&inline=1"
+                            ),
+                            path="/api/media",
+                        ),
+                    )
+                    with self.subTest(name=target.name):
+                        self.assertEqual(handler.status, 403)
+                        self.assertNotIn(b"alpha", handler.body)
+                        self.assertNotIn(b"secret", handler.body)
 
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
