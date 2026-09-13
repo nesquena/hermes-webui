@@ -15,6 +15,29 @@ def read_ui_js():
         return f.read()
 
 
+def _extract_js_function(src, header):
+    """Return a JS function's full source, matched by brace depth.
+
+    Structural tests here used fixed character windows after a `find()`, which
+    silently drift out of the function whenever anything earlier in it grows.
+    That produces failures with no behavior change (and can slide PAST the
+    expression under test, passing for the wrong reason). Brace counting is
+    exact for this file: ui.js has no unbalanced braces inside string or regex
+    literals in the functions these tests target.
+    """
+    start = src.index(header)
+    i = src.index('{', start)
+    depth = 1
+    i += 1
+    while depth and i < len(src):
+        if src[i] == '{':
+            depth += 1
+        elif src[i] == '}':
+            depth -= 1
+        i += 1
+    return src[start:i]
+
+
 def test_autolink_comment_present():
     """The Autolink comment should be present in renderMd() to document the feature."""
     content = read_ui_js()
@@ -27,11 +50,12 @@ def test_autolink_comment_present():
 def test_autolink_regex_in_rendermd():
     """The autolink regex pattern (https?://) should appear in renderMd()."""
     content = read_ui_js()
-    # Locate the renderMd function body
-    rendermd_start = content.find('function renderMd(raw){')
-    assert rendermd_start != -1, "renderMd function not found in ui.js"
-    # Find the closing brace after renderMd (look for the autolink pattern within it)
-    rendermd_body = content[rendermd_start:rendermd_start + 15000]
+    # Extract the WHOLE renderMd body by brace depth rather than slicing a fixed
+    # character window. renderMd is ~35KB and the autolink pass sits past the
+    # 15000-char mark, so any edit earlier in the function silently pushed the
+    # pattern out of the window and failed this test without the behavior
+    # changing at all.
+    rendermd_body = _extract_js_function(content, 'function renderMd(raw){')
     assert 'https?:\\/\\/' in rendermd_body, (
         "Autolink regex (https?:\\/\\/) not found inside renderMd() body."
     )

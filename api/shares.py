@@ -22,9 +22,21 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import NamedTuple
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data
+from api.helpers import (
+    redact_session_data,
+    unquote_media_ref,
+    is_external_media_url,
+    media_token_exceeds_max_length,
+)
+from api.share_refs import (
+    SHARE_REFERENCE_RE,
+    media_ref_of_match,
+    public_reference_hides_local_target,
+    url_of_match,
+)
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -115,14 +127,23 @@ def _redact_share_paths(text: str, extra_paths) -> str:
     return text
 
 
-# Regex matching local MEDIA:<path> references — same pattern that
-# _inlineMediaHtmlForRef() in ui.js handles when rendering messages.
-# Excludes MEDIA: followed by http/https URLs so external images pass
-# through unchanged.  file:// references are NOT matched here — they are
-# always rejected at the public-share boundary (absolute, un-scoped).
-_SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
-)
+# Regex matching EVERY URL-bearing token the share renderer can turn into a
+# live URL — the canonical `MEDIA:` token plus Markdown images/links, bare
+# absolute URLs, and relative `api/media?…` references. Shape and rationale
+# live in api/share_refs.py.
+#
+# NOTE: the `MEDIA:` branch deliberately does NOT pass exclude_urls=True. That
+# option is a negative lookahead at the current start position, so an external
+# URL is rejected by NOT MATCHING — and `re.sub` then resumes scanning one
+# character later, inside the very token it just refused. For
+# `MEDIA:https://cdn.test/img/MEDIA:/etc/passwd.png` the outer token is skipped
+# and the nested `MEDIA:` matches as a fresh LOCAL token, so a legitimate
+# external URL gets its tail rewritten (and local paths get probed from share
+# text). Match the complete canonical token here and classify it in
+# _replace_ref(): match -> classify -> decide, which cannot restart mid-token.
+# Every other branch obeys the same rule, so one refusal always consumes its
+# whole token.
+_SHARE_MEDIA_RE = SHARE_REFERENCE_RE
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
 _SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
@@ -153,6 +174,31 @@ _DANGEROUS_HREF_RE = re.compile(r"^\s*javascript\s*:", re.IGNORECASE)
 
 # Static placeholder emitted when a media reference cannot be embedded.
 _PLACEHOLDER = "[*Local attachment omitted from public share*]"
+
+# ── The three outcomes of ONE reference decision ─────────────────────────────
+# Named so the pure classifier and its two callers cannot disagree about what a
+# verdict means. `_EMBED` is the only outcome that needs the filesystem, and it
+# is reachable ONLY from the create path — the load path treats it as a refusal.
+_PRESERVE = "preserve"
+_REFUSE = "refuse"
+_EMBED = "embed"
+
+
+class _RefVerdict(NamedTuple):
+    """What to do with one matched reference.
+
+    ``action`` is one of :data:`_PRESERVE`, :data:`_REFUSE`, or :data:`_EMBED`.
+    ``local_path`` carries the unquoted local ref for :data:`_EMBED` and is
+    empty otherwise, so an ``_EMBED`` verdict is the only shape that can name a
+    file at all.
+    """
+
+    action: str
+    local_path: str = ""
+
+
+_PRESERVE_VERDICT = _RefVerdict(_PRESERVE)
+_REFUSE_VERDICT = _RefVerdict(_REFUSE)
 
 # Magic byte signatures for allowed image formats — content-based validation
 # that catches mismatched extensions (e.g. a .png that is actually a script).
@@ -236,6 +282,104 @@ def _sanitize_svg_bytes(data: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _classify_share_ref(match: re.Match) -> _RefVerdict:
+    """Decide ONE matched token, WITHOUT touching the filesystem.
+
+    This is the pure half of the publication decision. It answers with
+    :data:`_PRESERVE` (publish the span byte-for-byte), :data:`_REFUSE`
+    (replace the whole span with :data:`_PLACEHOLDER`), or :data:`_EMBED`
+    (a canonical ``MEDIA:`` token naming a LOCAL path, which only the create
+    path may resolve and inline).
+
+    Split out of :func:`_embed_share_media` so the LOAD path can reuse the
+    identical decision. ``load_share()`` must apply the same guard to a stored
+    snapshot written by an older build, but it must never read a local file to
+    do it: a public read of an anonymous share is not a licence to touch the
+    host filesystem, and the concrete path in a legacy snapshot is untrusted
+    input. Structural separation is stronger than calling the embedder with
+    empty ``allowed_roots`` — an absolute ref still reaches ``Path.resolve()``
+    and ``is_file()`` there, so "no roots" is not "no filesystem access".
+    """
+    # Non-`MEDIA:` branches: a Markdown image/link target, a bare absolute
+    # URL, or a relative reference to our own media route. Each of these is
+    # a live-URL sink on the share page (see api/share_refs.py for the sink
+    # inventory), so ONE fail-closed decision covers the WHOLE matched span
+    # here, exactly as the `MEDIA:` branch below does. Never embedded: the
+    # allowed-roots embed path exists for canonical `MEDIA:` tokens, and a
+    # Markdown target that survives is preserved byte-for-byte instead.
+    if match.group("media") is None:
+        if public_reference_hides_local_target(url_of_match(match)):
+            return _REFUSE_VERDICT
+        return _PRESERVE_VERDICT
+
+    # Quoted refs are captured with their quotes so the replaced span covers
+    # the whole token; strip them before any path resolution, or a spaced
+    # path that the renderer displays would be placeholdered here.
+    capture = media_ref_of_match(match)
+    raw = unquote_media_ref(capture)
+    if not raw:
+        return _PRESERVE_VERDICT
+    # An over-ceiling capture is not a legal MEDIA token (shared lexical
+    # contract; see MEDIA_TOKEN_MAX_LENGTH in api/helpers.py). Neither
+    # renderer turns it into a media node, so the snapshot must leave the
+    # span exactly as prose rather than embed or placeholder it — otherwise
+    # the share and the live view disagree about one token.
+    if media_token_exceeds_max_length(capture):
+        return _PRESERVE_VERDICT
+    # Classification happens HERE, on a token that was actually matched, and
+    # is the only thing that decides external vs local. The pattern no longer
+    # rejects external URLs by non-match, so the scanner can never resume
+    # inside a refused token and rewrite the tail of an external URL that
+    # itself contains `MEDIA:`. Preserving returns the exact original span, so
+    # an exempt external token survives byte-for-byte.
+    #
+    # But "carries an http(s) scheme" is NOT the same as "safe to publish".
+    # The share renderer restores a preserved token into an image URL, so a
+    # URL whose own path/query/fragment names a local file, our
+    # authenticated /api/media route, or a loopback/private host would
+    # either round-trip a host path into the anonymous snapshot or make the
+    # viewer's browser issue a same-origin authenticated request. Decide the
+    # WHOLE token: preserve it byte-for-byte, or placeholder all of it. A
+    # partial rewrite is exactly the bug that let the scanner resume inside
+    # a token it had refused.
+    if is_external_media_url(raw):
+        if public_reference_hides_local_target(raw):
+            return _REFUSE_VERDICT
+        return _PRESERVE_VERDICT
+    return _RefVerdict(_EMBED, raw)
+
+
+def guard_public_share_references(text: str) -> str:
+    """Apply the public-reference decision to *text* with NO filesystem access.
+
+    The guard :func:`_embed_share_media` applies runs when a snapshot is
+    CREATED. ``load_share()`` used to return a stored snapshot's ``messages``
+    untouched, so every share written before that guard existed stayed on the
+    vulnerable path forever: ``static/share.js`` hands each stored
+    ``msg.content`` straight to ``renderMd()`` and assigns the result with
+    ``innerHTML``, and the live sinks there (``_markdownHref()`` turning
+    ``file://`` into ``api/media?path=…&inline=1``; ``_isSafeUrl()``/``_tag()``
+    accepting a relative ``api/`` image or link target) are still reachable.
+
+    So the same decision runs on the way OUT. Every token
+    :data:`SHARE_REFERENCE_RE` matches is either preserved byte-for-byte or
+    replaced whole with :data:`_PLACEHOLDER`. A local ``MEDIA:`` ref is
+    placeholdered rather than embedded: reading it would need the filesystem,
+    the allowed roots of the originating session are not available at load
+    time, and the path itself is untrusted input from a stored file. Already
+    guarded snapshots pass through unchanged, because the decision is
+    idempotent on its own output.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    def _decide(match: re.Match) -> str:
+        verdict = _classify_share_ref(match)
+        return match.group(0) if verdict.action == _PRESERVE else _PLACEHOLDER
+
+    return _SHARE_MEDIA_RE.sub(_decide, text)
+
+
 def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> str:
     """Find local MEDIA: references and replace them with inline <img> tags.
 
@@ -289,11 +433,8 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
                 return candidate
         return None
 
-    def _replace_ref(m: re.Match) -> str:
-        raw = (m.group(1) or "").strip()
-        if not raw:
-            return m.group(0)
-
+    def _embed_local_ref(raw: str) -> str:
+        """The effectful half: resolve *raw*, validate it, inline its bytes."""
         # --- Resolve and validate against allowed roots -----------------------
         p = _resolve_against_roots(raw)
         if p is None:
@@ -339,6 +480,14 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         except (OSError, MemoryError):
             return _PLACEHOLDER
 
+    def _replace_ref(m: re.Match) -> str:
+        verdict = _classify_share_ref(m)
+        if verdict.action == _PRESERVE:
+            return m.group(0)
+        if verdict.action == _REFUSE:
+            return _PLACEHOLDER
+        return _embed_local_ref(verdict.local_path)
+
     return _SHARE_MEDIA_RE.sub(_replace_ref, text)
 
 
@@ -372,14 +521,36 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     return sanitized
 
 
+def _guarded_public_message(message) -> dict | None:
+    """Return *message* with its stored content re-decided for publication.
+
+    A stored snapshot's ``content`` is untrusted text: it may predate the
+    public-reference guard entirely. Every message therefore passes through
+    :func:`guard_public_share_references` on the way out, and a message whose
+    shape is not ``{role, content: str}`` is dropped rather than published.
+    """
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if not isinstance(content, str):
+        return None
+    guarded = guard_public_share_references(content)
+    return {**message, "content": guarded}
+
+
 def _public_share_payload(payload: dict) -> dict:
     messages = payload.get("messages")
     if not isinstance(messages, list):
         messages = []
+    # The stored snapshot is re-guarded on EVERY read, so a share written before
+    # the public-reference guard existed cannot keep serving a live local
+    # reference to an anonymous viewer. No filesystem access happens here — see
+    # guard_public_share_references().
+    guarded = [m for m in map(_guarded_public_message, messages) if m is not None]
     public = {
         "title": str(payload.get("title") or "Untitled"),
-        "messages": messages,
-        "message_count": int(payload.get("message_count") or len(messages)),
+        "messages": guarded,
+        "message_count": int(payload.get("message_count") or len(guarded)),
     }
     created_at = payload.get("created_at")
     updated_at = payload.get("updated_at")
