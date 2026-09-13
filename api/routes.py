@@ -2957,6 +2957,7 @@ from api.helpers import (
     read_body,
     MAX_BODY_BYTES,
     _security_headers,
+    flush_pending_auth_cookies,
     _sanitize_error,
     redact_session_data,
     public_session_projection,
@@ -11013,6 +11014,31 @@ def _safe_login_redirect_path(raw_path: str | None) -> str:
     return path
 
 
+def _login_redirect_location(safe_path: str) -> str:
+    """Serialize a `_safe_login_redirect_path()` result as a `Location` value.
+
+    The fallback `/` becomes `./`: from `<mount>/login` that resolves to the
+    mount root, so a subpath deployment such as `/hermes/` is not sent to the
+    site root. This mirrors the `_safeNextPath()` default in static/login.js.
+    A present `next` is emitted as-is — the app's own producers (static/ui.js,
+    workspace.js, boot.js) build it from `window.location.pathname`, which
+    already carries the mount prefix, and login.js navigates to it verbatim;
+    prefixing `./` would double the mount (`/hermes/hermes/session/...`).
+
+    `parse_qs()` has already decoded percent escapes, so a UTF-8 `next` arrives
+    as a Unicode string, and `BaseHTTPRequestHandler.send_header()` encodes
+    header values as strict Latin-1 — `/你好` would raise. Percent-encode
+    anything outside the RFC 3986 reserved/unreserved sets back to an ASCII
+    URI. A `%` is legal only as the start of a `%HH` triplet: a valid triplet
+    that survived decoding is kept as-is (not doubled to `%25HH`), while a
+    lone or malformed `%` (`100%`, `%Z`) is escaped to `%25`.
+    """
+    if safe_path == "/":
+        return "./"
+    path = re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", safe_path)
+    return quote(path, safe="/%:@!$&'()*+,;=?#[]~")
+
+
 def _request_base_url(handler) -> str:
     from api.auth import _is_secure_context
 
@@ -13494,6 +13520,32 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/login":
+        from api.auth import ensure_trusted_auth_session, is_auth_enabled
+
+        # Already signed in — send the browser on instead of rendering a form it
+        # cannot use. `/login` is public (PUBLIC_PATHS), so check_auth() never
+        # reconciles the request's identity here; do it in the route. This
+        # covers both a trusted reverse-proxy header and a valid session
+        # cookie. It matters most for an installed web app: iOS relaunches a
+        # Home Screen app at its last URL, so a device that once landed on
+        # /login stays parked on the password form forever even though every
+        # request it makes is authenticated.
+        if is_auth_enabled() and ensure_trusted_auth_session(handler):
+            handler.send_response(302)
+            handler.send_header(
+                "Location",
+                _login_redirect_location(
+                    _safe_login_redirect_path(
+                        parse_qs(parsed.query or "").get("next", [""])[0]
+                    )
+                ),
+            )
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Content-Length", "0")
+            _security_headers(handler)
+            flush_pending_auth_cookies(handler)
+            handler.end_headers()
+            return True
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")
