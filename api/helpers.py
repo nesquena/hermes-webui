@@ -1282,6 +1282,62 @@ def read_body(handler) -> dict:
     return parsed
 
 
+def request_has_body(handler) -> bool:
+    """Return True when the request advertises a body (Content-Length / chunked).
+
+    Callers use this from *early-response* paths — auth rejection, unknown
+    route, server error — which answer before ``rfile`` is read. In those paths
+    an advertised body is by construction still queued on the connection, so
+    the connection must not be reused (:func:`close_if_body_unread`).
+    """
+    headers = getattr(handler, 'headers', None)
+    if headers is None:
+        return False
+    try:
+        raw_length = headers.get('Content-Length')
+    except AttributeError:
+        return False
+    if raw_length is None:
+        length = 0
+    else:
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            # Unparsable framing: the body length is unknown, so the stream
+            # cannot be resynchronised. Treat it as body-bearing (fail closed);
+            # ``read_body`` already flags the connection for those requests.
+            return True
+    if length > 0:
+        return True
+    try:
+        return bool(headers.get('Transfer-Encoding'))
+    except AttributeError:
+        return False
+
+
+def close_if_body_unread(handler):
+    """Flag a keep-alive connection for teardown when its body was not read.
+
+    A response written before the request body is consumed leaves those bytes
+    in ``rfile``; because the response is fully framed and the connection stays
+    alive, ``BaseHTTPRequestHandler`` then parses the leftover body as the next
+    request line, so the next request on that connection is answered with a
+    bogus ``501 Unsupported method`` (issue #7550). Draining is not an option —
+    the body is client-sized — so the connection is closed instead.
+
+    Returns the extra response headers the caller must emit (``Connection:
+    close``), or ``None`` when the request carried no body and keep-alive can be
+    preserved.
+    """
+    if not request_has_body(handler):
+        return None
+    try:
+        handler.close_connection = True
+    except Exception:
+        pass
+    return {'Connection': 'close'}
+
+
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────
 
 PROFILE_COOKIE_NAME = 'hermes_profile'
