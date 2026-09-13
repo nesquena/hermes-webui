@@ -43,6 +43,37 @@ def _media_fixture_dir() -> pathlib.Path:
     return fixture_dir
 
 
+def _media_token_fixture_dir() -> pathlib.Path:
+    """A writable directory that is NOT an /api/media allowed root.
+
+    ``_handle_media`` hardcodes /tmp as an allowed root (screenshots land
+    there), and the review sandbox sets HOME=/tmp, so an exact-token fixture
+    under the OS temp dir would be authorized by the ALLOWED-ROOT branch and
+    the request would never exercise the token grant (it would only reach it
+    by precedence). The OS temp dir is used only when it lives OUTSIDE the
+    /tmp root — macOS (/var/folders) and Windows (%TEMP%; ``Path('/tmp')``
+    does not exist there). On Linux the /dev/shm tmpfs is used instead, which
+    is outside every allowed root. Falls back to the OS temp dir when no
+    outside-/tmp location is available.
+    """
+    tmp_root = pathlib.Path("/tmp").resolve()
+    for cand in (
+        pathlib.Path(tempfile.gettempdir()).resolve(),
+        pathlib.Path("/dev/shm"),
+    ):
+        if cand == tmp_root or tmp_root in cand.parents:
+            continue
+        try:
+            probe = pathlib.Path(
+                tempfile.mkdtemp(prefix="hermes_media_token_probe_", dir=str(cand))
+            )
+            probe.rmdir()
+            return cand
+        except OSError:
+            continue
+    return pathlib.Path(tempfile.gettempdir())
+
+
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
 
 class TestMediaRenderMdStash(unittest.TestCase):
@@ -536,6 +567,782 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     h4.status, 403,
                     "profile webui_state/sessions/*.json must be denied")
 
+    def test_sibling_base_profile_webui_state_dir_denied_when_named_profile_active(self):
+        """#6982: /api/media must NOT serve a base/sibling profile's WebUI state
+        dir (<root>/webui — the default STATE_DIR) when a NAMED profile is
+        active. Only the active STATE_DIR was previously denied (as a root), so
+        base `~/.hermes/webui/sessions/...` and sibling
+        `<root>/profiles/<other>/webui/sessions/...` were served with a 200.
+        Fail-closed: deny every enumerated root/profile-root's `<root>/webui`
+        state subtree, while `<root>/webui/workspace` media stays servable.
+        """
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            class _W:
+                def write(self_inner, b):
+                    pass
+                def flush(self_inner):
+                    pass
+            wfile = _W()
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            # Base profile's WebUI state dir (~/.hermes/webui) and its workspace.
+            base_webui = base / "webui"
+            base_sessions = base_webui / "sessions"
+            base_ws = base_webui / "workspace"
+            base_sessions.mkdir(parents=True)
+            base_ws.mkdir(parents=True)
+            base_index = base_sessions / "_index.json"
+            base_index.write_text('{"sessions":[]}', encoding="utf-8")
+            base_shot = base_ws / "shot.png"
+            base_shot.write_bytes(png_bytes)
+            # Sibling named profile's WebUI state dir.
+            sibling = base / "profiles" / "other"
+            sibling_webui = sibling / "webui"
+            sibling_sessions = sibling_webui / "sessions"
+            sibling_sessions.mkdir(parents=True)
+            sibling_sess = sibling_sessions / "s1.json"
+            sibling_sess.write_text('{"messages":[]}', encoding="utf-8")
+            # Active named profile's own state dir + workspace.
+            active = base / "profiles" / "webui"
+            active_webui = active / "webui"
+            active_sessions = active_webui / "sessions"
+            active_ws = active_webui / "workspace"
+            active_sessions.mkdir(parents=True)
+            active_ws.mkdir(parents=True)
+            active_sess = active_sessions / "s2.json"
+            active_sess.write_text('{"messages":[]}', encoding="utf-8")
+            active_shot = active_ws / "shot.png"
+            active_shot.write_bytes(png_bytes)
+
+            env = {
+                "HERMES_HOME": str(active),
+                "HERMES_WEBUI_STATE_DIR": str(active_webui),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(active_ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", active_webui), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                # Base profile's WebUI session index → DENIED (was 200, #6982)
+                h1 = _Handler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(base_index.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h1.status, 403,
+                    "base profile <root>/webui/sessions/_index.json must be denied "
+                    "when a named profile is active (#6982)")
+                # Sibling named profile's WebUI session file → DENIED
+                h2 = _Handler()
+                routes._handle_media(h2, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(sibling_sess.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h2.status, 403,
+                    "sibling profile <root>/profiles/other/webui/sessions must be denied")
+                # Active named profile's own state → still denied
+                h3 = _Handler()
+                routes._handle_media(h3, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(active_sess.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h3.status, 403,
+                    "active named profile's own webui/sessions must stay denied")
+                # Base profile's <root>/webui/workspace media → still servable
+                h4 = _Handler()
+                routes._handle_media(h4, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(base_shot.resolve()))}&inline=1",
+                    path="/api/media"))
+                self.assertNotEqual(
+                    h4.status, 403,
+                    "base <root>/webui/workspace/shot.png must NOT be blocked (legit media)")
+                # Active profile's workspace media → still servable
+                h5 = _Handler()
+                routes._handle_media(h5, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(active_shot.resolve()))}&inline=1",
+                    path="/api/media"))
+                self.assertNotEqual(
+                    h5.status, 403,
+                    "active profile's webui/workspace/shot.png must NOT be blocked")
+
+    def test_media_serve_binds_authorization_to_opened_object_swap_toctou(self):
+        """#6988 review: authorization must be bound to the object actually
+        opened. /api/media resolves + allow/deny-checks `target` first, then
+        serves it; if an ancestor is swapped for a symlink to a denied webui
+        state dir between the check and the final open, the SAME
+        already-authorized pathname must NOT open the denied object.
+
+        (a) A plain file under an allowed tree serves normally (200 + body).
+        (b) After swapping an ancestor (`alias`) for a symlink to the denied
+        active-profile <root>/webui/sessions dir, the same pathname must be
+        refused at open time (component-anchored openat + O_NOFOLLOW) — the
+        denied state content must never reach the response, even though the
+        path was authorized before the swap.
+        """
+        import shutil
+        from api import routes
+
+        class _CaptureHandler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            # Active named profile (HERMES_HOME) with its WebUI state dir and
+            # the default workspace under it (STATE_DIR/workspace).
+            active = base / "profiles" / "webui"
+            active_webui = active / "webui"
+            denied_sessions = active_webui / "sessions"
+            ws = active_webui / "workspace"
+            denied_sessions.mkdir(parents=True)
+            ws.mkdir(parents=True)
+            # Denied state object with the SAME relative name the request uses.
+            denied_state = denied_sessions / "payload.json"
+            denied_state.write_text(
+                '{"top-secret-session":"do-not-leak","messages":[]}',
+                encoding="utf-8")
+            # Allowed, attacker-mutable tree inside the active workspace.
+            alias_dir = ws / "media_swap" / "alias"
+            alias_dir.mkdir(parents=True)
+            innocent = alias_dir / "payload.json"
+            innocent.write_text('{"ok":true,"payload":"innocent"}', encoding="utf-8")
+
+            env = {
+                "HERMES_HOME": str(active),
+                "HERMES_WEBUI_STATE_DIR": str(active_webui),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", active_webui), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                request_path = (
+                    "path="
+                    + urllib.parse.quote(str((alias_dir / "payload.json").resolve()))
+                )
+
+                # (a) Pre-swap: the same pathname serves the innocent file.
+                h1 = _CaptureHandler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=request_path, path="/api/media"))
+                self.assertEqual(
+                    h1.status, 200,
+                    "innocent file under the allowed workspace must serve (200)")
+                self.assertIn(
+                    b"innocent", h1.body,
+                    "pre-swap body must be the innocent file content")
+
+                # (b) Swap the ancestor for a symlink to the denied webui
+                # state dir between check and open (simulated inside the first
+                # os.open call, i.e. after allow/deny evaluation). With the
+                # anchor_root binding the open is component-anchored and the
+                # swapped component is refused; without it, the same pathname
+                # re-traversed by name would open the denied state object.
+                real_open = os.open
+                swapped = {"done": False}
+
+                def _swap_on_first_open(path, *args, _real_open=real_open, _swapped=swapped, _alias_dir=alias_dir, _denied_sessions=denied_sessions, **kwargs):
+                    if not _swapped["done"]:
+                        _swapped["done"] = True
+                        shutil.rmtree(str(_alias_dir))
+                        os.symlink(str(_denied_sessions), str(_alias_dir))
+                    return _real_open(path, *args, **kwargs)
+
+                h2 = _CaptureHandler()
+                with mock.patch.object(os, "open", autospec=True,
+                                       side_effect=_swap_on_first_open):
+                    routes._handle_media(h2, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                self.assertNotEqual(
+                    h2.status, 200,
+                    "swapped-ancestor open must not serve the denied state object")
+                self.assertNotIn(
+                    b"top-secret-session", h2.body,
+                    "denied webui state content must never reach the response "
+                    "(authorization must be bound to the opened object)")
+
+    def test_media_serve_swapped_allowed_root_pathname_fails_closed(self):
+        """#6988 round 2: replacing the SELECTED ALLOWED-ROOT pathname between
+        authorization and open must never serve replacement state bytes.
+
+        Round 1 anchored the open with ``anchor_root``, but that anchor was
+        itself a PATHNAME re-resolved at open time (open_anchored_fd calls
+        workspace.resolve() again), so replacing the allowed-root pathname for
+        a symlink to a denied webui state dir made root and target rebound
+        together into the replacement tree. Round 2 retains the root DIRECTORY
+        FD at authorization time (O_DIRECTORY|O_NOFOLLOW) and walks
+        pre-computed relative components from that fd:
+
+        - swap BEFORE the retention open (inside the first os.open call, after
+          all stat-based checks): the O_NOFOLLOW root open refuses the swapped
+          pathname (fail closed);
+        - swap AFTER the retention open (inside the second os.open call, i.e.
+          at the first serve-walk component): the walk from the RETAINED fd
+          stays in the original tree and serves the original object — a
+          pathname re-open would have rebound into the replacement tree.
+
+        Neither schedule can return denied bytes, for full or range requests.
+        """
+        import shutil
+        from api import routes
+
+        class _CaptureHandler:
+            def __init__(self, headers=None):
+                self.status = None
+                self.headers = headers or {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            active = base / "profiles" / "webui"
+            active_webui = active / "webui"
+            denied_sessions = active_webui / "sessions"
+            ws = active_webui / "workspace"
+            denied_sessions.mkdir(parents=True)
+            ws.mkdir(parents=True)
+            # Denied state object with the SAME relative name the request uses.
+            denied_state = denied_sessions / "payload.json"
+            denied_state.write_text(
+                '{"top-secret-session":"do-not-leak","messages":[]}',
+                encoding="utf-8")
+            # Innocent file served directly from the workspace root (the
+            # SELECTED allowed root for this request).
+            innocent = ws / "payload.json"
+            innocent.write_text('{"ok":true,"payload":"innocent"}', encoding="utf-8")
+            moved = ws.parent / (ws.name + "_moved")
+
+            env = {
+                "HERMES_HOME": str(active),
+                "HERMES_WEBUI_STATE_DIR": str(active_webui),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.workspace.get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", active_webui), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                request_path = (
+                    "path=" + urllib.parse.quote(str((ws / "payload.json").resolve()))
+                )
+
+                # Baseline: the same pathname serves the innocent file.
+                h1 = _CaptureHandler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=request_path, path="/api/media"))
+                self.assertEqual(
+                    h1.status, 200,
+                    "innocent file at the selected root must serve (200)")
+                self.assertIn(b"innocent", h1.body)
+
+                def _restore():
+                    if ws.is_symlink():
+                        ws.unlink()
+                        if moved.exists():
+                            os.rename(str(moved), str(ws))
+                        else:
+                            ws.mkdir(parents=True)
+                            innocent.write_text(
+                                '{"ok":true,"payload":"innocent"}', encoding="utf-8")
+
+                for trigger in ("before_retention", "after_retention"):
+                    for range_header in (None, {"Range": "bytes=0-100"}):
+                        _restore()
+                        real_open = os.open
+                        swapped = {"done": False}
+                        calls = {"n": 0}
+
+                        def _swap_root(path, *args, _real_open=real_open, _swapped=swapped, _moved=moved, _ws=ws, _denied_sessions=denied_sessions, **kwargs):
+                            # Rename the real root dir aside, then put a
+                            # symlink to the denied tree at the root pathname.
+                            if not _swapped["done"]:
+                                _swapped["done"] = True
+                                shutil.rmtree(str(_moved), ignore_errors=True)
+                                os.rename(str(_ws), str(_moved))
+                                os.symlink(str(_denied_sessions), str(_ws))
+                            return _real_open(path, *args, **kwargs)
+
+                        def _swap_root_after_retention(path, *args, _real_open=real_open, _swapped=swapped, _calls=calls, _moved=moved, _ws=ws, _denied_sessions=denied_sessions, **kwargs):
+                            _calls["n"] += 1
+                            if _calls["n"] == 2 and not _swapped["done"]:
+                                _swapped["done"] = True
+                                shutil.rmtree(str(_moved), ignore_errors=True)
+                                os.rename(str(_ws), str(_moved))
+                                os.symlink(str(_denied_sessions), str(_ws))
+                            return _real_open(path, *args, **kwargs)
+
+                        side_effect = (
+                            _swap_root if trigger == "before_retention"
+                            else _swap_root_after_retention
+                        )
+                        h2 = _CaptureHandler(range_header)
+                        with mock.patch.object(os, "open", autospec=True,
+                                               side_effect=side_effect):
+                            routes._handle_media(h2, SimpleNamespace(
+                                query=request_path, path="/api/media"))
+                        self.assertNotIn(
+                            b"top-secret-session", h2.body,
+                            "denied webui state bytes must never reach the "
+                            "response (swapped allowed-root pathname) "
+                            f"[trigger={trigger}, range={bool(range_header)}]")
+                        if trigger == "before_retention":
+                            self.assertNotEqual(
+                                h2.status, 200,
+                                "swapped allowed-root open must be refused "
+                                "(O_NOFOLLOW on the retained root open)")
+                        else:
+                            self.assertIn(
+                                h2.status, (200, 206),
+                                "walk from the RETAINED root fd must keep "
+                                "serving the original tree")
+                            self.assertIn(
+                                b"innocent", h2.body,
+                                "retained-fd walk must serve the ORIGINAL "
+                                "object, not the replacement tree")
+
+    def test_media_serve_swapped_exact_token_parent_fails_closed(self):
+        """#6988 round 2: the exact-token MEDIA grant must not use mutable
+        target.parent as its anchor authority.
+
+        The grant retains an already-verified LEAF fd (walked with O_NOFOLLOW
+        from the filesystem anchor), so replacing the token target's parent
+        with a symlink to a denied webui state dir — before or during the
+        retention walk — is refused, and neither full nor range responses can
+        return the replacement state bytes.
+        """
+        import shutil
+        from api import routes
+
+        class _CaptureHandler:
+            def __init__(self, headers=None):
+                self.status = None
+                self.headers = headers or {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        token_dir = None
+        try:
+            # Token-granted file OUTSIDE every allowed root (the OS temp dir
+            # is itself an allowed /api/media root — /tmp is hardcoded, and
+            # the review sandbox sets HOME=/tmp — so a fixture there would be
+            # authorized by the allowed-root branch and only reach the token
+            # branch by precedence). The fixture root is chosen outside /tmp
+            # so the exact-token grant is the ONLY thing that can serve it.
+            token_dir = pathlib.Path(tempfile.mkdtemp(
+                prefix="hermes_media_token_", dir=str(_media_token_fixture_dir())))
+            moved = pathlib.Path(str(token_dir) + "_moved")
+            with tempfile.TemporaryDirectory() as home:
+                base = pathlib.Path(home) / ".hermes"
+                active = base / "profiles" / "webui"
+                active_webui = active / "webui"
+                denied_sessions = active_webui / "sessions"
+                ws = active_webui / "workspace"
+                denied_sessions.mkdir(parents=True)
+                ws.mkdir(parents=True)
+                # Denied state object with the SAME relative name the request
+                # uses, so a redirected open would return these bytes.
+                denied_state = denied_sessions / "report.html"
+                denied_state.write_text(
+                    "<!doctype html><title>top-secret-session</title>",
+                    encoding="utf-8")
+                innocent = token_dir / "report.html"
+                innocent.write_text(
+                    "<!doctype html><title>innocent</title>", encoding="utf-8")
+                session = SimpleNamespace(messages=[
+                    {"role": "assistant", "content": f"MEDIA:{innocent}"}])
+
+                env = {
+                    "HERMES_HOME": str(active),
+                    "HERMES_WEBUI_STATE_DIR": str(active_webui),
+                }
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                     mock.patch.object(routes, "get_session", return_value=session), \
+                     mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                     mock.patch("api.config.STATE_DIR", active_webui), \
+                     mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                    request_path = (
+                        "path=" + urllib.parse.quote(str(innocent.resolve()))
+                        + "&session_id=s-media&inline=1"
+                    )
+
+                    # Baseline: the token-granted file serves normally.
+                    h1 = _CaptureHandler()
+                    routes._handle_media(h1, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h1.status, 200,
+                        "token-granted file must serve (200)")
+                    self.assertIn(b"innocent", h1.body)
+
+                    def _restore():
+                        if token_dir.is_symlink():
+                            token_dir.unlink()
+                            if moved.exists():
+                                os.rename(str(moved), str(token_dir))
+                            else:
+                                token_dir.mkdir(parents=True)
+                                innocent.write_text(
+                                    "<!doctype html><title>innocent</title>",
+                                    encoding="utf-8")
+
+                    for trigger in ("before_retention", "after_retention"):
+                        for range_header in (None, {"Range": "bytes=0-100"}):
+                            _restore()
+                            real_open = os.open
+                            swapped = {"done": False}
+                            calls = {"n": 0}
+
+                            def _swap_parent(path, *args, _real_open=real_open, _swapped=swapped, _moved=moved, _token_dir=token_dir, _denied_sessions=denied_sessions, **kwargs):
+                                # Rename the token parent dir aside, then put a
+                                # symlink to the denied webui state dir at the
+                                # parent pathname.
+                                if not _swapped["done"]:
+                                    _swapped["done"] = True
+                                    shutil.rmtree(str(_moved), ignore_errors=True)
+                                    os.rename(str(_token_dir), str(_moved))
+                                    os.symlink(str(_denied_sessions), str(_token_dir))
+                                return _real_open(path, *args, **kwargs)
+
+                            def _swap_parent_midwalk(path, *args, _real_open=real_open, _swapped=swapped, _calls=calls, _moved=moved, _token_dir=token_dir, _denied_sessions=denied_sessions, **kwargs):
+                                _calls["n"] += 1
+                                if _calls["n"] == 2 and not _swapped["done"]:
+                                    _swapped["done"] = True
+                                    shutil.rmtree(str(_moved), ignore_errors=True)
+                                    os.rename(str(_token_dir), str(_moved))
+                                    os.symlink(str(_denied_sessions), str(_token_dir))
+                                return _real_open(path, *args, **kwargs)
+
+                            side_effect = (
+                                _swap_parent if trigger == "before_retention"
+                                else _swap_parent_midwalk
+                            )
+                            h2 = _CaptureHandler(range_header)
+                            with mock.patch.object(os, "open", autospec=True,
+                                                   side_effect=side_effect):
+                                routes._handle_media(h2, SimpleNamespace(
+                                    query=request_path, path="/api/media"))
+                            self.assertNotEqual(
+                                h2.status, 200,
+                                "swapped exact-token parent must not serve "
+                                "(the grant authority is the retained leaf fd, "
+                                "not target.parent) "
+                                f"[trigger={trigger}, range={bool(range_header)}]")
+                            self.assertNotIn(
+                                b"top-secret-session", h2.body,
+                                "denied webui state bytes must never reach the "
+                                "response (swapped exact-token target parent) "
+                                f"[trigger={trigger}, range={bool(range_header)}]")
+        finally:
+            if token_dir is not None:
+                if token_dir.is_symlink():
+                    token_dir.unlink()
+                shutil.rmtree(str(token_dir), ignore_errors=True)
+                shutil.rmtree(str(pathlib.Path(str(token_dir) + "_moved")),
+                              ignore_errors=True)
+
+    def test_media_fails_closed_without_dir_fd_allowed_root_grant(self):
+        """#6988 round 3: on platforms without dir_fd (no secure anchored-open
+        capability — Windows), /api/media must FAIL CLOSED (403) for
+        allowed-root grants instead of silently re-resolving/opening the
+        authorizing root/target pathnames (the known-vulnerable path). Covers
+        full and Range responses, and proves replacement state bytes cannot be
+        returned even when the allowed-root pathname is swapped to a secret
+        location BEFORE the request — a pathname re-open would have served it.
+        """
+        import shutil
+        from api import routes
+
+        class _CaptureHandler:
+            def __init__(self, headers=None):
+                self.status = None
+                self.headers = headers or {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            active = base / "profiles" / "webui"
+            active_webui = active / "webui"
+            ws = active_webui / "workspace"
+            ws.mkdir(parents=True)
+            innocent = ws / "payload.json"
+            innocent.write_text('{"ok":true,"payload":"innocent"}', encoding="utf-8")
+            # Secret location that is NOT deny-listed (so the deny gate cannot
+            # mask the fail-closed): a plain pathname open through the swapped
+            # symlink would serve these bytes on the pre-round-3 fallback.
+            secret_stash = active_webui / "workspace_secret_stash"
+            secret_stash.mkdir(parents=True)
+            secret = secret_stash / "payload.json"
+            secret.write_text(
+                '{"top-secret-session":"do-not-leak","messages":[]}',
+                encoding="utf-8")
+            moved = ws.parent / (ws.name + "_moved")
+
+            env = {
+                "HERMES_HOME": str(active),
+                "HERMES_WEBUI_STATE_DIR": str(active_webui),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.workspace.get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", active_webui), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                request_path = (
+                    "path=" + urllib.parse.quote(str((ws / "payload.json").resolve()))
+                )
+
+                # Control: with dir_fd the same request serves the innocent file.
+                h1 = _CaptureHandler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=request_path, path="/api/media"))
+                self.assertEqual(
+                    h1.status, 200,
+                    "control: allowed-root request must serve with dir_fd")
+                self.assertIn(b"innocent", h1.body)
+
+                def _restore():
+                    if ws.is_symlink():
+                        ws.unlink()
+                        if moved.exists():
+                            os.rename(str(moved), str(ws))
+                        else:
+                            ws.mkdir(parents=True)
+                            innocent.write_text(
+                                '{"ok":true,"payload":"innocent"}', encoding="utf-8")
+
+                # Fail-closed on the no-dir_fd platform: full and Range.
+                for range_header in (None, {"Range": "bytes=0-100"}):
+                    _restore()
+                    with mock.patch("api.routes._DIR_FD_OK", False):
+                        h2 = _CaptureHandler(range_header)
+                        routes._handle_media(h2, SimpleNamespace(
+                            query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h2.status, 403,
+                        "no-dir_fd platform must fail closed for allowed-root "
+                        f"grants [range={bool(range_header)}]")
+                    self.assertNotIn(
+                        b"top-secret-session", h2.body,
+                        "denied bytes must never reach the response")
+                    self.assertNotIn(
+                        b"innocent", h2.body,
+                        "fail-closed must not serve the file either")
+
+                # Replacement-bytes proof: swap the allowed-root pathname for a
+                # symlink to the secret location BEFORE the request. Without
+                # dir_fd the authority fd cannot be retained, so the route must
+                # fail closed — never open the swapped pathname by name.
+                for range_header in (None, {"Range": "bytes=0-100"}):
+                    _restore()
+                    os.rename(str(ws), str(moved))
+                    os.symlink(str(secret_stash), str(ws))
+                    with mock.patch("api.routes._DIR_FD_OK", False):
+                        h3 = _CaptureHandler(range_header)
+                        routes._handle_media(h3, SimpleNamespace(
+                            query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h3.status, 403,
+                        "swapped allowed-root pathname must fail closed without "
+                        f"dir_fd [range={bool(range_header)}]")
+                    self.assertNotIn(
+                        b"top-secret-session", h3.body,
+                        "replacement state bytes must never be returned "
+                        f"[range={bool(range_header)}]")
+                _restore()
+
+    def test_media_fails_closed_without_dir_fd_exact_token_grant(self):
+        """#6988 round 3: without dir_fd the exact-token MEDIA grant must also
+        FAIL CLOSED (403) — the verified leaf fd cannot be retained without
+        openat, and a plain pathname open of the resolved leaf would re-expose
+        the authorization-to-open race. The token fixture lives OUTSIDE every
+        allowed root, so the token is the ONLY grantor (not /tmp precedence).
+        Covers full and Range responses, and proves replacement state bytes
+        cannot be returned even when the token target's parent is swapped to a
+        secret location BEFORE the request.
+        """
+        import shutil
+        from api import routes
+
+        class _CaptureHandler:
+            def __init__(self, headers=None):
+                self.status = None
+                self.headers = headers or {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        token_dir = None
+        try:
+            token_dir = pathlib.Path(tempfile.mkdtemp(
+                prefix="hermes_media_token_", dir=str(_media_token_fixture_dir())))
+            moved = pathlib.Path(str(token_dir) + "_moved")
+            with tempfile.TemporaryDirectory() as home:
+                base = pathlib.Path(home) / ".hermes"
+                active = base / "profiles" / "webui"
+                active_webui = active / "webui"
+                ws = active_webui / "workspace"
+                ws.mkdir(parents=True)
+                # Non-deny-listed secret location under an allowed root (the
+                # deny gate cannot mask the fail-closed for the swapped case).
+                secret_stash = active_webui / "workspace_secret_stash"
+                secret_stash.mkdir(parents=True)
+                secret = secret_stash / "report.html"
+                secret.write_text(
+                    "<!doctype html><title>top-secret-session</title>",
+                    encoding="utf-8")
+                innocent = token_dir / "report.html"
+                innocent.write_text(
+                    "<!doctype html><title>innocent</title>", encoding="utf-8")
+                session = SimpleNamespace(messages=[
+                    {"role": "assistant", "content": f"MEDIA:{innocent}"}])
+
+                env = {
+                    "HERMES_HOME": str(active),
+                    "HERMES_WEBUI_STATE_DIR": str(active_webui),
+                }
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                     mock.patch("api.workspace.get_last_workspace", lambda: str(ws)), \
+                     mock.patch.object(routes, "get_session", return_value=session), \
+                     mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                     mock.patch("api.config.STATE_DIR", active_webui), \
+                     mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                    request_path = (
+                        "path=" + urllib.parse.quote(str(innocent.resolve()))
+                        + "&session_id=s-media&inline=1"
+                    )
+
+                    # Control: with dir_fd the token-granted file serves.
+                    h1 = _CaptureHandler()
+                    routes._handle_media(h1, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h1.status, 200,
+                        "control: token-granted file must serve with dir_fd")
+                    self.assertIn(b"innocent", h1.body)
+
+                    # Fail-closed on the no-dir_fd platform: full and Range.
+                    for range_header in (None, {"Range": "bytes=0-100"}):
+                        with mock.patch("api.routes._DIR_FD_OK", False):
+                            h2 = _CaptureHandler(range_header)
+                            routes._handle_media(h2, SimpleNamespace(
+                                query=request_path, path="/api/media"))
+                        self.assertEqual(
+                            h2.status, 403,
+                            "no-dir_fd platform must fail closed for exact-token "
+                            f"grants [range={bool(range_header)}]")
+                        self.assertNotIn(
+                            b"top-secret-session", h2.body,
+                            "denied bytes must never reach the response")
+                        self.assertNotIn(
+                            b"innocent", h2.body,
+                            "fail-closed must not serve the file either")
+
+                    # Replacement-bytes proof: swap the token target's parent
+                    # for a symlink to the secret location BEFORE the request.
+                    # The token still resolves (pathname-based), but without
+                    # dir_fd the leaf fd cannot be retained, so the route must
+                    # fail closed — never open the swapped pathname by name.
+                    for range_header in (None, {"Range": "bytes=0-100"}):
+                        # Restore the real dir at token_dir first (a previous
+                        # iteration left it renamed aside at `moved`).
+                        if token_dir.is_symlink():
+                            token_dir.unlink()
+                        if moved.exists():
+                            os.rename(str(moved), str(token_dir))
+                        os.rename(str(token_dir), str(moved))
+                        os.symlink(str(secret_stash), str(token_dir))
+                        with mock.patch("api.routes._DIR_FD_OK", False):
+                            h3 = _CaptureHandler(range_header)
+                            routes._handle_media(h3, SimpleNamespace(
+                                query=request_path, path="/api/media"))
+                        self.assertEqual(
+                            h3.status, 403,
+                            "swapped exact-token parent must fail closed without "
+                            f"dir_fd [range={bool(range_header)}]")
+                        self.assertNotIn(
+                            b"top-secret-session", h3.body,
+                            "replacement state bytes must never be returned "
+                            f"[range={bool(range_header)}]")
+        finally:
+            if token_dir is not None:
+                if token_dir.is_symlink():
+                    token_dir.unlink()
+                shutil.rmtree(str(token_dir), ignore_errors=True)
+                shutil.rmtree(str(pathlib.Path(str(token_dir) + "_moved")),
+                              ignore_errors=True)
+
     def test_media_allowed_roots_env_var_serves_outside_hermes_root(self):
         """MEDIA_ALLOWED_ROOTS must still allow legitimate outside-root media."""
         from api import routes
@@ -593,6 +1400,120 @@ class TestMediaEndpointUnit(unittest.TestCase):
                 handler.status, 200,
                 "MEDIA_ALLOWED_ROOTS media outside Hermes roots must still serve",
             )
+
+    def test_media_serves_readable_leaf_under_0111_search_only_root(self):
+        """#6988 review round 4: retained root/intermediate DIRECTORY fds must
+        open with O_PATH | O_DIRECTORY | O_NOFOLLOW (no READ permission needed
+        on the directory itself — only search on its parents). The pre-change
+        direct leaf open needed only search on ancestors, so a readable media
+        file beneath a valid 0111 (search-only) allowed root and nested
+        intermediate must keep serving HTTP 200 with the exact bytes (and 206
+        for Range), never regress to 403.
+
+        An O_RDONLY open of the 0111 root/intermediate fails with EACCES for
+        non-root users, which is exactly the regression this test guards:
+        with the retained root fd opened O_RDONLY, the authorization-time
+        retention open itself fails and the route returns 403.
+
+        Permissions are restored in ``finally`` so the TemporaryDirectory
+        cleanup can traverse and remove the tree.
+        """
+        from api import routes
+
+        if not hasattr(os, "O_PATH"):
+            self.skipTest("O_PATH unavailable on this platform")
+        if os.name == "nt":
+            self.skipTest("POSIX mode bits unavailable on Windows")
+
+        class _CaptureHandler:
+            def __init__(self, headers=None):
+                self.status = None
+                self.headers = headers or {}
+                self.sent_headers = {}
+                self.body = bytearray()
+                self.wfile = self
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, name, value):
+                self.sent_headers[name] = value
+            def end_headers(self):
+                pass
+            def write(self, b):
+                self.body.extend(b)
+            def flush(self):
+                pass
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home:
+            # Traversable by the testing user AND by a non-root drop (the
+            # 0111 search-only bits on the allowed root/intermediate are the
+            # point of this test; the parent must not add an unrelated
+            # EACCES). TemporaryDirectory creates 0700 by default.
+            home_path = pathlib.Path(home)
+            home_path.chmod(0o755)
+            hermes_home = home_path / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir(parents=True)
+            state_dir = hermes_home / "webui-state"
+            state_dir.mkdir(parents=True)
+            # Valid allowed root via MEDIA_ALLOWED_ROOTS, with a NESTED
+            # intermediate — both search-only (0111), leaf readable (0644).
+            allowed_root = home_path / "media_0111"
+            intermediate = allowed_root / "nested"
+            intermediate.mkdir(parents=True)
+            leaf = intermediate / "shot.png"
+            leaf.write_bytes(png_bytes)
+            leaf.chmod(0o644)
+            try:
+                allowed_root.chmod(0o111)
+                intermediate.chmod(0o111)
+
+                env = {
+                    "HERMES_HOME": str(hermes_home),
+                    "MEDIA_ALLOWED_ROOTS": str(allowed_root),
+                }
+                request_path = (
+                    "path=" + urllib.parse.quote(str(leaf.resolve())) + "&inline=1"
+                )
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                     mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                     mock.patch("api.config.STATE_DIR", state_dir), \
+                     mock.patch("api.profiles._DEFAULT_HERMES_HOME", hermes_home):
+                    # Full request: HTTP 200 with the exact bytes.
+                    h1 = _CaptureHandler()
+                    routes._handle_media(h1, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h1.status, 200,
+                        "readable leaf below 0111 search-only root+intermediate "
+                        "must serve full HTTP 200 (O_PATH on retained dir fds)")
+                    self.assertEqual(
+                        bytes(h1.body), png_bytes,
+                        "full response body must be the exact media bytes")
+                    # Range request: HTTP 206 with the exact slice.
+                    h2 = _CaptureHandler({"Range": "bytes=4-11"})
+                    routes._handle_media(h2, SimpleNamespace(
+                        query=request_path, path="/api/media"))
+                    self.assertEqual(
+                        h2.status, 206,
+                        "Range on a leaf below 0111 dirs must serve HTTP 206")
+                    self.assertEqual(
+                        bytes(h2.body), png_bytes[4:12],
+                        "206 body must be the exact requested byte slice")
+                    self.assertEqual(
+                        h2.sent_headers.get("Content-Range"),
+                        f"bytes 4-11/{len(png_bytes)}",
+                        "206 must carry the exact Content-Range")
+            finally:
+                # Restore permissions so TemporaryDirectory cleanup works.
+                allowed_root.chmod(0o755)
+                intermediate.chmod(0o755)
 
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
