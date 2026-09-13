@@ -1587,6 +1587,15 @@
   .session-search-clear svg{width:14px;height:14px;}
   .session-search-clear:hover,.session-search-clear:focus-visible{background:var(--hover);color:var(--text);opacity:1;}
   .session-search-clear:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+  .cron-search-field{position:relative;display:flex;align-items:center;width:100%;}
+  .cron-search .sidebar-search-icon{left:10px;}
+  .cron-search input{padding-right:34px;}
+  .cron-search .cron-search-clear{position:absolute;right:6px;top:50%;transform:translateY(-50%);z-index:1;width:24px;height:24px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;opacity:.78;}
+  .cron-search-clear[hidden]{display:none;}
+  .cron-search-clear svg{width:14px;height:14px;}
+  .cron-search-clear:hover,.cron-search-clear:focus-visible{background:var(--hover);color:var(--text);opacity:1;}
+  .cron-search-clear:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;}
   /* padding-right was 86px to reserve space for the absolute-positioned
