@@ -1,10 +1,13 @@
 """
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
+import hashlib
+import json
 import mimetypes
 import os
 import re as _re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
@@ -149,6 +152,42 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
+def _record_attachment_manifest(
+    *, session_id: str, attachment_id: str, original_name: str,
+    stored_name: str, mime: str, size: int, sha256: str,
+) -> None:
+    """Append/refresh one attachment's structured metadata in the
+    per-session ``.manifest.json`` sidecar (best-effort; upload must not
+    fail if the manifest write fails)."""
+    try:
+        dest_dir = _session_attachment_dir(session_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = dest_dir / '.manifest.json'
+        manifest = []
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                if not isinstance(manifest, list):
+                    manifest = []
+            except Exception:
+                manifest = []
+        manifest = [m for m in manifest if m.get('id') != attachment_id]
+        manifest.append({
+            'id': attachment_id,
+            'original_name': original_name,
+            'stored_name': stored_name,
+            'mime': mime,
+            'size': size,
+            'sha256': sha256,
+            'created_at': datetime.now(timezone.utc).isoformat(),
+        })
+        tmp_path = manifest_path.with_suffix('.json.tmp')
+        tmp_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+        os.replace(tmp_path, manifest_path)
+    except Exception:
+        pass
+
+
 def _session_visible_to_active_profile(session) -> bool:
     """Return whether an upload target session belongs to the active profile."""
     session_profile = getattr(session, 'profile', None)
@@ -239,12 +278,25 @@ def handle_upload(handler):
         with os.fdopen(_wfd, 'wb', closefd=True) as _wfh:
             _wfh.write(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+        sha256 = hashlib.sha256(file_bytes).hexdigest()
+        attachment_id = hashlib.sha256(f'{session_id}:{dest.name}'.encode()).hexdigest()[:16]
+        _record_attachment_manifest(
+            session_id=session_id,
+            attachment_id=attachment_id,
+            original_name=filename,
+            stored_name=dest.name,
+            mime=mime,
+            size=dest.stat().st_size,
+            sha256=sha256,
+        )
         return j(handler, {
             'filename': dest.name,
             'path': str(dest),
             'size': dest.stat().st_size,
             'mime': mime,
             'is_image': mime.startswith('image/'),
+            'id': attachment_id,
+            'sha256': sha256,
         })
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
