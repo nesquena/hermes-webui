@@ -55,6 +55,7 @@ from api.config import (
 )
 from api.helpers import (
     redact_session_data,
+    redact_session_data_incremental,
     scrub_internal_replay_fields,
     _redact_text,
 )
@@ -182,6 +183,134 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     except Exception:
         raw.pop('regeneration_revision', None)
     return raw
+
+
+# ── Settled-payload incremental redaction cache (#7081) ─────────────────────
+# The `done` SSE payload embeds the FULL transcript (the client renders the
+# settled turn from it, and the guard tests in
+# tests/test_streaming_done_payload_message_count.py lock the source contract).
+# Redacting that entire transcript synchronously on every settled turn is
+# CPU-bound and holds the GIL, so one long tool-heavy session stalled unrelated
+# WebUI requests for 10s-100s of seconds (#7081). Instead of discarding the
+# transcript (a CORE regression), keep the full payload and redact only the
+# messages appended since the previous settled turn, reusing the
+# already-redacted prefix from this bounded cache.
+#
+# Correctness: the raw prefix is re-validated against the cached boundary
+# message on every reuse. Transcripts are append-only in this codebase (no
+# in-place message mutation paths); compaction and retry truncation change the
+# boundary or the count, and a cross-process reload that normalized content
+# breaks the boundary comparison — all of those fall back to a full redaction
+# pass, which is always correct, just slower for that turn.
+_DONE_REDACTION_CACHE: dict[tuple, dict] = {}
+_DONE_REDACTION_CACHE_ORDER: list[tuple] = []
+_DONE_REDACTION_CACHE_MAX = 8
+_DONE_REDACTION_CACHE_MAX_BYTES = 128 * 1024 * 1024
+_DONE_REDACTION_LOCK = threading.Lock()
+
+
+def _estimate_redacted_bytes(messages: list) -> int:
+    """Rough in-memory footprint of redacted message dicts (JSON size)."""
+    total = 0
+    for message in messages:
+        try:
+            total += len(json.dumps(message, default=str))
+        except Exception:
+            total += 256
+    return total
+
+
+def _evict_done_redaction_cache_entries() -> None:
+    """Enforce the bounded done-redaction cache (count + approximate bytes).
+
+    Called with ``_DONE_REDACTION_LOCK`` held. Never evicts the entry that was
+    just stored (the newest, at the tail): a single huge session may exceed
+    the byte budget by itself, and the budget only bounds *additional*
+    retained transcripts.
+    """
+    total = sum(entry.get('approx_bytes', 0) for entry in _DONE_REDACTION_CACHE.values())
+    while (
+        len(_DONE_REDACTION_CACHE_ORDER) > _DONE_REDACTION_CACHE_MAX
+        or (total > _DONE_REDACTION_CACHE_MAX_BYTES and len(_DONE_REDACTION_CACHE_ORDER) > 1)
+    ) and len(_DONE_REDACTION_CACHE_ORDER) > 1:
+        key = _DONE_REDACTION_CACHE_ORDER.pop(0)
+        evicted = _DONE_REDACTION_CACHE.pop(key, None)
+        if evicted:
+            total -= evicted.get('approx_bytes', 0)
+
+
+def _redact_settled_session_payload(raw_session: dict, session: object) -> dict:
+    """Redact a settled ``done`` session payload, redacting only the delta.
+
+    The full transcript stays in the payload (the ``done`` contract); the
+    redaction work is limited to messages appended since this session's
+    previous settled turn, reusing the cached redacted prefix. Falls back to a
+    full ``redact_session_data`` pass whenever the prefix cannot be proven
+    unchanged (first turn, compaction, retry truncation, eviction, an
+    ``api_redact_enabled`` toggle, or a mismatched active-turn token). See
+    ``_DONE_REDACTION_CACHE``.
+    """
+    session_id = getattr(session, 'session_id', None)
+    profile = getattr(session, 'profile', None)
+    messages = raw_session.get('messages')
+    if not isinstance(messages, list) or not messages or not session_id:
+        return redact_session_data(raw_session)
+    active_turn_token = build_active_turn_token(
+        raw_session.get('active_stream_id'),
+        raw_session.get('pending_started_at'),
+    )
+    # Mirror redact_session_data's settings read exactly: a mid-session toggle
+    # of api_redact_enabled must invalidate the cached prefix, because a prefix
+    # produced under different settings (notably redaction disabled) can never
+    # be proven safe to reuse. Local import keeps this consistent with
+    # api/helpers.py and monkeypatchable in tests.
+    from api.config import load_settings
+    _enabled = bool(load_settings().get("api_redact_enabled", True))
+    cache_key = (profile, session_id)
+    with _DONE_REDACTION_LOCK:
+        entry = _DONE_REDACTION_CACHE.get(cache_key)
+    cache_hit = (
+        entry is not None
+        and entry.get('enabled') == _enabled
+        and entry.get('active_turn_token') == active_turn_token
+        and 0 < entry['count'] <= len(messages)
+        and len(entry['redacted']) == entry['count']
+        and messages[entry['count'] - 1] == entry['boundary']
+    )
+    if cache_hit:
+        prefix_count = entry['count']
+        result = redact_session_data_incremental(
+            raw_session,
+            prefix_count=prefix_count,
+            prefix_redacted=entry['redacted'],
+            _active_turn_token=active_turn_token,
+        )
+    else:
+        prefix_count = 0
+        result = redact_session_data(raw_session)
+    # Refresh the cache with the transcript we just redacted. The byte
+    # estimate accumulates only the delta (O(delta) per turn, never O(transcript)).
+    redacted_messages = result.get('messages')
+    if isinstance(redacted_messages, list) and len(redacted_messages) == len(messages) and messages:
+        delta_bytes = _estimate_redacted_bytes(redacted_messages[prefix_count:])
+        prev_bytes = entry.get('approx_bytes', 0) if cache_hit else 0
+        new_entry = {
+            'count': len(messages),
+            'boundary': copy.deepcopy(messages[-1]),
+            # Fresh list object: downstream consumers may mutate the outgoing
+            # payload's messages list without corrupting the cached prefix.
+            'redacted': list(redacted_messages),
+            'active_turn_token': active_turn_token,
+            'enabled': _enabled,
+            'approx_bytes': prev_bytes + delta_bytes + 1024,
+        }
+        with _DONE_REDACTION_LOCK:
+            if cache_key in _DONE_REDACTION_CACHE_ORDER:
+                _DONE_REDACTION_CACHE_ORDER.remove(cache_key)
+            _DONE_REDACTION_CACHE_ORDER.append(cache_key)
+            _DONE_REDACTION_CACHE[cache_key] = new_entry
+            _evict_done_redaction_cache_entries()
+    return result
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -12587,7 +12716,7 @@ def _run_agent_streaming(
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
                 raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                _done_payload = {'session': _redact_settled_session_payload(raw_session, s), 'usage': usage}
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
