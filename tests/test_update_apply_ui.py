@@ -67,6 +67,12 @@ function _waitForServerThenReload(opts) {
 }
 function _showUpdateError(target, res) { errors.push({ target, message: res.message || '' }); }
 function _formatUpdateApplyExceptionMessage(e) { return 'Update failed: ' + e.message; }
+function _isUpdateApplyNetworkError() { return false; }
+function _formatUpdateRestartMessage(restartDeferred) { return restartDeferred ? 'Deferred' : 'Restarting'; }
+function _setUpdateApplyStatus() {}
+function _updateRestartWaitOptions(baselineServerIdentity, restartDeferred) {
+  return { baselineServerIdentity, restartDeferred };
+}
 function showToast(message, duration, kind) {
   showToasts.push({ message, duration, kind });
 }
@@ -156,7 +162,8 @@ def test_update_apply_successful_stash_conflict_displays_recovery_message():
     restart_wait = body.index("_waitForServerThenReload", message_join)
 
     assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "const toastMessage=stashConflictMessage?" in body
+    assert "showToast(toastMessage" in body
     assert "stashConflictMessages.length?10000" in body
 
 
@@ -173,7 +180,8 @@ def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
     assert "stashConflictMessages.push('Update applied ('+target+'): " in body
     assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
     assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "const toastMessage=stashConflictMessage?" in body
+    assert "showToast(toastMessage" in body
 
 
 def test_update_apply_network_error_classifier_ignores_http_status_errors():

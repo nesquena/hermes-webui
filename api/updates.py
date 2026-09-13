@@ -1949,9 +1949,6 @@ def apply_force_update(target: str, channel=None) -> dict:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
@@ -2045,6 +2042,7 @@ def apply_force_update(target: str, channel=None) -> dict:
                     'gateway_restart': gateway_result.get('status'),
                 }
 
+        restart_deferred = bool(_restart_blocker_snapshot().get('restart_blocked'))
         _schedule_restart()
 
         response = {
@@ -2052,6 +2050,7 @@ def apply_force_update(target: str, channel=None) -> dict:
             'message': f'{target} force-updated to {compare_ref}',
             'target': target,
             'restart_scheduled': True,
+            'restart_deferred': restart_deferred,
         }
         if target == 'agent':
             response['gateway_restart'] = gateway_result.get('status')
@@ -2065,9 +2064,6 @@ def apply_update(target, channel=None):
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
@@ -2348,7 +2344,6 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 }
             with _cache_lock:
                 _update_cache['checked_at'] = 0
-
             if target == 'agent':
                 gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
                 if not gateway_ok:
@@ -2358,6 +2353,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                         'target': target,
                         'gateway_restart': gateway_result.get('status'),
                     }
+            restart_deferred = bool(_restart_blocker_snapshot().get('restart_blocked'))
             _schedule_restart()
             response = {
                 'ok': True,
@@ -2371,6 +2367,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 ),
                 'target': target,
                 'restart_scheduled': True,
+                'restart_deferred': restart_deferred,
                 'stash_conflict': True,
             }
             if target == 'agent':
@@ -2381,6 +2378,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     with _cache_lock:
         _update_cache['checked_at'] = 0
 
+    gateway_result = {}
     if target == 'agent':
         gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
         if not gateway_ok:
@@ -2399,6 +2397,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     # the process replaces itself.  The client already does
     # setTimeout(() => location.reload(), 1500) on success, so the page reload
     # and the restart land at roughly the same time.
+    restart_deferred = bool(_restart_blocker_snapshot().get('restart_blocked'))
     _schedule_restart()
     message = f'{target} updated successfully'
     if stash_drop_failed:
@@ -2412,6 +2411,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         'message': message,
         'target': target,
         'restart_scheduled': True,
+        'restart_deferred': restart_deferred,
     }
     if target == 'agent':
         response['gateway_restart'] = gateway_result.get('status')
