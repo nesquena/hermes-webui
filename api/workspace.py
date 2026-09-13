@@ -1331,13 +1331,25 @@ def serialize_workspace_entries_for_browser(entries: list[dict] | None) -> list[
     return payload
 
 
-def list_dir(workspace: Path, rel: str='.'):
+MAX_DIR_ENTRIES = 200  # per-page cap for /api/list; surfaced to clients via has_more (#6645)
+
+
+def _iter_dir_entries(workspace: Path, rel: str='.'):
+    """Yield one processed entry dict per listable child of ``rel``.
+
+    Sorted, filtered enumeration shared by list_dir() and dir_signature().
+    No entry cap is applied here — callers decide how many entries to consume:
+    list_dir() paginates with limit/offset and dir_signature() hashes the full
+    listing. Previously the 200-entry cap lived inside this loop and the HTTP
+    response carried no truncation signal, so directories with more children
+    were silently cut off with no way for the UI to know the rest existed (#6645).
+    """
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
     ws_resolved = workspace.resolve()
     target_resolved = target.resolve()
-    entries = []
+    pending = []
 
     def _process(name, is_symlink, raw_link, lstat_result, reachable):
         """Append one directory entry. ``raw_link`` is the os.readlink() result
@@ -1400,7 +1412,7 @@ def list_dir(workspace: Path, rel: str='.'):
                     'mtime_ns': mtime_ns,
                     'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
                 }
-                entries.append(entry)
+                pending.append(entry)
             else:
                 is_dir = link_target.is_dir()
                 entry = {
@@ -1419,7 +1431,7 @@ def list_dir(workspace: Path, rel: str='.'):
                         entry['size'] = link_target.stat().st_size
                     except OSError:
                         entry['size'] = None
-                entries.append(entry)
+                pending.append(entry)
         else:
             entry_path = name
             if rel and rel != '.':
@@ -1435,7 +1447,7 @@ def list_dir(workspace: Path, rel: str='.'):
                 mtime_ns = None
                 is_dir_entry = False
                 workspace_sort_rank = 1
-            entries.append({
+            pending.append({
                 'name': name,
                 'path': entry_path,
                 'type': 'dir' if is_dir_entry else 'file',
@@ -1492,8 +1504,8 @@ def list_dir(workspace: Path, rel: str='.'):
                     except OSError:
                         reachable = False
                 _process(name, is_symlink, raw_link, lst, reachable)
-                if len(entries) >= 200:
-                    break
+                if pending:
+                    yield pending.pop(0)
         finally:
             try:
                 os.close(dir_fd)
@@ -1535,9 +1547,38 @@ def list_dir(workspace: Path, rel: str='.'):
                 except OSError:
                     reachable = False
             _process(name, is_symlink, raw_link, lst, reachable)
-            if len(entries) >= 200:
-                break
-    return entries
+            if pending:
+                yield pending.pop(0)
+
+
+def list_dir(workspace: Path, rel: str='.', *, limit: int | None = MAX_DIR_ENTRIES, offset: int = 0) -> dict:
+    """List one page of a workspace directory.
+
+    Returns ``{"entries": [...], "total": N, "has_more": bool, "limit": L, "offset": O}``:
+    ``entries`` holds up to ``limit`` children starting at ``offset`` (sorted and
+    filtered as before), ``total`` is the number of listable children in the
+    directory, and ``has_more`` is True when further pages exist. This replaces
+    the previous silent truncation at 200 entries — clients can paginate with
+    ``offset`` or render a visible "load more" affordance from ``has_more`` /
+    ``total`` (#6645). Pass ``limit=None`` to fetch the full listing in one page.
+    """
+    if limit is not None and limit < 0:
+        limit = MAX_DIR_ENTRIES
+    if offset < 0:
+        offset = 0
+    entries = []
+    total = 0
+    for entry in _iter_dir_entries(workspace, rel):
+        if total >= offset and (limit is None or len(entries) < limit):
+            entries.append(entry)
+        total += 1
+    return {
+        'entries': entries,
+        'total': total,
+        'has_more': total > offset + len(entries),
+        'limit': limit,
+        'offset': offset,
+    }
 
 
 def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
@@ -1546,9 +1587,11 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
     The signature is based only on bounded directory-entry metadata already used
     by the workspace tree: names, displayed paths, entry type, file sizes,
     mtimes, and symlink targets. It intentionally does not read file contents.
+    When ``entries`` is omitted the FULL listing is hashed (no 200-entry cap),
+    so signatures also detect changes past the first page (#6645).
     """
     if entries is None:
-        entries = list_dir(workspace, rel)
+        entries = list(_iter_dir_entries(workspace, rel))
     payload = []
     for entry in entries:
         payload.append({
@@ -1742,11 +1785,12 @@ def resolve_authorized_escape_request(workspace: Path, session_id: str, token: s
     }
 
 
-def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel: str) -> dict:
+def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel: str, *, offset: int = 0) -> dict:
     resolved = resolve_authorized_escape_request(workspace, session_id, token, rel)
     external_root = resolved["external_root"]
     external_rel = resolved["external_rel"]
-    entries = list_dir(external_root, external_rel)
+    result = list_dir(external_root, external_rel, offset=offset)
+    entries = result["entries"]
     surface_path = resolved["surface_path"]
     external_root_resolved = external_root.resolve()
     for entry in entries:
@@ -1765,6 +1809,10 @@ def list_authorized_escape_dir(workspace: Path, session_id: str, token: str, rel
     return {
         "path": resolved["request_path"],
         "entries": entries,
+        "total": result["total"],
+        "has_more": result["has_more"],
+        "limit": result["limit"],
+        "offset": result["offset"],
         "signature": dir_signature(external_root, external_rel, entries),
         "virtual_root": surface_path,
         "read_only": True,
