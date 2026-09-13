@@ -13790,21 +13790,29 @@ def cancel_stream(stream_id: str) -> bool:
                 return False
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    if active_run_entry is None:
-        try:
-            with _live_config.ACTIVE_RUNS_LOCK:
-                active_run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
-        except Exception:
-            active_run_entry = None
-        if active_run_entry and not active_run_session_id:
-            active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+        if active_run_entry is None:
+            try:
+                with _live_config.ACTIVE_RUNS_LOCK:
+                    active_run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
+            except Exception:
+                active_run_entry = None
+            if active_run_entry and not active_run_session_id:
+                active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    # Mark the worker lifecycle registry immediately. The SSE maps may be popped
-    # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
-    # health polling sees during that detached window. Stamp cancelled_at so
-    # _clear_stale_stream_state() can eventually reclaim the session if the
-    # worker is stuck in C-level I/O and never reaches its finally (#6623).
-    update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+        # Mark the worker lifecycle registry immediately. The SSE maps may be popped
+        # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
+        # health polling sees during that detached window. Stamp cancelled_at so
+        # _clear_stale_stream_state() can eventually reclaim the session if the
+        # worker is stuck in C-level I/O and never reaches its finally (#6623).
+        update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+
+        # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
+        # Publish cancellation and detach ownership before releasing the edge;
+        # later Steer cannot enqueue into a turn already claimed by Stop.
+        if stream_present:
+            streams.pop(stream_id, None)
+            cancel_flags.pop(stream_id, None)
+            agent_instances.pop(stream_id, None)
 
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
@@ -13857,16 +13865,7 @@ def cancel_stream(stream_id: str) -> bool:
     # worker save and show cancel in the client while persistence says done.
     _emit_cancel_event = True
 
-    # ── Eager session lock release (fixes #653) ──────────────────────────
-    # Pop stream state now so the 409 guard in routes.py sees the session
-    # as idle and allows new /api/chat/start immediately after cancel,
-    # even if the agent thread is still blocked in a C-level syscall.
-    # The worker thread's finally block uses .pop(key, None) too, so a
-    # double-pop here is safe (no-op).
-    if stream_present:
-        streams.pop(stream_id, None)
-        cancel_flags.pop(stream_id, None)
-        agent_instances.pop(stream_id, None)
+    # Stream ownership was detached under streams_lock before interrupting.
     # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
     # still be appending tokens, and the streaming finally block handles cleanup
     # when the thread exits. We already snapshotted the buffers under streams_lock
