@@ -2973,6 +2973,407 @@ console.log(JSON.stringify({{success: true}}));
 """
     assert _run_node(harness)["success"] is True
 
+# A minimal but browser-faithful DOM -- enough to run the REAL
+# renderModelDropdown() from ui.js (innerHTML parsing, class lists, CSS
+# selectors, event dispatch) instead of a hand-written stand-in that can
+# drift from it.
+_MODEL_PICKER_DOM_JS = r"""
+// ── A minimal but browser-faithful DOM, enough for the REAL renderModelDropdown ──
+// Deliberately NOT exposing a `_listeners` map: a browser element has no such
+// property, so production code that probes for it must fall through to the
+// native dispatchEvent(new Event('input')) path, exactly as it does in a page.
+const VOID_TAGS = new Set(['INPUT', 'BR', 'IMG', 'HR', 'META', 'LINK']);
+const nativeInputEvents = [];
+
+class Event {
+  constructor(type) { this.type = String(type); this.defaultPrevented = false; }
+  preventDefault() { this.defaultPrevented = true; }
+  stopPropagation() {}
+}
+
+function _decode(s) {
+  return String(s)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+function _camel(name) { return String(name).replace(/-([a-z])/g, (_m, c) => c.toUpperCase()); }
+
+class Elem {
+  constructor(tag) {
+    this.tagName = String(tag || 'div').toUpperCase();
+    this.children = [];
+    this.parentElement = null;
+    this.dataset = {};
+    this.style = {};
+    this.title = '';
+    this.label = '';
+    this.tabIndex = 0;
+    this.onclick = null;
+    this.offsetTop = 0;
+    this._text = '';
+    this._value = '';
+    this._html = '';
+    this._classes = new Set();
+    this._handlers = {};
+    const cls = this._classes;
+    this.classList = {
+      add: (...c) => c.forEach(x => cls.add(x)),
+      remove: (...c) => c.forEach(x => cls.delete(x)),
+      contains: (c) => cls.has(c),
+      toggle: (c, on) => {
+        const want = (on === undefined) ? !cls.has(c) : !!on;
+        if (want) cls.add(c); else cls.delete(c);
+        return want;
+      },
+    };
+  }
+  get className() { return [...this._classes].join(' '); }
+  set className(v) {
+    this._classes.clear();
+    for (const c of String(v || '').split(/\s+/)) if (c) this._classes.add(c);
+  }
+  get parentNode() { return this.parentElement; }
+  get textContent() {
+    if (!this.children.length) return this._text;
+    return this._text + this.children.map(c => c.textContent).join('');
+  }
+  set textContent(v) {
+    this.children.length = 0;
+    this._html = '';
+    this._text = String(v == null ? '' : v);
+  }
+  get value() {
+    if (this.tagName === 'SELECT') {
+      const opts = this.options;
+      if (!opts.length) return '';
+      const hit = opts.find(o => String(o.value) === String(this._value));
+      return hit ? hit.value : opts[0].value;
+    }
+    return this._value;
+  }
+  set value(v) { this._value = String(v == null ? '' : v); }
+  get innerHTML() { return this._html; }
+  set innerHTML(v) {
+    this.children.length = 0;
+    this._text = '';
+    if (this.tagName === 'SELECT') this._value = '';
+    this._html = String(v == null ? '' : v);
+    if (this._html) _parseHTML(this._html, this);
+  }
+  get options() {
+    const out = [];
+    const walk = (el) => {
+      for (const ch of el.children) {
+        if (ch.tagName === 'OPTION') out.push(ch);
+        else walk(ch);
+      }
+    };
+    walk(this);
+    return out;
+  }
+  get selectedOptions() {
+    const hit = this.options.find(o => String(o.value) === String(this.value));
+    return hit ? [hit] : [];
+  }
+  get previousElementSibling() {
+    const sibs = this.parentElement ? this.parentElement.children : [];
+    const at = sibs.indexOf(this);
+    return at > 0 ? sibs[at - 1] : null;
+  }
+  appendChild(child) {
+    if (child.parentElement) child.parentElement.removeChild(child);
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+  insertBefore(child, ref) {
+    if (child.parentElement) child.parentElement.removeChild(child);
+    const at = ref ? this.children.indexOf(ref) : -1;
+    child.parentElement = this;
+    if (at < 0) this.children.push(child);
+    else this.children.splice(at, 0, child);
+    return child;
+  }
+  removeChild(child) {
+    const at = this.children.indexOf(child);
+    if (at >= 0) this.children.splice(at, 1);
+    child.parentElement = null;
+    return child;
+  }
+  remove() { if (this.parentElement) this.parentElement.removeChild(this); }
+  setAttribute(name, value) {
+    if (name === 'class') { this.className = value; return; }
+    if (String(name).startsWith('data-')) { this.dataset[_camel(String(name).slice(5))] = String(value); return; }
+    this[name] = value;
+  }
+  getAttribute(name) {
+    if (name === 'class') return this.className;
+    if (String(name).startsWith('data-')) return this.dataset[_camel(String(name).slice(5))];
+    return this[name];
+  }
+  addEventListener(type, handler) {
+    if (!this._handlers[type]) this._handlers[type] = [];
+    this._handlers[type].push(handler);
+  }
+  removeEventListener(type, handler) {
+    const list = this._handlers[type] || [];
+    const at = list.indexOf(handler);
+    if (at >= 0) list.splice(at, 1);
+  }
+  dispatchEvent(evt) {
+    if (evt && evt.type === 'input') nativeInputEvents.push(this);
+    for (const handler of (this._handlers[evt.type] || []).slice()) handler.call(this, evt);
+    return !(evt && evt.defaultPrevented);
+  }
+  click() {
+    const evt = new Event('click');
+    if (typeof this.onclick === 'function') this.onclick(evt);
+    this.dispatchEvent(evt);
+  }
+  focus() { global.document.activeElement = this; }
+  blur() { if (global.document.activeElement === this) global.document.activeElement = null; }
+  scrollIntoView() {}
+  querySelector(selector) { return _select(this, selector)[0] || null; }
+  querySelectorAll(selector) { return _select(this, selector); }
+}
+
+function _parseHTML(html, root) {
+  const stack = [root];
+  const token = /<(\/)?([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^>])*)>|([^<]+)/g;
+  let m;
+  while ((m = token.exec(html)) !== null) {
+    const [, closing, tag, attrs, text] = m;
+    const top = stack[stack.length - 1];
+    if (text !== undefined) { top._text += _decode(text); continue; }
+    if (closing) { if (stack.length > 1) stack.pop(); continue; }
+    const el = new Elem(tag);
+    const attrRe = /([a-zA-Z_:][\w:.-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+    let a;
+    while ((a = attrRe.exec(attrs)) !== null) {
+      const raw = a[2] !== undefined ? a[2] : (a[3] !== undefined ? a[3] : (a[4] !== undefined ? a[4] : ''));
+      el.setAttribute(a[1], _decode(raw));
+    }
+    top.appendChild(el);
+    if (!VOID_TAGS.has(el.tagName) && !/\/\s*$/.test(attrs)) stack.push(el);
+  }
+}
+
+// Selector support: comma-separated lists of descendant chains whose compounds
+// are any mix of tag, .class and [attr] / [attr="value"] — the shapes ui.js and
+// panels.js actually query with ('input', '.model-opt', '.model-opt,.model-opt-more',
+// '.model-group-body[data-group="openai"]', '.model-opt .model-opt-id').
+function _matchesCompound(el, compound) {
+  const re = /([a-zA-Z][\w-]*)|\.([\w-]+)|\[([\w-]+)(?:=["']?([^\]"']*)["']?)?\]/g;
+  let m;
+  while ((m = re.exec(compound)) !== null) {
+    if (m[1]) { if (el.tagName !== m[1].toUpperCase()) return false; }
+    else if (m[2]) { if (!el._classes.has(m[2])) return false; }
+    else if (m[3]) {
+      const name = m[3];
+      const val = name.startsWith('data-') ? el.dataset[_camel(name.slice(5))] : el[name];
+      if (m[4] !== undefined) { if (String(val) !== m[4]) return false; }
+      else if (val === undefined || val === null) return false;
+    }
+  }
+  return true;
+}
+function _ancestorsMatch(el, prefix, root) {
+  let node = el.parentElement;
+  for (let i = prefix.length - 1; i >= 0; i--) {
+    let hit = false;
+    while (node && node !== root.parentElement) {
+      const at = node;
+      node = node.parentElement;
+      if (_matchesCompound(at, prefix[i])) { hit = true; break; }
+    }
+    if (!hit) return false;
+  }
+  return true;
+}
+function _select(root, selector) {
+  const chains = String(selector).split(',')
+    .map(part => part.trim().split(/\s+/).filter(Boolean))
+    .filter(chain => chain.length);
+  const out = [];
+  const walk = (node) => {
+    for (const child of node.children) {
+      for (const chain of chains) {
+        if (_matchesCompound(child, chain[chain.length - 1])
+            && _ancestorsMatch(child, chain.slice(0, -1), root)) {
+          out.push(child);
+          break;
+        }
+      }
+      walk(child);
+    }
+  };
+  walk(root);
+  return out;
+}
+"""
+
+
+# The test body itself: drives the composed picker (real renderer + real
+# panels.js populate/open/close/select) through the catalog-in-flight races.
+_MODEL_PICKER_REFRESH_TEST_JS = r"""
+const assert = require("assert");
+
+const elements = {
+  kanbanTaskModalModel: new Elem("select"),
+  kanbanTaskModalModelChip: new Elem("button"),
+  kanbanTaskModalModelDropdown: new Elem("div"),
+};
+global.document = {
+  activeElement: null,
+  baseURI: "http://localhost/",
+  createElement: (tag) => new Elem(tag),
+  getElementById: (id) => elements[id] || null,
+};
+global.window = {_configuredModelBadges: {}};
+global.Event = Event;
+global.CSS = {escape: (s) => String(s).replace(/[^\w-]/g, "\\$&")};
+global.requestAnimationFrame = (fn) => { fn(); return 0; };
+
+// ui.js resolves these by name at call time.
+function $(id) { return elements[id] || null; }
+const STRINGS = {
+  kanban_no_model_override: "Profile default",
+  kanban_model_hint: "Model used for this card's dispatches.",
+};
+function t(key) { return STRINGS[key] || ""; }
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function li() { return ""; }
+function getModelLabel(v) { return String(v || ""); }
+let _kanbanModelPopulateSeq = 0;
+
+let renderCalls = 0;
+const _origRender = renderModelDropdown;
+renderModelDropdown = function(...args) {
+  renderCalls++;
+  return _origRender.apply(this, args);
+};
+
+let _catalog = null;
+function deferred() {
+  let resolve; const promise = new Promise(r => { resolve = r; });
+  return {promise, resolve};
+}
+global.fetch = async () => {
+  await _catalog.promise;
+  return {ok: true, json: async () => ({groups: [
+    {provider: "OpenAI", provider_id: "openai",
+     models: [{id: "gpt-5.6-sol"}, {id: "gpt-5.6-mini"}],
+     extra_models: [{id: "gpt-5.6-nano"}]},
+  ]})};
+};
+
+const dd = elements.kanbanTaskModalModelDropdown;
+const rowNames = () => dd.querySelectorAll(".model-opt")
+  .map(r => (r.querySelector(".model-opt-name") || r).textContent);
+
+async function run() {
+  // ── (1) open the picker WHILE /api/models is in flight ──
+  _catalog = deferred();
+  const pending = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  assert.deepStrictEqual(rowNames(), ["Profile default"], "pre-catalog snapshot");
+  assert(dd.querySelector(".model-scope-note"), "real renderer scope note");
+  assert.strictEqual(dd.querySelector(".model-scope-note").textContent, STRINGS.kanban_model_hint);
+
+  const typing = dd.querySelector(".model-search-input");
+  assert(typing, "real renderer search input");
+  assert.strictEqual(dd.querySelector("input"), typing, "search input is first by tag");
+
+  // ── (2) catalog arrives -> open picker re-renders with full catalog ──
+  _catalog.resolve();
+  await pending;
+  assert.deepStrictEqual(rowNames(), ["Profile default", "gpt-5.6-sol", "gpt-5.6-mini"],
+    "refresh re-rendered from the loaded catalog");
+
+  // ── (3) a CLOSED picker is left alone (the next open renders it anyway) ──
+  _kanbanCloseModelDropdown();
+  const beforeClosed = renderCalls;
+  _catalog = deferred();
+  const second = _kanbanPopulateModelSelect("", "");
+  _catalog.resolve();
+  await second;
+  assert.strictEqual(renderCalls, beforeClosed,
+    "a closed picker must not be re-rendered on every catalog load");
+
+  // ── (4) the mid-flight-selection early return refreshes too ──
+  elements.kanbanTaskModalModel = new Elem("select");
+  _catalog = deferred();
+  const third = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  // The custom model-ID path works without the catalog.
+  _kanbanSelectModelFromDropdown("my-custom-model", "custom");
+  _kanbanOpenModelDropdown();
+  const mark = renderCalls;
+  _catalog.resolve();
+  await third;
+  assert(renderCalls > mark,
+    "the in-flight-selection early return skipped the open-picker refresh, so " +
+    "the picker stayed stuck on the pre-catalog snapshot");
+  assert(rowNames().includes("gpt-5.6-sol"),
+    "the refresh after an in-flight selection did not include the catalog");
+
+  // ── (5) an open, FOCUSED picker with a half-typed query keeps it ──
+  elements.kanbanTaskModalModel = new Elem("select");
+  _kanbanCloseModelDropdown();
+  _catalog = deferred();
+  const fourth = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  const typingFocus = dd.querySelector(".model-search-input");
+  assert(typingFocus, "precondition: the render owns a search input");
+  typingFocus.value = "mini";
+  typingFocus.dispatchEvent(new Event("input"));
+  typingFocus.focus();
+  assert.strictEqual(document.activeElement, typingFocus);
+
+  const nativeBefore = nativeInputEvents.length;
+  _catalog.resolve();
+  await fourth;
+
+  const live = dd.querySelector(".model-search-input");
+  assert(live && live !== typingFocus, "refresh replaced the search input");
+  assert.strictEqual(live.value, "mini", "query survived");
+  assert.strictEqual(document.activeElement, live, "focus handed to replacement");
+  assert.deepStrictEqual(rowNames(), ["gpt-5.6-mini"], "rows filtered by real renderer");
+  assert.strictEqual(nativeInputEvents.length, nativeBefore + 1, "native input event path");
+  assert.strictEqual(nativeInputEvents[nativeInputEvents.length - 1], live);
+
+  // control: clearing the query through the same input shows the whole catalog
+  live.value = "";
+  live.dispatchEvent(new Event("input"));
+  assert.deepStrictEqual(rowNames(), ["Profile default", "gpt-5.6-sol", "gpt-5.6-mini"],
+    "cleared query renders the full catalog");
+
+  // ── (6) an open but UNFOCUSED picker must not steal the caret ──
+  elements.kanbanTaskModalModel = new Elem("select");
+  _kanbanCloseModelDropdown();
+  _catalog = deferred();
+  const fifth = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  const idle = dd.querySelector(".model-search-input");
+  idle.value = "sol";
+  idle.dispatchEvent(new Event("input"));
+  const elsewhere = new Elem("textarea");
+  elsewhere.focus();
+  _catalog.resolve();
+  await fifth;
+  const kept = dd.querySelector(".model-search-input");
+  assert(kept !== idle, "unfocused picker re-rendered");
+  assert.strictEqual(kept.value, "sol");
+  assert.deepStrictEqual(rowNames(), ["gpt-5.6-sol"]);
+  assert.strictEqual(document.activeElement, elsewhere, "focus not stolen");
+}
+
+run().then(() => console.log(JSON.stringify({success: true})))
+  .catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+"""
+
+
 def test_kanban_populate_refreshes_open_model_dropdown():
     """renderModelDropdown() renders a SNAPSHOT of the hidden <select>. The
     create modal is shown immediately and populates un-awaited, so a user who
@@ -2981,231 +3382,37 @@ def test_kanban_populate_refreshes_open_model_dropdown():
     the modal, because nothing re-rendered it when the catalog arrived.
 
     Drive the REAL _kanbanOpenModelDropdown/_kanbanPopulateModelSelect/
-    _kanbanRefreshOpenModelDropdown against a renderModelDropdown that behaves
-    like the real one -- it REPLACES the search input, rebuilds the option rows
-    from the hidden <select>, and filters them through the input listener.
+    _kanbanRefreshOpenModelDropdown against the REAL renderModelDropdown from
+    ui.js, on a DOM faithful enough to run it: the renderer itself replaces the
+    search input, rebuilds the option rows from the hidden <select>, and filters
+    them through its own input listener.
 
     Assert the open picker is re-rendered with the full catalog (and that a
     CLOSED picker is left alone), and that the re-render does not destroy live
     user state: a half-typed search query and its filtered result survive the
     refresh, keyboard focus is handed back to the replacement input when the
     user had it, and is NOT stolen when they did not."""
-    fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
-    fn_populate = extract_function(PANELS, "_kanbanPopulateModelSelect", prefix="async function")
-    fn_refresh = extract_function(PANELS, "_kanbanRefreshOpenModelDropdown", prefix="function")
-    fn_open = extract_function(PANELS, "_kanbanOpenModelDropdown", prefix="function")
-    fn_close = extract_function(PANELS, "_kanbanCloseModelDropdown", prefix="function")
-    fn_select = extract_function(PANELS, "_kanbanSelectModelFromDropdown", prefix="function")
-
-    harness = f"""
-const assert = require("assert");
-{_KANBAN_DOM_ELEMENT_JS}
-
-const elements = {{
-  kanbanTaskModalModel: new Element("select"),
-  kanbanTaskModalModelChip: new Element("button"),
-  kanbanTaskModalModelDropdown: new Element("div"),
-}};
-global.document = {{
-  getElementById: (id) => elements[id] || null,
-  createElement: (tag) => new Element(tag),
-  baseURI: "http://localhost/",
-  activeElement: null,
-}};
-function t(k) {{ return k === "kanban_no_model_override" ? "Profile default" : k; }}
-
-// ── DOM affordances the composed picker needs on top of the shared fake ──
-Element.prototype.addEventListener = function (type, handler) {{
-  if (!this._listeners) this._listeners = {{}};
-  this._listeners[type] = handler;
-}};
-Element.prototype.focus = function () {{ global.document.activeElement = this; }};
-// Supports both ".class" and bare tag selectors ("input"), matched in document
-// order, so production code that finds the search box by tag resolves to the
-// same element a real browser would hand it.
-Element.prototype.querySelector = function (sel) {{
-  const isClass = sel.charAt(0) === ".";
-  const want = isClass ? sel.slice(1) : sel.toUpperCase();
-  const hits = (el) => isClass ? el._classes.has(want) : el.tagName === want;
-  const walk = (el) => {{
-    for (const ch of el.children) {{
-      if (hits(ch)) return ch;
-      const hit = walk(ch);
-      if (hit) return hit;
-    }}
-    return null;
-  }};
-  return walk(this);
-}};
-
-// A render of the real picker REPLACES the popup's children -- the search input
-// included -- and rebuilds the option rows from a SNAPSHOT of the hidden
-// <select>, narrowed by whatever is in the search box. Model that faithfully so
-// the refresh has live user state (query, filtered rows, focus) to preserve.
-const renders = [];
-function renderModelDropdown(opts) {{
-  const dd = elements.kanbanTaskModalModelDropdown;
-  const catalog = elements.kanbanTaskModalModel.options
-    .map(o => String(o.value)).filter(v => v !== "");
-  dd.children = [];
-  const input = new Element("input");
-  input._classes.add("model-search-input");
-  dd.appendChild(input);
-  const list = new Element("div");
-  list._classes.add("model-list");
-  dd.appendChild(list);
-  const record = {{
-    dropdownId: opts.dropdownId,
-    autoFocusSearch: opts.autoFocusSearch,
-    models: catalog,
-    visible: [],
-    input,
-  }};
-  const applyFilter = () => {{
-    const needle = String(input.value || "").trim().toLowerCase();
-    list.children = [];
-    for (const id of catalog) {{
-      if (needle && !id.toLowerCase().includes(needle)) continue;
-      const row = new Element("div");
-      row._classes.add("model-opt");
-      row.textContent = id;
-      list.appendChild(row);
-    }}
-    record.visible = list.children.map(r => r.textContent);
-  }};
-  input.addEventListener("input", applyFilter);
-  applyFilter();
-  if (opts.autoFocusSearch) input.focus();
-  renders.push(record);
-}}
-
-let _catalog = null;
-global.fetch = async () => {{
-  await _catalog.promise;
-  return {{ok: true, json: async () => ({{groups: [
-    {{provider: "OpenAI", provider_id: "openai",
-      models: [{{id: "gpt-5.6-sol"}}, {{id: "gpt-5.6-mini"}}],
-      extra_models: ["gpt-5.6-nano"]}},
-  ]}})}};
-}};
-function deferred() {{
-  let resolve; const promise = new Promise(r => {{ resolve = r; }});
-  return {{promise, resolve}};
-}}
-
-let _kanbanModelPopulateSeq = 0;
-{fn_sync}
-{fn_close}
-{fn_select}
-{fn_open}
-{fn_populate}
-{fn_refresh}
-
-async function run() {{
-  const dd = elements.kanbanTaskModalModelDropdown;
-
-  // ── (1) open the picker WHILE the catalog is in flight ──
-  _catalog = deferred();
-  const pending = _kanbanPopulateModelSelect("", "");
-  _kanbanOpenModelDropdown();
-  assert.strictEqual(renders.length, 1, "opening the chip must render the picker");
-  assert(dd.classList.contains("open"), "the picker did not open");
-  assert.deepStrictEqual(renders[0].models, [],
-    "precondition: the picker opened before the catalog landed, so it is empty");
-
-  // ── (2) the catalog lands -> the OPEN picker must re-render with it ──
-  _catalog.resolve();
-  await pending;
-  assert.strictEqual(renders.length, 2,
-    "an already-open picker stayed empty after /api/models arrived");
-  assert.deepStrictEqual(renders[1].models, ["gpt-5.6-sol", "gpt-5.6-mini"],
-    "the refresh did not re-render from the loaded catalog");
-  assert.strictEqual(renders[1].dropdownId, "kanbanTaskModalModelDropdown");
-  assert.strictEqual(renders[1].autoFocusSearch, false,
-    "a background refresh must not yank focus back into the search input");
-  assert(dd.classList.contains("open"), "the refresh closed the picker");
-
-  // ── (3) a CLOSED picker is left alone (the next open renders it anyway) ──
-  _kanbanCloseModelDropdown();
-  const before = renders.length;
-  _catalog = deferred();
-  const second = _kanbanPopulateModelSelect("", "");
-  _catalog.resolve();
-  await second;
-  assert.strictEqual(renders.length, before,
-    "a closed picker must not be re-rendered on every catalog load");
-
-  // ── (4) the mid-flight-selection early return refreshes too ──
-  _catalog = deferred();
-  const third = _kanbanPopulateModelSelect("", "");
-  _kanbanOpenModelDropdown();
-  // The custom model-ID path works without the catalog.
-  _kanbanSelectModelFromDropdown("my-custom-model", "custom");
-  _kanbanOpenModelDropdown();
-  const mark = renders.length;
-  _catalog.resolve();
-  await third;
-  assert(renders.length > mark,
-    "the in-flight-selection early return skipped the open-picker refresh, so " +
-    "the picker stayed stuck on the pre-catalog snapshot");
-  assert(renders[renders.length - 1].models.includes("gpt-5.6-sol"),
-    "the refresh after an in-flight selection did not include the catalog");
-
-  // ── (5) an open, FOCUSED picker with a half-typed query keeps it ──
-  // The user opens the chip before the catalog lands and starts typing a
-  // filter. The re-render replaces the input underneath them; the query, the
-  // filtered list and the caret must all come back.
-  elements.kanbanTaskModalModel = new Element("select");
-  _kanbanCloseModelDropdown();
-  _catalog = deferred();
-  const fourth = _kanbanPopulateModelSelect("", "");
-  _kanbanOpenModelDropdown();
-  const typing = dd.querySelector(".model-search-input");
-  assert(typing, "precondition: the render owns a search input");
-  typing.value = "mini";
-  typing._listeners.input();  // the user types
-  typing.focus();
-  assert.strictEqual(document.activeElement, typing,
-    "precondition: the search input has keyboard focus");
-  _catalog.resolve();
-  await fourth;
-  const live = dd.querySelector(".model-search-input");
-  assert(live && live !== typing,
-    "precondition: the refresh re-rendered and replaced the search input");
-  assert.strictEqual(live.value, "mini",
-    "the background refresh wiped the query the user was typing");
-  assert.strictEqual(document.activeElement, live,
-    "the refresh dropped keyboard focus out of the picker mid-typing");
-  assert.deepStrictEqual(renders[renders.length - 1].visible, ["gpt-5.6-mini"],
-    "the restored query was not reapplied through the input path, so the popup " +
-    "shows the whole catalog while the search box still says 'mini'");
-
-  // ── (6) an open but UNFOCUSED picker must not steal the caret ──
-  elements.kanbanTaskModalModel = new Element("select");
-  _kanbanCloseModelDropdown();
-  _catalog = deferred();
-  const fifth = _kanbanPopulateModelSelect("", "");
-  _kanbanOpenModelDropdown();
-  const idle = dd.querySelector(".model-search-input");
-  idle.value = "sol";
-  idle._listeners.input();
-  const elsewhere = new Element("textarea");  // the modal's prompt field
-  elsewhere.focus();
-  _catalog.resolve();
-  await fifth;
-  const kept = dd.querySelector(".model-search-input");
-  assert.strictEqual(kept.value, "sol",
-    "the query must survive the refresh even when the picker is unfocused");
-  assert.deepStrictEqual(renders[renders.length - 1].visible, ["gpt-5.6-sol"],
-    "the unfocused picker's restored query was not reapplied to the catalog");
-  assert.strictEqual(document.activeElement, elsewhere,
-    "a background refresh of an unfocused picker yanked focus out of the field " +
-    "the user was actually typing in");
-}}
-
-run().then(() => console.log(JSON.stringify({{success: true}})))
-  .catch(e => {{ process.stderr.write(String(e && e.stack || e)); process.exit(1); }});
-"""
+    ui_fns = [
+        "_getOptionProviderId", "_providerFromModelValue", "_modelPickerOptionIdentity",
+        "_deduplicateModelPickerOptions", "_modelStateForSelect", "_normalizeConfiguredModelKey",
+        "_isEquivalentConfiguredModelEntry", "_getConfiguredModelBadge", "_readModelOverflowData",
+        "_appendOverflowOptionsToGroup", "_findModelInDropdown", "_applyModelToDropdown",
+        "_ensureModelOptionInDropdown", "renderModelDropdown",
+    ]
+    panels_fns = [
+        ("_kanbanSyncModelChip", "function"),
+        ("_kanbanCloseModelDropdown", "function"),
+        ("_kanbanSelectModelFromDropdown", "function"),
+        ("_kanbanOpenModelDropdown", "function"),
+        ("_kanbanPopulateModelSelect", "async function"),
+        ("_kanbanRefreshOpenModelDropdown", "function"),
+    ]
+    harness = "\n".join([
+        _MODEL_PICKER_DOM_JS,
+        *[extract_function(UI, name) for name in ui_fns],
+        *[extract_function(PANELS, name, prefix=prefix) for name, prefix in panels_fns],
+        _MODEL_PICKER_REFRESH_TEST_JS,
+    ])
     assert _run_node(harness)["success"] is True
 
     # Source guards: both exits of _kanbanPopulateModelSelect must refresh, and
