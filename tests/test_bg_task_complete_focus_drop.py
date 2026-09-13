@@ -138,14 +138,13 @@ def test_mark_as_seen_is_after_dedup_and_inside_focus_gate():
     body = _handler_body()
     dedupe_idx = body.index("_bgTaskCompleteRingBufferAdd(sid, evt_id)")
     mark_idx = body.index("_markSessionViewed")
-    clear_idx = body.index("_clearSessionCompletionUnread")
     gate_match = _focus_gate_match(body)
     assert gate_match is not None
     assert dedupe_idx < gate_match.start() <= mark_idx < gate_match.end(), (
         "_markSessionViewed must sit after dedupe inside the T4 focus gate"
     )
-    assert dedupe_idx < gate_match.start() <= clear_idx < gate_match.end(), (
-        "_clearSessionCompletionUnread must sit after dedupe inside the T4 focus gate"
+    assert "_clearSessionCompletionUnread" not in body[gate_match.start() : gate_match.end()], (
+        "manual clear helper should be routed through _markSessionViewed inside the focused branch"
     )
 
 
