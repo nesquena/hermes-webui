@@ -1351,13 +1351,7 @@ def test_kanban_unassigned_lane_in_sidebar_meta():
     """Sidebar task list must show 'unassigned' label for tasks without an
     assignee, not silently omit the field.
     """
-    meta_match = re.search(
-        r"function _kanbanTaskMeta\(task\)\{(.*?)\n\}",
-        PANELS,
-        re.DOTALL,
-    )
-    assert meta_match, "_kanbanTaskMeta() not found"
-    meta_body = meta_match.group(1)
+    meta_body = extract_function(PANELS, "_kanbanTaskMeta")
     # Must emit unassigned label when task.assignee is falsy.
     assert "t('kanban_unassigned')" in meta_body
 
@@ -1368,21 +1362,17 @@ def test_kanban_card_exposes_next_dispatch_model_override():
     at a glance. (The override is a dispatch-time input, so it can never be
     presented as the model an already-running worker is using -- see
     test_kanban_running_card_model_badge_does_not_claim_the_active_run.)"""
-    # _kanbanTaskMeta appends a 🧠 chip carrying the override (provider wins the
-    # label when both are set, since it disambiguates the backend).
-    meta_match = re.search(
-        r"function _kanbanTaskMeta\(task\)\{(.*?)\n\}",
-        PANELS,
-        re.DOTALL,
-    )
-    assert meta_match, "_kanbanTaskMeta() not found"
-    meta_body = meta_match.group(1)
+    # _kanbanTaskMeta appends a 🧠 bit carrying the override. The sidebar row is a
+    # dense one-liner, so the bit is the bare MODEL id -- never the provider
+    # alone (the earlier `provider_override || model_override` form would have
+    # labelled a bare provider id as the model), and never the spelled-out
+    # "Model (next dispatch): x (provider)" phrasing, which belongs on the card
+    # badge tooltip and the detail row that have room for it.
+    meta_body = extract_function(PANELS, "_kanbanTaskMeta")
     assert "task.model_override" in meta_body
-    # The chip names the MODEL, with the provider only as a qualifier -- the
-    # earlier `provider_override || model_override` form would have labelled a
-    # bare provider id as the "Model (next dispatch)".
     assert "task.provider_override || task.model_override" not in meta_body
-    assert "${task.model_override} (${task.provider_override})" in meta_body
+    assert "${task.model_override} (${task.provider_override})" not in meta_body
+    assert "🧠 ${task.model_override}" in meta_body
     assert "🧠" in meta_body
 
     # _kanbanCard renders a .kanban-badge.model chip in the card top line when
@@ -1409,7 +1399,6 @@ def test_kanban_card_exposes_next_dispatch_model_override():
     assert "kanban_no_model_override" in detail_body
 
     # i18n keys exist (English block) so the labels/tooltips resolve.
-    assert "kanban_model:" in I18N
     assert "kanban_provider:" in I18N
     assert "kanban_no_model_override:" in I18N
     assert "kanban_card_model_hint:" in I18N
@@ -1551,8 +1540,11 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert "accessKey" not in PANELS  # sanity: unused
 
     # New i18n keys exist (English block) for labels/hints.
-    for key in ("kanban_model", "kanban_model_hint", "kanban_no_model_override"):
+    for key in ("kanban_model_next_dispatch", "kanban_model_hint", "kanban_no_model_override"):
         assert f"{key}:" in I18N
+    # 'kanban_model' ("Model") was superseded by kanban_model_next_dispatch and
+    # left behind in all 15 locales with nothing reading it.
+    assert "kanban_model:" not in I18N
     # The free-text-era keys must be gone.
     for key in ("kanban_provider_placeholder", "kanban_provider_hint",
                 "kanban_provider_requires_model", "kanban_model_placeholder"):
@@ -1719,10 +1711,18 @@ def test_kanban_model_wording_is_dispatch_scoped_everywhere():
     assert "kanban_card_model_hint_running" in card_src
     assert "kanban_card_model_hint'" in card_src
 
-    # (d) meta bits + detail row are labelled as the next-dispatch model.
+    # (d) The detail row is labelled as the next-dispatch model. The sidebar
+    #     meta bit deliberately carries no label at all (bare `🧠 <model>`): it
+    #     is a dense one-liner, and the detail view -- the only caller that also
+    #     renders the labelled row -- opts the bit out entirely so the model is
+    #     not printed twice in a row.
     meta_src = extract_function(PANELS, "_kanbanTaskMeta")
-    assert "t('kanban_model_next_dispatch')" in meta_src
+    assert "t('kanban_model_next_dispatch')" not in meta_src
     detail_src = extract_function(PANELS, "_kanbanRenderTaskDetail")
+    assert "_kanbanTaskMeta(task, {includeModel: false})" in detail_src, (
+        "the detail view must opt out of the meta model bit -- it renders its own "
+        "dedicated kanban-detail-model row directly below the meta line"
+    )
     assert "t('kanban_model_next_dispatch')" in detail_src
     assert "t('kanban_model')" not in detail_src, (
         "the detail Model row must use the next-dispatch label, not the bare 'Model'"
@@ -1897,8 +1897,20 @@ def test_kanban_submit_decodes_picker_provider_prefix_out_of_model_override():
     # A plain catalog option (bare value, provider on the option) — the path that
     # already worked; it must keep working.
     catalog = [{"value": "gpt-5.6-sol", "provider": "openai"}]
+    # ── The REAL catalog shape (#6765 P1 proper): options rendered by the shared
+    # picker for a provider-scoped model carry the '@<provider>:<model>' routing
+    # value and data-provider, but NO data-model — only the synthesized options
+    # from _ensureModelOptionInDropdown() set that. The decoder therefore falls
+    # back to the raw (prefixed) value, so the submit path has to strip exactly
+    # the '@<provider>:' prefix itself.
+    catalog_prefixed = [{"value": "@anthropic:claude-sonnet-4-6", "provider": "anthropic"}]
+    # Same shape in the overflow ("Show more") tail, with a colon in BOTH the
+    # provider slug and the model id — the #6221 shape that any last-colon or
+    # first-colon split mangles.
+    catalog_overflow = [{"value": "@custom:backup:deepseek-r1:free", "provider": "custom:backup"}]
 
     create, edit, create_colon, edit_colon, create_catalog, edit_catalog, \
+        create_cat_prefixed, edit_cat_prefixed, create_overflow, edit_overflow, \
         create_cleared, edit_cleared = _run_kanban_submit_model_cases([
             {"mode": "create", "options": synthesized, "selected": "@custom:backup:model-a"},
             {"mode": "edit", "editingId": "t_1", "options": synthesized,
@@ -1908,6 +1920,14 @@ def test_kanban_submit_decodes_picker_provider_prefix_out_of_model_override():
              "selected": "@custom:backup:model-a:free"},
             {"mode": "create", "options": catalog, "selected": "gpt-5.6-sol"},
             {"mode": "edit", "editingId": "t_1", "options": catalog, "selected": "gpt-5.6-sol"},
+            {"mode": "create", "options": catalog_prefixed,
+             "selected": "@anthropic:claude-sonnet-4-6"},
+            {"mode": "edit", "editingId": "t_1", "options": catalog_prefixed,
+             "selected": "@anthropic:claude-sonnet-4-6"},
+            {"mode": "create", "options": catalog_overflow,
+             "selected": "@custom:backup:deepseek-r1:free"},
+            {"mode": "edit", "editingId": "t_1", "options": catalog_overflow,
+             "selected": "@custom:backup:deepseek-r1:free"},
             {"mode": "create", "options": synthesized, "selected": ""},
             {"mode": "edit", "editingId": "t_1", "options": synthesized, "selected": ""},
         ])
@@ -1935,6 +1955,27 @@ def test_kanban_submit_decodes_picker_provider_prefix_out_of_model_override():
     for label, case in (("create", create_catalog), ("edit", edit_catalog)):
         assert case["payload"]["model_override"] == "gpt-5.6-sol", (label, case["payload"])
         assert case["payload"]["provider_override"] == "openai", (label, case["payload"])
+
+    # ── real catalog option (data-model ABSENT): the routing prefix is still
+    #    stripped, so the dispatcher gets a bare model id ──
+    for label, case in (("create", create_cat_prefixed), ("edit", edit_cat_prefixed)):
+        assert case["payload"]["model_override"] == "claude-sonnet-4-6", (label, case["payload"])
+        assert case["payload"]["provider_override"] == "anthropic", (label, case["payload"])
+        assert not case["payload"]["model_override"].startswith("@"), (
+            f"{label}: a catalog option with no data-model leaked the picker's "
+            f"'@provider:' routing prefix into model_override"
+        )
+
+    # ── overflow catalog option: colon-bearing provider AND model, no data-model.
+    #    Only stripping the exact '@custom:backup:' prefix yields 'deepseek-r1:free'
+    #    — a first-colon split gives 'backup:deepseek-r1:free' and a last-colon
+    #    split gives '@custom:backup:deepseek-r1'. ──
+    for label, case in (("create", create_overflow), ("edit", edit_overflow)):
+        assert case["payload"]["model_override"] == "deepseek-r1:free", (label, case["payload"])
+        assert case["payload"]["provider_override"] == "custom:backup", (label, case["payload"])
+        assert not case["payload"]["model_override"].startswith("@"), (
+            f"{label}: overflow catalog option leaked the routing prefix"
+        )
 
     # ── empty selection: create omits both keys, edit clears both to null ──
     assert "model_override" not in create_cleared["payload"], create_cleared["payload"]
@@ -1994,6 +2035,70 @@ def test_kanban_submit_still_does_not_repin_a_provider_the_task_never_had():
     assert edit_kept["payload"]["provider_override"] == "openai", edit_kept["payload"]
 
 
+# Minimal <select>/<option> DOM used by the model-picker node harnesses: enough
+# of the real semantics for _kanbanPopulateModelSelect()/_kanbanSyncModelChip()
+# to run unmodified (a select with no explicit selection reports its first
+# option, innerHTML='' clears, optgroups nest, selectedOptions resolves).
+_KANBAN_DOM_ELEMENT_JS = """
+class Element {
+  constructor(tag) {
+    this.tagName = tag ? tag.toUpperCase() : "DIV";
+    this.children = [];
+    this.dataset = {};
+    this.textContent = "";
+    this._value = "";
+    this.title = "";
+    this.parentElement = null;
+    this._classes = new Set();
+    this.classList = {
+      add: (c) => this._classes.add(c),
+      remove: (c) => this._classes.delete(c),
+      contains: (c) => this._classes.has(c),
+    };
+  }
+  setAttribute(){}
+  get value() {
+    if (this.tagName === "SELECT") {
+      const opts = this.options;
+      if (!opts.length) return "";
+      const hit = opts.find(o => String(o.value) === String(this._value));
+      return hit ? hit.value : (opts[0] ? opts[0].value : "");
+    }
+    return this._value;
+  }
+  set value(v) {
+    this._value = String(v);
+  }
+  set innerHTML(val) {
+    if (val === "") {
+      this.children = [];
+      this._value = "";
+    }
+  }
+  appendChild(child) {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+  get options() {
+    const list = [];
+    function collect(el) {
+      for (const ch of el.children) {
+        if (ch.tagName === "OPTION") list.push(ch);
+        else collect(ch);
+      }
+    }
+    collect(this);
+    return list;
+  }
+  get selectedOptions() {
+    const hit = this.options.find(o => String(o.value) === String(this.value));
+    return hit ? [hit] : [];
+  }
+}
+"""
+
+
 def test_kanban_populate_model_select_deferred_promise_ordering():
     """Behavioral deferred-promise tests for _kanbanPopulateModelSelect():
     (a) Edit A -> open Create while catalog /api/models is pending: chip must immediately
@@ -2014,59 +2119,14 @@ def test_kanban_populate_model_select_deferred_promise_ordering():
 
     fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
     fn_populate = extract_function(PANELS, "_kanbanPopulateModelSelect", prefix="async function")
+    # Populate re-renders an already-open picker once the catalog lands; there is
+    # no dropdown element in this harness, so the real helper no-ops.
+    fn_refresh = extract_function(PANELS, "_kanbanRefreshOpenModelDropdown", prefix="function")
 
     harness = f"""
 const assert = require("assert");
 
-class Element {{
-  constructor(tag) {{
-    this.tagName = tag ? tag.toUpperCase() : "DIV";
-    this.children = [];
-    this.dataset = {{}};
-    this.textContent = "";
-    this._value = "";
-    this.title = "";
-    this.parentElement = null;
-  }}
-  get value() {{
-    if (this.tagName === "SELECT") {{
-      const opts = this.options;
-      if (!opts.length) return "";
-      const hit = opts.find(o => String(o.value) === String(this._value));
-      return hit ? hit.value : (opts[0] ? opts[0].value : "");
-    }}
-    return this._value;
-  }}
-  set value(v) {{
-    this._value = String(v);
-  }}
-  set innerHTML(val) {{
-    if (val === "") {{
-      this.children = [];
-      this._value = "";
-    }}
-  }}
-  appendChild(child) {{
-    child.parentElement = this;
-    this.children.push(child);
-    return child;
-  }}
-  get options() {{
-    const list = [];
-    function collect(el) {{
-      for (const ch of el.children) {{
-        if (ch.tagName === "OPTION") list.push(ch);
-        else collect(ch);
-      }}
-    }}
-    collect(this);
-    return list;
-  }}
-  get selectedOptions() {{
-    const hit = this.options.find(o => String(o.value) === String(this.value));
-    return hit ? [hit] : [];
-  }}
-}}
+{_KANBAN_DOM_ELEMENT_JS}
 
 let elements = {{
   kanbanTaskModalModel: new Element("select"),
@@ -2096,6 +2156,7 @@ function deferred() {{
 let _kanbanModelPopulateSeq = 0;
 {fn_sync}
 {fn_populate}
+{fn_refresh}
 
 async function run() {{
   const sel = elements.kanbanTaskModalModel;
@@ -2191,3 +2252,906 @@ run().then(() => {{
     assert result.returncode == 0, f"node deferred-promise test failed: {result.stderr}"
     assert json.loads(result.stdout)["success"] is True
 
+
+
+# ── #6765 P2: the Model row belongs with the dispatch controls, not the metadata ──
+
+
+def _kanban_modal_label_order():
+    """Field ids of the task modal's <label for=...> rows, in DOM order."""
+    start = INDEX.find('id="kanbanTaskModal"')
+    assert start >= 0, "kanban task modal not found in index.html"
+    end = INDEX.find('id="kanbanTaskModalSubmit"', start)
+    assert end > start, "kanban task modal submit button not found"
+    return re.findall(r'<label for="(kanbanTaskModal\w+)"', INDEX[start:end])
+
+
+def test_kanban_modal_model_row_sits_directly_below_assignee():
+    """The model override is an assignment-time dispatch control: it overrides
+    the ASSIGNED profile's model, so it reads as a modifier of the row above it.
+    Parked further down (below Tenant/Workspace, among the metadata fields) the
+    two were visually unrelated. Keep Assignee -> Model adjacent, and keep Model
+    ahead of Tenant so the dispatch controls stay grouped."""
+    order = _kanban_modal_label_order()
+    assert "kanbanTaskModalAssignee" in order, order
+    assert "kanbanTaskModalModel" in order, order
+    assert "kanbanTaskModalTenant" in order, order
+    assignee_at = order.index("kanbanTaskModalAssignee")
+    model_at = order.index("kanbanTaskModalModel")
+    tenant_at = order.index("kanbanTaskModalTenant")
+    assert model_at == assignee_at + 1, (
+        "the Model row must be the row directly below Assignee (no field in "
+        f"between). Got modal field order: {order}"
+    )
+    assert tenant_at == model_at + 1, (
+        f"the Model row must come before Tenant. Got modal field order: {order}"
+    )
+
+
+# ── Modal lifecycle + picker UX regressions ──
+
+
+def _run_node(harness, timeout=20):
+    """Run a node harness that prints {"success": true} and return its stdout."""
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    result = subprocess.run([node, "-e", harness], capture_output=True, text=True,
+                            timeout=timeout)
+    assert result.returncode == 0, f"node -e failed: {result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_kanban_modal_key_isolation_for_model_picker():
+    """The model picker is a popup NESTED inside the modal, and both are driven
+    by the same document-level keydown handler. Without isolation:
+
+      * Escape inside the open picker tore down the whole modal, throwing away
+        every unsaved edit just because the user backed out of the picker;
+      * Enter in the picker's search / custom-model-ID input submitted the task
+        behind the picker instead of choosing a model.
+
+    Run the REAL _kanbanTaskModalKey() against a stubbed DOM and assert each key
+    is consumed at the innermost open layer."""
+    key_src = extract_function(PANELS, "_kanbanTaskModalKey", prefix="function")
+    harness = (
+        "const assert = require('assert');\n"
+        "let dropdownOpen = false, modalHidden = false;\n"
+        "const calls = {close: 0, closeDropdown: 0, submit: 0};\n"
+        "const dropdownEl = {classList: {contains: (c) => c === 'open' && dropdownOpen}};\n"
+        "const modalEl = {get hidden(){ return modalHidden; }};\n"
+        "global.document = {getElementById: (id) => (\n"
+        "  id === 'kanbanTaskModalModelDropdown' ? dropdownEl :\n"
+        "  id === 'kanbanTaskModal' ? modalEl : null)};\n"
+        "function closeKanbanTaskModal(){ calls.close++; modalHidden = true; }\n"
+        "function _kanbanCloseModelDropdown(){ calls.closeDropdown++; dropdownOpen = false; }\n"
+        "function submitKanbanTaskModal(){ calls.submit++; }\n"
+        + key_src + "\n"
+        "function ev(key, target, opts){\n"
+        "  const e = Object.assign({key, target, shiftKey: false,\n"
+        "    prevented: 0, stopped: 0}, opts || {});\n"
+        "  e.preventDefault = () => { e.prevented++; };\n"
+        "  e.stopPropagation = () => { e.stopped++; };\n"
+        "  return e;\n"
+        "}\n"
+        # A DOM node whose closest() reports it lives inside the picker popup.
+        # closest() is matched over the whole selector LIST, like the real DOM,
+        # so a handler that widens its selector is still exercised here.
+        "const inPicker = {tagName: 'INPUT', closest: (s) => (\n"
+        "  s.split(',').map((x) => x.trim())\n"
+        "   .includes('#kanbanTaskModalModelDropdown') ? dropdownEl : null)};\n"
+        "const inModal = {tagName: 'INPUT', closest: () => null};\n"
+        "const inTextarea = {tagName: 'TEXTAREA', closest: () => null};\n"
+        "const out = {};\n"
+        # (1) Escape with the picker OPEN closes only the picker.
+        "dropdownOpen = true; modalHidden = false;\n"
+        "let e1 = ev('Escape', inPicker);\n"
+        "_kanbanTaskModalKey(e1);\n"
+        "assert.strictEqual(calls.closeDropdown, 1, 'Escape must close the open picker');\n"
+        "assert.strictEqual(calls.close, 0, 'Escape in the open picker tore down the whole modal');\n"
+        "assert.strictEqual(modalHidden, false, 'modal was closed by a picker-level Escape');\n"
+        "assert(e1.prevented > 0 && e1.stopped > 0, 'picker Escape must be consumed');\n"
+        # (2) Escape with the picker CLOSED still closes the modal.
+        "dropdownOpen = false;\n"
+        "let e2 = ev('Escape', inModal);\n"
+        "_kanbanTaskModalKey(e2);\n"
+        "assert.strictEqual(calls.close, 1, 'Escape outside the picker must close the modal');\n"
+        "assert.strictEqual(calls.closeDropdown, 1, 'no extra dropdown close');\n"
+        # (3) Enter inside the picker must not submit the task behind it.
+        "modalHidden = false; dropdownOpen = true;\n"
+        "let e3 = ev('Enter', inPicker);\n"
+        "_kanbanTaskModalKey(e3);\n"
+        "assert.strictEqual(calls.submit, 0, 'Enter in the model picker submitted the task');\n"
+        "assert.strictEqual(e3.prevented, 0, 'Enter in the picker must be left to the picker');\n"
+        # (4) Enter elsewhere in the modal still submits.
+        "let e4 = ev('Enter', inModal);\n"
+        "_kanbanTaskModalKey(e4);\n"
+        "assert.strictEqual(calls.submit, 1, 'Enter in the modal must still submit');\n"
+        # (5) Enter in the description textarea still inserts a newline.
+        "let e5 = ev('Enter', inTextarea);\n"
+        "_kanbanTaskModalKey(e5);\n"
+        "assert.strictEqual(calls.submit, 1, 'Enter in the textarea must not submit');\n"
+        "out.success = true;\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    assert _run_node(harness)["success"] is True
+
+    # Source guard: the two isolation checks must stay keyed on the picker's own
+    # element/id, not on some proxy that drifts when the picker is restyled.
+    assert "kanbanTaskModalModelDropdown" in key_src
+    assert "closest('#kanbanTaskModalModelDropdown')" in key_src, (
+        "the Enter branch must ignore events originating inside the model picker"
+    )
+
+
+def test_kanban_picker_escape_does_not_bubble_into_modal_close():
+    """Escape inside the picker must survive the REAL listener ORDER.
+
+    renderModelDropdown() binds Escape on the picker's own search / custom-ID
+    inputs, and that child handler calls closeDropdown() WITHOUT stopping
+    propagation. The event then keeps bubbling to the document-level
+    _kanbanTaskModalKey(), which — checking only `dropdown.classList.contains
+    ('open')` — saw an already-closed picker and took the whole task modal
+    down with it, discarding every unsaved edit on one Escape press.
+
+    Drive both listeners in their real bubbling sequence (child first, document
+    second) and assert Escape collapsed exactly one layer: the picker."""
+    close_src = extract_function(PANELS, "_kanbanCloseModelDropdown", prefix="function")
+    key_src = extract_function(PANELS, "_kanbanTaskModalKey", prefix="function")
+    harness = (
+        "const assert = require('assert');\n"
+        "let dropdownOpen = true, modalClosed = 0;\n"
+        "const dropdownEl = {classList: {\n"
+        "  contains: (c) => c === 'open' && dropdownOpen,\n"
+        "  remove: (c) => { if (c === 'open') dropdownOpen = false; }}};\n"
+        "const chipEl = {classList: {remove: () => {}}, setAttribute: () => {}};\n"
+        "const modalEl = {hidden: false};\n"
+        "global.document = {getElementById: (id) => (\n"
+        "  id === 'kanbanTaskModalModelDropdown' ? dropdownEl :\n"
+        "  id === 'kanbanTaskModalModelChip' ? chipEl :\n"
+        "  id === 'kanbanTaskModal' ? modalEl : null)};\n"
+        "function closeKanbanTaskModal(){ modalClosed++; modalEl.hidden = true; }\n"
+        "function submitKanbanTaskModal(){ throw new Error('Escape must not submit'); }\n"
+        + close_src + "\n" + key_src + "\n"
+        # The picker's search input: closest() answers over the full selector
+        # list, exactly as the DOM does.
+        "const ANCESTORS = ['#kanbanTaskModalModelDropdown', '.kanban-model-picker-wrap'];\n"
+        "const searchInput = {tagName: 'INPUT', closest: (s) => (\n"
+        "  s.split(',').map((x) => x.trim()).some((x) => ANCESTORS.includes(x))\n"
+        "    ? dropdownEl : null)};\n"
+        "const ev = {key: 'Escape', target: searchInput, shiftKey: false,\n"
+        "  prevented: 0, stopped: 0};\n"
+        "ev.preventDefault = () => { ev.prevented++; };\n"
+        "ev.stopPropagation = () => { ev.stopped++; };\n"
+        # Bubbling sequence: renderModelDropdown()'s child listener fires first
+        # and closes the dropdown, then the event reaches the document handler.
+        "_kanbanCloseModelDropdown();\n"
+        "_kanbanTaskModalKey(ev);\n"
+        "assert.strictEqual(dropdownOpen, false, 'the picker must be closed');\n"
+        "assert.strictEqual(modalClosed, 0,\n"
+        "  'Escape in the picker bubbled through and closed the task modal');\n"
+        "assert.strictEqual(modalEl.hidden, false, 'the task modal must stay open');\n"
+        "assert(ev.stopped > 0, 'the picker Escape must stop propagating further');\n"
+        # A second Escape — now genuinely outside the picker — closes the modal.
+        "const body = {tagName: 'INPUT', closest: () => null};\n"
+        "const ev2 = {key: 'Escape', target: body, shiftKey: false,\n"
+        "  preventDefault: () => {}, stopPropagation: () => {}};\n"
+        "_kanbanTaskModalKey(ev2);\n"
+        "assert.strictEqual(modalClosed, 1,\n"
+        "  'Escape outside the picker must still close the modal');\n"
+        "console.log(JSON.stringify({success: true}));\n"
+    )
+    assert _run_node(harness)["success"] is True
+
+    # Source guards: the document handler must key off the event's ORIGIN, not
+    # just the dropdown's (already-mutated) open state ...
+    assert "closest('#kanbanTaskModalModelDropdown')" in key_src and "closest('.kanban-model-picker-wrap')" in key_src, (
+        "the Escape branch must recognise events that originated inside the picker"
+    )
+    assert re.search(r"if\s*\(\s*dropdownOpen\s*\|\|\s*isPickerTarget\s*\)", key_src), (
+        "an already-closed-by-its-own-handler picker must still swallow Escape"
+    )
+    # ... and the picker itself claims Escape in the CAPTURE phase, so the key
+    # never reaches the modal listener in the first place.
+    mount_src = extract_function(PANELS, "_kanbanMountModelChip", prefix="function")
+    assert "keydown" in mount_src and "true)" in mount_src, (
+        "the picker must bind a capture-phase keydown listener on its dropdown"
+    )
+
+
+_MODAL_SEQ_PRELUDE = """
+const assert = require('assert');
+
+function deferred(){
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return {promise, resolve, reject};
+}
+
+const calls = {reset: [], labels: [], statusHint: [], model: [], assignee: []};
+const modal = {hidden: true};
+const assigneeSel = {options: [], value: ''};
+const titleEl = {value: '', focus(){}, select(){}};
+global.document = {
+  getElementById: (id) => (
+    id === 'kanbanTaskModal' ? modal :
+    id === 'kanbanTaskModalAssignee' ? assigneeSel :
+    id === 'kanbanTaskModalTitleInput' ? titleEl : null),
+  addEventListener(){}, removeEventListener(){},
+};
+let _currentPanel = 'kanban';
+let _kanbanModalOpenSeq = 0;
+let _kanbanTaskModalMode = 'create';
+let _kanbanTaskModalEditingId = null;
+let _kanbanTaskModalInitialDisplayedStatus = null;
+let _kanbanTaskModalFocusCleanup = null;
+function _trapModalFocus(){ return () => {}; }
+function t(k){ return k; }
+function showToast(){}
+function _kanbanBoardQuery(){ return ''; }
+function _kanbanResetTaskModalFields(v){ calls.reset.push(v); }
+function _kanbanSetTaskModalLabels(mode){ calls.labels.push(mode); }
+function _kanbanSetTaskModalStatusHint(a, b){ calls.statusHint.push([a, b]); }
+function _kanbanMountModelChip(){}
+function _kanbanPopulateTenantDatalist(){}
+function _kanbanPopulateWorkspacePathDatalist(){}
+function _kanbanPopulateParentsDatalist(){}
+function _kanbanTaskModalKey(){}
+
+// Armed deferreds: each await point in openKanbanEdit can be parked so a
+// competing openKanbanCreate() lands while this edit is mid-flight.
+let armedApi = null, armedModel = null, armedAssignee = null;
+async function api(url){
+  calls.api = url;
+  if (armedApi) { const d = armedApi; armedApi = null; return d.promise; }
+  return {task: TASK_A};
+}
+async function _kanbanPopulateModelSelect(model, provider){
+  calls.model.push([model, provider]);
+  if (armedModel) { const d = armedModel; armedModel = null; return d.promise; }
+}
+async function _kanbanPopulateAssigneeSelect(value){
+  calls.assignee.push(value);
+  if (armedAssignee) { const d = armedAssignee; armedAssignee = null; return d.promise; }
+}
+const TASK_A = {id: 't_A', title: 'Task A', body: 'A body', status: 'running',
+                tenant: 'tenant-a', priority: 7, assignee: 'agent-a',
+                model_override: 'model-a', provider_override: 'prov-a'};
+"""
+
+_MODAL_SEQ_BODY = """
+function resetSpies(){
+  calls.reset = []; calls.labels = []; calls.statusHint = [];
+  calls.model = []; calls.assignee = [];
+}
+
+function assertCreateSurvived(where){
+  assert.strictEqual(_kanbanTaskModalMode, 'create',
+    'a late openKanbanEdit continuation (parked at ' + where + ') flipped the ' +
+    'modal back to edit mode — saving would PATCH the wrong task');
+  assert.strictEqual(_kanbanTaskModalEditingId, null,
+    'late edit continuation (parked at ' + where + ') restored its editing id');
+  assert(!calls.reset.some(v => v && v.title === 'Task A'),
+    'late edit continuation (parked at ' + where + ') painted Task A over the create form');
+  assert(!calls.labels.includes('edit'),
+    'late edit continuation (parked at ' + where + ') relabelled the create modal as edit');
+}
+
+async function run(){
+  // ── (1) parked on api() ──
+  armedApi = deferred();
+  const editAtApi = openKanbanEdit('t_A');
+  await null;
+  openKanbanCreate();
+  assert.strictEqual(_kanbanTaskModalMode, 'create');
+  resetSpies();
+  const apiDef = armedApiHeld; armedApiHeld = null;
+  apiDef.resolve({task: TASK_A});
+  await editAtApi;
+  assertCreateSurvived('api()');
+  assert.deepStrictEqual(calls.statusHint, [],
+    'late edit continuation applied Task A\\'s status hint to the create form');
+
+  // ── (2) parked on _kanbanPopulateModelSelect() ──
+  armedModel = deferred();
+  const editAtModel = openKanbanEdit('t_A');
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(_kanbanTaskModalMode, 'edit', 'edit should have claimed the modal by now');
+  openKanbanCreate();
+  assert.strictEqual(_kanbanTaskModalMode, 'create');
+  resetSpies();
+  const modelDef = armedModelHeld; armedModelHeld = null;
+  modelDef.resolve();
+  await editAtModel;
+  assertCreateSurvived('_kanbanPopulateModelSelect()');
+  assert(!calls.assignee.includes('agent-a'),
+    'late edit continuation re-populated the assignee select with Task A\\'s assignee');
+
+  // ── (3) parked on _kanbanPopulateAssigneeSelect() ──
+  armedAssignee = deferred();
+  const editAtAssignee = openKanbanEdit('t_A');
+  await new Promise(r => setImmediate(r));
+  openKanbanCreate();
+  assert.strictEqual(_kanbanTaskModalMode, 'create');
+  resetSpies();
+  const assigneeDef = armedAssigneeHeld; armedAssigneeHeld = null;
+  assigneeDef.resolve();
+  await editAtAssignee;
+  assertCreateSurvived('_kanbanPopulateAssigneeSelect()');
+  assert.deepStrictEqual(calls.statusHint, [],
+    'late edit continuation stamped Task A\\'s status hint onto the create form');
+  assert(!calls.labels.includes('edit'), 'late edit continuation relabelled the modal');
+
+  // ── control: an UNCONTESTED edit still applies everything ──
+  resetSpies();
+  await openKanbanEdit('t_A');
+  assert.strictEqual(_kanbanTaskModalMode, 'edit', 'an uncontested edit must still open');
+  assert.strictEqual(_kanbanTaskModalEditingId, 't_A');
+  assert(calls.reset.some(v => v && v.title === 'Task A'), 'uncontested edit did not fill the form');
+  assert(calls.labels.includes('edit'), 'uncontested edit did not apply the edit labels');
+  assert.deepStrictEqual(calls.model[0], ['model-a', 'prov-a']);
+  assert(calls.assignee.includes('agent-a'));
+}
+
+run().then(() => console.log(JSON.stringify({success: true})))
+  .catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+"""
+
+
+def test_kanban_modal_open_sequence_guard():
+    """openKanbanEdit() awaits three times (the task fetch, the model catalog,
+    the assignee list). Opening Create — or another task's Edit — while it is
+    parked writes the new form; the parked edit then RESUMED and wrote its own
+    task's fields, mode and editing id over the form the user was already
+    typing into, so Save posted the create form's content as a PATCH of the
+    other task. _kanbanModalOpenSeq is the claim token: the continuation must
+    bail at every await boundary once a newer open has claimed the modal.
+
+    Runs the REAL openKanbanCreate()/openKanbanEdit() under node, parking the
+    edit at each await in turn."""
+    fn_create = extract_function(PANELS, "openKanbanCreate", prefix="function")
+    fn_edit = extract_function(PANELS, "openKanbanEdit", prefix="async function")
+    fn_editable = extract_function(PANELS, "_kanbanEditableStatusFor", prefix="function")
+    # The stubs hand their deferred out and clear the "armed" slot on use; the
+    # body needs a handle to resolve it later.
+    prelude = _MODAL_SEQ_PRELUDE.replace(
+        "if (armedApi) { const d = armedApi; armedApi = null; return d.promise; }",
+        "if (armedApi) { const d = armedApi; armedApiHeld = d; armedApi = null; return d.promise; }",
+    ).replace(
+        "if (armedModel) { const d = armedModel; armedModel = null; return d.promise; }",
+        "if (armedModel) { const d = armedModel; armedModelHeld = d; armedModel = null; return d.promise; }",
+    ).replace(
+        "if (armedAssignee) { const d = armedAssignee; armedAssignee = null; return d.promise; }",
+        "if (armedAssignee) { const d = armedAssignee; armedAssigneeHeld = d; armedAssignee = null; return d.promise; }",
+    ) + "\nlet armedApiHeld = null, armedModelHeld = null, armedAssigneeHeld = null;\n"
+    harness = prelude + fn_editable + "\n" + fn_create + "\n" + fn_edit + "\n" + _MODAL_SEQ_BODY
+    assert _run_node(harness)["success"] is True
+
+    # Source guards: the token must be claimed by BOTH openers and re-checked
+    # after each of the three awaits, so a new await can't be added without one.
+    assert "_kanbanModalOpenSeq++" in fn_create, (
+        "openKanbanCreate must claim the modal so a parked openKanbanEdit goes stale"
+    )
+    assert "const seq = ++_kanbanModalOpenSeq;" in fn_edit
+    guard = "if (seq !== _kanbanModalOpenSeq) return;"
+    # Every state write after an await must be preceded by a guard.
+    state_writes = ("_kanbanTaskModalMode =", "_kanbanTaskModalEditingId =",
+                    "_kanbanResetTaskModalFields(", "_kanbanSetTaskModalLabels(",
+                    "_kanbanSetTaskModalStatusHint(", "modal.hidden = false")
+    for marker in ("await api(", "await _kanbanPopulateModelSelect(",
+                   "await _kanbanPopulateAssigneeSelect("):
+        at = fn_edit.find(marker)
+        assert at >= 0, f"openKanbanEdit no longer has `{marker}` — update this test"
+        after = fn_edit[at + len(marker):]
+        guard_at = after.find(guard)
+        assert guard_at >= 0, f"no open-sequence guard after `{marker}`"
+        between = after[:guard_at]
+        for write in state_writes:
+            assert write not in between, (
+                f"openKanbanEdit writes `{write}` after `{marker}` before "
+                f"re-checking _kanbanModalOpenSeq — a stale continuation can "
+                f"paint over a newer modal"
+            )
+    # The fetch's failure path must be guarded too: a stale rejection must not
+    # raise "Kanban unavailable" over the form the user is now typing into.
+    catch_at = fn_edit.find("} catch(e) {")
+    assert catch_at >= 0
+    catch_body = fn_edit[catch_at:fn_edit.find("}", fn_edit.find("showToast", catch_at))]
+    assert catch_body.find(guard) < catch_body.find("showToast"), (
+        "a stale task-fetch rejection must be dropped before it toasts over a newer modal"
+    )
+
+
+def test_kanban_model_dirty_mark_is_scoped_and_close_cancels_a_pending_edit():
+    """Two lifecycle leaks out of the same modal, driven against the REAL
+    functions under node:
+
+    (a)+(b) The picker marked the hidden <select> dirty with an unbounded
+        boolean so an in-flight /api/models load could not clobber a selection
+        the user made while it was pending. The mark outlived its modal: pick
+        "Profile default" on task A, then edit task B — B's populate read A's
+        stale mark, took the preserve-the-live-selection early return, and
+        never restored B's saved model_override. The override silently
+        vanished from the form, and saving wrote the loss back. The mark must
+        be scoped to the populate pass it was made during.
+
+    (c) closeKanbanTaskModal() hid the modal but did not claim it, so an
+        openKanbanEdit() still parked on the task fetch resumed afterwards and
+        set modal.hidden = false — the dialog the user just cancelled popped
+        back open, populated, and focused."""
+    fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
+    fn_clear = extract_function(PANELS, "_kanbanClearModelDirtyMark", prefix="function")
+    fn_select = extract_function(PANELS, "_kanbanSelectModelFromDropdown", prefix="function")
+    fn_close_dd = extract_function(PANELS, "_kanbanCloseModelDropdown", prefix="function")
+    fn_populate = extract_function(PANELS, "_kanbanPopulateModelSelect", prefix="async function")
+    fn_refresh = extract_function(PANELS, "_kanbanRefreshOpenModelDropdown", prefix="function")
+    fn_reset = extract_function(PANELS, "_kanbanResetTaskModalFields", prefix="function")
+    fn_editable = extract_function(PANELS, "_kanbanEditableStatusFor", prefix="function")
+    fn_edit = extract_function(PANELS, "openKanbanEdit", prefix="async function")
+    fn_close = extract_function(PANELS, "closeKanbanTaskModal", prefix="function")
+
+    harness = f"""
+const assert = require("assert");
+
+{_KANBAN_DOM_ELEMENT_JS}
+
+const elements = {{
+  kanbanTaskModal: new Element("div"),
+  kanbanTaskModalModel: new Element("select"),
+  kanbanTaskModalModelChip: new Element("button"),
+  kanbanTaskModalTitleInput: new Element("input"),
+}};
+elements.kanbanTaskModal.hidden = true;
+elements.kanbanTaskModalTitleInput.focus = () => {{}};
+elements.kanbanTaskModalTitleInput.select = () => {{}};
+global.document = {{
+  getElementById: (id) => elements[id] || null,
+  createElement: (tag) => new Element(tag),
+  baseURI: "http://localhost/",
+  addEventListener(){{}}, removeEventListener(){{}},
+}};
+function t(k) {{ return k === "kanban_no_model_override" ? "Profile default" : k; }}
+
+function deferred() {{
+  let resolve, reject;
+  const promise = new Promise((res, rej) => {{ resolve = res; reject = rej; }});
+  return {{promise, resolve, reject}};
+}}
+
+// /api/models: one provider group holding the model task B has pinned.
+let _catalog = null;
+global.fetch = async () => {{
+  await _catalog.promise;
+  return {{ok: true, json: async () => ({{groups: [
+    {{provider: "OpenAI", provider_id: "openai",
+      models: [{{id: "gpt-5.6-sol"}}, {{id: "gpt-5.6-mini"}}]}},
+  ]}})}};
+}};
+
+let _currentPanel = 'kanban';
+let _kanbanModelPopulateSeq = 0;
+let _kanbanModalOpenSeq = 0;
+let _kanbanTaskModalMode = 'create';
+let _kanbanTaskModalEditingId = null;
+let _kanbanTaskModalInitialDisplayedStatus = null;
+let _kanbanTaskModalFocusCleanup = null;
+function _trapModalFocus(){{ return () => {{}}; }}
+function showToast(){{}}
+function _kanbanBoardQuery(){{ return ''; }}
+function _kanbanSetTaskModalLabels(){{}}
+function _kanbanSetTaskModalStatusHint(){{}}
+function _kanbanMountModelChip(){{}}
+function _kanbanPopulateTenantDatalist(){{}}
+function _kanbanTaskModalKey(){{}}
+async function _kanbanPopulateAssigneeSelect(){{}}
+
+// The task fetch, parkable so close() can land while the edit is mid-flight.
+let armedApi = null;
+async function api(){{
+  if (armedApi) {{ const d = armedApi; armedApi = null; return d.promise; }}
+  return {{task: TASK_B}};
+}}
+const TASK_B = {{id: 't_B', title: 'Task B', body: '', status: 'ready',
+                 tenant: '', priority: 0, assignee: '',
+                 model_override: 'gpt-5.6-sol', provider_override: 'openai'}};
+
+{fn_sync}
+{fn_clear}
+{fn_close_dd}
+{fn_select}
+{fn_populate}
+{fn_refresh}
+{fn_reset}
+{fn_editable}
+{fn_edit}
+{fn_close}
+
+async function run() {{
+  const sel = elements.kanbanTaskModalModel;
+  const chip = elements.kanbanTaskModalModelChip;
+
+  // ── (a) "Profile default" chosen while /api/models is pending survives ──
+  // The create modal is shown immediately and populates un-awaited, so the
+  // user can reach the picker (the custom-ID path works without a catalog)
+  // before the catalog lands. Their choice must win over the restore.
+  _catalog = deferred();
+  const taskA = _kanbanPopulateModelSelect("model-a", "prov-a");
+  _kanbanSelectModelFromDropdown("", null);
+  assert.strictEqual(sel.value, "", "picking Profile default must clear the select");
+  _catalog.resolve();
+  await taskA;
+  assert.strictEqual(sel.value, "",
+    "an explicit Profile-default pick made while the catalog was in flight was " +
+    "clobbered back to the captured override when the catalog landed");
+  assert.strictEqual(chip.textContent, "Profile default");
+
+  // ── (b) editing task B right after (a) still restores B's override ──
+  // Same <select> element, so task A's dirty mark is still on it unless the
+  // mark is scoped to A's populate pass (and cleared on reset).
+  _catalog = deferred();
+  _kanbanResetTaskModalFields({{
+    title: TASK_B.title, status: TASK_B.status,
+    model_override: TASK_B.model_override,
+  }});
+  const taskB = _kanbanPopulateModelSelect("gpt-5.6-sol", "openai");
+  _catalog.resolve();
+  await taskB;
+  assert.strictEqual(sel.value, "gpt-5.6-sol",
+    "task A's dirty mark leaked into task B's populate: B's saved " +
+    "model_override was dropped and the form fell back to Profile default");
+  assert.strictEqual(chip.title, "gpt-5.6-sol", "the chip still shows no override");
+  const opt = sel.options.find(o => String(o.value) === "gpt-5.6-sol");
+  assert.strictEqual(opt.dataset.provider, "openai",
+    "the persisted provider pin was not restored with the model");
+
+  // ── (b2) the scoping alone holds, without relying on the reset to clear ──
+  _catalog = deferred();
+  const taskA2 = _kanbanPopulateModelSelect("model-a", "prov-a");
+  _kanbanSelectModelFromDropdown("", null);
+  _catalog.resolve();
+  await taskA2;
+  _catalog = deferred();
+  const taskB2 = _kanbanPopulateModelSelect("gpt-5.6-sol", "openai");
+  _catalog.resolve();
+  await taskB2;
+  assert.strictEqual(sel.value, "gpt-5.6-sol",
+    "a dirty mark from an earlier populate pass suppressed the next one's restore");
+
+  // ── (c) cancelling the modal while openKanbanEdit awaits the task fetch ──
+  elements.kanbanTaskModal.hidden = true;
+  armedApi = deferred();
+  const held = armedApi;
+  const pendingEdit = openKanbanEdit('t_B');
+  await null;
+  closeKanbanTaskModal();
+  assert.strictEqual(elements.kanbanTaskModal.hidden, true, "precondition: closed");
+  held.resolve({{task: TASK_B}});
+  await pendingEdit;
+  assert.strictEqual(elements.kanbanTaskModal.hidden, true,
+    "closeKanbanTaskModal() did not invalidate the in-flight openKanbanEdit — " +
+    "the cancelled edit reopened the modal when its task fetch resolved");
+  assert.strictEqual(_kanbanTaskModalMode, 'create',
+    "the cancelled edit still flipped the modal back into edit mode");
+  assert.strictEqual(_kanbanTaskModalEditingId, null,
+    "the cancelled edit still restored its editing id");
+
+  // ── control: an uncontested edit still opens ──
+  await openKanbanEdit('t_B');
+  assert.strictEqual(elements.kanbanTaskModal.hidden, false,
+    "the open-sequence bump broke the ordinary edit path");
+  assert.strictEqual(_kanbanTaskModalEditingId, 't_B');
+}}
+
+run().then(() => console.log(JSON.stringify({{success: true}})))
+  .catch(e => {{ process.stderr.write(String(e && e.stack || e)); process.exit(1); }});
+"""
+    assert _run_node(harness)["success"] is True
+
+    # Source guards: the dirty mark must stay sequence-scoped on both sides, and
+    # both teardown paths must drop it.
+    assert "sel.dataset.dirtySeq = String(_kanbanModelPopulateSeq)" in fn_select, (
+        "the picker must stamp the dirty mark with the populate pass it happened "
+        "during, not an unbounded boolean flag"
+    )
+    assert "sel.dataset.dirtySeq === String(seq)" in fn_populate, (
+        "populate must only honour a dirty mark made during ITS OWN pass"
+    )
+    assert "delete sel.dataset.dirtySeq" in fn_clear
+    assert "delete sel.dataset.userDirty" in fn_clear
+    for name, body in (("_kanbanResetTaskModalFields", fn_reset),
+                       ("closeKanbanTaskModal", fn_close)):
+        assert "_kanbanClearModelDirtyMark()" in body, (
+            f"{name}() must drop the picker's dirty mark so it cannot leak into "
+            f"the next task opened in the same modal"
+        )
+    assert "_kanbanModalOpenSeq++" in fn_close, (
+        "closeKanbanTaskModal() must claim the modal so an openKanbanEdit parked "
+        "on its task fetch cannot reopen the dialog the user just cancelled"
+    )
+    assert "_kanbanCloseModelDropdown()" in fn_close, (
+        "closing the modal must also close the picker popup anchored to it"
+    )
+
+
+def test_kanban_populate_refreshes_open_model_dropdown():
+    """renderModelDropdown() renders a SNAPSHOT of the hidden <select>. The
+    create modal is shown immediately and populates un-awaited, so a user who
+    clicks the chip before /api/models lands opens a picker built from a select
+    holding only "Profile default" -- and it stayed that way for the life of
+    the modal, because nothing re-rendered it when the catalog arrived.
+
+    Drive the REAL _kanbanOpenModelDropdown/_kanbanPopulateModelSelect/
+    _kanbanRefreshOpenModelDropdown against a recording renderModelDropdown and
+    assert the open picker is re-rendered with the full catalog (and that a
+    CLOSED picker is left alone)."""
+    fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
+    fn_populate = extract_function(PANELS, "_kanbanPopulateModelSelect", prefix="async function")
+    fn_refresh = extract_function(PANELS, "_kanbanRefreshOpenModelDropdown", prefix="function")
+    fn_open = extract_function(PANELS, "_kanbanOpenModelDropdown", prefix="function")
+    fn_close = extract_function(PANELS, "_kanbanCloseModelDropdown", prefix="function")
+    fn_select = extract_function(PANELS, "_kanbanSelectModelFromDropdown", prefix="function")
+
+    harness = f"""
+const assert = require("assert");
+{_KANBAN_DOM_ELEMENT_JS}
+
+const elements = {{
+  kanbanTaskModalModel: new Element("select"),
+  kanbanTaskModalModelChip: new Element("button"),
+  kanbanTaskModalModelDropdown: new Element("div"),
+}};
+global.document = {{
+  getElementById: (id) => elements[id] || null,
+  createElement: (tag) => new Element(tag),
+  baseURI: "http://localhost/",
+}};
+function t(k) {{ return k === "kanban_no_model_override" ? "Profile default" : k; }}
+
+// Each render records the option ids visible to the picker AT THAT MOMENT --
+// exactly what the user would see in the popup.
+const renders = [];
+function renderModelDropdown(opts) {{
+  renders.push({{
+    dropdownId: opts.dropdownId,
+    autoFocusSearch: opts.autoFocusSearch,
+    models: elements.kanbanTaskModalModel.options
+      .map(o => String(o.value)).filter(v => v !== ""),
+  }});
+}}
+
+let _catalog = null;
+global.fetch = async () => {{
+  await _catalog.promise;
+  return {{ok: true, json: async () => ({{groups: [
+    {{provider: "OpenAI", provider_id: "openai",
+      models: [{{id: "gpt-5.6-sol"}}, {{id: "gpt-5.6-mini"}}],
+      extra_models: ["gpt-5.6-nano"]}},
+  ]}})}};
+}};
+function deferred() {{
+  let resolve; const promise = new Promise(r => {{ resolve = r; }});
+  return {{promise, resolve}};
+}}
+
+let _kanbanModelPopulateSeq = 0;
+{fn_sync}
+{fn_close}
+{fn_select}
+{fn_open}
+{fn_populate}
+{fn_refresh}
+
+async function run() {{
+  const dd = elements.kanbanTaskModalModelDropdown;
+
+  // ── (1) open the picker WHILE the catalog is in flight ──
+  _catalog = deferred();
+  const pending = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  assert.strictEqual(renders.length, 1, "opening the chip must render the picker");
+  assert(dd.classList.contains("open"), "the picker did not open");
+  assert.deepStrictEqual(renders[0].models, [],
+    "precondition: the picker opened before the catalog landed, so it is empty");
+
+  // ── (2) the catalog lands -> the OPEN picker must re-render with it ──
+  _catalog.resolve();
+  await pending;
+  assert.strictEqual(renders.length, 2,
+    "an already-open picker stayed empty after /api/models arrived");
+  assert.deepStrictEqual(renders[1].models, ["gpt-5.6-sol", "gpt-5.6-mini"],
+    "the refresh did not re-render from the loaded catalog");
+  assert.strictEqual(renders[1].dropdownId, "kanbanTaskModalModelDropdown");
+  assert.strictEqual(renders[1].autoFocusSearch, false,
+    "a background refresh must not yank focus back into the search input");
+  assert(dd.classList.contains("open"), "the refresh closed the picker");
+
+  // ── (3) a CLOSED picker is left alone (the next open renders it anyway) ──
+  _kanbanCloseModelDropdown();
+  const before = renders.length;
+  _catalog = deferred();
+  const second = _kanbanPopulateModelSelect("", "");
+  _catalog.resolve();
+  await second;
+  assert.strictEqual(renders.length, before,
+    "a closed picker must not be re-rendered on every catalog load");
+
+  // ── (4) the mid-flight-selection early return refreshes too ──
+  _catalog = deferred();
+  const third = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  // The custom model-ID path works without the catalog.
+  _kanbanSelectModelFromDropdown("my-custom-model", "custom");
+  _kanbanOpenModelDropdown();
+  const mark = renders.length;
+  _catalog.resolve();
+  await third;
+  assert(renders.length > mark,
+    "the in-flight-selection early return skipped the open-picker refresh, so " +
+    "the picker stayed stuck on the pre-catalog snapshot");
+  assert(renders[renders.length - 1].models.includes("gpt-5.6-sol"),
+    "the refresh after an in-flight selection did not include the catalog");
+}}
+
+run().then(() => console.log(JSON.stringify({{success: true}})))
+  .catch(e => {{ process.stderr.write(String(e && e.stack || e)); process.exit(1); }});
+"""
+    assert _run_node(harness)["success"] is True
+
+    # Source guards: both exits of _kanbanPopulateModelSelect must refresh, and
+    # the refresh must stay a no-op for a closed picker.
+    populate_src = extract_function(PANELS, "_kanbanPopulateModelSelect")
+    assert populate_src.count("_kanbanRefreshOpenModelDropdown()") == 2, (
+        "both the in-flight-selection early return and the normal tail of "
+        "_kanbanPopulateModelSelect must refresh an open picker"
+    )
+    refresh_src = extract_function(PANELS, "_kanbanRefreshOpenModelDropdown")
+    assert "classList.contains('open')" in refresh_src
+
+
+def _css_at_block(source, header):
+    """(start, body_start, body_end, end) of the brace-matched `header{...}`."""
+    at = source.find(header)
+    if at < 0:
+        return None
+    open_at = source.index("{", at)
+    depth = 0
+    for i in range(open_at, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return (at, open_at + 1, i, i + 1)
+    return None
+
+
+def _css_media_body(query, source=STYLE):
+    """Body of the `@media <query>{...}` block, brace-matched (nested rules)."""
+    span = _css_at_block(source, "@media " + query)
+    return None if span is None else source[span[1]:span[2]]
+
+
+def _css_strip_at_blocks(source):
+    """Drop every top-level at-rule body (@media/@supports/...) so a rule-lookup
+    over the result cannot accidentally read a media-scoped override."""
+    out, i = [], 0
+    while True:
+        at = source.find("@", i)
+        if at < 0:
+            out.append(source[i:])
+            return "".join(out)
+        brace = source.find("{", at)
+        semi = source.find(";", at)
+        if brace < 0 or (0 <= semi < brace):  # @import/@charset — no body
+            out.append(source[i:max(semi, at) + 1])
+            i = max(semi, at) + 1
+            continue
+        span = _css_at_block(source[at:], source[at:brace])
+        if span is None:
+            out.append(source[i:])
+            return "".join(out)
+        out.append(source[i:at])
+        i = at + span[3]
+
+
+def _css_declarations(selector, source=None, nested=False):
+    """Declarations of the LAST rule whose selector list contains `selector`
+    exactly. Defaults to style.css with all at-rule bodies removed, so a
+    top-level lookup never picks up a media-query override; pass a media body
+    as `source` (with nested=True) to scope the lookup to that query instead.
+    Returns None when the rule is absent.
+
+    Selector-scoped on purpose: `"min-height:44px" in STYLE` passes on an
+    untouched stylesheet -- style.css already contains 26 of those, 51
+    `flex-wrap:wrap`, 125 `white-space:nowrap` and 126 `width:100%`. Only a
+    lookup anchored to the rule being asserted can fail when the rule is wrong.
+    """
+    if source is None:
+        source = _css_strip_at_blocks(STYLE)
+    lead = r"[ \t]*" if nested else ""
+    found = None
+    for match in re.finditer(r"(?m)^" + lead + r"([^{}@/\s][^{}]*)\{([^{}]*)\}", source):
+        selectors = [s.strip() for s in match.group(1).split(",")]
+        if selector in selectors:
+            found = match.group(2)
+    return found
+
+
+def test_kanban_card_topline_wraps_while_badges_stay_unbroken():
+    """Fable UX 3. The top line carries id + priority/tenant/model badges; a
+    long model id (`ollama_macbook/qwen3-coder:30b`) overflowed the card, and
+    once the row was allowed to wrap the browser broke the text INSIDE the
+    badge pill instead. The row must wrap between badges; each badge must not."""
+    topline = _css_declarations(".kanban-card-topline")
+    assert topline is not None, ".kanban-card-topline rule not found in style.css"
+    assert "flex-wrap:wrap" in topline.replace(" ", ""), (
+        f"the card topline must wrap so long model badges reflow instead of "
+        f"overflowing the card. Got: {topline!r}"
+    )
+    badge = _css_declarations(".kanban-badge")
+    assert badge is not None, ".kanban-badge rule not found in style.css"
+    assert "white-space:nowrap" in badge.replace(" ", ""), (
+        f"each badge must stay on one line so a wrapped topline does not split "
+        f"a model id inside its pill. Got: {badge!r}"
+    )
+
+
+def test_kanban_modal_model_dropdown_is_full_width():
+    """Fable UX 4. The picker is a settings-style absolutely-positioned popup;
+    inside the modal it inherited the shared `.settings-model-dropdown` sizing
+    and rendered narrower than the chip that opens it. Pin it to the wrap's
+    width (and box-sizing, or the padding/border push it back past 100%)."""
+    dd = _css_declarations(".kanban-model-picker-wrap .settings-model-dropdown")
+    assert dd is not None, "the kanban-scoped model dropdown rule is missing"
+    flat = dd.replace(" ", "")
+    assert "width:100%" in flat, f"dropdown is not full-width. Got: {dd!r}"
+    assert "min-width:100%" in flat, (
+        f"the shared picker sets its own min-width; override it or the dropdown "
+        f"stays narrow. Got: {dd!r}"
+    )
+    assert "box-sizing:border-box" in flat, (
+        f"without border-box the 100% width plus padding overflows the modal "
+        f"row. Got: {dd!r}"
+    )
+    wrap = _css_declarations(".kanban-model-picker-wrap")
+    assert wrap is not None and "position:relative" in wrap.replace(" ", ""), (
+        "the wrap must stay the positioning context the 100% width resolves against"
+    )
+
+
+def test_kanban_model_chip_touch_target_is_at_least_44px():
+    """Fable UX 7. The chip is the only way to reach the picker, and at
+    `padding:6px 10px` it measured 34.8px tall -- under the 44px minimum for a
+    finger. Raise it only where the pointer is coarse or the viewport is
+    phone-sized, so the desktop modal keeps its compact row height (the modal
+    is already at its #6906 height cap)."""
+    desktop = _css_declarations(".kanban-model-picker-wrap .settings-model-chip")
+    assert desktop is not None, "the kanban-scoped chip rule is missing"
+    assert "min-height:44px" not in desktop.replace(" ", ""), (
+        "the 44px bump must be media-scoped -- an unconditional one adds ~18px "
+        "to the desktop modal, which is already at the #6906 height cap"
+    )
+
+    body = _css_media_body("(pointer: coarse), (max-width: 640px)")
+    assert body is not None, (
+        "no coarse-pointer / phone-width media block raising the chip hit area"
+    )
+    touch = _css_declarations(".kanban-model-picker-wrap .settings-model-chip", body, nested=True)
+    assert touch is not None, (
+        "the coarse-pointer block does not target the kanban model chip"
+    )
+    flat = touch.replace(" ", "")
+    height = re.search(r"min-height:(\d+)px", flat)
+    assert height and int(height.group(1)) >= 44, (
+        f"the touch hit area must be >= 44px (was 34.8px). Got: {touch!r}"
+    )
+    # The rule has to come after the desktop one, or equal specificity loses.
+    assert STYLE.index("@media (pointer: coarse), (max-width: 640px)") > STYLE.index(
+        ".kanban-model-picker-wrap .settings-model-chip{"
+    ), "the touch override is declared before the desktop rule it must beat"

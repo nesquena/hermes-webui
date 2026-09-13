@@ -185,6 +185,8 @@ class FakeKanbanDB:
         task = self.get_task(conn, task_id)
         if not task:
             return False
+        if task.status == "archived":
+            raise RuntimeError(f"cannot set model override on archived task {task_id}")
         model = (model or "").strip() or None
         provider = (provider or "").strip() or None
         if provider and not model:
@@ -518,6 +520,165 @@ def test_kanban_model_override_rejects_provider_without_model(monkeypatch):
         bridge._patch_task_payload(task_id, {"provider_override": "openai"})
     with _pytest.raises(ValueError):
         bridge._create_task_payload({"title": "Bad", "provider_override": "openai"})
+
+
+# ── #6765 P1: the picker's '@<provider>:' routing prefix must never be persisted ──
+#
+# The model dropdown represents a provider-scoped pick INTERNALLY as
+# '@<provider>:<model>'. That string is a routing token for the picker, not a
+# model id: persisting it means the dispatcher spawns the worker with
+# `-m @openai:gpt-5.6-sol`, which the backend rejects (or worse, treats as an
+# unknown model). The bridge is the last line of defence for every client, so it
+# strips the prefix itself rather than trusting the WebUI to have done it.
+
+
+def test_normalise_model_override_strips_the_picker_routing_prefix(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    # Plain case: the provider prefix is removed, the provider is kept.
+    assert bridge._normalise_model_override(
+        "@anthropic:claude-sonnet-4-6", "anthropic"
+    ) == ("claude-sonnet-4-6", "anthropic")
+
+    # A colon-bearing provider slug: only the EXACT '@custom:backup:' prefix goes,
+    # and the colon inside the model id survives (a split at the first or last
+    # colon mangles one or the other -- #6221).
+    assert bridge._normalise_model_override(
+        "@custom:backup:model-a:free", "custom:backup"
+    ) == ("model-a:free", "custom:backup")
+    assert bridge._normalise_model_override(
+        "@custom:backup:model-a", "custom:backup"
+    ) == ("model-a", "custom:backup")
+
+    # Already-bare ids are untouched, including ones that merely contain colons
+    # or a leading '@' belonging to a DIFFERENT provider (never blind-strip).
+    assert bridge._normalise_model_override("model-a:free", "custom:backup") == (
+        "model-a:free", "custom:backup",
+    )
+    assert bridge._normalise_model_override("gpt-5.6-sol", "openai") == ("gpt-5.6-sol", "openai")
+    assert bridge._normalise_model_override("@other:model-a", "openai") == ("@other:model-a", "openai")
+    # A model id that merely STARTS with the provider name (no '@', no ':') is
+    # not a routing prefix.
+    assert bridge._normalise_model_override("openai-mirror", "openai") == ("openai-mirror", "openai")
+
+    # No provider to anchor the prefix on -> nothing is stripped, and the
+    # clear-both / provider-without-model contracts are unchanged.
+    assert bridge._normalise_model_override("@openai:gpt-5.6-sol", None) == (
+        "@openai:gpt-5.6-sol", None,
+    )
+    assert bridge._normalise_model_override("", "") == (None, None)
+    assert bridge._normalise_model_override("  ", None) == (None, None)
+
+    # A prefix with nothing behind it is a bare provider in disguise -- rejected
+    # like one, instead of persisting an empty model against a pinned provider.
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        bridge._normalise_model_override("@openai:", "openai")
+
+
+def test_kanban_patch_persists_the_bare_model_id_not_the_picker_prefix(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    created = bridge._create_task_payload({"title": "Prefixed model target"})
+    task_id = created["task"]["id"]
+
+    patched = bridge._patch_task_payload(task_id, {
+        "model_override": "@custom:backup:model-a:free",
+        "provider_override": "custom:backup",
+    })
+    assert patched["task"]["model_override"] == "model-a:free"
+    assert patched["task"]["provider_override"] == "custom:backup"
+
+    # Same on create.
+    made = bridge._create_task_payload({
+        "title": "Prefixed model on create",
+        "model_override": "@anthropic:claude-sonnet-4-6",
+        "provider_override": "anthropic",
+    })
+    assert made["task"]["model_override"] == "claude-sonnet-4-6"
+    assert made["task"]["provider_override"] == "anthropic"
+
+
+# ── #6765 P1: an archived-task rejection must not leave a half-applied edit ──
+#
+# kanban_db.set_model_override() REFUSES archived tasks by raising RuntimeError,
+# and _patch_task applies its writes as an unguarded sequence (title/priority
+# UPDATE, assign, model override, status verb). Calling set_model_override last
+# meant a PATCH of an archived task committed the title first and then blew up
+# with a 500: the user saw an error, and the title changed anyway.
+
+
+def test_patch_archived_task_edits_other_fields_when_model_is_unchanged(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    created = bridge._create_task_payload({
+        "title": "Archived edit target",
+        "model_override": "gpt-5.6-sol",
+        "provider_override": "openai",
+    })
+    task_id = created["task"]["id"]
+    bridge._patch_task_payload(task_id, {"status": "archived"})
+
+    # The edit modal always re-sends the model fields, even untouched. An
+    # unchanged pair must not be routed into set_model_override at all, so the
+    # title edit lands on the archived task.
+    patched = bridge._patch_task_payload(task_id, {
+        "title": "Archived edit applied",
+        "model_override": "gpt-5.6-sol",
+        "provider_override": "openai",
+    })
+    assert patched["task"]["title"] == "Archived edit applied"
+    assert patched["task"]["status"] == "archived"
+    assert patched["task"]["model_override"] == "gpt-5.6-sol"
+    assert patched["task"]["provider_override"] == "openai"
+
+    # The picker-prefixed spelling of the SAME model is also "unchanged" --
+    # normalisation happens before the comparison, so a re-save from the UI
+    # doesn't trip the archived guard on a model the user never touched.
+    resaved = bridge._patch_task_payload(task_id, {
+        "title": "Archived edit resaved",
+        "model_override": "@openai:gpt-5.6-sol",
+        "provider_override": "openai",
+    })
+    assert resaved["task"]["title"] == "Archived edit resaved"
+
+
+def test_patch_archived_task_rejects_model_change_without_committing_other_fields(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+
+    created = bridge._create_task_payload({
+        "title": "Archived atomicity target",
+        "model_override": "gpt-5.6-sol",
+        "provider_override": "openai",
+    })
+    task_id = created["task"]["id"]
+    bridge._patch_task_payload(task_id, {"status": "archived"})
+    events_before = len(fake_kanban.events)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="archived"):
+        bridge._patch_task_payload(task_id, {
+            "title": "Should not be applied",
+            "priority": 9,
+            "assignee": "someone-else",
+            "model_override": "gpt-5.6-mini",
+            "provider_override": "openai",
+        })
+
+    detail = bridge._task_detail_payload(task_id)["task"]
+    assert detail["title"] == "Archived atomicity target", "title committed before the model rejection"
+    assert detail["priority"] == 0, "priority committed before the model rejection"
+    assert detail["assignee"] is None, "assignee committed before the model rejection"
+    assert detail["model_override"] == "gpt-5.6-sol"
+    assert detail["provider_override"] == "openai"
+    assert len(fake_kanban.events) == events_before, "a rejected PATCH still emitted events"
+
+    # Clearing the override on an archived task is a change too -- same refusal,
+    # same all-or-nothing outcome.
+    with _pytest.raises(RuntimeError, match="archived"):
+        bridge._patch_task_payload(task_id, {"title": "Nope", "model_override": ""})
+    assert bridge._task_detail_payload(task_id)["task"]["title"] == "Archived atomicity target"
 
 
 def test_kanban_link_payload_adds_parent_child_relationship(monkeypatch):

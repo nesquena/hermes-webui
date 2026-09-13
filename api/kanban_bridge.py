@@ -340,13 +340,29 @@ def _normalise_model_override(model, provider):
     would re-resolve the profile's model against a different backend — the
     exact mismatch class this feature exists to prevent). Returns a 2-tuple;
     both elements may be None (meaning "no override, use profile default").
+
+    Also strips the model picker's INTERNAL routing prefix: a provider-scoped
+    pick is represented in the dropdown as ``@<provider>:<model>``, and any
+    client that sends that string verbatim would persist it as the model id,
+    which the dispatcher then hands to the backend as ``-m @provider:model``
+    (#6765). Only the EXACT ``@<provider>:`` prefix is removed — never a parse
+    at the first/last colon — so colon-bearing provider slugs (``custom:backup``)
+    and colon-bearing model ids (``model-a:free``) both survive intact (#6221).
     """
     model = (str(model or "").strip()) or None
     provider = (str(provider or "").strip()) or None
     if provider and not model:
         raise ValueError("provider_override requires a model_override")
     if not model:
-        provider = None
+        return (None, None)
+    if provider:
+        prefix = f"@{provider}:"
+        if model.startswith(prefix):
+            model = model[len(prefix):].strip() or None
+            if not model:
+                # '@openai:' alone carries no model — same failure mode as a
+                # bare provider, so reject it the same way.
+                raise ValueError("provider_override requires a model_override")
     return (model, provider)
 
 
@@ -393,6 +409,30 @@ def _patch_task(conn, task_id: str, body: dict):
     if not task:
         raise LookupError("task not found")
 
+    # Model / provider override. Edit mode sends the fields explicitly (even
+    # empty) so users can clear an override back to the profile default;
+    # _normalise_model_override collapses empty model → (None, None), which
+    # set_model_override treats as "clear both". A provider without a model is
+    # rejected (mirrors the worker spawn contract).
+    #
+    # Resolve and VET it before any write below: kanban_db.set_model_override
+    # refuses archived tasks by raising, and this PATCH is a plain sequence of
+    # independent writes with no enclosing transaction — so a rejection landing
+    # after the title/priority UPDATE left the task half-edited behind an HTTP
+    # 500 (#6765). Checking first makes the archived case all-or-nothing.
+    model_changed = False
+    new_model = new_provider = None
+    if "model_override" in body or "provider_override" in body:
+        new_model, new_provider = _normalise_model_override(
+            body.get("model_override"), body.get("provider_override")
+        )
+        curr_model, curr_provider = _normalise_model_override(
+            getattr(task, "model_override", None), getattr(task, "provider_override", None)
+        )
+        model_changed = (new_model != curr_model) or (new_provider != curr_provider)
+        if model_changed and getattr(task, "status", None) == "archived":
+            raise RuntimeError(f"cannot set model override on archived task {task_id}")
+
     updates = {}
     if "title" in body:
         title = str(body.get("title") or "").strip()
@@ -425,16 +465,13 @@ def _patch_task(conn, task_id: str, body: dict):
         if not kb.assign_task(conn, task_id, body.get("assignee") or None):
             raise LookupError("task not found")
 
-    # Model / provider override. Edit mode sends the fields explicitly (even
-    # empty) so users can clear an override back to the profile default;
-    # _normalise_model_override collapses empty model → (None, None), which
-    # set_model_override treats as "clear both". A provider without a model is
-    # rejected (mirrors the worker spawn contract).
-    if "model_override" in body or "provider_override" in body:
-        model_override, provider_override = _normalise_model_override(
-            body.get("model_override"), body.get("provider_override")
-        )
-        if not kb.set_model_override(conn, task_id, model_override, provider=provider_override):
+    # Apply the override vetted above. An unchanged pair skips the write
+    # entirely: the modal always re-sends both fields, so calling through on
+    # every save would make set_model_override reject an archived task for an
+    # edit that never touched its model (and would spam model_override_set
+    # events on every unrelated save).
+    if model_changed:
+        if not kb.set_model_override(conn, task_id, new_model, provider=new_provider):
             raise LookupError("task not found")
 
     if "status" not in body or body.get("status") in (None, ""):

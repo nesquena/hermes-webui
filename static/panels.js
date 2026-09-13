@@ -2118,21 +2118,25 @@ let _editingCronId = null;
 function _kanbanColumnLabel(name){ return t('kanban_status_' + name) || name; }
 function _kanbanTaskTitle(task){ return task.title || task.summary || task.id || t('kanban_task'); }
 function _kanbanTaskBody(task){ return task.body || task.description || task.prompt || ''; }
-function _kanbanTaskMeta(task){
+// `options.includeModel === false` drops the model bit: the detail view renders
+// its own dedicated .kanban-detail-model row (with the full next-dispatch
+// wording and the running-aware tooltip) directly below this meta line, so
+// including it here printed the same model twice.
+function _kanbanTaskMeta(task, options){
+  const opts = options || {};
   const bits = [];
   bits.push(task.assignee ? task.assignee : t('kanban_unassigned'));
   if (task.tenant) bits.push(task.tenant);
   if (task.priority !== undefined && task.priority !== null) bits.push('P' + task.priority);
   if (task.comment_count) bits.push('💬 ' + task.comment_count);
   if (task.link_counts && task.link_counts.children) bits.push('↳ ' + task.link_counts.children);
-  if (task.model_override) {
-    // Dispatch-time input, not a live-run fact — label it as such. The value
-    // must be the MODEL (the provider only qualifies it); labelling a bare
-    // provider id as "Model" would be its own false claim.
-    const label = task.provider_override
-      ? `${task.model_override} (${task.provider_override})`
-      : task.model_override;
-    bits.push(`🧠 ${t('kanban_model_next_dispatch')}: ${label}`);
+  if (task.model_override && opts.includeModel !== false) {
+    // Sidebar rows are a dense one-line summary, so the bit stays the bare
+    // MODEL id behind the 🧠 marker — the spelled-out "Model (next dispatch)"
+    // label and the provider qualifier live on the card badge tooltip and the
+    // detail row, which have room for them. Never the provider alone: labelling
+    // a bare provider id as the model would be its own false claim.
+    bits.push(`🧠 ${task.model_override}`);
   }
   return bits;
 }
@@ -3263,6 +3267,15 @@ let _kanbanModelChipBound = false;
 // awaits — both target the same hidden select). A late response from an older
 // invocation is dropped instead of clobbering the current one.
 let _kanbanModelPopulateSeq = 0;
+// Sequence token for the modal itself: openKanbanEdit awaits the task fetch and
+// the dropdown populates, during which the user can hit "New task" (or edit a
+// different card). Without this, the older openKanbanEdit resumed after the
+// await and wrote Task A's fields, mode, and editing id over the create modal
+// the user is now typing into — so saving posted A's state under the wrong verb.
+let _kanbanModalOpenSeq = 0;
+// Sequence token for assignee select population so late profile loads do not
+// clobber a newer modal invocation.
+let _kanbanAssigneePopulateSeq = 0;
 
 function _kanbanSyncModelChip(){
   const sel = document.getElementById('kanbanTaskModalModel');
@@ -3280,9 +3293,23 @@ function _kanbanSyncModelChip(){
   chip.title = val;
 }
 
+function _kanbanClearModelDirtyMark(){
+  // Drop the picker's "user picked this" mark when the modal is reset or torn
+  // down, so it can never be read by a later task's populate pass.
+  const sel = document.getElementById('kanbanTaskModalModel');
+  if (!sel || !sel.dataset) return;
+  delete sel.dataset.dirtySeq;
+  delete sel.dataset.userDirty;  // legacy flag from before the seq-scoped mark
+}
+
 function _kanbanSelectModelFromDropdown(value, preferredProviderId){
   const sel = document.getElementById('kanbanTaskModalModel');
   if (!sel) { _kanbanCloseModelDropdown(); return; }
+  // Tie the "user picked this" mark to the populate pass it happened during.
+  // An unbounded boolean flag outlived its modal: selecting Profile default on
+  // task A left it set, and task B's populate then read A's dirty mark and
+  // skipped restoring B's saved override — the picker silently wiped it.
+  if (sel.dataset) sel.dataset.dirtySeq = String(_kanbanModelPopulateSeq);
   const provider = String(preferredProviderId || '').trim() || null;
   if (typeof _ensureModelOptionInDropdown === 'function') {
     _ensureModelOptionInDropdown(value, sel, provider);
@@ -3382,9 +3409,20 @@ async function _kanbanPopulateModelSelect(currentValue, currentProvider){
   // is shown immediately and the populate fires un-awaited. After the load
   // resolves, don't clobber that live selection back to the captured default;
   // only apply the restore when the user hasn't picked something mid-flight.
-  if (sel.value) {
-    // Preserve the user's in-flight choice; just resync the chip label.
+  // We check dirtySeq so explicitly choosing "Profile default" (empty value)
+  // while the catalog was pending is also preserved rather than restored to
+  // currentValue — and only for THIS populate pass, so a stale mark left by an
+  // earlier modal can't suppress the next task's restore.
+  const _kanbanPreserveInFlightSelection = () => {
     _kanbanSyncModelChip();
+    _kanbanRefreshOpenModelDropdown();
+  };
+  if (sel.value) {
+    _kanbanPreserveInFlightSelection();
+    return;
+  }
+  if (sel.dataset && sel.dataset.dirtySeq === String(seq)) {
+    _kanbanPreserveInFlightSelection();
     return;
   }
   // Restore current override (edit mode). Preserve the MODEL and the PERSISTED
@@ -3412,6 +3450,29 @@ async function _kanbanPopulateModelSelect(currentValue, currentProvider){
     }
   }
   _kanbanSyncModelChip();
+  _kanbanRefreshOpenModelDropdown();
+}
+
+function _kanbanRefreshOpenModelDropdown(){
+  // renderModelDropdown() renders a SNAPSHOT of the hidden <select>'s options,
+  // so a picker the user opened while /api/models was still in flight stayed
+  // empty ("no models") for the life of the modal even after the catalog
+  // landed. Re-render in place once the options exist. No-op when the dropdown
+  // is closed — the next open renders the full catalog anyway.
+  const dd = document.getElementById('kanbanTaskModalModelDropdown');
+  if (!dd || !dd.classList.contains('open')) return;
+  if (typeof renderModelDropdown !== 'function') return;
+  renderModelDropdown({
+    dropdownId: 'kanbanTaskModalModelDropdown',
+    selectId: 'kanbanTaskModalModel',
+    forceOpenKey: 'kanbanTaskModalModel',
+    closeDropdown: _kanbanCloseModelDropdown,
+    selectModel: _kanbanSelectModelFromDropdown,
+    scopeNoteText: t('kanban_model_hint') || "Model used for this card's dispatches; leave Profile default to use the assigned profile's model. Changes take effect from the next dispatch.",
+    // Already-open picker: the search input keeps whatever focus the user gave
+    // it, so don't yank it back on a background refresh.
+    autoFocusSearch: false,
+  });
 }
 
 function _kanbanMountModelChip(){
@@ -3435,13 +3496,30 @@ function _kanbanMountModelChip(){
     const wrap = chip.closest('.kanban-model-picker-wrap');
     if (wrap && !wrap.contains(e.target)) _kanbanCloseModelDropdown();
   });
+  // Escape inside the picker belongs to the picker, not the modal behind it.
+  // renderModelDropdown() rebuilds the dropdown's children on every open, so
+  // bind once on the container in the CAPTURE phase: the key is consumed
+  // before any child handler can close the dropdown and leave the modal's
+  // document listener seeing an already-closed picker.
+  const dd = document.getElementById('kanbanTaskModalModelDropdown');
+  if (dd) {
+    dd.addEventListener('keydown', function(e){
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      _kanbanCloseModelDropdown();
+    }, true);
+  }
 }
 
-async function _kanbanPopulateAssigneeSelect(currentValue){
+async function _kanbanPopulateAssigneeSelect(currentValue, expectedSeq){
+  const seq = ++_kanbanAssigneePopulateSeq;
   const sel = document.getElementById('kanbanTaskModalAssignee');
   if (!sel) return;
   // Profile names: the canonical set the dispatcher can claim.
   const profileNames = await _kanbanLoadProfileNames();
+  if (seq !== _kanbanAssigneePopulateSeq) return;
+  if (expectedSeq !== undefined && expectedSeq !== _kanbanModalOpenSeq) return;
   // Historical assignees from the active board: include them so users who
   // assigned to a CLI lane (e.g. orion-cc) before still see those values.
   const historicalAssignees = (_kanbanBoard && Array.isArray(_kanbanBoard.assignees))
@@ -3485,6 +3563,9 @@ async function _kanbanPopulateAssigneeSelect(currentValue){
 }
 
 function openKanbanCreate(){
+  // Claim the modal: any openKanbanEdit still parked on an await is now stale
+  // and must not write its task's state over this create form.
+  _kanbanModalOpenSeq++;
   // Make sure the user is on the kanban panel so the resulting board reload is
   // visible behind the modal.
   if (typeof switchPanel === 'function' && _currentPanel !== 'kanban') switchPanel('kanban');
@@ -3502,7 +3583,9 @@ function openKanbanCreate(){
   _kanbanSetTaskModalLabels('create');
   _kanbanPopulateModelSelect('');
   _kanbanMountModelChip();
-  _kanbanPopulateAssigneeSelect('').then(() => {
+  const createSeq = _kanbanModalOpenSeq;
+  _kanbanPopulateAssigneeSelect('', createSeq).then(() => {
+    if (createSeq !== _kanbanModalOpenSeq) return;
     // After the dropdown is populated, default-select the first profile (not
     // the "Unassigned" fallthrough).  This is the right hint: most users want
     // to assign to *something* — they can pick "Unassigned" deliberately.
@@ -3533,6 +3616,11 @@ async function openKanbanEdit(taskId){
   // (rather than relying on whatever's cached locally) so the modal always
   // reflects authoritative server state.
   if (!taskId) return;
+  // Claim the modal, then re-check after every await: opening Create (or
+  // another task's Edit) while this one is mid-fetch must win, so a late
+  // resume here neither repaints the visible form with this task's fields nor
+  // flips _kanbanTaskModalMode/_kanbanTaskModalEditingId back to this task.
+  const seq = ++_kanbanModalOpenSeq;
   if (typeof switchPanel === 'function' && _currentPanel !== 'kanban') switchPanel('kanban');
   const modal = document.getElementById('kanbanTaskModal');
   if (!modal) return;
@@ -3541,9 +3629,11 @@ async function openKanbanEdit(taskId){
     const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery());
     task = data && data.task;
   } catch(e) {
+    if (seq !== _kanbanModalOpenSeq) return;
     showToast((t('kanban_unavailable') || 'Kanban unavailable') + ': ' + (e.message || e), 'error');
     return;
   }
+  if (seq !== _kanbanModalOpenSeq) return;
   if (!task) return;
   _kanbanTaskModalMode = 'edit';
   _kanbanTaskModalEditingId = task.id;
@@ -3569,10 +3659,12 @@ async function openKanbanEdit(taskId){
   // current value below. Pass the PERSISTED provider so an unrelated edit
   // preserves the saved provider pin on the model.
   await _kanbanPopulateModelSelect(task.model_override || '', task.provider_override || '');
+  if (seq !== _kanbanModalOpenSeq) return;
   _kanbanMountModelChip();
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
-  await _kanbanPopulateAssigneeSelect(task.assignee || '');
+  await _kanbanPopulateAssigneeSelect(task.assignee || '', seq);
+  if (seq !== _kanbanModalOpenSeq) return;
   _kanbanSetTaskModalStatusHint(originalStatus, initialDisplayedStatus);
   _kanbanSetTaskModalLabels('edit');
   _kanbanPopulateTenantDatalist();
@@ -3615,6 +3707,7 @@ function _kanbanResetTaskModalFields(values){
   set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
   set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
   set('kanbanTaskModalModel', v.model_override || '');
+  _kanbanClearModelDirtyMark();
   set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
@@ -3728,6 +3821,14 @@ function _trapModalFocus(modalEl){
 function closeKanbanTaskModal(){
   const modal = document.getElementById('kanbanTaskModal');
   if (modal) modal.hidden = true;
+  // Claim the modal so an openKanbanEdit() still parked on the task fetch (or
+  // either populate) is stale when it resumes: without this the cancelled edit
+  // reopened the modal the user just dismissed, seconds after they closed it.
+  _kanbanModalOpenSeq++;
+  // The picker is a popup anchored to the modal; leaving it open detaches it
+  // from the dialog that owns it and it survives into the next open.
+  _kanbanCloseModelDropdown();
+  _kanbanClearModelDirtyMark();
   _kanbanTaskModalMode = 'create';
   _kanbanTaskModalEditingId = null;
   _kanbanTaskModalInitialDisplayedStatus = null;
@@ -3740,7 +3841,28 @@ function closeKanbanTaskModal(){
 }
 
 function _kanbanTaskModalKey(ev){
+  // The model picker is a nested popup inside the modal, so its keys must be
+  // consumed before the modal's: Escape closes the picker (one level at a
+  // time, not the whole modal with the user's unsaved edits), and Enter inside
+  // the picker's search/custom-ID input picks a model rather than submitting
+  // the task behind it.
+  const dropdown = document.getElementById('kanbanTaskModalModelDropdown');
+  const dropdownOpen = !!dropdown && dropdown.classList.contains('open');
+  // Where the key came from matters as much as the dropdown's state: the
+  // picker's own search/custom-ID inputs close the dropdown from their child
+  // keydown handler and let the event keep bubbling, so by the time this
+  // document listener runs the dropdown already reads as closed and Escape
+  // took the whole modal down with it. Treat any key that originated inside
+  // the picker as the picker's.
+  const isPickerTarget = !!(ev.target && typeof ev.target.closest === 'function'
+    && (ev.target.closest('#kanbanTaskModalModelDropdown') || ev.target.closest('.kanban-model-picker-wrap')));
   if (ev.key === 'Escape') {
+    if (dropdownOpen || isPickerTarget) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      _kanbanCloseModelDropdown();
+      return;
+    }
     ev.preventDefault();
     closeKanbanTaskModal();
     return;
@@ -3750,6 +3872,7 @@ function _kanbanTaskModalKey(ev){
     // (where Enter should insert a newline).
     const target = ev.target;
     if (target && target.tagName === 'TEXTAREA') return;
+    if (target && typeof target.closest === 'function' && target.closest('#kanbanTaskModalModelDropdown')) return;
     const modal = document.getElementById('kanbanTaskModal');
     if (modal && !modal.hidden) {
       ev.preventDefault();
@@ -3827,7 +3950,7 @@ async function submitKanbanTaskModal(){
   const modelState = (modelEl && typeof _modelStateForSelect === 'function')
     ? _modelStateForSelect(modelEl, selectedModelValue)
     : {model: selectedModelValue, model_provider: null};
-  const modelRaw = String(modelState.model || '').trim();
+  const modelDecoded = String(modelState.model || '').trim();
   // _kanbanPopulateModelSelect() signals "this task has no persisted provider
   // pin" by clearing the matched option's OWN data-provider to '' (an ABSENT
   // one reads back as undefined). Keep honouring that signal: the shared
@@ -3838,6 +3961,17 @@ async function submitKanbanTaskModal(){
   const providerPinCleared = !!selectedOption && !!selectedOption.dataset
     && selectedOption.dataset.provider === '';
   const providerRaw = providerPinCleared ? '' : String(modelState.model_provider || '').trim();
+  // Defence in depth for an option that carries the picker's internal
+  // '@<provider>:<model>' string as its value but NO data-model to decode from
+  // (only value + data-provider set, e.g. an option synthesized by a caller
+  // that skipped data-model): the decoder falls back to the raw value, which
+  // would persist the routing prefix as the model id (#6765). Strip exactly the
+  // '@<provider>:' prefix — never split on a colon — so colon-bearing provider
+  // slugs (custom:backup) and model ids (model-a:free) survive intact (#6221).
+  const routingPrefix = providerRaw ? `@${providerRaw}:` : '';
+  const modelRaw = (routingPrefix && modelDecoded.startsWith(routingPrefix))
+    ? modelDecoded.slice(routingPrefix.length).trim()
+    : modelDecoded;
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -3994,7 +4128,7 @@ function _kanbanRenderTaskDetail(data){
   const log = data.log || {};
   const title = _kanbanTaskTitle(task);
   const body = _kanbanTaskBody(task) || t('kanban_no_description');
-  const meta = _kanbanTaskMeta(task);
+  const meta = _kanbanTaskMeta(task, {includeModel: false});
   const comments = data.comments || [];
   const events = data.events || [];
   const links = data.links || {};
