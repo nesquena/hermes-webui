@@ -78,6 +78,30 @@ that throws only when a real browser executes the page (e.g. a `function X(){}` 
 `tests/browser_smoke.py` boots the real `server.py` (agent-free, on an ephemeral
 port, with an isolated temp state dir) and loads the key pages in headless
 Chromium, failing if **any** console error or uncaught JS exception fires on load.
+
+### Inject-test endpoints (approval / clarify)
+
+`GET /api/approval/inject_test` and `GET /api/clarify/inject_test` are **off by
+default**. They require both:
+
+1. `HERMES_WEBUI_ALLOW_INJECT_TEST=1` (or `true` / `yes` / `on`), and
+2. a true loopback peer (`127.0.0.1` / `::1` via `_is_loopback`).
+
+Peer IP alone is not enough: same-host reverse proxies (Svelte Node proxy,
+Tailscale Funnel → local backend) always present as `127.0.0.1`. Leave the env
+**unset in production / Funnel**. The pytest test-server subprocess and a-tier
+Playwright smoke set it for CI only.
+
+### Updates simulate (`?simulate=1`)
+
+`GET /api/updates/check?simulate=1` is the same class of Funnel-reachable
+debug endpoint. It requires both:
+
+1. `HERMES_WEBUI_ALLOW_UPDATE_SIMULATE=1` (or `true` / `yes` / `on`), and
+2. a true loopback peer.
+
+Without the env, simulate returns `404` even from loopback (so reverse proxies
+cannot enable it by accident). Leave unset in production / Funnel.
 It runs in CI (`.github/workflows/browser-smoke.yml`) on every PR and push to
 master, and locally:
 
