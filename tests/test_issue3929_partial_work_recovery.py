@@ -190,6 +190,56 @@ def test_core_sync_keeps_pending_owner_for_reasoning_only_partial(tmp_path):
     )
 
 
+def test_tokenless_current_core_row_receives_reasoning_without_duplicate():
+    """A tokenless current-turn core row must be backfilled, not duplicated."""
+    session_id = "issue3929_tokenless_core_row"
+    stream_id = "stream_tokenless_core_row"
+    repeated_text = "The current answer is already in the core transcript."
+    pending_started_at = 2_222
+    session = Session(
+        session_id=session_id,
+        title="Tokenless core row",
+        messages=[
+            {
+                "role": "user",
+                "content": "Continue",
+                "timestamp": pending_started_at,
+                "_source": "webui",
+                "attachments": [],
+            },
+            {"role": "assistant", "content": repeated_text},
+        ],
+        context_messages=[
+            {"role": "user", "content": "Continue", "timestamp": pending_started_at},
+            {"role": "assistant", "content": repeated_text},
+        ],
+        pending_user_message="Continue",
+        pending_started_at=pending_started_at,
+        pending_user_source="webui",
+        pending_attachments=[],
+        active_stream_id=stream_id,
+    )
+    append_run_event(
+        session_id,
+        stream_id,
+        "reasoning",
+        {"text": "Backfill the existing answer exactly once."},
+    )
+    append_run_event(session_id, stream_id, "token", {"text": repeated_text})
+
+    assert _append_journaled_partial_output(
+        session, stream_id, dedupe_existing=True,
+    ) is True
+
+    matching = [
+        message for message in session.messages
+        if message.get("role") == "assistant" and message.get("content") == repeated_text
+    ]
+    assert len(matching) == 1
+    assert matching[0].get("reasoning") == "Backfill the existing answer exactly once."
+
+
+
 def test_reasoning_backfill_is_idempotent_for_existing_recovered_text():
     session_id = "issue3929_reasoning_dedupe"
     stream_id = "stream_reasoning_dedupe"

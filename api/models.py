@@ -44,7 +44,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import build_active_turn_token, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -874,8 +874,18 @@ def _append_recovered_context_projection(
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
-            if _message_matches_pending_checkpoint(
-                context_messages[-1] if context_messages else None,
+            # Token-aware first (review fix 4): the raw checkpoint comparison
+            # below cannot see the session's active-turn token, so a tokened
+            # current row could be misjudged here. Route through the shared
+            # ownership helper and only fall back to the checkpoint predicate
+            # when the session has no authoritative token.
+            _projection_tail = context_messages[-1] if context_messages else None
+            if isinstance(_projection_tail, dict) and _message_owns_current_turn(
+                _projection_tail, session
+            ):
+                return
+            if _current_turn_token(session) is None and _message_matches_pending_checkpoint(
+                _projection_tail,
                 recovered.get('content'),
                 recovered.get('timestamp'),
                 recovered.get('_source'),
@@ -912,13 +922,17 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     _append_recovered_context_projection(session, context_messages, projected)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+def _append_recovered_pending_turn(session, *, timestamp: int | float | None = None) -> dict | None:
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
-    recovered_ts = int(time.time())
+    # Full-precision recovered timestamp: the recovered row IS the pending
+    # turn's identity, so an int() truncation here would persist a row that
+    # can no longer match its own checkpoint (500.9 -> 500) and would make
+    # the whole-second historical row win the ownership check instead.
+    recovered_ts: int | float = time.time()
     if isinstance(timestamp, (int, float)) and timestamp > 0:
-        recovered_ts = int(timestamp)
+        recovered_ts = timestamp
     recovered: dict = {
         'role': 'user',
         'content': session.pending_user_message,
@@ -927,6 +941,9 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     }
     pending_source = getattr(session, 'pending_user_source', None)
     stamp_message_source(recovered, pending_source)
+    current_turn_token = _current_turn_token(session)
+    if current_turn_token is not None:
+        recovered['_active_turn_token'] = current_turn_token
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
@@ -2339,15 +2356,32 @@ def _normalize_journal_recovery_text(value) -> str:
 def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
+    raw_message_timestamp = message.get('timestamp')
+    raw_expected_timestamp = timestamp
+    if raw_message_timestamp is None or raw_expected_timestamp is None:
+        # Missing timestamps must FAIL CLOSED toward appending: this predicate
+        # gates decisions that can suppress a row or clear pending state, and
+        # a lost user prompt is not recoverable while a duplicate row is.
+        # Legacy rows and replay paths may omit a timestamp; treating absence
+        # as a match let an unrelated turn consume the current prompt.
+        return False
     try:
-        message_timestamp = int(message.get('timestamp'))
-        expected_timestamp = int(timestamp)
+        message_timestamp = float(str(raw_message_timestamp))
+        expected_timestamp = float(str(raw_expected_timestamp))
     except (TypeError, ValueError):
+        return False
+    if not math.isfinite(message_timestamp) or not math.isfinite(expected_timestamp):
+        # NaN/inf must not compare equal to anything.
+        return False
+    if message_timestamp != expected_timestamp:
+        # Exact full-precision equality only. The historical whole-second
+        # allowance (int-vs-float same-second match) let a tokenless row at
+        # 500.0 win ownership of a 500.9 current turn after the callers
+        # truncated — suppressing the row and clearing pending state.
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
-        and message_timestamp == expected_timestamp
         and (message.get('_source') or 'webui') == (source or 'webui')
         and list(message.get('attachments') or []) == list(attachments or [])
     )
@@ -2360,6 +2394,86 @@ def _message_matches_pending_text(message, pending_text):
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
     )
+
+
+def _current_turn_token(session) -> str | None:
+    """Return the authoritative active-turn token for the session's pending turn."""
+    return build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
+
+
+def _message_owns_current_turn(message: dict, session) -> bool:
+    """Return True when ``message`` is part of the session's active pending turn.
+
+    The check is hierarchical:
+    * If the session has an authoritative active-turn token, require the
+      message to carry the same ``_active_turn_token``.  This is the
+      preferred signal because it is written by ``stamp_message_source``
+      at the single authoritative checkpoint and is stable across
+      recovery, eager-merge, and retry paths.
+    * When the token is unavailable (legacy sidecars, missing pending
+      state, or interrupted turns before token stamping), fall back to
+      the existing ``_message_matches_pending_checkpoint`` comparison
+      which checks text + timestamp + source + attachments.
+    * Pure text equality is intentionally **not** used here — identical
+      prompts in earlier turns must not be mistaken for the current turn.
+    """
+    if not isinstance(message, dict):
+        return False
+    current_token = _current_turn_token(session)
+    message_token = message.get('_active_turn_token')
+    if current_token is not None and message_token is not None:
+        return message_token == current_token
+    pending_text = _normalize_journal_recovery_text(getattr(session, 'pending_user_message', None))
+    if not pending_text:
+        return False
+    return _message_matches_pending_checkpoint(
+        message,
+        session.pending_user_message,
+        getattr(session, 'pending_started_at', None),
+        getattr(session, 'pending_user_source', None),
+        getattr(session, 'pending_attachments', None),
+    )
+
+
+def _pending_user_row_already_materialized(session, candidate, timestamp) -> bool:
+    """Return True only when ``candidate`` provably IS the pending user turn.
+
+    Used to decide whether ``_append_recovered_pending_turn`` may be skipped.
+    Historical text equality is deliberately NOT accepted: when an earlier turn
+    used the identical prompt, a text-only test treats that older row as the
+    pending turn, the current prompt is never materialized, and pending state is
+    then cleared — losing the current user prompt outright (CORE#3).
+
+    Accepted proofs, in order:
+
+    * the row carries the session's active-turn token;
+    * full pending-checkpoint identity (text + timestamp + source + attachments).
+
+    Anything less returns False so the caller PRESERVES/APPENDS the recovered
+    pending turn rather than suppressing it.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    current_token = _current_turn_token(session)
+    candidate_token = candidate.get('_active_turn_token')
+    if current_token is not None and candidate_token is not None:
+        # An explicit token conflict is authoritative negative evidence; do not
+        # let a coincidentally equal checkpoint override it.
+        return candidate_token == current_token
+    if _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        timestamp,
+        session.pending_user_source,
+        session.pending_attachments,
+    ):
+        return True
+    if current_token is not None and candidate_token == current_token:
+        return _message_matches_pending_text(candidate, session.pending_user_message)
+    return False
 
 
 def _latest_user_matches_pending_text(messages, pending_text):
@@ -2426,16 +2540,19 @@ def _find_existing_assistant_for_journal_content(
     session,
     content: str,
     *,
+    min_index: int | None = None,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
 ) -> int | None:
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
         return None
     messages = session.messages or []
+    start = 0 if min_index is None else max(0, min_index)
     stop = len(messages) if max_index is None else min(len(messages), max_index)
     substring_match = None
-    for idx in range(stop):
+    for idx in range(start, stop):
         if excluded_indexes and idx in excluded_indexes:
             continue
         message = messages[idx]
@@ -2443,6 +2560,10 @@ def _find_existing_assistant_for_journal_content(
             continue
         if message.get('_error'):
             continue
+        if stream_id:
+            msg_stream = message.get('_recovered_stream_id') or message.get('_stream_id')
+            if msg_stream and str(msg_stream) != str(stream_id):
+                continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
             continue
@@ -2459,23 +2580,14 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    current_turn_min_idx: int | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
-    Matching rule:
-
-    * If the existing tool card carries ``_recovered_stream_id``, that means a
-      previous journal-recovery run materialized it.  The retry can safely
-      collapse against it only when both stream ids match — otherwise a
-      legitimately-repeated tool (e.g. a second ``terminal: ls`` in a
-      different turn) would be dropped.
-    * If the existing tool card has no ``_recovered_stream_id`` (a live tool
-      card, or a tool card carried over from a core transcript that pre-dates
-      stream-id tagging), the legacy name+preview match still wins.  This
-      preserves the "core transcript already has this tool, don't duplicate
-      it" invariant the original repair path established.
-    * When ``stream_id`` is omitted, the helper degrades cleanly to its
-      pre-fix session-wide behaviour.
+    Matching is stream-scoped when ``stream_id`` is supplied.  For untagged
+    cards, a supplied current-turn boundary must prove ownership with a valid
+    assistant anchor; unknown ownership defaults to append so an old card
+    cannot suppress a current recovery.
     """
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
@@ -2490,14 +2602,64 @@ def _journal_tool_already_present(
         )
         if existing_preview != candidate_preview:
             continue
-        if candidate_stream is not None:
-            existing_stream = tool_call.get('_recovered_stream_id')
-            # A tool card explicitly tagged with a recovered_stream_id that
-            # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live or carried
-            # over from the core transcript) still match.
-            if existing_stream and str(existing_stream) != candidate_stream:
+        if candidate_stream is None:
+            return True
+        existing_stream = tool_call.get('_recovered_stream_id') or tool_call.get('_stream_id')
+        if existing_stream:
+            if str(existing_stream) == candidate_stream:
+                return True
+            continue
+        if current_turn_min_idx is None:
+            return True
+        anchor = tool_call.get('assistant_msg_idx')
+        if isinstance(anchor, bool) or not isinstance(anchor, int):
+            # Unknown/invalid anchor must NOT match (fail closed toward
+            # appending): an unprovable card cannot suppress the current
+            # recovered tool.
+            continue
+        if not (current_turn_min_idx <= anchor < len(session.messages or [])):
+            continue
+        anchor_message = (session.messages or [])[anchor]
+        if not isinstance(anchor_message, dict) or anchor_message.get('role') != 'assistant':
+            continue
+        anchor_token = anchor_message.get('_active_turn_token')
+        current_token = _current_turn_token(session)
+        pending_text = _normalize_journal_recovery_text(
+            getattr(session, 'pending_user_message', None)
+        )
+        if current_token is not None and anchor_token is not None:
+            if anchor_token != current_token:
                 continue
+        elif current_token is not None:
+            # Tokenless anchor vs an authoritative session token: proven only
+            # when pending turn metadata is gone (lazy retry after reopen,
+            # where the initial repair cleared pending identity) — mirroring
+            # the legacy boundary rule in content_match_owned_by_current_turn.
+            # With pending metadata present the tokenless anchor is unproven:
+            # append.
+            if pending_text:
+                continue
+        elif pending_text:
+            # No authoritative token but pending metadata exists: the owning
+            # user row must provably belong to the current turn.
+            if not _message_owns_current_turn(
+                next(
+                    (
+                        message
+                        for message in reversed((session.messages or [])[:anchor])
+                        if isinstance(message, dict) and message.get('role') == 'user'
+                    ),
+                    {},
+                ),
+                session,
+            ):
+                continue
+        # else: legacy replay mode (no authoritative token, no pending
+        # metadata — e.g. the lazy retry after reopen). The bounds check above
+        # already proved the anchor sits at/after the current-turn boundary
+        # hint, mirroring the content dedupe rule in
+        # content_match_owned_by_current_turn — accept as duplicate so the
+        # retry does not re-append the persisted card.
         return True
     return False
 
@@ -2667,15 +2829,28 @@ def _pending_recovery_turn_start(session) -> int | None:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return None
+    current_token = _current_turn_token(session)
     for idx in range(len(session.messages or []) - 1, -1, -1):
         message = session.messages[idx]
-        if _message_matches_pending_checkpoint(
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        message_token = message.get('_active_turn_token')
+        if current_token is not None and message_token is not None:
+            if message_token == current_token:
+                return idx
+            continue
+        # Token-aware (review fix 4): when the session has an authoritative
+        # token but this row does not, do NOT fall back to the raw checkpoint
+        # predicate — the token is the stronger signal and a tokenless older
+        # row must not claim the current turn. Checkpoint identity is only
+        # consulted when the session itself has no token (legacy sidecars).
+        if current_token is None and _message_matches_pending_checkpoint(
             message,
             pending_text,
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+        ):
             return idx
     return None
 
@@ -2825,6 +3000,93 @@ def _append_journaled_partial_output(
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
 
+    messages_list = session.messages or []
+    current_turn_min_idx = 0
+    current_turn_boundary_authoritative = False
+    # Derive the current-turn boundary from an AUTHORITATIVE ownership signal
+    # first (active-turn token, else the full pending checkpoint identity:
+    # text + timestamp + source + attachments).  Plain text equality is NOT an
+    # ownership proof: when an earlier turn used the identical prompt, a
+    # text-only backward scan walks PAST the current turn and pins the boundary
+    # at the older duplicate, letting that older turn's assistant row consume
+    # the current journal output (the CORE#1 data loss).
+    #
+    # Among CONSECUTIVE provably-owned user rows keep the EARLIEST: the WebUI
+    # can persist the same turn twice (an eager checkpoint plus a ``_recovered``
+    # echo), and rows between those copies still belong to this turn.  Stopping
+    # at the latest copy would exclude a legitimate same-turn core row from
+    # reasoning backfill.  Any older DUPLICATE prompt is separated from this run
+    # by an intervening assistant/user turn that is not owned, so the walk stops
+    # before reaching it.
+    for idx in range(initial_message_count - 1, -1, -1):
+        msg = messages_list[idx]
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        if _message_owns_current_turn(msg, session):
+            current_turn_min_idx = idx
+            current_turn_boundary_authoritative = True
+            continue
+        if current_turn_boundary_authoritative:
+            # Walked off the top of the owned run: previous idx was the start.
+            break
+        break
+    if not current_turn_boundary_authoritative:
+        # No provable current-turn user row.  Fall back to the latest user row
+        # as a non-authoritative hint so an in-turn match can still collapse,
+        # but leave ``current_turn_boundary_authoritative`` False so callers
+        # default to APPEND instead of collapsing on unproven ownership.
+        for idx in range(initial_message_count - 1, -1, -1):
+            msg = messages_list[idx]
+            if isinstance(msg, dict) and msg.get('role') == 'user':
+                current_turn_min_idx = idx
+                break
+
+    def content_match_owned_by_current_turn(existing_idx: int) -> bool:
+        """Return True when the assistant row at ``existing_idx`` provably
+        belongs to the current turn.
+
+        Every content match must clear this gate — including reasoning-free
+        ones.  The previous ``not reasoning or ...`` short-circuit skipped the
+        ownership check entirely whenever the journal produced no reasoning,
+        which let an older identical answer consume the current turn's output
+        and emit a false ``_pending_journal_recovery`` marker (CORE#1).
+
+        Ownership is proven two ways:
+
+        * the assistant row itself carries the active-turn token, or
+        * the row sits at/after an AUTHORITATIVE current-turn boundary and its
+          owning user row is provably the current turn.
+
+        When ownership cannot be proven, return False so the caller APPENDS
+        instead of collapsing.
+        """
+        messages = session.messages or []
+        if not (0 <= existing_idx < len(messages)):
+            return False
+        existing = messages[existing_idx]
+        current_token = _current_turn_token(session)
+        if current_token is not None and isinstance(existing, dict):
+            if existing.get('_active_turn_token') == current_token:
+                return True
+        owner_idx = None
+        for candidate_idx in range(existing_idx - 1, -1, -1):
+            candidate = messages[candidate_idx]
+            if isinstance(candidate, dict) and candidate.get('role') == 'user':
+                owner_idx = candidate_idx
+                break
+        if owner_idx is None:
+            return False
+        if _message_owns_current_turn(messages[owner_idx], session):
+            return True
+        # Legacy journal replay has no pending turn metadata.  In that mode,
+        # the latest user row is the only available ownership boundary; this
+        # preserves replay idempotence without weakening active-turn checks.
+        if not _normalize_journal_recovery_text(
+            getattr(session, 'pending_user_message', None)
+        ) and owner_idx >= current_turn_min_idx:
+            return True
+        return False
+
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
         messages = session.messages or []
         owner_idx = None
@@ -2837,13 +3099,7 @@ def _append_journaled_partial_output(
             return False
 
         pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-        if pending_text and not _message_matches_pending_checkpoint(
-            messages[owner_idx],
-            session.pending_user_message,
-            session.pending_started_at,
-            session.pending_user_source,
-            session.pending_attachments,
-        ):
+        if pending_text and not _message_owns_current_turn(messages[owner_idx], session):
             return False
 
         for candidate_idx in range(existing_idx + 1, initial_message_count):
@@ -2851,12 +3107,22 @@ def _append_journaled_partial_output(
             if not isinstance(candidate, dict) or candidate.get('role') != 'user':
                 continue
             candidate_text = _normalize_journal_recovery_text(candidate.get('content'))
-            candidate_matches_checkpoint = pending_text and _message_matches_pending_checkpoint(
-                candidate,
-                session.pending_user_message,
-                session.pending_started_at,
-                session.pending_user_source,
-                session.pending_attachments,
+            # Token-aware (review fix 4): route through the shared ownership
+            # helper so a tokened row is judged by its token, not by the raw
+            # checkpoint comparison which cannot see it. The raw checkpoint
+            # predicate only runs when the session has no authoritative token.
+            candidate_matches_checkpoint = pending_text and (
+                _message_owns_current_turn(candidate, session)
+                or (
+                    _current_turn_token(session) is None
+                    and _message_matches_pending_checkpoint(
+                        candidate,
+                        session.pending_user_message,
+                        session.pending_started_at,
+                        session.pending_user_source,
+                        session.pending_attachments,
+                    )
+                )
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -2895,11 +3161,18 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
+                    min_index=current_turn_min_idx,
                     max_index=initial_message_count,
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
                 )
                 if candidate_idx is None:
                     break
+                # Ownership gate applies to EVERY match, reasoning or not.
+                # Unproven ownership => fall through to append.
+                if not content_match_owned_by_current_turn(candidate_idx):
+                    search_excluded.add(candidate_idx)
+                    continue
                 if not reasoning or content_match_can_receive_reasoning(candidate_idx):
                     existing_idx = candidate_idx
                     break
@@ -2994,7 +3267,8 @@ def _append_journaled_partial_output(
 
     for event in events:
         event_name = str(event.get('event') or event.get('type') or '')
-        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        _raw_payload = event.get('payload')
+        payload: dict = _raw_payload if isinstance(_raw_payload, dict) else {}
         created_at = event.get('created_at') if isinstance(event.get('created_at'), (int, float)) else None
         if event_name == 'reasoning':
             text = str(
@@ -3029,16 +3303,26 @@ def _append_journaled_partial_output(
             flush_assistant()
             continue
         if event_name == 'tool':
-            anchor_idx = flush_assistant()
-            if anchor_idx is None:
-                anchor_idx = ensure_assistant_anchor(created_at)
+            # Resolve the tool identity and run dedupe BEFORE allocating an
+            # empty assistant anchor (review SILENT fix): ensure_assistant_anchor()
+            # used to run unconditionally before the dedupe check, so a
+            # tool-only replay whose card was already present still grew the
+            # transcript by one orphan empty assistant row while the tool
+            # count stayed flat. Pending text is still flushed first when it
+            # exists — only the anchor allocation is deferred.
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
-            if dedupe_existing and _journal_tool_already_present(
+            tool_already_present = dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
-            ):
-                current_assistant_idx = anchor_idx
+                current_turn_min_idx=current_turn_min_idx,
+            )
+            anchor_idx = flush_assistant()
+            if tool_already_present:
+                # Pending text (if any) was flushed above; a deduped tool must
+                # not allocate or claim an anchor of its own.
                 continue
+            if anchor_idx is None:
+                anchor_idx = ensure_assistant_anchor(created_at)
             recovered_tool_calls.append({
                 'name': name,
                 'preview': preview,
@@ -3412,24 +3696,44 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
+        # Display timestamp only — truncation is fine for chronology, but the
+        # ownership identity below uses the ORIGINAL full-precision
+        # pending_started_at (int() truncation let a tokenless historical row
+        # at the same whole second win the ownership check for a sub-second
+        # current turn, suppressing/losing the prompt), and the recovered row
+        # persists full precision too because its timestamp IS the turn's
+        # identity after pending state is cleared.
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
-            session.pending_user_message,
-            _recovered_ts,
-            session.pending_user_source,
-            session.pending_attachments,
+        _recovered_row_ts = (
+            session.pending_started_at
+            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0
+            else time.time()
         )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
+        # Ownership identity must use the ORIGINAL full-precision
+        # pending_started_at: truncating to int() here let a tokenless
+        # historical row at the same whole second (500.0) win the
+        # ownership check for a sub-second current turn (500.9),
+        # suppressing the recovered prompt and clearing pending state.
+        _latest_user = next(
+            (
+                message
+                for message in reversed(session.messages or [])
+                if isinstance(message, dict) and message.get('role') == 'user'
+            ),
+            None,
         )
+        _already_checkpointed = _pending_user_row_already_materialized(
+            session,
+            _latest_user,
+            session.pending_started_at,
+        )
+        _tail_user_already_checkpointed = _already_checkpointed
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            if not _already_checkpointed:
+                _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
             _append_journaled_partial_output(
                 session,
                 _stream_id,
@@ -3448,12 +3752,12 @@ def _apply_core_sync_or_error_marker(
             )
             return True
         if not _tail_user_already_checkpointed:
-            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
         else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
+                'timestamp': _recovered_row_ts,
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
@@ -3466,6 +3770,7 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
+                dedupe_existing=True,
                 terminal_recovery=_terminal_recovery,
             )
         )
@@ -3505,16 +3810,22 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-                _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
+            # Full-precision identity for the recovered pending row (see the
+            # display-vs-identity note in the first repair branch).
+            _recovered_row_ts = (
+                session.pending_started_at
+                if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0
+                else time.time()
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+            _last_user = None
+            for _m in reversed(session.messages or []):
+                if isinstance(_m, dict) and _m.get('role') == 'user':
+                    _last_user = _m
+                    break
+            _tail_user_already_checkpointed = _pending_user_row_already_materialized(
+                session,
+                _last_user,
+                session.pending_started_at,
             )
             if (
                 _pending_text
@@ -3524,7 +3835,7 @@ def _apply_core_sync_or_error_marker(
                     or _terminal_recovery is not None
                 )
             ):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+                _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
             recovered_output, terminal_error_recovered = (
                 _recover_journaled_output_and_terminal_error(
                     session,
@@ -3572,14 +3883,27 @@ def _apply_core_sync_or_error_marker(
     if session.pending_user_message:
         # Use the original send time if available so the recovered turn
         # appears in the correct chronological position.
+        # Display timestamp only — truncation is fine for chronology, but the
+        # ownership identity below uses the ORIGINAL full-precision
+        # pending_started_at (int() truncation let a tokenless historical row
+        # at the same whole second win the ownership check for a sub-second
+        # current turn, suppressing/losing the prompt), and the recovered row
+        # persists full precision too because its timestamp IS the turn's
+        # identity after pending state is cleared.
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        _recovered_row_ts = (
+            session.pending_started_at
+            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0
+            else time.time()
+        )
+        _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(
             session,
             _stream_id,
+            dedupe_existing=True,
             terminal_recovery=_terminal_recovery,
         )
     )
