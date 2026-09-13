@@ -11393,11 +11393,16 @@ function _buildProviderCard(p){
   const modelCount=Number.isFinite(p.models_total)
     ? p.models_total
     : (Array.isArray(p.models) ? p.models.length : 0);
-  const sourceLabel=p.key_source==='oauth'
-    ? t('providers_status_oauth')
-    : p.key_source==='config_yaml'
-      ? t('providers_status_configured')||'Configured'
-      : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
+  const isConfigured=p.is_self_hosted===true
+    ? typeof p.base_url==='string' && p.base_url.trim().length>0
+    : p.has_key;
+  const sourceLabel=p.is_self_hosted
+    ? (isConfigured ? t('providers_status_configured_label')||'Configured' : t('providers_status_not_configured_label'))
+    : p.key_source==='oauth'
+      ? t('providers_status_oauth')
+      : p.key_source==='config_yaml'
+        ? t('providers_status_configured')||'Configured'
+        : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
   const metaParts=[];
   if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
   metaParts.push(sourceLabel);
@@ -11412,7 +11417,7 @@ function _buildProviderCard(p){
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
     </div>
-    ${p.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    ${isConfigured?`<span class="provider-card-badge">${esc(t(p.is_self_hosted?'providers_status_configured_label':'providers_status_configured'))}</span>`:''}
     <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
   `;
   card.appendChild(header);
