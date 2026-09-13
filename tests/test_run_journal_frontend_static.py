@@ -1,6 +1,9 @@
 import json
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from tests.test_1694_terminal_cleanup_ownership import _attach_live_stream_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -421,8 +424,17 @@ def test_frontend_replay_cursor_uses_eventsource_last_event_id():
     assert "lastIndexOf(':')" in block
     assert "_lastRunJournalSeq=seq" in block
     assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
-    assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
-    assert "after_seq=0" not in MESSAGES_SRC
+
+    event_source = _attach_live_stream_source()
+    query = parse_qs(urlsplit(event_source["url"]).query)
+    assert query["after_seq"] == ["10491"]
+    assert query["after_event_id"] == ["stream-under-test:10491"]
+
+    missing_cursor_source = _attach_live_stream_source(include_server_cursor=False)
+    missing_cursor_query = parse_qs(urlsplit(missing_cursor_source["url"]).query)
+    assert "after_seq" not in missing_cursor_query
+    assert "after_event_id" not in missing_cursor_query
+    assert "replay" not in missing_cursor_query
 
 
 def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
