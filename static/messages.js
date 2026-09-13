@@ -2910,13 +2910,43 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(sceneMode==='hide_all_activity') return (hints&&hints.hidden_activity)||'hidden_activity';
     return row&&row.display_hint||'activity_row';
   }
-  function _renderAnchorLiveScene(){
-    if(!_anchorRegistry||!_isActiveSession()) return false;
-    if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
+  // --- live anchor scene paint coalescing ----------------------------------
+  // Reasoning deltas arrive at provider-token rate, and each one used to
+  // re-project and re-paint the whole live activity scene, bypassing the ~15fps
+  // budget _scheduleRender already gives the prose path. Every paint rebuilds
+  // the live rows and runs two forced-layout scroll restores, so on a long
+  // transcript the pileup saturated the main thread (a reported run measured
+  // 2,874 long tasks and 37s of blocked main-thread time). Coalesce live-scene
+  // paints onto one frame budget, keeping the trailing edge so the newest delta
+  // is always painted; settlement still renders the authoritative scene.
+  let _anchorSceneTimeoutHandle=null;
+  let _anchorSceneRafHandle=null;
+  let _anchorSceneLastPaintMs=0;
+  let _anchorScenePendingReasoning=null;
+  function _anchorScenePaintIntervalMs(){
+    return _shouldUseLiveProseFade()?33:66;
+  }
+  function _cancelPendingAnchorScenePaint(){
+    _anchorScenePendingReasoning=null;
+    // Timeout and rAF handles live in separate ID spaces, so cancelling must
+    // only touch the matching API — a wrong-API cancel could kill an unrelated
+    // timer/frame that happens to share the same numeric ID.
+    if(_anchorSceneTimeoutHandle!==null){
+      clearTimeout(_anchorSceneTimeoutHandle);
+      _anchorSceneTimeoutHandle=null;
+    }
+    if(_anchorSceneRafHandle!==null){
+      cancelAnimationFrame(_anchorSceneRafHandle);
+      _anchorSceneRafHandle=null;
+    }
+  }
+  function _paintAnchorLiveScene(){
     try{
-      return !!window._renderLiveAnchorActivitySceneForStream(streamId, activeSid, {
+      const rendered=!!window._renderLiveAnchorActivitySceneForStream(streamId, activeSid, {
         mode:_anchorSceneActiveMode(),
       });
+      _anchorSceneLastPaintMs=performance.now();
+      return rendered;
     }catch(err){
       if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
         _anchorShadowWarned=true;
@@ -2924,6 +2954,68 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       return false;
     }
+  }
+  // A declined scene paint still has to keep the newest reasoning text visible,
+  // and the scene owns that row — the in-place row update (#5720) is the only
+  // surface left for it. Without this the coalesced delta would never reach the
+  // DOM at all.
+  function _flushPendingAnchorReasoningRowUpdate(){
+    const pending=_anchorScenePendingReasoning;
+    _anchorScenePendingReasoning=null;
+    if(!pending||typeof _updateLiveAnchorReasoningRowForFallback!=='function') return;
+    const turn=$('liveAssistantTurn');
+    if(!turn) return;
+    try{
+      _updateLiveAnchorReasoningRowForFallback(turn,pending.text,{
+        anchorReasoningLocalId:pending.localId,
+        segmentSeq:pending.segmentSeq,
+        burstId:pending.burstId,
+        sessionId:activeSid,
+        streamId,
+      });
+    }catch(_){}
+  }
+  function _scheduleAnchorSceneRender(){
+    if(_anchorSceneTimeoutHandle!==null||_anchorSceneRafHandle!==null) return true;
+    const fire=()=>{
+      _anchorSceneRafHandle=null;
+      // A queued paint can outlive finalization or a session switch; writing a
+      // live scene into a settled/detached turn is the #631 Bug A class, so
+      // re-check ownership here instead of trusting the schedule.
+      if(_streamFinalized||!_isActiveSession()) return;
+      if(_paintAnchorLiveScene()) _anchorScenePendingReasoning=null;
+      else _flushPendingAnchorReasoningRowUpdate();
+    };
+    const waitMs=_anchorScenePaintIntervalMs()-(performance.now()-_anchorSceneLastPaintMs);
+    if(waitMs>0){
+      _anchorSceneTimeoutHandle=setTimeout(()=>{
+        _anchorSceneTimeoutHandle=null;
+        _anchorSceneRafHandle=requestAnimationFrame(fire);
+      },waitMs);
+    }else{
+      _anchorSceneRafHandle=requestAnimationFrame(fire);
+    }
+    return true;
+  }
+  // Paint the live anchor scene, coalescing rapid stream deltas. Returns whether
+  // the anchor scene owns the live turn — the value callers use to decide that no
+  // visible fallback surface is needed. A coalesced call returns true: the
+  // registry already holds the row and a paint is queued. `pendingReasoning` is
+  // the newest reasoning text, kept only so a declined paint can still update
+  // that row in place.
+  function _renderAnchorLiveScene(pendingReasoning){
+    if(!_anchorRegistry||!_isActiveSession()) return false;
+    if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
+    // Only coalesce once the anchor scene already owns the live turn: the first
+    // paint of a stream stays synchronous so ownership — and the caller's
+    // fallback decision — comes from a real render. hide_all_activity never
+    // paints at all, so its callers must keep seeing the synchronous result.
+    const coalesce=_anchorSceneActiveMode()!=='hide_all_activity'
+      &&typeof isLiveAnchorActivitySceneOwner==='function'
+      &&isLiveAnchorActivitySceneOwner(streamId);
+    if(!coalesce) return _paintAnchorLiveScene();
+    if(pendingReasoning) _anchorScenePendingReasoning=pendingReasoning;
+    return _scheduleAnchorSceneRender();
   }
   function _projectLiveAnchorActivityScene(){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
@@ -4113,7 +4205,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:options.sealed?'completed':'running',
         payload:{text:clean,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
-      return _renderAnchorLiveScene()?replaced:null;
+      // Hand the newest text to the coalesced paint: if that paint declines, the
+      // in-place row update keeps the thinking row current instead of stale.
+      return _renderAnchorLiveScene({
+        localId,
+        text:clean,
+        segmentSeq,
+        burstId:_currentActivityBurstId,
+      })?replaced:null;
     }
     const renderOutcome={rendered:false};
     _applyToAnchor('reasoning',{
@@ -4595,6 +4694,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeSilentPrefixChars=0;
   }
   function _cancelAnimationFramePendingStreamRender(){
+    // Every terminal exit (done / cancel / error / recovery / teardown) routes
+    // here, so the coalesced anchor-scene paint is released with the prose
+    // render — a queued paint must never land after the transcript settles.
+    _cancelPendingAnchorScenePaint();
     if(_pendingRafHandle===null) return;
     cancelAnimationFrame(_pendingRafHandle);
     clearTimeout(_pendingRafHandle);

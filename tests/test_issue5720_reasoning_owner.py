@@ -385,8 +385,30 @@ global.document={
 global.location={href:'http://test.local/'};
 global.CSS={escape:value=>String(value)};
 global.requestAnimationFrame=fn=>{fn();return 1;};
-global.setTimeout=()=>1;
-global.clearTimeout=()=>{};
+// The reasoning path defers its live-scene rebuild to the next frame budget
+// (static/messages.js _scheduleAnchorSceneRender), so a stub that never delivers
+// timers would model a browser whose timers are dead. Model a virtual clock and
+// deliver the timers a real browser would have fired by the next few frames;
+// long-horizon timers (e.g. the 10-minute anchor registry cleanup) stay pending.
+let __clockMs=0;
+global.performance={now:()=>__clockMs};
+const __timers=[];
+let __timerSeq=0;
+global.setTimeout=(fn,ms)=>{ __timerSeq+=1; __timers.push({id:__timerSeq,fn,at:__clockMs+(Number(ms)||0)}); return __timerSeq; };
+global.clearTimeout=id=>{ const i=__timers.findIndex(entry=>entry.id===id); if(i>=0) __timers.splice(i,1); };
+global.__drainFrames=(maxAdvanceMs=250)=>{
+  for(let guard=0;guard<50;guard+=1){
+    let next=null;
+    for(const entry of __timers){
+      if(entry.at>__clockMs+maxAdvanceMs) continue;
+      if(!next||entry.at<next.at||(entry.at===next.at&&entry.id<next.id)) next=entry;
+    }
+    if(!next) return;
+    __timers.splice(__timers.indexOf(next),1);
+    __clockMs=Math.max(__clockMs,next.at);
+    next.fn();
+  }
+};
 
 const emptyState=new FakeElement('div');
 const msgInner=new FakeElement('div');
@@ -523,7 +545,13 @@ class FakeEventSource {
   static CONNECTING=0;
   constructor(){ this.listeners=Object.create(null);this.readyState=1;FakeEventSource.instances.push(this); }
   addEventListener(name,fn){ (this.listeners[name]||(this.listeners[name]=[])).push(fn); }
-  emit(name,data){ for(const fn of this.listeners[name]||[]) fn({data:JSON.stringify(data),lastEventId:''}); }
+  emit(name,data){
+    // A delta arrives, then the browser gets its frames before the page is
+    // observed: advance the virtual clock and deliver due timers.
+    __clockMs+=40;
+    for(const fn of this.listeners[name]||[]) fn({data:JSON.stringify(data),lastEventId:''});
+    global.__drainFrames();
+  }
   close(){ this.readyState=2; }
 }
 global.EventSource=FakeEventSource;
