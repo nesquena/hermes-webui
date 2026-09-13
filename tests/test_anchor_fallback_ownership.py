@@ -551,6 +551,13 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         global.performance = {{ now: () => 1 }};
         global.requestAnimationFrame = (fn) => fn();
         global.setTimeout = (fn) => fn();
+        // #7040: user rows now bound their canonical text through
+        // _setBoundedRawText() instead of a direct dataset.rawText=
+        // assignment, so the full payload never serializes into the DOM/HTML
+        // cache. Covered on its own in test_workspace_display_prefix.py --
+        // stub it here since this test is only exercising anchor-ownership
+        // gating, not raw-text bounding.
+        function _setBoundedRawText(row, canonical) {{ if (row) row.dataset.rawText = String(canonical || ''); }}
         function $(id) {{ return elements[id] || null; }}
         function isTransparentStream() {{ return false; }}
         function isCompactWorklogMode() {{ return true; }}
