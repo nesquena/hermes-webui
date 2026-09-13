@@ -9630,6 +9630,33 @@ _lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
 _lineage_display_cache_lock = threading.Lock()
 
 
+def _snapshot_parent_replays_nothing(parent_meta) -> bool:
+    """Return True when a snapshot ancestor provably contributes no visible row.
+
+    ``merge_session_messages_append_only`` treats a truncation watermark of 0
+    as the truncate-to-empty sentinel (#2914) and returns ``[]`` outright. The
+    lineage walk seeds its accumulator with ``merged = []``, so merging such an
+    ancestor resets the stitched prefix to empty on every hop: the ancestor's
+    messages can never reach the display list.
+
+    Detecting that from the cheap metadata prefix lets the walk stop before
+    ``Session.load()`` parses a multi-MB messages array whose rows are
+    guaranteed to be discarded. On a 9-hop / 167MB lineage this was ~85% of a
+    9.87s cold ``GET /api/session``.
+
+    Fail-closed: any ancestor that is not a snapshot, or whose watermark is
+    absent/non-zero/unparseable, returns False and takes the normal full-load
+    path. Only the exact sentinel value short-circuits.
+    """
+    if not getattr(parent_meta, "pre_compression_snapshot", False):
+        return False
+    watermark = getattr(parent_meta, "truncation_watermark", None)
+    if watermark is None:
+        return False
+    watermark_timestamp = _message_timestamp_as_float({"timestamp": watermark})
+    return watermark_timestamp == 0
+
+
 def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
@@ -9688,6 +9715,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     seen = {str(getattr(session, "session_id", "") or "")}
     parent_sigs: list[tuple[str, tuple]] = []
     parent_signatures_complete = True
+    neutralized_ancestor = False
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id:
@@ -9697,6 +9725,25 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             break
         parent_path = SESSION_DIR / f"{parent_id}.json"
         parent_sig_before = _sidecar_stat_signature(parent_path)
+        # perf: decide whether this ancestor can contribute BEFORE paying for
+        # its messages array. A snapshot parent whose truncation watermark is
+        # the truncate-to-empty sentinel replays nothing: the merge below takes
+        # the `watermark_timestamp == 0` branch in
+        # merge_session_messages_append_only() and returns [], resetting the
+        # accumulator on every hop. Loading tens of MB of JSON to produce zero
+        # visible rows was the dominant cost of a cold GET /api/session on a
+        # deep lineage (measured 9.87s vs 0.04s warm; ~85% of it ancestor
+        # loads). load_metadata_only() reads only the JSON prefix (~100x
+        # cheaper) and carries the same watermark/snapshot fields.
+        parent_meta = Session.load_metadata_only(parent_id)
+        if parent_meta is not None and _snapshot_parent_replays_nothing(parent_meta):
+            # Neutralized ancestor: it contributes no visible row, so stop the
+            # walk here rather than loading it and every ancestor above it.
+            # Provenance stays incomplete on purpose — the ancestry was not
+            # fully verified, so this result must never enter the cache.
+            neutralized_ancestor = True
+            parent_signatures_complete = False
+            break
         parent = Session.load(parent_id)
         if not parent:
             parent_signatures_complete = False
@@ -9729,7 +9776,20 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent_signatures_complete = False
 
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        own_messages = list(getattr(session, "messages", []) or [])
+        if not neutralized_ancestor:
+            return own_messages
+        # The walk stopped on a neutralized ancestor. The unoptimised path
+        # would still have run the child through the final append-only merge,
+        # which dedupes rows against the (empty) stitched prefix. Skipping that
+        # merge would hand back raw sidecar rows and change the visible output
+        # (measured: 6747 rows instead of 6564 on a real lineage). Reproduce it
+        # exactly against the empty prefix the ancestors would have produced.
+        return merge_session_messages_append_only(
+            [],
+            own_messages,
+            truncation_watermark=None,
+        )
 
     merged = []
     for segment in reversed(segments):
