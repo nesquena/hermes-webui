@@ -396,6 +396,78 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert all(len(item) == 3 and item[2] for item in events)
 
 
+def test_gateway_writeback_preserves_context_and_display_transcript(tmp_path, monkeypatch):
+    """Gateway settlement must not rewrite either durable history projection."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            assert "tool_calls" in s.messages[0], (
+                "request execution must not mutate the durable/display transcript before writeback"
+            )
+            yield b'data: {"choices":[{"delta":{"content":"new answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        streaming,
+        "_load_webui_prefill_context",
+        lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []},
+    )
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    s.messages = [
+        {
+            "role": "assistant",
+            "content": "visible answer",
+            "tool_calls": [
+                {
+                    "id": "foreign-call",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    s.context_messages = []
+    stream_id = "stream-gateway-orphan-context-purity"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "next question"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    display_before = json.dumps(s.messages, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    STREAMS[stream_id] = create_stream_channel()
+
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            s.session_id,
+            "next question",
+            "test-model",
+            str(tmp_path),
+            stream_id,
+            [],
+        )
+    finally:
+        STREAMS.pop(stream_id, None)
+
+    saved = models.get_session(s.session_id)
+    assert "tool_calls" in saved.context_messages[0]
+    assert json.dumps(saved.messages[0:1], sort_keys=True, ensure_ascii=False, separators=(",", ":")) == display_before
+
+
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
     """Gateway terminal errors must survive an empty assistant stream."""
     from unittest.mock import MagicMock
