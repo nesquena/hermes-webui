@@ -7823,7 +7823,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                             pending_names[tid] = part.get('name', '')
                             pending_args[tid] = part.get('input', {})
                             pending_asst_idx[tid] = msg_idx
-            for tc in m.get('tool_calls', []):
+            for tc in m.get('tool_calls') or []:
                 if not isinstance(tc, dict):
                     continue
                 tid = tc.get('id', '') or tc.get('call_id', '')
