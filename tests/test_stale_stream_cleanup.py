@@ -76,10 +76,10 @@ def test_session_load_clears_stale_stream_before_response():
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():
-    stale_comment_pos = ROUTES_SRC.index("# Stale stream id from a previous run; clear and continue.")
-    cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", stale_comment_pos)
-    stream_id_pos = ROUTES_SRC.index("stream_id = uuid.uuid4().hex", cleanup_pos)
-    assert stale_comment_pos < cleanup_pos < stream_id_pos
+    cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)")
+    lock_pos = ROUTES_SRC.index("with session_lock:", cleanup_pos)
+    admission_pos = ROUTES_SRC.index("_commit_chat_start_admission(", lock_pos)
+    assert cleanup_pos < lock_pos < admission_pos
 
 
 def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_path):

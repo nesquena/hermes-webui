@@ -871,12 +871,9 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
         assert response["session_id"] == session.session_id
         assert len(gateway_reads) == 1
         assert revision_checks == ([] if gateway_owned else [True])
-        expected_worker = (
-            routes._run_gateway_chat_streaming
-            if gateway_owned
-            else routes._run_agent_streaming
-        )
-        assert worker_targets == [expected_worker]
+        # The route owns the acceptance gate; the real backend target remains
+        # the first trampoline argument and is not passed gate controls.
+        assert worker_targets == [routes._run_chat_start_worker]
     finally:
         stream_id = str(response.get("stream_id") or "")
         with routes.STREAMS_LOCK:

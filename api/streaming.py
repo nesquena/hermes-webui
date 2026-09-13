@@ -12573,7 +12573,8 @@ def _run_agent_streaming(
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        from api.config import add_pending_goal_continuation
+                        add_pending_goal_continuation(session_id)
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,

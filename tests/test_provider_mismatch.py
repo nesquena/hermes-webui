@@ -1077,8 +1077,8 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     assert payload["effective_model_provider"] == "openai-codex"
     assert session.model == "gpt-5.5"
     assert session.model_provider == "openai-codex"
-    assert captured_thread["args"][2] == "gpt-5.5"
-    assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
+    assert captured_thread["args"][1][2] == "gpt-5.5"
+    assert captured_thread["args"][2]["model_provider"] == "openai-codex"
     assert save_calls[-1]["model_provider"] == "openai-codex"
 
 

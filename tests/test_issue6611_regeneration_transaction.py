@@ -207,21 +207,20 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
 
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
     before = copy.deepcopy(session.__dict__)
-    with pytest.raises(RuntimeError, match="workspace failed") as raised:
-        routes._start_regeneration_stream_locked(
-            session,
-            turn=plan.turn,
-            workspace="C:/workspace",
-            model="model",
-            model_provider="provider",
-            normalized_model=False,
-            diag=None,
-            goal_related=False,
-            source="webui",
-            moa_config=None,
-            backend_is_gateway=False,
-        )
-    assert raised.value._regeneration_accepted is True
+    response = routes._start_regeneration_stream_locked(
+        session,
+        turn=plan.turn,
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=False,
+    )
+    assert response["session_id"] == session.session_id
     assert session.active_stream_id is not None
     assert session.__dict__ != before
 

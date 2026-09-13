@@ -1331,7 +1331,7 @@ def _process_one(evt: dict) -> None:
             seen.add(process_id)
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
-    _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
+    _cfg.add_pending_bg_task_completion(session_id)
     # Mark the event consumed in the agent's process registry so the REAL
     # merged PR #2279's next-turn drain
     # (api/streaming._drain_webui_process_notifications) treats this process_id
@@ -1512,7 +1512,7 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
         # real delivery is the prompt(s) we just claimed. Discard it now that
         # the deferred wakeups are owned by this teardown.
         try:
-            _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
+            _cfg.discard_pending_bg_task_completion(session_id)
         except Exception:
             logger.debug(
                 "PENDING discard failed for session %s", session_id, exc_info=True

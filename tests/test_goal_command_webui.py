@@ -633,9 +633,10 @@ def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_pat
     )
 
     assert response["stream_id"] == "goal-stream-id"
-    assert captured["target"] is routes._run_gateway_chat_streaming
-    assert captured["kwargs"]["goal_related"] is True
-    assert captured["kwargs"]["model_provider"] == "openai-codex"
+    assert captured["target"] is routes._run_chat_start_worker
+    assert captured["args"][0] is routes._run_gateway_chat_streaming
+    assert captured["args"][2]["goal_related"] is True
+    assert captured["args"][2]["model_provider"] == "openai-codex"
     assert captured["started"] is True
 
 
