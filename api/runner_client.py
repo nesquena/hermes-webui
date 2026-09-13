@@ -62,6 +62,7 @@ class HttpRunnerClient:
             "profile": request.profile,
             "provider": request.provider,
             "model": request.model,
+            "reasoning_effort": request.reasoning_effort,
             "toolsets": list(request.toolsets or []),
             "source": request.source,
             "metadata": dict(request.metadata or {}),
