@@ -3282,7 +3282,7 @@ function _messageComparableText(m){
 }
 
 function _stripAttachedFilesMarker(text){
-  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+  return String(text||'').replace(/\n\n\[Attached files: [^\r\n]+\]$/,'').trim();
 }
 
 function _stripForcedSkillEnvelope(text){
@@ -7284,7 +7284,7 @@ function _sessionDisplayTitle(s){
   const rawTitle=String((s&&(s.display_title||s._state_db_title||s.title))||'Untitled').trim();
   const strip=(typeof _stripAttachedFilesMarker==='function')
     ? _stripAttachedFilesMarker
-    : (text)=>String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+    : (text)=>String(text||'').replace(/\n\n\[Attached files: [^\r\n]+\]$/,'').trim();
   const title=strip(rawTitle);
   return title||'Untitled';
 }

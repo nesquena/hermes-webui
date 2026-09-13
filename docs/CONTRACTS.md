@@ -23,6 +23,12 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`ARCHITECTURE.md`, Chat attachment handoff](../ARCHITECTURE.md#chat-attachment-handoff):
+  fresh `/api/chat/start` requests use structured `attachments`; the server
+  constructs reference text before persistence and dispatch. Attachment-only
+  requests are accepted, invalid references reject the whole request, and
+  regeneration reuses the stored turn without formatting it again.
+
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata

@@ -358,6 +358,36 @@ POST /api/approval/respond:
 
 ### 4.6 File Upload Parser
 
+#### Chat attachment handoff
+
+For a fresh `POST /api/chat/start`, clients send their message text and the
+structured `attachments` array returned by uploading. Each ordinary file has
+`name` (or `filename`), `path`, `mime`, `size` and `is_image`. The path is the
+server-side location, not a client filesystem path. Extracted archives may
+supply a directory path. The existing limit of 20 attachments applies.
+
+`api.upload.build_chat_attachment_message` resolves references against the
+selected workspace or configured attachment inbox, rejects unavailable or
+out-of-scope references, and constructs the model-facing text before the turn
+is checkpointed, journalled or dispatched. It does not read file bytes.
+
+- Text plus attachments becomes `text` followed by `[Attached files: ...]`.
+- Attachments without text become `Uploaded: <filenames>` followed by the same
+  `[Attached files: ...]` suffix, keeping paths out of the ordinary display.
+- Text without attachments retains its existing behaviour.
+- Neither text nor usable attachments returns a client error. A request with
+  an invalid attachment is rejected as a whole, not run with a partial list.
+
+The browser no longer builds these strings. It still uploads files, submits
+attachment objects and renders attachment cards. Native image embedding keeps
+using the structured metadata; text-mode agents receive paths for file/vision
+tools. Regeneration reuses the already formatted retained turn, as do recovery
+and replay. No legacy-client suffix detection or history migration is performed.
+This contract applies to chat-start, not the separate steer or synchronous-chat
+endpoints. Existing tool access checks still apply when a file is consumed.
+
+#### Multipart parsing
+
 parse_multipart(rfile, content_type, content_length):
     - Reads all content_length bytes from rfile into memory (up to MAX_UPLOAD_BYTES, default 20MB, env-overridable via HERMES_WEBUI_MAX_UPLOAD_MB)
     - Extracts boundary from Content-Type header

@@ -24159,7 +24159,7 @@ def _handle_chat_start(handler, body, diag=None):
             attachments = None
         diag.stage("normalize_message") if diag else None
         msg = str(msg if msg is not None else body.get("message", "")).strip()
-        if not msg:
+        if not msg and not (body.get("attachments") or attachments):
             return bad(handler, "message is required")
         diag.stage("normalize_attachments") if diag else None
         if attachments is None:
@@ -24187,6 +24187,15 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, str(e), 500)
         except ValueError as e:
             return bad(handler, str(e))
+        if regeneration is None:
+            from api.upload import build_chat_attachment_message
+
+            try:
+                msg = build_chat_attachment_message(msg, attachments, workspace)
+            except ValueError as exc:
+                return bad(handler, str(exc))
+            if not msg:
+                return bad(handler, "message is required")
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -24378,7 +24387,8 @@ def _normalize_chat_attachments(raw_attachments):
     for item in raw_attachments:
         if isinstance(item, dict):
             name = str(item.get("name") or item.get("filename") or "").strip()
-            path = str(item.get("path") or "").strip()
+            raw_path = item.get("path")
+            path = raw_path.strip() if isinstance(raw_path, str) else ""
             mime = str(item.get("mime") or "").strip()
             att = {"name": name or path, "path": path, "mime": mime}
             size = item.get("size")

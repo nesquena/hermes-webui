@@ -7,19 +7,105 @@ MESSAGES_JS = ROOT / "static" / "messages.js"
 UPLOAD_PY = ROOT / "api" / "upload.py"
 
 
-def test_image_uploads_use_server_path_in_attached_files_context():
-    """The agent text context must include real uploaded paths for images.
+def test_browser_submits_raw_text_and_structured_uploads():
+    """Execute formatting, admission and the production request expression in Node."""
+    import json
+    import subprocess
 
-    /api/upload returns an absolute attachment path. The browser also sends the
-    structured attachment payload to /api/chat/start, but text/tool-mode agents
-    still rely on the literal ``[Attached files: ...]`` suffix. Images must not
-    be downgraded to bare filenames there, otherwise tools like vision_analyze
-    cannot open the uploaded file immediately.
-    """
     src = MESSAGES_JS.read_text(encoding="utf-8")
+    formatting = src[src.index('  const uploadedNames='):src.index('  // Composer textarea + persisted draft were already')]
+    start = src.index("JSON.stringify({", src.index("const startData=await api('/api/chat/start'"))
+    end = src.index('})});', start) + 2
+    request = src[start:end]
+    script = '''
+const uploaded=[{name:'photo.jpg',path:'/uploads/photo.jpg',mime:'image/jpeg',size:12,is_image:true}];
+const activeSid='session';
+const S={session:{workspace:'/workspace'},activeProfile:'default'};
+const _modelState={model:'model',model_provider:'provider'};
+const _explicitPick=false, _pendingMoaConfig=null, _forcedSkillDirectivePending=null;
+const statuses=[];
+function setComposerStatus(text){statuses.push(text);}
+async function build(text){
+''' + formatting + '\nreturn ' + request + ';\n}\n' + '''
+(async()=>{
+const requests=await Promise.all(['Describe this',''].map(async text=>{
+  const body=await build(text); return body ? JSON.parse(body) : null;
+}));
+uploaded.length=0;
+const empty=await build('');
+process.stdout.write(JSON.stringify({requests,statuses,emptyRejected:empty===undefined}));
+})();
+'''
+    result = subprocess.run(['node', '-e', script], cwd=ROOT, text=True,
+                            capture_output=True, check=True)
+    output = json.loads(result.stdout)
+    requests = output['requests']
+    assert all(body is not None for body in requests), output
+    assert output['statuses'] == ['Nothing to send']
+    assert output['emptyRejected'] is True
+    assert [body['message'] for body in requests] == ['Describe this', '']
+    for body in requests:
+        assert body['attachments'] == [dict(name='photo.jpg', path='/uploads/photo.jpg',
+                                           mime='image/jpeg', size=12, is_image=True)]
 
-    assert "uploadedPaths=uploaded.map(u=>u&&u.is_image?" not in src
-    assert "uploadedPaths=uploaded.map(u=>u&&u.path?u.path" in src
+
+def test_attachment_only_text_matches_optimistic_display_and_title(tmp_path, monkeypatch):
+    """The stored turn must reconcile with the filename-only optimistic row."""
+    import json
+    import subprocess
+    from api.models import title_from
+    from api.upload import build_chat_attachment_message
+
+    monkeypatch.setenv('HERMES_WEBUI_ATTACHMENT_DIR', str(tmp_path))
+    path = tmp_path / 'photo.jpg'
+    path.write_bytes(b'image fixture')
+    canonical = build_chat_attachment_message('', [{'name': path.name, 'path': str(path)}], str(tmp_path))
+    functions = []
+    for filename, name in [('ui.js', '_stripAttachedFilesMarkerForDisplay'),
+                           ('sessions.js', '_stripAttachedFilesMarker'),
+                           ('sessions.js', '_stripForcedSkillEnvelope'),
+                           ('sessions.js', '_normalizeUserTranscriptText')]:
+        src = (ROOT / 'static' / filename).read_text(encoding='utf-8')
+        start = src.index(f'function {name}(')
+        end = src.index('\n}', start) + 2
+        functions.append(src[start:end])
+    script = '\n'.join(functions) + '\nconst canonical=' + json.dumps(canonical) + ';\n' + '''
+process.stdout.write(JSON.stringify({
+ display:_stripAttachedFilesMarkerForDisplay(canonical),
+ reconciles:_normalizeUserTranscriptText(canonical)===_normalizeUserTranscriptText('Uploaded: photo.jpg')
+}));
+'''
+    result = subprocess.run(['node', '-e', script], cwd=ROOT, text=True,
+                            capture_output=True, check=True)
+    observed = json.loads(result.stdout)
+    assert observed == {'display': 'Uploaded: photo.jpg', 'reconciles': True}
+    assert title_from([{'role': 'user', 'content': canonical}]) == 'Uploaded: photo.jpg'
+
+
+def test_marker_punctuation_in_path_stays_hidden_from_display():
+    """A valid filename must not leak the model-only suffix into the transcript."""
+    import json
+    import subprocess
+
+    from api.models import title_from
+    from api.streaming import _strip_title_attachment_suffix
+
+    text = 'Describe this\n\n[Attached files: /uploads/photo [1].jpg]'
+    assert title_from([{'role': 'user', 'content': text}]) == 'Describe this'
+    assert _strip_title_attachment_suffix(text) == 'Describe this'
+    for filename, function in [('ui.js', '_stripAttachedFilesMarkerForDisplay'),
+                               ('sessions.js', '_stripAttachedFilesMarker')]:
+        src = (ROOT / 'static' / filename).read_text(encoding='utf-8')
+        start = src.index(f'function {function}(')
+        end = src.index('\n}', start) + 2
+        script = src[start:end] + f'''
+const paths=['/uploads/résumé 1.jpg','/uploads/photo [1].jpg'];
+process.stdout.write(JSON.stringify(paths.map(path =>
+  {function}('Describe this\\n\\n[Attached files: '+path+']'))));
+'''
+        result = subprocess.run(['node', '-e', script], cwd=ROOT, text=True,
+                                capture_output=True, check=True)
+        assert json.loads(result.stdout) == ['Describe this', 'Describe this']
 
 
 def test_attached_files_context_is_hidden_from_user_message_display():
@@ -38,7 +124,6 @@ def test_attached_files_context_is_hidden_from_sidebar_titles():
 
     assert "function _stripAttachedFilesMarker" in sessions_src
     assert "? _stripAttachedFilesMarker" in sessions_src
-    assert "replace(/\\n\\n\\[Attached files: [^\\]]+\\]$/" in sessions_src
 
 
 def test_server_provisional_titles_strip_attached_files_context():
