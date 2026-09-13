@@ -77,7 +77,7 @@ class TestSlashCommandRegistration:
 
 
 class TestSlashCommandHandlers:
-    """The three handler functions must guard properly and call cancelStream where appropriate."""
+    """The three handler functions must guard properly."""
 
     def test_cmd_queue_handles_idle_state(self):
         """/queue when idle now sends the message normally instead of showing an
@@ -88,12 +88,13 @@ class TestSlashCommandHandlers:
         body = COMMANDS_JS[idx:idx + 600]
         assert "if(!S.busy)" in body, "/queue must have an if(!S.busy) guard that routes to send()"
 
-    def test_cmd_interrupt_calls_cancel_stream(self):
+    def test_cmd_interrupt_delegates_to_redirect_first_helper(self):
         idx = COMMANDS_JS.find("async function cmdInterrupt(")
         assert idx >= 0
-        body = COMMANDS_JS[idx:idx + 1300]  # expanded: idle-fallback block added before the busy path
-        assert "queueSessionMessage" in body, "/interrupt must queue the new message before cancelling"
-        assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
+        body = _source_between(COMMANDS_JS, "async function cmdInterrupt(", "\n/**\n * /steer")
+        assert "_tryInterrupt" in body
+        assert "queueSessionMessage" not in body
+        assert "cancelStream" not in body
 
     def test_cmd_steer_delegates_to_try_steer(self):
         """/steer delegates to _trySteer which calls /api/chat/steer.
@@ -123,25 +124,19 @@ class TestSlashCommandHandlers:
 # ── send() busy branch ───────────────────────────────────────────────────
 
     def test_slash_commands_clear_pending_files(self):
-        """Queue/interrupt clear S.pendingFiles after enqueuing; steer failure
-        preserves staged files so the user can choose the next explicit action.
-
-        cmdQueue and cmdInterrupt call queueSessionMessage themselves and clear
-        S.pendingFiles directly. cmdSteer delegates to _trySteer. _trySteer no
-        longer clears files on failure because it no longer falls back to
-        cancel-and-queue behavior.
-        """
-        # cmdQueue and cmdInterrupt clear pendingFiles directly
-        for fn_name in ("cmdQueue", "cmdInterrupt"):
-            idx = COMMANDS_JS.find(f"function {fn_name}(")
-            assert idx >= 0, f"{fn_name} not found"
-            body = COMMANDS_JS[idx:idx + 800]
-            assert "S.pendingFiles=[]" in body, (
-                f"{fn_name} must clear S.pendingFiles after queueSessionMessage"
-            )
-            assert "renderTray()" in body, (
-                f"{fn_name} must call renderTray() after clearing pendingFiles"
-            )
+        """Queue clears directly; interrupt preserves ownership in its helper."""
+        # cmdQueue clears its payload directly; interrupt delegates to one helper.
+        idx = COMMANDS_JS.find("function cmdQueue(")
+        assert idx >= 0, "cmdQueue not found"
+        body = COMMANDS_JS[idx:idx + 800]
+        assert "S.pendingFiles=[]" in body
+        assert "renderTray()" in body
+        interrupt_body = _source_between(COMMANDS_JS, "async function _tryInterrupt(", "\n/**\n * /steer")
+        assert "'/api/chat/interrupt'" in interrupt_body
+        assert "if(!filesSnapshot.length&&ownerStreamId)" in interrupt_body
+        assert "queueSessionMessage(ownerSid" in interrupt_body
+        assert "cancelStream(cancelReason)" in interrupt_body
+        assert "S.pendingFiles=[]" not in interrupt_body
         # cmdSteer delegates to _trySteer; the helper clears files only on
         # accepted steer, and (post-#5459-gate) removes ONLY the delivered files
         # by identity so files staged during the upload await are preserved. The
@@ -296,24 +291,19 @@ class TestSendBusyBranchDispatch:
             "send() must read window._defaultMessageMode in the S.busy branch"
         )
 
-    def test_send_calls_cancel_stream_on_interrupt(self):
+    def test_send_interrupt_uses_shared_helper(self):
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0
         send_end = MESSAGES_JS.find("const LIVE_STREAMS=", send_idx)
         assert send_end > send_idx, "could not bound send() body"
         send_body = MESSAGES_JS[send_idx:send_end]
-        # The interrupt branch must call cancelStream
-        assert "cancelStream" in send_body
-        # And queue before cancel (otherwise the drain has nothing to pick up)
-        # Verify the order textually: queueSessionMessage appears before cancelStream
-        # within the busy block's interrupt branch
-        cancel_idx = send_body.find("cancelStream")
-        queue_idx = send_body.find("queueSessionMessage")
-        assert queue_idx >= 0 and cancel_idx >= 0
-        assert queue_idx < cancel_idx, (
-            "queueSessionMessage must run before cancelStream so the drain "
-            "after setBusy(false) picks up the queued message"
-        )
+        branch_start = send_body.find("} else if(defaultMessageMode==='interrupt'){")
+        branch_end = send_body.find("} else {", branch_start)
+        assert branch_start >= 0 and branch_end > branch_start
+        branch = send_body[branch_start:branch_end]
+        assert "_tryInterrupt" in branch
+        assert "queueSessionMessage" not in branch
+        assert "cancelStream(" not in branch
 
     def test_send_busy_steer_preserves_files_when_steer_not_delivered(self):
         """Busy-mode steer must only clear staged files after delivered steer.
