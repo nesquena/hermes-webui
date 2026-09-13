@@ -9786,19 +9786,249 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                     truncation_boundary=getattr(session, "truncation_boundary", None),
                 )
-            merged_messages = []
+            # _session_message_merge_key cannot reconcile one turn that BOTH
+            # stores hold when only one of the two copies carries a stable id:
+            # the identified copy keys as ("message_id", id) while the other
+            # keys as ("legacy", role, content, timestamp, ...). Two key shapes
+            # never compare equal, so the turn survives twice. Every
+            # gateway-backed browser turn has that shape — WebUI stamps a stable
+            # id on the sidecar row it writes while the agent store holds its
+            # own unidentified copy of the same turn.
+            #
+            # Identified rows stay authoritative: two rows that both carry ids
+            # are distinct messages even when their text matches (a user really
+            # can send the same prompt twice). Only an UNIDENTIFIED row is
+            # reconciled away, and only when an identified row with the same
+            # visible identity is still unmatched — the same cross-store
+            # identity the append-only merge above uses.
+            #
+            # Pairing is one-to-one, not "every match for this visible key
+            # goes to whichever identified row we saw first": two identical
+            # assistant answers (same visible key, different ids, different
+            # per-turn reasoning) must not have their Agent-store metadata
+            # cross-wired onto the wrong survivor. Each visible key gets its
+            # own FIFO queue of still-unmatched identified rows, built in
+            # transcript order in pass 1; pass 2 pops the oldest unmatched
+            # entry for a match, so repeats pair up in the order they
+            # actually occurred rather than collapsing onto one row.
+            #
+            # Those queues are partitioned by SOURCE STORE as well as visible
+            # key, and a row may only consume a survivor from the OPPOSITE
+            # store. Neither list is homogeneous: `sidecar_messages` comes out
+            # of _webui_sidecar_lineage_messages_for_display() and can mix
+            # id-stamped rows with legacy ones after lineage stitching or an
+            # upgrade, and the Agent store can hold identified rows too.
+            # Without the partition an unidentified row could reconcile
+            # against an identified row from its OWN store — two separate
+            # same-text turns, arbitrarily far apart, since
+            # _session_message_visible_key carries role, content and
+            # tool_calls but neither timestamp nor store — and the later turn
+            # would be dropped as though it were a cross-store twin.
+            def _cross_store_pairing_key(msg, from_sidecar):
+                """Visible identity for cross-store twin matching.
+
+                Deliberately narrower than `_session_message_visible_key`: it
+                excludes the `api_content` provider sidecar that key appends
+                via `_session_message_key_with_sidecar`. `api_content` is
+                state.db-only by design (there is a whole
+                `_copy_api_content_sidecar` helper because the sidecar copy
+                usually lacks it), so a gateway turn's Agent copy commonly
+                carries provider bytes its sidecar twin does not have. Keying
+                pairing on that field would give the two copies of ONE turn
+                different keys and let both survive — reproducing the exact
+                duplicate-turn symptom this reconciliation exists to fix.
+                `api_content` instead gets its own directional authority in
+                `_reconcile_cross_store_twin`, once a twin is already matched
+                one-to-one on every other identity component (role, visible
+                content, tool_calls, and tool_call_id/tool_name via
+                `_cross_store_pairable`). The SHARED
+                `_session_message_visible_key` is deliberately left untouched
+                — other merge paths rely on its stricter identity there.
+                """
+                if not isinstance(msg, dict):
+                    return ("non_dict", repr(msg))
+                tool_calls = msg.get("tool_calls")
+                tool_calls_key = (
+                    json.dumps(tool_calls, sort_keys=True, default=str)
+                    if tool_calls else ""
+                )
+                role = str(msg.get("role") or "")
+                content = _normalized_session_message_content(msg)
+                if role == "user" and not from_sidecar:
+                    from api.streaming import _strip_workspace_prefix
+
+                    content = " ".join(
+                        _strip_workspace_prefix(content, include_legacy=True).split()
+                    )
+                return (role, content, tool_calls_key)
+
+            # Reconciliation writes onto a COPY of the survivor, never the
+            # caller's dict. `session.messages` rows are shared: they live in
+            # the module-level session cache, and `Session.save()` rewrites the
+            # whole array from that in-memory object, so mutating here would let
+            # a plain GET (or even a metadata-only sidebar poll) seed a payload
+            # that any later unrelated save commits to the sidecar JSON. Rows
+            # reaching this branch are already handed out as copies on the
+            # lineage-cache paths, so copying is the contract callers can
+            # actually rely on -- and it keeps display reconciliation from
+            # durably editing a transcript.
+            row_overrides = {}
+
+            def _survivor_row(position, msg):
+                row = row_overrides.get(position)
+                if row is None:
+                    row = dict(msg)
+                    row_overrides[position] = row
+                return row
+
+            def _cross_store_pairable(survivor, dropped):
+                """Guard the pairing key's blind spot for tool identity.
+
+                `_session_message_visible_key` carries role, content and
+                `tool_calls`, but NOT `tool_call_id` or `tool_name`. Two
+                results from different tool calls that happen to print the
+                same text ("OK", "{}", "Command completed.") therefore share a
+                visible key, and reconciling them would delete a real tool
+                result. Require the tool identity to agree before pairing.
+                """
+                return (
+                    str(survivor.get("tool_call_id") or "")
+                    == str(dropped.get("tool_call_id") or "")
+                    and str(survivor.get("tool_name") or survivor.get("name") or "")
+                    == str(dropped.get("tool_name") or dropped.get("name") or "")
+                )
+
+            def _pop_pairable(queue, dropped):
+                """Take the oldest queued survivor this row may pair with."""
+                for index, entry in enumerate(queue):
+                    if _cross_store_pairable(entry[1], dropped):
+                        del queue[index]
+                        return entry
+                return None
+
+            def _reconcile_cross_store_twin(position, survivor, dropped,
+                                            dropped_from_sidecar):
+                """Carry a discarded cross-store twin's payload to the survivor.
+
+                The lanes are deliberately NOT symmetric. Display metadata is
+                sidecar-authored, so it travels either way. Semantic payload
+                and `api_content` both travel only Agent -> sidecar: the
+                Agent store owns the real reasoning/Codex trace and is the
+                only store `api_content` is ever written to, whereas a
+                sidecar-authored `reasoning` is the unreliable one (it can
+                hold a verbatim copy of the reply --
+                NousResearch/hermes-agent#13007), so pushing either into an
+                Agent survivor would degrade the better record. That lane
+                keeps the survivor's own values.
+
+                `_copy_api_content_sidecar` is fill-only-if-absent on its own
+                (it returns early if the target already carries a non-empty
+                value), so a conflicting non-empty pair fails closed: the
+                identified survivor's own `api_content` is never overwritten.
+                """
+                row = _survivor_row(position, survivor)
+                _merge_session_display_metadata(row, dropped)
+                if not dropped_from_sidecar:
+                    _adopt_agent_semantic_payload(row, dropped)
+                    _copy_api_content_sidecar(row, dropped)
+
+            ordered = sorted(
+                [(msg, False) for msg in cli_messages]
+                + [(msg, True) for msg in sidecar_messages],
+                key=lambda pair: (
+                    float(pair[0].get("timestamp") or 0),
+                    str(pair[0].get("role") or ""),
+                    str(pair[0].get("content") or ""),
+                ),
+            )
             seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
+            unmatched_identified_queue = {}
+            kept_positions = set()
+            # An unidentified row that finds no queued survivor falls back to
+            # this pair of dedup checks instead of the round-to-the-second
+            # `_session_message_merge_key`. That coarse key exists so a
+            # cross-store duplicate of the SAME turn (one copy per store,
+            # sub-second clock drift, no id on either side -- sessions
+            # predating stable-id stamping) still collapses to one row.
+            # Using it directly here would also collapse two textually
+            # identical but genuinely DISTINCT unidentified rows from the
+            # SAME store landing in the same wall-clock second (e.g. two
+            # short repeated assistant replies), silently dropping the
+            # second one and its semantic payload. So: full-precision
+            # `_session_message_dedup_key` decides same-store duplicates (a
+            # store's own clock never needs second-level rounding
+            # tolerance), and the coarse key only collapses a row against a
+            # KEPT row from the OPPOSITE store.
+            #
+            # That cross-store collapse carries metadata across too, on the
+            # same lanes as the identified path below. Without it the payload
+            # of whichever copy loses the sort is dropped outright, and which
+            # copy that is depends only on sub-second drift between the two
+            # stores' writes: the sidecar copy winning silently discards the
+            # Agent copy's reasoning/Codex trace, the Agent copy winning
+            # silently discards the sidecar's display metadata.
+            #
+            # It is also ONE-TO-ONE, for the same reason the identified lane
+            # is: a coarse key groups every same-second repeat of one text, so
+            # a single "already kept a twin" flag would let one kept row absorb
+            # an unbounded number of opposite-store rows and delete every
+            # additional real turn in that second. Each store keeps a
+            # consumable pool of the rows kept for a coarse key; an
+            # opposite-store row collapses against exactly one pooled entry,
+            # and once the pool is empty the next row is a surplus turn that
+            # survives on its own.
+            seen_unmatched_exact_keys = set()
+            # cross_key -> {from_sidecar: deque of (position, row) kept for it}
+            unmatched_kept_pools = {}
+            # Pass 1 admits every identified row and enqueues it under its
+            # visible identity; pass 2 admits the unidentified rows that no
+            # identified row already covers.
+            for identified_pass in (True, False):
+                for position, (msg, from_sidecar) in enumerate(ordered):
+                    has_identity = bool(msg.get("id") or msg.get("message_id"))
+                    if has_identity != identified_pass:
+                        continue
+                    visible_key = _cross_store_pairing_key(msg, from_sidecar)
+                    if has_identity:
+                        key = _session_message_merge_key(msg)
+                        if key in seen_message_keys:
+                            continue
+                        unmatched_identified_queue.setdefault(
+                            (visible_key, from_sidecar), deque()
+                        ).append((position, msg))
+                        seen_message_keys.add(key)
+                        kept_positions.add(position)
+                        continue
+                    # Opposite store only — see the partition note above.
+                    queue = unmatched_identified_queue.get(
+                        (visible_key, not from_sidecar)
+                    )
+                    entry = _pop_pairable(queue, msg) if queue else None
+                    if entry is not None:
+                        _reconcile_cross_store_twin(
+                            entry[0], entry[1], msg, from_sidecar
+                        )
+                        continue
+                    exact_key = (from_sidecar, _session_message_dedup_key(msg))
+                    if exact_key in seen_unmatched_exact_keys:
+                        continue
+                    cross_key = _session_message_merge_key(msg)
+                    pools = unmatched_kept_pools.setdefault(cross_key, {})
+                    opposite = pools.get(not from_sidecar)
+                    entry = _pop_pairable(opposite, msg) if opposite else None
+                    if entry is not None:
+                        _reconcile_cross_store_twin(
+                            entry[0], entry[1], msg, from_sidecar
+                        )
+                        continue
+                    seen_unmatched_exact_keys.add(exact_key)
+                    pools.setdefault(from_sidecar, deque()).append((position, msg))
+                    kept_positions.add(position)
+            return [
+                row_overrides.get(position, msg)
+                for position, (msg, _from_sidecar) in enumerate(ordered)
+                if position in kept_positions
+            ]
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
 
@@ -10325,9 +10555,13 @@ from api.models import (
     _active_stream_ids,
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
+    _adopt_agent_semantic_payload,
     _session_message_merge_key,
+    _session_message_dedup_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
+    _normalized_session_message_content,
+    _copy_api_content_sidecar,
     _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
