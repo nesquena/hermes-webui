@@ -91,6 +91,60 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+## Persistent snapshot-video cache behavior gate
+
+`tests/browser_persistent_video_cache.py` serves the production
+`static/media-cache.js` unchanged through a credential-free local fixture and
+uses real Chromium Cache Storage, streams, Web Locks, observers, Blob URLs,
+reloads, and network cancellation:
+
+```bash
+python tests/browser_persistent_video_cache.py
+```
+
+The gate covers production `media-cache.js` → `ui.js` script order and
+`_mediaPlayerHtml()` integration with real session-authorized URLs, native Range fallback, first fetch versus
+cached replay/reload, bounded validation, early stream cancellation, and eviction/refetch of corrupt persistent
+hits, exact captured-byte and browser-Blob snapshot attestation, fail-closed
+wrong-body/right-header rejection (neither playback nor persistence), canonical-path
+retarget denial and digest-binding mismatch fallback, real `video.play()`/`currentTime`,
+per-file and
+global byte limits, LRU and real quota errors, auth-scope rotation, two-phase
+cross-tab authority clearing, profile/build/cache version clearing, unknown and
+declared oversize responses, same-tab deduplication, A → B → A chat-switch reuse
+with per-consumption path-and-digest reauthorization, late subscribers, cross-tab
+quota serialization, crash reconciliation, DOM and same-node replacement,
+response-header rejection aborts, pagehide/final-consumer abort, persisted
+pageshow recovery, Blob playback-error fallback, localized accessible loading/integrity
+status, `saveData` reduced-data native fallback, progress cleanup, object-URL teardown,
+one-shot intersection,
+removed-before-intersection cleanup, Cache Storage fallback, and production-markup
+desktop/narrow progress evidence. `tests/test_persistent_video_cache_scope.py`
+separately covers the opaque server authority scope, trusted-header first request,
+build-version rotation, logout ordering, and snapshot response attestation.
+
+The authority lifecycle rows also hold the origin Web Lock indefinitely while a mounted
+ready video is cleared and reactivated, inject a
+Cache Storage deletion failure, overlap stale and successor scope requests, and clear
+mounted ready players in one and two tabs. They assert synchronous local invalidation,
+a bounded cleanup return, bounded cache-operation fallback, request-owned
+finalizers/waiters, old-request abort, and ready playback recovery under the successor
+authority. The cache-operation deadline row holds one acquired lock callback pending,
+then enqueues several distinct successors and requires all of them to fall back within
+one enqueue-time deadline window; its mutant moves deadline creation behind the queue
+and must fail specifically at that timing assertion. The server scope suite also proves
+small and over-cache-ceiling one-byte native Range requests avoid whole-object hashing,
+open-ended snapshot ranges are capped to one 1 MiB response window, unverified native
+responses are `no-store`, the requested range body is bound
+before headers commit, and a raced-in FIFO/non-regular opened descriptor is rejected before
+any read. Independent cache-hit mutants cover stream cancellation at the byte ceiling,
+actual-versus-declared length, MIME, and SHA-256. Service-worker tests execute
+install/activate's shared cleanup and prove only obsolete `hermes-shell-*` caches are
+deleted.
+
+Both the behavior gate and its mutation gate run in the required
+`browser-smoke` GitHub Actions job after the normal page-load smoke.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
