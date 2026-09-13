@@ -2647,10 +2647,21 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     inner = candidate[1:]
     provider_hint, bare_model = inner.rsplit(":", 1)
     if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
-        _slug_rest = provider_hint[len("custom:"):]
-        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
-            provider_hint, extra = provider_hint.rsplit(":", 1)
-            bare_model = f"{extra}:{bare_model}"
+        _parts = inner.split(":")
+        _named_slugs = _named_custom_provider_slugs()
+        if _parts[0] == "custom" and len(_parts) >= 4 and f"custom:{_parts[1]}" in _named_slugs:
+            # The first two segments form a *configured* custom-provider slug
+            # (``custom:<slug>``) and the model ID itself contains colons
+            # (e.g. ``syn:small:text``) — positional rsplit cannot recover
+            # that, so split on the known slug instead: everything after it
+            # is the full model ID.
+            provider_hint = f"custom:{_parts[1]}"
+            bare_model = ":".join(_parts[2:])
+        else:
+            _slug_rest = provider_hint[len("custom:"):]
+            if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+                provider_hint, extra = provider_hint.rsplit(":", 1)
+                bare_model = f"{extra}:{bare_model}"
     elif (provider_hint not in _PROVIDER_MODELS
             and provider_hint not in _PROVIDER_DISPLAY
             and not provider_hint.startswith("custom:")):
