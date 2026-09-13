@@ -4,6 +4,7 @@ Hermes Web UI -- HTTP helper functions.
 import base64 as _base64
 import binascii as _binascii
 import functools
+import ipaddress as _ipaddress
 import json as _json
 import logging
 import os
@@ -81,11 +82,34 @@ _CSP_EXTRA_CONNECT_RE = _re.compile(
 _CSP_EXTRA_FRAME_RE = _re.compile(
     r"^https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
 )
+# Validator for a frame-ancestors allowlist entry (HERMES_WEBUI_CSP_FRAME_ANCESTORS).
+# Stricter than the frame-src one on purpose: this directive decides who may embed
+# the WebUI, and an accepted-but-malformed source silently drops X-Frame-Options,
+# leaving the embed browser-dependent. Host labels follow CSP/DNS structure —
+# ASCII alphanumerics with internal hyphens, single dots between labels, no empty
+# label — and the port is ASCII [0-9] only, because ``\d`` also matches Unicode
+# digits (e.g. Arabic-Indic), which no browser parses as a port.
+#
+# A bracketed IPv6 literal (http://[::1]:3000) is accepted as an alternative host
+# form: the motivating case is a local dashboard embedding the WebUI, and on an
+# IPv6 loopback the operator has no other way to name it. The brackets only get
+# it past the shape check — the address inside is parsed with ``ipaddress`` in
+# _valid_csp_frame_ancestor_source, so "[:::1]" or "[192.168.1.1]" still fall back
+# to lockdown. No ``*.`` prefix: a wildcard label has no meaning for a literal.
+_CSP_ANCESTOR_HOST = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_CSP_FRAME_ANCESTOR_RE = _re.compile(
+    r"^https?://"
+    r"(?:"
+    rf"(?:\*\.)?{_CSP_ANCESTOR_HOST}(?:\.{_CSP_ANCESTOR_HOST})*"
+    r"|(?P<ipv6>\[[0-9A-Fa-f:.]+\])"
+    r")"
+    r"(?::(?P<port>[0-9]{1,5}|\*))?$"
+)
 _CSP_HEADER_NAME = 'Content-Security-Policy'
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
     "object-src 'none'; "
-    "frame-ancestors 'none'; "
+    "frame-ancestors {frame_ancestors}; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
@@ -101,7 +125,8 @@ _CSP_SHARED_POLICY_TEMPLATE = (
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
 # extension tab. This governs what THIS page may embed; it does NOT affect
-# frame-ancestors (who may embed the WebUI), which stays 'none'.
+# frame-ancestors (who may embed the WebUI), which stays 'none' unless
+# HERMES_WEBUI_CSP_FRAME_ANCESTORS is set (see _csp_frame_ancestors).
 _CSP_FRAME_BASE = "'self'"
 
 
@@ -142,6 +167,28 @@ def _valid_csp_extra_frame_source(source: str) -> bool:
         return False
 
 
+def _valid_csp_frame_ancestor_source(source: str) -> bool:
+    match = _CSP_FRAME_ANCESTOR_RE.fullmatch(source)
+    if not match:
+        return False
+    ipv6 = match.group("ipv6")
+    if ipv6:
+        try:
+            _ipaddress.IPv6Address(ipv6[1:-1])
+        except ValueError:
+            return False
+    port = match.group("port")
+    if not port:
+        return True
+    if port == "*":
+        # A wildcard port stays available for hostname sources, but not on a
+        # bracketed literal: accepting it would omit X-Frame-Options for a value
+        # browsers do not honour on an IPv6 source, leaving the embed broken with
+        # the fallback protection already dropped.
+        return ipv6 is None
+    return 1 <= int(port) <= 65535
+
+
 def _csp_extra_frame_src() -> str:
     raw = os.getenv("HERMES_WEBUI_CSP_FRAME_EXTRA", "").strip()
     if not raw:
@@ -151,6 +198,25 @@ def _csp_extra_frame_src() -> str:
         logger.warning("Ignoring invalid HERMES_WEBUI_CSP_FRAME_EXTRA value")
         return ""
     return " " + " ".join(sources)
+
+
+def _csp_frame_ancestors() -> str:
+    """CSP frame-ancestors sources: who may embed the WebUI in an <iframe>.
+
+    Locked down to 'none' by default. An operator can opt in via
+    HERMES_WEBUI_CSP_FRAME_ANCESTORS — space-separated http(s) origins
+    (same shape as HERMES_WEBUI_CSP_FRAME_EXTRA entries), e.g. a trusted
+    local dashboard that embeds the WebUI. Malformed values are ignored
+    with a warning and the safe default is kept.
+    """
+    raw = os.getenv("HERMES_WEBUI_CSP_FRAME_ANCESTORS", "").strip()
+    if not raw:
+        return "'none'"
+    sources = raw.split()
+    if any(not _valid_csp_frame_ancestor_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_FRAME_ANCESTORS value")
+        return "'none'"
+    return " ".join(sources)
 
 
 def _csp_connect_src(extra_connect_src: str = "") -> str:
@@ -164,23 +230,28 @@ def _csp_frame_src(extra_frame_src: str = "") -> str:
 def _build_csp_enforced_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    frame_ancestors: str | None = None,
 ) -> str:
     if extra_connect_src is None:
         extra_connect_src = _csp_extra_connect_src()
     if extra_frame_src is None:
         extra_frame_src = _csp_extra_frame_src()
+    if frame_ancestors is None:
+        frame_ancestors = _csp_frame_ancestors()
     return _CSP_SHARED_POLICY_TEMPLATE.format(
         connect_src=_csp_connect_src(extra_connect_src),
         frame_src=_csp_frame_src(extra_frame_src),
+        frame_ancestors=frame_ancestors,
     )
 
 
 def _build_csp_report_only_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    frame_ancestors: str | None = None,
 ) -> str:
     return (
-        _build_csp_enforced_policy(extra_connect_src, extra_frame_src)
+        _build_csp_enforced_policy(extra_connect_src, extra_frame_src, frame_ancestors)
         + "; report-uri /api/csp-report; report-to csp-endpoint"
     )
 
@@ -189,12 +260,20 @@ def _security_headers(handler):
     """Add security headers to every response."""
     extra_connect_src = _csp_extra_connect_src()
     extra_frame_src = _csp_extra_frame_src()
+    # Resolve frame-ancestors ONCE per response and reuse that single value for
+    # the enforced policy, the report-only policy (via end_headers) and the
+    # X-Frame-Options decision. Resolving it separately let the two headers
+    # disagree — a conforming browser ignores XFO whenever an enforced
+    # frame-ancestors exists, so they must come from one resolution.
+    frame_ancestors = _csp_frame_ancestors()
     handler._csp_extra_connect_src = extra_connect_src
     handler._csp_extra_frame_src = extra_frame_src
+    handler._csp_frame_ancestors = frame_ancestors
     handler.send_header('X-Content-Type-Options', 'nosniff')
-    handler.send_header('X-Frame-Options', 'DENY')
+    if frame_ancestors == "'none'":
+        handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
-    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
+    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src, frame_ancestors))
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
