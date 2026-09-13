@@ -74,7 +74,10 @@ Follow that checklist's safety rules:
   may rotate the agent identity; steering must never evict or close an agent.
   Keep HTTP response writes outside runtime registry locks. A Gateway-owned
   active run must resolve to the Gateway outcome before any local cache fallback,
-  even when no in-process worker is registered for that stream.
+  even when no in-process worker is registered for that stream. Stop publishes
+  cancellation and detaches stream/agent entries under the same stream lock
+  (STREAMS_LOCK -> ACTIVE_RUNS_LOCK); interrupt and session persistence remain
+  outside it. Test both Stop/Steer orderings with deterministic barriers.
 - For Docker build changes in `docker_init.bash`, mirror directory exclusions
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).
