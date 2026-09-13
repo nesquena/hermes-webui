@@ -1,13 +1,9 @@
 """#7040: the public session response must stay byte-complete.
 
-The bounded-transcript design (docs/superpowers/specs/2026-08-14-wkwebview-
-transcript-layout-design.md) makes DOM/display projection the *only* place a
-transcript may be abbreviated. Its Goal and Scope are explicit: "The WebUI must
-retain the complete API response and canonical ``S.messages`` values" and "No
-... API response mutation, server transcript mutation ... is part of this
-change." The implementation plan repeats it as a Global Constraint: "Do not
-mutate API responses, ``S.messages``, persisted recovery state, or server
-transcript data."
+Display projection is the *only* place a transcript may be abbreviated. The
+WebUI must retain the complete API response and canonical ``S.messages``
+values. Do not mutate API responses, ``S.messages``, persisted recovery
+state, or server transcript data.
 
 A previous revision of this PR added a ``_PUBLIC_TRANSCRIPT_TEXT_LIMIT`` head/
 tail excerpt to ``_redact_text()``. Because ``redact_session_data()`` routes
