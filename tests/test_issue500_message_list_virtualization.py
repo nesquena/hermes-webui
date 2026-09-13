@@ -196,6 +196,9 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
   default: 140,
 };
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
 let virtualized = true;
 let _messageVirtualHeightCache = [0, 220, 180, 120];
@@ -553,6 +556,11 @@ function _messageVirtualDefaultHeightForRole(role){
 }
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
 const MESSAGE_VIRTUAL_BUFFER_PX = 900;
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+function _messageVirtualEstimatedHeightForRole(role){
+  return _messageVirtualDefaultHeightForRole(role);
+}
 let _messageVirtualHeightCache = [];
 let _messageVirtualEstimatedRowHeight = 140;
 function _syncMessageVirtualHeightCache(){ /* no-op for the test */ }
@@ -612,6 +620,9 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
   default:140,
 };
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
 console.log(JSON.stringify({
   tool_call: _messageVirtualDefaultHeightForRole('tool_call'),
   user: _messageVirtualDefaultHeightForRole('user'),
@@ -666,6 +677,9 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
 const MESSAGE_VIRTUAL_BUFFER_PX = 900;
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
 eval(extractFunc('_messageVirtualWindow'));
 const visWithIdx = [
   {m: {role: 'user'}},
@@ -704,6 +718,60 @@ console.log(JSON.stringify({
     assert metrics["end"] - metrics["start"] > 0
 
 
+def test_unmeasured_rows_use_measured_role_mean_once_samples_exist():
+    """#4343 groundwork: an unmeasured row must contribute the role's MEASURED mean.
+
+    rowHeightFor() only consulted the static MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS
+    constant (roleForIdx is always supplied, so the measurement-derived
+    `defaultHeight` was dead code), leaving the virtual scroll geometry built from
+    a flat per-role guess for every row that never entered the render window — 34%
+    short of the real transcript height on a 2000-row session. This pins that a
+    role with enough samples now estimates from them, and that a role without
+    samples still falls back to its static seed (so first paint is unchanged).
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={user:120, assistant:160, tool_call:400, default:140};
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_resetMessageVirtualRoleHeightStats'));
+eval(extractFunc('_recordMessageVirtualRoleHeightSample'));
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
+
+const seeded = _messageVirtualEstimatedHeightForRole('user');
+// Below the sample floor: still the static seed.
+_recordMessageVirtualRoleHeightSample('user', 300);
+_recordMessageVirtualRoleHeightSample('user', 300);
+const belowFloor = _messageVirtualEstimatedHeightForRole('user');
+// At the floor: the measured mean takes over.
+_recordMessageVirtualRoleHeightSample('user', 300);
+const calibrated = _messageVirtualEstimatedHeightForRole('user');
+// A different role is unaffected by another role's samples.
+const otherRole = _messageVirtualEstimatedHeightForRole('tool_call');
+// Garbage samples are ignored rather than poisoning the mean.
+_recordMessageVirtualRoleHeightSample('user', 0);
+_recordMessageVirtualRoleHeightSample('user', NaN);
+_recordMessageVirtualRoleHeightSample('user', -5);
+const afterGarbage = _messageVirtualEstimatedHeightForRole('user');
+// A session switch drops the calibration.
+_resetMessageVirtualRoleHeightStats();
+const afterReset = _messageVirtualEstimatedHeightForRole('user');
+
+console.log(JSON.stringify({seeded, belowFloor, calibrated, otherRole, afterGarbage, afterReset}));
+"""
+    out = json.loads(_run_node(source))
+    assert out["seeded"] == 120, "no samples yet -> static seed"
+    assert out["belowFloor"] == 120, "under the sample floor -> still the static seed"
+    assert out["calibrated"] == 300, (
+        "with enough samples the unmeasured-row estimate must come from the "
+        "measurements, not the static constant — this is the whole fix"
+    )
+    assert out["otherRole"] == 400, "one role's samples must not leak into another"
+    assert out["afterGarbage"] == 300, "non-positive / non-finite samples must be ignored"
+    assert out["afterReset"] == 120, "clearing the height cache must drop the calibration"
+
+
 def test_message_virtual_window_cached_heights_override_role_defaults():
     """Verify cached heights take precedence over role-specific defaults."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
@@ -717,6 +785,9 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
 const MESSAGE_VIRTUAL_BUFFER_PX = 900;
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
 eval(extractFunc('_messageVirtualWindow'));
 const visWithIdx = [
   {m: {role: 'user'}},  // normally 120
@@ -787,6 +858,9 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
   default: 140,
 };
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
 
 // Three entries: user (120), tool_call (400), assistant (160) — all uncached (height=0)
@@ -1119,6 +1193,12 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {user:120, assistant:160, tool_call:400, default:140};
 function clearTimeout(id){ timerCleared = (id === 99); }
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN = 3;
+let _messageVirtualRoleHeightStats = Object.create(null);
+eval(extractFunc('_messageVirtualEstimatedHeightForRole'));
+// _clearMessageVirtualHeightCache also drops the per-role measured samples so a
+// new session cannot inherit the previous transcript's calibration.
+eval(extractFunc('_resetMessageVirtualRoleHeightStats'));
 eval(extractFunc('_clearMessageVirtualHeightCache'));
 _clearMessageVirtualHeightCache();
 console.log(JSON.stringify({
