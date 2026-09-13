@@ -212,7 +212,8 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     assert 'included == ("cron",)' in src
     assert "not messages_index_present" in src
     assert "PRAGMA index_list(messages)" in src
-    assert "CREATE INDEX IF NOT EXISTS idx_messages_session" in src
+    # Listing is a pure read: index creation lives in the drained maintenance tool.
+    assert "CREATE INDEX IF NOT EXISTS idx_messages_session" not in src
     assert "_CRON_PREAGGREGATE_CANDIDATE_ORDER_MIN_MESSAGES" not in src
     assert "MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" in src
     assert "candidate_limit = max(result_limit * 8, result_limit)" in src

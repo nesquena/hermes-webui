@@ -317,6 +317,12 @@ class GatewayWatcher:
         protects projection fields (notably role-derived CLI visibility) that
         the agent's existing index cannot see.
         """
+        with self._sub_lock:
+            has_subscribers = bool(self._subscribers)
+        if not has_subscribers:
+            # Force fresh projection on the next subscription, without touching DB.
+            self._last_full_projection_at = None
+            return False
         db_path = self._state_db_path
         # A watcher may start before the agent has created state.db. Publishing an
         # empty first snapshot would make an already-rendered sidebar disappear;
