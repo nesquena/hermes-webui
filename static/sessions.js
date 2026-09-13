@@ -222,18 +222,105 @@ function _saveComposerDraft(sid, text, files) {
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  const normalizedDraft = { text: normalizedText, files: normalizedFiles };
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
   }
   _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-    }).then(() => {
-      _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+    _postComposerDraftPayload(sid, normalizedDraft).catch((error) => {
+      _handleComposerDraftPostFailure(error, sid, normalizedText, normalizedFiles);
+    });
   }, _DRAFT_SAVE_DELAY_MS);
+}
+
+function _safeDraftSessionId(sid) {
+  if (typeof sid !== 'string') return '';
+  const trimmed = sid.trim();
+  if (!trimmed) return '';
+  return /^[0-9A-Za-z_-]+$/.test(trimmed) ? trimmed : '';
+}
+
+function _parseSessionMovedDraftError(error) {
+  const body = error && error.body;
+  if (typeof body !== 'string') return null;
+  let parsed = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch (err) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const code = String(parsed.code || '').trim();
+  const nextSid = _safeDraftSessionId(parsed.session_id || '');
+  if (code !== 'session_moved' || !nextSid) return null;
+  return nextSid;
+}
+
+function _composerDraftResponseSessionId(response, fallbackSid) {
+  if (!response || response.session_id === undefined || response.session_id === null) return fallbackSid;
+  const sid = _safeDraftSessionId(response.session_id);
+  if (!sid) throw new Error('Invalid composer draft session response');
+  return sid;
+}
+
+function _handleComposerDraftPostFailure(error, sid, text, files) {
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (S.session && S.session.session_id === sid) {
+    S.session.composer_draft = { text: normalizedText, files: normalizedFiles };
+  }
+  if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
+    _composerDraftKnownPayloadSessions.add(sid);
+  }
+  if (typeof console !== 'undefined' && console.warn) {
+    console.warn(
+      '[composer draft] failed to persist draft',
+      { session_id: sid, error: String(error && error.message ? error.message : error || '') },
+    );
+  }
+}
+
+function _postComposerDraftPayload(sid, draft) {
+  const requestSid = _safeDraftSessionId(sid);
+  if (!requestSid) return Promise.resolve();
+  const normalizedText = String((draft && draft.text) || '');
+  const normalizedFiles = Array.isArray(draft && draft.files) ? draft.files.filter(Boolean) : [];
+  const bodyPayload = { text: normalizedText, files: normalizedFiles };
+  const post = (targetSid) => api('/api/session/draft', {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: targetSid,
+      text: bodyPayload.text,
+      files: bodyPayload.files,
+    }),
+  });
+  const remember = (responseSid) => {
+    if (responseSid !== requestSid) {
+      _composerDraftKnownPayloadSessions.delete(requestSid);
+    }
+    _rememberComposerDraftPayloadState(responseSid, normalizedText, normalizedFiles);
+  };
+
+  return post(requestSid).then((response) => {
+    const responseSid = _composerDraftResponseSessionId(response, requestSid);
+    remember(responseSid);
+    return response;
+  }).catch((error) => {
+    const movedSid = _parseSessionMovedDraftError(error);
+    if (
+      !error || error.status !== 409
+      || !movedSid
+      || movedSid === requestSid
+    ) {
+      throw error;
+    }
+    return post(movedSid).then((response) => {
+      const responseSid = _composerDraftResponseSessionId(response, movedSid);
+      remember(responseSid);
+      return response;
+    });
+  });
 }
 
 function _composerDraftHasPayload(text, files) {
@@ -265,6 +352,7 @@ function _saveComposerDraftNow(sid, text, files) {
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  const normalizedDraft = { text: normalizedText, files: normalizedFiles };
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
   }
@@ -277,12 +365,7 @@ function _saveComposerDraftNow(sid, text, files) {
       && !_composerDraftKnownPayloadSessions.has(sid)) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  return _postComposerDraftPayload(sid, normalizedDraft);
 }
 
 // Restore composer draft from server onto #msg textarea.

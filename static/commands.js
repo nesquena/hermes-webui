@@ -1551,8 +1551,19 @@ function _steerIndicatorText(originalMsg, filesSnapshot){
 }
 
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
-  if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
-  await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
+  if(!ownerSid||typeof _saveComposerDraftNow!=='function') return false;
+  const persistedText = _steerRestoreText(originalMsg,explicitSteer);
+  const persistedFiles = Array.isArray(filesSnapshot) ? [...filesSnapshot] : [];
+  try{
+    const result = _saveComposerDraftNow(ownerSid,persistedText,persistedFiles);
+    if(result&&typeof result.catch==='function'){
+      return result.catch((error)=>_handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles));
+    }
+    return result;
+  }catch(error){
+    _handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles);
+    return false;
+  }
 }
 
 // #5459 gate: cache successful steer uploads by owner session so a failed-steer
