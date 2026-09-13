@@ -22624,6 +22624,42 @@ def _prepare_chat_start_session_for_stream(
         s.save()
 
 
+def _cleanup_chat_start_launch_failure(session, stream_id: str) -> None:
+    """Release state registered before a worker thread successfully starts."""
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    unregister_stream_owner(stream_id)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    STREAM_GOAL_RELATED.pop(stream_id, None)
+    # The session-field reset needs the same concurrency discipline as the
+    # registry half: hold the per-session lock and re-resolve the canonical
+    # session before clearing anything. Mutating the passed-in stale object
+    # could wipe a concurrent successor turn's pending fields, and saving it
+    # could resurrect a session deleted while the launch was failing. Same
+    # pattern as the #1533 race fix (routes.py:3077) and the anchor-scene
+    # write guard (routes.py:5140).
+    with _get_session_agent_lock(session.session_id):
+        try:
+            canonical = get_session(session.session_id)
+        except KeyError:
+            return  # session deleted while the thread launch was failing
+        if getattr(canonical, "active_stream_id", None) != stream_id:
+            return  # a successor turn already owns the session
+        canonical.active_stream_id = None
+        canonical.pending_user_message = None
+        canonical.pending_attachments = []
+        canonical.pending_started_at = None
+        canonical.pending_user_source = None
+        try:
+            canonical.save()
+        except Exception:
+            logger.debug(
+                "Failed to persist chat-start cleanup after worker launch failure for %s",
+                stream_id,
+                exc_info=True,
+            )
+
+
 def _is_hidden_empty_session(s) -> bool:
     return (
         getattr(s, "title", "Untitled") == "Untitled"
@@ -23207,6 +23243,7 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        _cleanup_chat_start_launch_failure(s, stream_id)
         raise
     response = {
         "stream_id": stream_id,
