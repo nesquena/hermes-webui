@@ -51,6 +51,21 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+function extractConst(name) {{
+  const start = src.indexOf('const ' + name + '=');
+  if (start < 0) throw new Error(name + ' not found');
+  // `const` inside a direct eval stays scoped to that eval; re-bind as `var`
+  // so the shipped initializer reaches the driver scope.
+  return 'var ' + src.slice(start + 'const '.length, src.indexOf('\\n', start));
+}}
+// _messageIsRenderable and _messageVirtualRoleForEntry classify through the
+// shared process-wakeup helper; load the real one (and its deps) so these
+// drivers exercise production classification instead of failing on a
+// ReferenceError.
+eval(extractConst('_ASYNC_DELEGATION_WAKEUP_HEADER_RE'));
+eval(extractFunc('_stripWorkspaceDisplayPrefix'));
+eval(extractFunc('msgContent'));
+eval(extractFunc('_isProcessWakeupMessage'));
 """
 
 
