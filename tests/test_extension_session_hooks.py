@@ -308,7 +308,7 @@ def test_preload_veto_only_on_preload_phase():
 def test_continuation_retry_carries_preload_notified_flag():
     body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
     idx_cont = body.index("continuationSid=")
-    cont_branch = body[idx_cont:idx_cont + 400]
+    cont_branch = body[idx_cont:body.index("S.session=data.session", idx_cont)]
     assert "_preloadNotified:true" in cont_branch
 
 

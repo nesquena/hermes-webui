@@ -172,7 +172,10 @@ def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
     # protected ownership invariant is unchanged: the guard still requires
     # (!_loadingSessionId || _loadingSessionId===sid) and still early-returns
     # before _loadingSessionId=sid.
-    guard = "if(currentSid===sid&&!forceReload&&(!_loadingSessionId||_loadingSessionId===sid)){"
+    guard = (
+        "if(currentSid===sid&&!forceReload&&(!_loadingSessionId||_loadingSessionId===sid)"
+        "&&visibleOwnerMatchesActive&&expectedOwnerMatchesVisible){"
+    )
     assert guard in compact, (
         "same-session no-op must be owned by the current load target: "
         "another in-flight sid must not suppress a pending switch-back"
@@ -183,7 +186,7 @@ def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
     # The guarded block must still early-return for the same-session no-op,
     # while now also acknowledging the visit to clear a stale unread dot.
     assert "_sessionVisitHasUnreadState(sid)" in compact[guard_pos:guard_pos + 600]
-    assert "return;}" in compact[guard_pos:guard_pos + 900]
+    assert "returntrue;}" in compact[guard_pos:guard_pos + 1200]
 
 
 def test_load_session_preserves_existing_worklog_content_without_destructive_fallback():

@@ -15,6 +15,7 @@ import urllib.parse
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
 from tests._pytest_port import BASE
+from tests.js_source_extract import extract_function
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -593,22 +594,16 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     not on same-session navigation/force-reload code paths.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    load_start = src.find("async function loadSession(sid){")
-    assert load_start >= 0
-    load_end = src.find("  // Sync context usage indicator from session data", load_start)
-    load_body = src[load_start:load_end]
+    load_body = extract_function(src, "loadSession", prefix="async function")
     cross_start = load_body.find("if (currentSid && currentSid !== sid) {")
     cross_end = load_body.find("if (currentSid !== sid || forceReload) {", cross_start)
     assert cross_start >= 0 and cross_end >= 0
     assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (
         "queue-card clear helper must be inside the cross-session branch"
     )
-    same_session_idx = load_body.find(
-        "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){"
-    )
+    same_session_idx = load_body.find("if(currentSid===sid && !forceReload && (")
     assert same_session_idx >= 0, (
-        "same-session no-op guard must still exist (now a block that first clears "
-        "a stale unread dot before returning) and must precede the cross-session branch"
+        "owner-safe same-session no-op guard must exist before the cross-session branch"
     )
     assert same_session_idx < cross_start
 
@@ -764,18 +759,17 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
 
 def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test_sessions):
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
-    # grab the wrong one. (rfind = the substantive restore branch.)
-    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
+    load_body = extract_function(src, "loadSession", prefix="async function")
+    inflight_idx = load_body.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1200]
+    ensure_idx = load_body.find("await _ensureMessagesLoaded(sid", inflight_idx)
+    merge_idx = load_body.find("_mergeInflightTailMessages(S.messages,inflightMessages)", inflight_idx)
 
-    assert "await _ensureMessagesLoaded(sid" in inflight_block, (
+    assert ensure_idx >= 0, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
-    assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
-        "INFLIGHT messages should be merged as a tail, not replace the full transcript"
+    assert merge_idx > ensure_idx, (
+        "INFLIGHT messages should be merged as a tail after loading the persisted transcript"
     )
     assert "function _mergeInflightTailMessages" in src, (
         "sessions.js should centralize INFLIGHT tail merge logic for regression coverage"

@@ -97,12 +97,20 @@ def test_post_load_reack_is_guarded_by_active_view():
 
 def test_same_session_reselect_clears_stale_unread():
     block = _load_session_block()
-    guard = block.find("if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){")
-    unread_check = block.find("_sessionVisitHasUnreadState(sid)", guard)
+    guard = block.find(
+        "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid) &&"
+    )
+    owner_check = block.find(
+        "visibleOwnerMatchesActive&&expectedOwnerMatchesVisible", guard
+    )
+    unread_check = block.find("_sessionVisitHasUnreadState(sid)", owner_check)
     acknowledge = block.find("_acknowledgeSessionVisit(", unread_check)
-    ret = block.find("return;", acknowledge)
+    ret = block.find("return true;", acknowledge)
 
     assert guard != -1, "same-session no-op guard must still exist"
+    assert owner_check != -1 and guard < owner_check < unread_check, (
+        "same-session no-op must verify visible and expected profile ownership"
+    )
     assert unread_check != -1 and guard < unread_check, (
         "re-selecting the already-open session must check for stale unread state"
     )

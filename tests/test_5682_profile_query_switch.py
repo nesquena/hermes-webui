@@ -146,8 +146,8 @@ global.switchToProfile = async (name) => {
   const afterPrefill = window.location.pathname + window.location.search + window.location.hash;
   const profilePos = bootSrc.indexOf("const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;");
   const renderPos = bootSrc.indexOf("await renderSessionList();", profilePos);
-  const savedPos = bootSrc.indexOf("const saved=urlSession||savedLocal;", profilePos);
-  const loadPos = bootSrc.indexOf("await loadSession(saved, {preserveActiveInput:true});", profilePos);
+  const savedPos = bootSrc.indexOf("const saved=urlSession||(_profileQueryBlocksSavedLocal?null:savedLocal);", profilePos);
+  const loadPos = bootSrc.indexOf("const loaded=await _restoreBootSession(urlSession,restoreIntent,saved);", profilePos);
   const consumePos = bootSrc.indexOf("if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();", profilePos);
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
@@ -502,8 +502,8 @@ global.switchToProfile = async (name) => { switched.push(name); };
     assert payload["intent"] == {"hasParam": True, "valid": False, "name": "../bad"}
     assert payload["switched"] == []
     assert payload["warns"] == [["[boot] ignored invalid profile query", "../bad"]]
-    assert payload["url"] == "/app/?q=hello&keep=1#frag"
-    assert payload["historyCalls"] == [{"state": None, "title": "", "url": "/app/?q=hello&keep=1#frag"}]
+    assert payload["url"] == "/app/?profile=../bad&q=hello&keep=1#frag"
+    assert payload["historyCalls"] == []
 
 
 def test_prefill_cleanup_still_strips_q_prompt_and_send():
@@ -577,7 +577,7 @@ console.log(JSON.stringify({
     assert payload == {
         "blocksImplicit": True,
         "allowsExplicit": False,
-        "ignoresInvalid": False,
+        "ignoresInvalid": True,
         "implicitAfter": None,
         "explicitAfter": "saved-local",
     }
@@ -665,7 +665,7 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
         assert refresh in background
 
 
-def test_profile_transitions_fetch_destination_reasoning_after_hiding_stale_chip():
+def test_existing_session_profile_switch_defers_reasoning_until_validated_load():
     source = f"""
 const uiSrc = {UI_JS!r};
 const panelsSrc = {PANELS_JS!r};
@@ -716,7 +716,6 @@ eval(extractFunc(uiSrc, 'fetchReasoningChip'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'syncTopbar'));
 eval(extractFunc(panelsSrc, 'switchToProfile'));
-eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
 const pending = [];
 const reasoningUrls = [];
 global.api = (url) => {{
@@ -739,12 +738,11 @@ fetchReasoningChip();
   S.session = {{ model: 'old-model', model_provider: 'old-provider', profile: 'default' }};
   _currentReasoningEffort = 'low'; _currentReasoningEffortsSupported = ['low', 'high']; _profileTransitionReasoningContext = null; _lastReasoningFetchKey = null;
   fetchReasoningChip();
-  await _switchProfileForSessionLoad('vops');
-  const directLoad = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice(2) }};
+      await switchToProfile('vops', {{ openExistingSession: true }});
+  const directLoad = {{ hidden: els.composerReasoningWrap.style.display || null, urls: reasoningUrls.slice(2) }};
   pending[2]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
   const directLoadAfterOld = _currentReasoningEffort;
-  pending[3]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
-  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld, directLoadAfterNew: _currentReasoningEffort }}));
+  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld }}));
 }})().catch(err => {{ console.error(err); process.exit(1); }});
 """
     payload = json.loads(_run_node(source))
@@ -755,11 +753,10 @@ fetchReasoningChip();
     assert payload["blankBootAfterOld"] == ""
     assert payload["blankBootAfterNew"] == "high"
     assert payload["directLoad"] == {
-        "hidden": "none",
-        "urls": ["/api/reasoning?model=old-model&provider=old-provider", "/api/reasoning?model=gpt-high&provider=openai"],
+        "hidden": None,
+        "urls": ["/api/reasoning?model=old-model&provider=old-provider"],
     }
-    assert payload["directLoadAfterOld"] == ""
-    assert payload["directLoadAfterNew"] == "high"
+    assert payload["directLoadAfterOld"] == "low"
 
 
 def test_blank_profile_transition_context_clears_before_explicit_model_change():

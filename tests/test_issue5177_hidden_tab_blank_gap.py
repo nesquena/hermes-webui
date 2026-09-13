@@ -157,8 +157,15 @@ def test_ensure_messages_loaded_called_with_keep_stale_flag():
     # the keep-stale flag so the early-return inside _ensureMessagesLoaded
     # cannot skip the swap when stale messages are still in place.
     block = _load_session_block(_compact(SESSIONS_JS))
-    # Both INFLIGHT and idle paths.
-    assert block.count("await_ensureMessagesLoaded(sid,{force:_keepStaleUntilLoaded,loadGeneration:_loadGeneration})") == 2
+    expected = (
+        "await_ensureMessagesLoaded(sid,{"
+        "force:_keepStaleUntilLoaded,"
+        "loadGeneration:_loadGeneration,"
+        "expectedSessionId:opts.expectedSessionId,"
+        "expectedProfile:opts.expectedProfile"
+        "})"
+    )
+    assert block.count(expected) == 2
 
 
 def test_ensure_messages_loaded_supports_force_override():
