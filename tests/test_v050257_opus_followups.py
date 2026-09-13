@@ -113,6 +113,7 @@ def test_cron_history_rejects_traversal_in_job_id():
         assert 'job_id in (".", "..")' in body, (
             f"{name} must explicitly reject `.` and `..` in addition to the regex."
         )
+    assert "parse_cron_output_artifact" in detail_body
 
 
 # ── 3: int() bounds checking on offset/limit ────────────────────────────────
