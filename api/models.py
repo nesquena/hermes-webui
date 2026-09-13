@@ -1248,6 +1248,7 @@ class Session:
                  clear_generation=None,
                  intentional_shrink_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
+                 last_used_model=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
                 parent_session_id: str=None,
@@ -1346,6 +1347,7 @@ class Session:
         self.intentional_shrink_generation = intentional_shrink_generation
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
+        self.last_used_model = str(last_used_model).strip()[:240] if last_used_model else None
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
@@ -1430,7 +1432,7 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'intentional_shrink_generation',
-            'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
+            'gateway_routing', 'gateway_routing_history', 'last_used_model', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
@@ -1796,6 +1798,7 @@ class Session:
             'recommended_recovery_action': self.recommended_recovery_action,
             'gateway_routing': self.gateway_routing,
             'gateway_routing_history': self.gateway_routing_history,
+            'last_used_model': self.last_used_model,
             'manual_title': self.manual_title,
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.

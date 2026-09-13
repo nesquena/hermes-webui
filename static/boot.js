@@ -2242,6 +2242,15 @@ function _applySessionContextMetadataUpdate(data){
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
   S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
+  if('last_used_model' in data.session){
+    S.session.last_used_model=data.session.last_used_model||null;
+  }
+  if('gateway_routing' in data.session){
+    S.session.gateway_routing=data.session.gateway_routing||null;
+  }
+  if('gateway_routing_history' in data.session){
+    S.session.gateway_routing_history=data.session.gateway_routing_history||[];
+  }
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -2273,6 +2282,12 @@ $('modelSelect').onchange=async()=>{
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  const routeChanged = String(S.session.model || '') !== String(modelState.model || '')
+    || String(S.session.model_provider || '') !== String(modelState.model_provider || '');
+  if(routeChanged){
+    S.session.last_used_model = null;
+    S.session.gateway_routing = null;
+  }
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
@@ -2294,6 +2309,7 @@ $('modelSelect').onchange=async()=>{
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
+  if(typeof syncModelChip==='function') syncModelChip();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);

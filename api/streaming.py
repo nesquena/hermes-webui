@@ -10335,6 +10335,7 @@ def _run_agent_streaming(
             # detached worker for a NAMED profile paired that profile's endpoint
             # with the DEFAULT profile's API key (finding #3). No-op for the
             # default/root profile.
+            _session_requested_provider = None
             with profiles_api.profile_scope_for_detached_worker(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
@@ -11958,13 +11959,15 @@ def _run_agent_streaming(
                     agent,
                     result,
                     requested_model=resolved_model or model,
-                    requested_provider=resolved_provider,
+                    requested_provider=_session_requested_provider or resolved_provider,
                 )
                 # #6068: the served model must be read AFTER agent.run — the agent
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
                 _used_model = getattr(agent, 'model', None) or resolved_model or model
+                if _used_model:
+                    s.last_used_model = str(_used_model).strip()[:240]
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
