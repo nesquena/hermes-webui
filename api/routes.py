@@ -24763,7 +24763,15 @@ def _handle_cron_update(handler, body):
                 updates[k] = v
     except ValueError as e:
         return bad(handler, str(e))
-    job = update_job(body["job_id"], updates)
+    # update_job() reparses the schedule through the agent's authoritative
+    # parser, so invalid or display-only schedule input (e.g. the human-readable
+    # "once at ..." text derived for the UI) raises ValueError here. Report it
+    # as a 400 with the parser message instead of letting it escape as a 500,
+    # and keep the existing job untouched (issue #7352).
+    try:
+        job = update_job(body["job_id"], updates)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
     if not job:
         return bad(handler, "Job not found", 404)
     return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
