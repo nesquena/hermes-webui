@@ -233,6 +233,85 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
     With 10 sessions: negligible. With 1000+: will be slow.
     See Architecture Phase C for the index file fix.
 
+#### Offline replay repair for very large sidecars
+
+Loading a session normally repairs known replay duplicates before returning the
+mutable `Session`. For a sidecar larger than 128 MiB, that inline path would
+create several full-size copies inside an HTTP request. `Session.load()` instead
+performs an allocation-free adjacent-partial check: only a large projection that
+actually needs that repair is marked `_replay_repair_deferred` and blocked from
+save. A large valid projection remains writable, and full session-index rebuilds
+use a bounded streaming top-level metadata scanner that skips transcript and
+scene bodies, accepts metadata before or after those arrays, and refuses files
+without a valid persisted session ID matching the sidecar filename rather than
+constructing a default or phantom ID. Skipped values are still fully checked
+against JSON grammar; if legacy JSON repeats `messages` and omits an explicit
+`message_count`, the last array supplies the count, matching `json.loads`.
+
+`Session.save()` and the tool share an exclusive per-session sidecar lock.
+Every normal save, compact, and restore advances `_sidecar_generation_v1` from
+the durable value observed under that lock. New sidecars receive a durable
+`_sidecar_epoch_v1`, and the first mutating compaction bootstraps one for a
+legacy sidecar; restore retains that epoch. A loaded mutable `Session` records
+epoch, generation, the digest of the exact bytes read, and the session ID that
+owns that observation; save compares that complete revision under the lock and
+records the digest of the bytes actually published, including platform newline
+behavior. It fails stale instead of republishing history loaded before
+maintenance. A freshly constructed replacement has no prior observation: its
+first save adopts an existing target epoch under the lock, while a session-ID
+rotation with no target sidecar starts a new epoch. Any authoritative in-place
+refresh that copies newer durable state also transfers the matching revision.
+After that first save or refresh, the object is revision-bound again. The epoch
+changes on delete/recreate, preventing generation-counter ABA.
+
+The command remains strictly offline: always drain and stop every WebUI process
+before running it, then restart from fresh durable state after maintenance,
+because older, direct, or non-WebUI writers may not acquire this maintenance
+lock. Even `--dry-run` acquires the cooperative lock and may create its private
+`.sidecar-locks/<sid>.lock` metadata:
+
+```bash
+python scripts/compact_session_replays.py --dry-run ~/.hermes/webui/sessions/<session-id>.json
+python scripts/compact_session_replays.py ~/.hermes/webui/sessions/<session-id>.json
+```
+
+The maintenance command is POSIX/WSL-only; on Windows, run it inside WSL rather
+than invoking it from native Python.
+
+The tool performs separate analysis and write passes, validates every copied
+JSON value with RFC 8259's exact whitespace set, incrementally validates and
+copies non-target strings with fixed-size buffers, limits one decoded target
+message to 64 MiB, and transforms only top-level `messages` and
+`context_messages`.
+Exact replay membership is tracked
+in a temporary SQLite
+index with a bounded page cache, so RAM does not grow with the number of unique
+message identities; operators must provide temporary-disk headroom proportional
+to that unique-key count. It publishes only while the source inode/stat
+signature, SHA-256, and generation still match. Ambiguous or non-JSON-stable
+rows are retained. A content-addressed byte-exact backup and hidden checksum
+manifest are fsynced, including the manifest directory entry, before the
+compacted sidecar is atomically installed. A non-crash source-install failure
+removes and fsyncs the unpublished manifest; the
+source mode is preserved on source, backup, manifest, and restore output. Every
+sensitive artifact is created as `0600` before its final mode is applied. The
+source must be a regular non-symlink sidecar whose safe embedded `session_id`
+matches its filename and is at most 150 characters. The hidden manifest is
+excluded from session discovery and index rebuilds, and WebUI session deletion
+removes that session's replay-v10 backups, manifests, and stale temporaries.
+
+Rollback is explicit and also fail-closed:
+
+```bash
+python scripts/compact_session_replays.py --restore <manifest-path>
+```
+
+Restore refuses if either the current compacted sidecar or immutable backup no
+longer matches the manifest. It opens the backup without following symlinks and
+hashes/transforms one regular-file descriptor, closing the check/use gap. The
+archive remains byte-exact; only the restored sidecar receives the newer
+generation required to order later writes.
+
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 

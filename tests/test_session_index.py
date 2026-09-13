@@ -1407,7 +1407,7 @@ def test_concurrent_saves_dont_lose_data():
     sB = _make_session("sess_b", "Bravo", updated_at=200.0)
 
     for s in (sA, sB):
-        s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+        s.save(touch_updated_at=False, skip_index=True)
 
     # Build initial index
     _write_session_index(updates=None)
