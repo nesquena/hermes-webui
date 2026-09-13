@@ -167,41 +167,105 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Geometry-side touch predicate: "this viewport has a touch surface", with or
+// without a trackpad/mouse also attached. _isTouchKeyboardViewport() above
+// deliberately excludes devices where a fine pointer coexists, which is right
+// for the composer's Enter semantics (see _hasFinePointerCoexisting) but wrong
+// for layout geometry: an iPad with a Magic Keyboard/trackpad still raises the
+// on-screen keyboard and still keeps the stale horizontal offset after
+// dismissal, and once its pointer is reported as fine the
+// `(hover:none) and (pointer:coarse)` pair stops matching, so that device used
+// to skip the reflow and the horizontal reset entirely. `(any-pointer:coarse)`
+// is true for every touch device and false for mouse-only desktops.
+function _isTouchCapableViewport(){
+  try{return matchMedia('(any-pointer:coarse)').matches;}catch(_){return false;}
+}
+
+// Whether the on-screen keyboard was occluding the visual viewport as of the
+// last _syncKeyboardBottomInset() call — the single keyboard-state authority in
+// this file.
+let _keyboardVisible=false;
+
+// Keyboard-occlusion state machine. Writes the --keyboard-bottom-inset variable
+// consumed by the touch-primary composer padding rule, mirrors the same state on
+// `body.keyboard-visible` (the style.css iPad horizontal-shift guard), and
+// returns the transition it just performed: 'shown', 'dismissed', or '' (no
+// change, or a "cannot prove" exit). Only the eligible, unzoomed, zero-inset
+// exit reports 'dismissed' — that value is the single trigger for the document
+// horizontal reset — so callers react exactly once per keyboard transition
+// instead of once per visualViewport event.
+// Every exit that cannot prove an unzoomed, occluding on-screen keyboard — no
+// visualViewport, no touch surface, pinch zoom, zero inset — clears BOTH the
+// variable and the class, so the style.css rule keyed off body.keyboard-visible
+// can never be left stranded on screen after the keyboard is gone.
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
-  if(!root) return;
-  if(!window.visualViewport||!_isTouchKeyboardViewport()){
+  if(!root) return '';
+  const wasVisible=_keyboardVisible;
+  const clearKeyboardState=()=>{
     root.style.removeProperty('--keyboard-bottom-inset');
-    return;
-  }
+    _keyboardVisible=false;
+    if(document.body) document.body.classList.remove('keyboard-visible');
+  };
   const vv=window.visualViewport;
+  if(!vv||!_isTouchCapableViewport()){
+    // Cannot prove an occluding keyboard at all (no visualViewport, or a
+    // mouse-only desktop): clear the state, but report no keyboard transition
+    // so nobody treats this as a dismissal.
+    clearKeyboardState();
+    return '';
+  }
   // A pinch-zoomed viewport (vv.scale != 1) makes innerHeight - vv.height
   // reflect the zoom, not the keyboard — on Chromium touch devices with
   // accessibility "force enable zoom" that yields a large spurious inset that
   // jitters on pan. Treat only the unzoomed state as keyboard occlusion.
   if(Math.abs((vv.scale||1)-1)>0.05){
-    root.style.removeProperty('--keyboard-bottom-inset');
-    return;
+    // Same "cannot prove" exit: while pinch-zoomed this geometry says nothing
+    // about the keyboard, and reporting a dismissal here would reset the
+    // document's horizontal offset right after the user pinched or panned.
+    clearKeyboardState();
+    return '';
   }
   const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
   if(inset>0){
-    root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
-  }else{
-    root.style.removeProperty('--keyboard-bottom-inset');
+    // The inset variable is only read inside the `(hover:none) and
+    // (pointer:coarse)` padding rule in style.css, so its write stays scoped to
+    // that pair; body.keyboard-visible is the guard that also matters on
+    // tablets whose primary pointer is fine (iPad + trackpad).
+    if(_isTouchKeyboardViewport()) root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
+    _keyboardVisible=true;
+    if(document.body) document.body.classList.add('keyboard-visible');
+    return wasVisible?'':'shown';
   }
+  clearKeyboardState();
+  return wasVisible?'dismissed':'';
 }
 
-// Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
+// Reset only the document's horizontal offset, preserving vertical scroll.
+// window.scrollTo(0, window.scrollY) is the one form that leaves the vertical
+// position untouched on every engine we target, so the keyboard-dismiss path
+// cannot jump the transcript back to the top.
+function _resetDocumentHorizontalOffset(){
+  try{ window.scrollTo(0, window.scrollY); }catch(_){ }
+}
+
+// Mobile PWA / tablet viewport reflow guard. When the on-screen keyboard / browser
 // chrome shows or hides, visualViewport (or a plain resize on browsers without
 // it) changes height without a layout invalidation, leaving the phone layout
 // painted against stale geometry. Toggling a one-frame `viewport-reflow` class
-// (which applies a cheap GPU-promotion transform under the @media(max-width:640px)
-// rule) forces a repaint, then we resync the workspace panel + sidebar aria.
+// (which applies a cheap GPU-promotion transform under the .layout rule) forces
+// a repaint, then we resync the workspace panel + sidebar aria.
+// On touch viewports the keyboard dismiss can additionally leave a horizontal
+// offset on the document, so the X reset is bound to the keyboard-visible ->
+// dismissed transition — exactly once per dismissal — and never to every
+// geometry event: a blind scrollTo on each visualViewport event cancelled the
+// horizontal position the user had just pinched or panned to.
 function _forceMobileViewportReflow(){
-  _syncKeyboardBottomInset();
-  if(!_isPhoneWidthViewport()) return;
+  const keyboardTransition=_syncKeyboardBottomInset();
+  if(!_isPhoneWidthViewport() && !_isTouchCapableViewport()) return;
   const layout=document.querySelector('.layout');
   if(!layout) return;
+  if(keyboardTransition==='dismissed') _resetDocumentHorizontalOffset();
   document.documentElement.classList.add('viewport-reflow');
   void layout.offsetWidth;
   requestAnimationFrame(()=>{
