@@ -1,0 +1,2387 @@
+"""Regression: project-assigned CLI sessions must survive the recent-session cap.
+
+Two independent 20-session caps used to hide older project-assigned CLI/TUI
+sessions while their project chip still claimed them. Recovering them must not
+swing to the opposite failure, so these tests pin BOTH edges of the contract:
+
+* an assigned conversation older than the recent window is still reachable
+  (the original bug), including past the 200-conversation mark when the
+  assignments are spread over several projects;
+* one busy project cannot starve the others: a per-project budget applied to a
+  single global recency window is not a per-project bound, so a saturated window
+  is followed by project-scoped, per-project-budgeted queries (greptile P1);
+* the follow-up is COMPLETE — every starved project is served, with no fixed
+  per-build project cap that would permanently skip the rest (greptile P1);
+* the recovered set is BOUNDED — the FINAL MERGED assigned payload never exceeds
+  the 200-row assigned cap, counting logical conversations, including assigned
+  rows that arrive as imported WebUI sidecars and therefore never pass through
+  any state.db cap — and that bound is spent by a fair per-project draw, so
+  bounding the payload does not starve a quiet project;
+* assigned rows do not spend the unassigned sidebar quota: 20 unique unassigned
+  logical conversations survive after lineage/sidecar dedup — including when the
+  assignment lives only on a WebUI sidecar, wherever the moved conversations sit
+  relative to the window, since the refill re-classifies its OWN result and
+  widens again instead of trusting one pre-computed allowance. The one honest
+  boundary is the refill's scan ceiling: conversations deeper than
+  ``UNASSIGNED_CLI_REFILL_SCAN_CEILING`` are not read, so a profile whose newest
+  200 state.db-unassigned conversations hold fewer than 20 still-unassigned ones
+  gets a shorter window (pinned below);
+* a deleted or cross-profile ``project_id`` cannot hide a session — it resolves
+  to "unassigned" before either cap runs, instead of becoming a ``default_hidden``
+  row with no chip left to reveal it;
+* a project assignment recorded on a newer EMPTY compression continuation is
+  applied to the lineage even when the root is the freshest importable segment.
+"""
+
+import json
+import sqlite3
+
+import pytest
+
+from api import agent_sessions, models, routes
+
+BASE_TS = 1700000000.0
+
+
+def _session(
+    sid,
+    started_at,
+    *,
+    project_id=None,
+    parent=None,
+    ended_at=None,
+    end_reason=None,
+    source="cli",
+    messages=1,
+    title=None,
+):
+    """One state.db ``sessions`` row. Titled by default so the row is visible."""
+    return {
+        "id": sid,
+        "title": sid if title is None else title,
+        "model": "gpt-x",
+        "message_count": messages,
+        "started_at": started_at,
+        "source": source,
+        "project_id": project_id,
+        "parent_session_id": parent,
+        "ended_at": ended_at,
+        "end_reason": end_reason,
+        "messages": messages,
+    }
+
+
+def _write_state_db(db_path, rows, *, lineage_columns=True):
+    """Create a minimal agent state.db from ``_session()`` rows."""
+    columns = [
+        "id", "title", "model", "message_count", "started_at", "source", "project_id",
+    ]
+    lineage_ddl = ""
+    if lineage_columns:
+        columns += ["parent_session_id", "ended_at", "end_reason"]
+        lineage_ddl = ", parent_session_id TEXT, ended_at REAL, end_reason TEXT"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE sessions ("
+        "id TEXT PRIMARY KEY, title TEXT, model TEXT, message_count INTEGER, "
+        f"started_at REAL, source TEXT, project_id TEXT{lineage_ddl})"
+    )
+    conn.execute(
+        "CREATE TABLE messages ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, timestamp REAL, role TEXT)"
+    )
+    placeholders = ", ".join("?" for _ in columns)
+    for row in rows:
+        conn.execute(
+            f"INSERT INTO sessions ({', '.join(columns)}) VALUES ({placeholders})",
+            [row.get(column) for column in columns],
+        )
+        for index in range(int(row.get("messages") or 0)):
+            conn.execute(
+                "INSERT INTO messages (session_id, timestamp, role) VALUES (?, ?, ?)",
+                (row["id"], float(row["started_at"]) + 0.5 + index, "user"),
+            )
+    conn.commit()
+    conn.close()
+
+
+def _lineage(prefix, start_ts, segments, *, project_id=None, tip_project_id=None,
+             step=10.0, messages=1):
+    """A compression chain: ``segments`` rows, only the last one still open."""
+    rows = []
+    for index in range(segments):
+        last = index == segments - 1
+        started_at = start_ts + index * step
+        rows.append(_session(
+            f"{prefix}-seg{index}",
+            started_at,
+            project_id=(
+                tip_project_id if last and tip_project_id is not None
+                else project_id if index == 0
+                else None
+            ),
+            parent=None if index == 0 else f"{prefix}-seg{index - 1}",
+            ended_at=None if last else started_at + step / 2,
+            end_reason=None if last else "compression",
+            messages=messages,
+        ))
+    return rows
+
+
+@pytest.fixture
+def fake_hermes_home(tmp_path, monkeypatch):
+    """Point get_cli_sessions() at a temporary HERMES_HOME + projects.json."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    import api.config as cfg
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    # Keep root-profile aliasing hermetic: the real _is_root_profile falls back
+    # to list_profiles_api(), which shells out to the agent CLI.
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+
+    projects_file = tmp_path / "projects.json"
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    projects_file.write_text("[]", encoding="utf-8")
+
+    models.clear_cli_sessions_cache()
+    yield home
+    models.clear_cli_sessions_cache()
+
+
+def _register_projects(tmp_path, *project_ids, profile="default"):
+    """Write ``project_ids`` into the projects.json the loader resolves against."""
+    existing = json.loads((tmp_path / "projects.json").read_text(encoding="utf-8"))
+    existing.extend(
+        {
+            "project_id": project_id,
+            "name": f"Project {project_id}",
+            "color": "#6366f1",
+            "profile": profile,
+            "created_at": 1.0,
+        }
+        for project_id in project_ids
+    )
+    (tmp_path / "projects.json").write_text(json.dumps(existing), encoding="utf-8")
+    models.clear_cli_sessions_cache()
+
+
+# ── The original bug: an assigned session older than the recent window ────────
+
+
+def test_project_assigned_cli_session_survives_recent_session_limit(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
+
+    rows = [
+        _session(f"recent-{index:02d}", BASE_TS + 100 + index)
+        for index in range(25)
+    ]
+    rows.append(_session("older-assigned", BASE_TS, project_id="project-123"))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "older-assigned" in by_id
+    assert by_id["older-assigned"]["project_id"] == "project-123"
+    assert [session["session_id"] for session in sessions].count("older-assigned") == 1
+
+
+@pytest.mark.parametrize(
+    ("root_project_id", "tip_project_id"),
+    [
+        ("project-123", None),
+        (None, "project-123"),
+    ],
+)
+def test_project_assigned_compression_lineage_is_returned_once(
+    fake_hermes_home,
+    tmp_path,
+    monkeypatch,
+    root_project_id,
+    tip_project_id,
+):
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
+
+    rows = [
+        _session(
+            "lineage-root",
+            BASE_TS,
+            project_id=root_project_id,
+            ended_at=BASE_TS + 1,
+            end_reason="compression",
+        ),
+        _session("lineage-tip", BASE_TS + 200, project_id=tip_project_id, parent="lineage-root"),
+    ]
+    # Keep the tip inside the normal five-row window while pushing the root
+    # outside its 8x SQL candidate window. This reproduces the real two-pass
+    # boundary: the normal pass sees only the tip and the project pass must
+    # bring enough lineage context to avoid appending the root separately.
+    rows.extend(_session(f"newer-{index}", BASE_TS + 300 + index) for index in range(4))
+    rows.extend(_session(f"middle-{index}", BASE_TS + 100 + index) for index in range(56))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    lineage_rows = [
+        session
+        for session in sessions
+        if session["session_id"] in {"lineage-root", "lineage-tip"}
+    ]
+
+    assert len(lineage_rows) == 1
+    assert lineage_rows[0]["session_id"] in {"lineage-root", "lineage-tip"}
+    assert lineage_rows[0]["project_id"] == "project-123"
+
+
+# ── Finding 1: the recovered assigned set must stay bounded ───────────────────
+
+
+def test_assigned_conversations_are_bounded_per_project(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """250 assigned conversations in one project yield the newest 200, not 250."""
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_LIMIT", 200)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [
+        _session(f"assigned-{index:04d}", BASE_TS + index, project_id="project-a")
+        for index in range(250)
+    ]
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 1000 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    assigned = [s for s in sessions if s["project_id"] == "project-a"]
+    assigned_ids = {s["session_id"] for s in assigned}
+
+    assert len(assigned) == 200
+    # The bound drops the OLDEST assigned conversations, never a newer one.
+    assert "assigned-0249" in assigned_ids
+    assert "assigned-0050" in assigned_ids
+    assert "assigned-0049" not in assigned_ids
+    assert "assigned-0000" not in assigned_ids
+
+
+def test_route_cap_bounds_imported_sidecar_assigned_rows(fake_hermes_home):
+    """Imported CLI sidecars bypass every state.db cap (review finding 1).
+
+    ``all_sessions()`` rows never pass through read_importable_agent_session_rows,
+    so the merged payload is the only place that can bound them. 1,000 assigned
+    rows used to yield 1,000 returned rows.
+    """
+    sidecars = [
+        {
+            "session_id": f"imported-{index:04d}",
+            "is_cli_session": True,
+            "project_id": "project-prime",
+        }
+        for index in range(1000)
+    ]
+
+    kept = routes._cap_recent_cli_sessions(sidecars)
+
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    assert kept[0]["session_id"] == "imported-0000"
+    # The recent window still renders normally; only the overflow is chip-only.
+    visible = [row for row in kept if not row.get("default_hidden")]
+    assert len(visible) == routes.CLI_VISIBLE_SESSION_CAP
+    # Capping never mutates the caller's rows.
+    assert not any("default_hidden" in row for row in sidecars)
+
+
+def _assigned_project_counts(rows):
+    """project_id -> kept row count, for the assigned rows only."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        project_id = row.get("project_id")
+        if project_id:
+            counts[project_id] = counts.get(project_id, 0) + 1
+    return counts
+
+
+def test_route_cap_bounds_the_reviewers_five_project_reproduction(fake_hermes_home):
+    """The review's literal reproduction: 1,000 assigned rows over 5 projects.
+
+    A PER-PROJECT 200 is not a bound on the payload — every one of the five
+    projects stayed under its own 200, so 1,000 rows went in and 1,000 came out,
+    which is exactly what review finding 1 reported. The review asked for "the
+    existing 200-row assigned cap across the final MERGED CLI set", so the bound
+    is on the whole assigned payload, not on one project.
+    """
+    project_count = 5
+    per_project = 200
+    rows = []
+    for project in range(project_count):
+        rows.extend(
+            {
+                "session_id": f"project-{project}-{index:04d}",
+                "is_cli_session": True,
+                "project_id": f"project-{project}",
+            }
+            for index in range(per_project)
+        )
+    assert len(rows) == 1000
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP == 200
+    # Bounded by a FAIR draw, not by truncating the head of the list: the rows
+    # are grouped per project, so a flat `sessions[:200]` would have handed
+    # project-0 every slot and left the other four unreachable — the starvation
+    # greptile rejected as P1.
+    counts = _assigned_project_counts(kept)
+    assert len(counts) == project_count
+    assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
+
+
+def test_route_cap_splits_the_merged_budget_fairly_between_projects(fake_hermes_home):
+    """A busy project must not evict another project's history (greptile P1).
+
+    The merged budget is drawn round-robin, newest first WITHIN each project, so
+    two equally deep projects get an equal share and each keeps its newest
+    conversations rather than an arbitrary slice.
+    """
+    rows = []
+    for project in ("project-a", "project-b"):
+        rows.extend(
+            {
+                "session_id": f"{project}-{index:04d}",
+                "is_cli_session": True,
+                "project_id": project,
+            }
+            for index in range(250)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    half = routes.CLI_PROJECT_ASSIGNED_CAP // 2
+    assert _assigned_project_counts(kept) == {"project-a": half, "project-b": half}
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    # Newest first within each project: the draw keeps the head of each queue.
+    kept_ids = {row["session_id"] for row in kept}
+    for project in ("project-a", "project-b"):
+        assert f"{project}-0000" in kept_ids
+        assert f"{project}-{half - 1:04d}" in kept_ids
+        assert f"{project}-{half:04d}" not in kept_ids
+
+
+def test_route_cap_shrinks_every_share_instead_of_dropping_projects(fake_hermes_home):
+    """Every project with an assigned session keeps at least one row.
+
+    8,000 assigned rows over 40 projects still leaves every chip reachable: the
+    draw shrinks each project's slice to 200 // 40 = 5 rather than dropping whole
+    projects, which is the starvation greptile rejected as P1.
+    """
+    project_count = 40
+    rows = []
+    for project in range(project_count):
+        rows.extend(
+            {
+                "session_id": f"project-{project:02d}-{index:04d}",
+                "is_cli_session": True,
+                "project_id": f"project-{project:02d}",
+            }
+            for index in range(200)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    counts = _assigned_project_counts(kept)
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    assert len(counts) == project_count
+    assert min(counts.values()) >= 1
+    assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
+
+
+def test_route_cap_bound_wins_when_projects_outnumber_slots(fake_hermes_home):
+    """The documented edge of the draw: 200 rows cannot represent 250 projects.
+
+    Deliberate and pinned so it is not mistaken for a bug: past
+    ``CLI_PROJECT_ASSIGNED_CAP`` assigned projects the review's number is the
+    hard constraint, so the most recently active ``CLI_PROJECT_ASSIGNED_CAP``
+    projects get one row each. The draw still never gives one project two rows
+    while another has none.
+    """
+    project_count = 250
+    rows = []
+    for project in range(project_count):
+        rows.extend(
+            {
+                "session_id": f"project-{project:03d}-{index}",
+                "is_cli_session": True,
+                "project_id": f"project-{project:03d}",
+            }
+            for index in range(3)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    counts = _assigned_project_counts(kept)
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    assert set(counts.values()) == {1}
+    assert len(counts) == routes.CLI_PROJECT_ASSIGNED_CAP
+    # The projects that keep a row are the ones with the most recent activity,
+    # i.e. the head of the newest-first merged list.
+    assert counts.keys() == {
+        f"project-{project:03d}" for project in range(routes.CLI_PROJECT_ASSIGNED_CAP)
+    }
+
+
+def test_route_cap_keeps_every_assigned_row_under_the_merged_cap(fake_hermes_home):
+    """Negative control: the draw is inert while the assigned set fits.
+
+    Without this, "bounded at 200" could just as well be a blanket shrink. Two
+    projects with 60 conversations each keep all 120.
+    """
+    rows = []
+    for project in ("project-a", "project-b"):
+        rows.extend(
+            {
+                "session_id": f"{project}-{index:04d}",
+                "is_cli_session": True,
+                "project_id": project,
+            }
+            for index in range(60)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    assert _assigned_project_counts(kept) == {"project-a": 60, "project-b": 60}
+    assert len(kept) == 120 < routes.CLI_PROJECT_ASSIGNED_CAP
+
+
+def test_route_merged_assigned_cap_is_the_existing_model_row_cap():
+    """The route's merged bound must stay the 200-row cap the review named.
+
+    ``api.models`` is imported below this cap in ``api/routes.py``, so the value
+    is spelled as a literal there and only a test can keep the two honest. The
+    merged bound must also never exceed what the model recovery pass can deliver,
+    or the route would advertise a budget nothing can fill.
+    """
+    assert routes.CLI_PROJECT_ASSIGNED_CAP == models.PROJECT_ASSIGNED_CLI_LIMIT == 200
+    assert (
+        routes.CLI_PROJECT_ASSIGNED_CAP
+        <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+    )
+
+
+def test_more_than_two_hundred_assigned_conversations_survive_across_projects(
+    fake_hermes_home, tmp_path
+):
+    """The model pass budgets per project too, not a single global 200."""
+    _register_projects(tmp_path, "project-a", "project-b")
+
+    rows = [
+        _session(f"a-{index:04d}", BASE_TS + index, project_id="project-a")
+        for index in range(150)
+    ]
+    rows.extend(
+        _session(f"b-{index:04d}", BASE_TS + 500 + index, project_id="project-b")
+        for index in range(150)
+    )
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 2000 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    counts: dict[str, int] = {}
+    for session in sessions:
+        if session["project_id"]:
+            counts[session["project_id"]] = counts.get(session["project_id"], 0) + 1
+
+    # 300 assigned conversations total — a global 200 bound would silently drop
+    # the 100 oldest, all of them project-a's.
+    assert counts == {"project-a": 150, "project-b": 150}
+
+
+def test_model_bounds_a_skewed_project_inside_a_wider_scan_window(
+    fake_hermes_home, tmp_path
+):
+    """The per-project budget, not the query LIMIT, is what bounds a project.
+
+    The recovery query asks for ``PROJECT_ASSIGNED_CLI_LIMIT * len(projects)``
+    conversations, so with two registered projects its window is 400 — wide
+    enough to hand back all 250 of project-a's on its own. Only the per-project
+    accounting keeps project-a at 200, so a skewed distribution is the case that
+    actually exercises it (a single-project profile has query_limit == the bound
+    and would pass either way).
+    """
+    _register_projects(tmp_path, "project-a", "project-b")
+
+    rows = [
+        _session(f"a-{index:04d}", BASE_TS + index, project_id="project-a")
+        for index in range(250)
+    ]
+    rows.extend(
+        _session(f"b-{index:04d}", BASE_TS + 5000 + index, project_id="project-b")
+        for index in range(5)
+    )
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 9000 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    counts: dict[str, int] = {}
+    for session in sessions:
+        if session["project_id"]:
+            counts[session["project_id"]] = counts.get(session["project_id"], 0) + 1
+    assigned_ids = {s["session_id"] for s in sessions if s["project_id"] == "project-a"}
+
+    assert counts == {"project-a": models.PROJECT_ASSIGNED_CLI_LIMIT, "project-b": 5}
+    # The budget spends newest-first, so the dropped rows are the oldest 50.
+    assert "a-0249" in assigned_ids
+    assert "a-0050" in assigned_ids
+    assert "a-0049" not in assigned_ids
+    # The smaller project is untouched by its neighbour's overflow.
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-b"} == {
+        f"b-{index:04d}" for index in range(5)
+    }
+
+
+# ── greptile P1: a busy project must not starve the quieter ones ──────────────
+
+
+def _assigned_counts(sessions):
+    counts: dict[str, int] = {}
+    for session in sessions:
+        if session["project_id"]:
+            counts[session["project_id"]] = counts.get(session["project_id"], 0) + 1
+    return counts
+
+
+def test_busy_project_does_not_starve_quieter_projects(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The per-project BUDGET is not enough while the QUERY is one global window.
+
+    The recovery pass asked for ``limit * len(projects)`` newest assigned
+    conversations in a single recency-ordered query and only then applied the
+    per-project budget. When one project owns that whole window, every other
+    project's assigned conversations are never even considered: their chips show
+    nothing at all. Reproduced with a scaled budget (3) so the fixture stays
+    small; ``test_busy_project_starvation_at_production_limits`` pins the same
+    behaviour at the real 200.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-busy", "project-quiet-a", "project-quiet-b")
+
+    rows = [
+        _session("quiet-a-old", BASE_TS, project_id="project-quiet-a"),
+        _session("quiet-b-old", BASE_TS + 1, project_id="project-quiet-b"),
+    ]
+    # 12 newer assigned conversations in one project fill the 3 * 3 = 9 window.
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(12)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=3,
+    )
+
+    # Was {'project-busy': 3}: both quiet projects were completely absent.
+    assert _assigned_counts(sessions) == {
+        "project-busy": 3,
+        "project-quiet-a": 1,
+        "project-quiet-b": 1,
+    }
+    # The busy project still gets its newest, and is still bounded.
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-busy"} == {
+        "busy-011", "busy-010", "busy-009",
+    }
+
+
+def test_busy_project_starvation_at_production_limits(fake_hermes_home, tmp_path):
+    """The same starvation with the real PROJECT_ASSIGNED_CLI_LIMIT (200).
+
+    Two registered projects give the old global query a 400-conversation window;
+    400 newer conversations in one project consumed all of it, so the quiet
+    project's single assigned conversation was unreachable.
+    """
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+
+    rows = [_session("quiet-old", BASE_TS, project_id="project-quiet")]
+    rows.extend(
+        _session(f"busy-{index:04d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(models.PROJECT_ASSIGNED_CLI_LIMIT * 2)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 5000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    counts = _assigned_counts(models.get_cli_sessions())
+
+    # Was {'project-busy': 200}.
+    assert counts == {
+        "project-busy": models.PROJECT_ASSIGNED_CLI_LIMIT,
+        "project-quiet": 1,
+    }
+
+
+def test_starved_project_recovers_its_whole_compression_lineage(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The project-scoped follow-up query is still lineage-keyed.
+
+    ``project_ids`` narrows only the recursive CTE's SEED, so a starved project's
+    conversation still arrives as ONE row even when its assignment sits on the
+    root of a compression chain.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+
+    rows = _lineage("quiet-chain", BASE_TS, 3, project_id="project-quiet")
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(12)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=2,
+    )
+
+    quiet = [s for s in sessions if s["project_id"] == "project-quiet"]
+    assert len(quiet) == 1, [s["session_id"] for s in quiet]
+    assert quiet[0]["session_id"] in {f"quiet-chain-seg{index}" for index in range(3)}
+
+
+def test_no_followup_queries_when_the_global_window_is_not_saturated(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A short global window already saw everything, so it must cost 1 query.
+
+    The starvation follow-up is gated on saturation. Without that gate every
+    sidebar build on every profile with projects would pay a GROUP BY probe plus
+    a query per project.
+    """
+    _register_projects(tmp_path, "project-a", "project-b", "project-c")
+
+    rows = [
+        _session("a-1", BASE_TS, project_id="project-a"),
+        _session("b-1", BASE_TS + 1, project_id="project-b"),
+    ]
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    assigned_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "assigned":
+            assigned_queries.append(kwargs.get("project_ids"))
+        return real_reader(*args, **kwargs)
+
+    probes = []
+    real_probe = models.read_assigned_project_row_counts
+
+    def _counting_probe(*args, **kwargs):
+        probes.append(args)
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+    monkeypatch.setattr(models, "read_assigned_project_row_counts", _counting_probe)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=3,
+    )
+
+    assert _assigned_counts(sessions) == {"project-a": 1, "project-b": 1}
+    assert assigned_queries == [None], "one global assigned query, no per-project ones"
+    assert probes == [], "the GROUP BY probe is only paid on a saturated window"
+
+
+def test_short_global_projection_still_refills_a_starved_project(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A fully consumed raw window can project short without exhausting state.db.
+
+    Three 64-segment busy lineages fill the final ``6 * 32`` raw candidate
+    window for a two-project, three-conversation budget.  They collapse to only
+    three logical conversations, while an older quiet-project conversation sits
+    just beyond that raw window.  A gate based only on ``len(global_rows)``
+    mistakes that projection shortfall for a small database and leaves the quiet
+    project unreachable.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 4)
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+    per_project_limit = 3
+    global_limit = per_project_limit * 2
+    raw_window = global_limit * max(agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS)
+    assert raw_window % 3 == 0
+
+    rows = [_session("quiet-old", BASE_TS, project_id="project-quiet")]
+    for index in range(3):
+        rows.extend(_lineage(
+            f"busy-chain-{index}",
+            BASE_TS + 10_000 + index * 1_000,
+            raw_window // 3,
+            project_id="project-busy",
+            step=1.0,
+        ))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"][0], kwargs["limit"]))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=per_project_limit,
+    )
+
+    assert "quiet-old" in {session["session_id"] for session in sessions}
+    assert scoped_queries == [("project-quiet", per_project_limit)]
+
+
+def test_scoped_recovery_widens_when_its_own_raw_window_is_exhausted(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A starved project's OWN raw window can be consumed, not just the global one.
+
+    The global window's exhaustion is what triggers the project-scoped
+    follow-up, but that scoped query carries a raw candidate window of its own
+    (``limit * 8``, re-widened to ``limit * 32`` by the shared reader). A
+    lineage-heavy project fills it with compression segments, so the query
+    collapses them to one logical conversation and comes back short of
+    ``remaining`` — while an older assigned conversation of the SAME project
+    sits just beyond that window. Without the exhaustion signal the loop
+    advances to the next project and leaves this one under-delivered on every
+    rebuild, so the conversation behind the window is never recovered.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 20)
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+    per_project_limit = 4
+    # The pass's own scan budget for two projects under a ceiling of 20.
+    scoped_scan_budget = min(per_project_limit * 2, 20)
+
+    # The starved project's remaining budget is the full per-project limit, and
+    # its scoped raw windows — 4 * 8, then 4 * 32 — are filled by its own
+    # compression segments, which collapse to a single logical conversation.
+    scoped_raw_window = per_project_limit * max(agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS)
+    rows = [_session("quiet-old", BASE_TS, project_id="project-quiet")]
+    rows.extend(_lineage(
+        "quiet-chain",
+        BASE_TS + 10_000,
+        scoped_raw_window + 100,
+        project_id="project-quiet",
+        step=1.0,
+    ))
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 1000 + index, project_id="project-busy")
+        for index in range(25)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 9000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((
+                kwargs["project_ids"][0],
+                kwargs.get("limit"),
+                kwargs.get("return_window_exhaustion"),
+            ))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=per_project_limit,
+    )
+
+    quiet = {
+        session["session_id"]
+        for session in sessions
+        if session["project_id"] == "project-quiet"
+    }
+    assert "quiet-old" in quiet, "the conversation behind the scoped raw window is lost"
+
+    # Every scoped query asks for the exhaustion signal, the binding window
+    # buys exactly ONE wider re-query, and that re-query stays inside the
+    # pass's own scan budget.
+    assert scoped_queries == [
+        ("project-quiet", per_project_limit, True),
+        ("project-quiet", scoped_scan_budget, True),
+    ], "one retry at the pass's scan budget, not a widening loop"
+    assert all(
+        limit <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+        for _, limit, _ in scoped_queries
+    )
+
+
+def test_saturated_window_pays_one_query_per_starved_project(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Pin the cost of the worst case: probe + one query per starved project.
+
+    The ceiling is forced to 20 over 5 projects (a share of 4) so saturation is
+    reachable with a small fixture. Every project ends up represented, the
+    follow-up queries are project-scoped and each carries only that project's
+    remaining budget, and the recovered total stays under the ceiling.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 20)
+    quiet = [f"quiet-{index}" for index in range(4)]
+    _register_projects(tmp_path, "project-busy", *quiet)
+
+    rows = [
+        _session(f"{project}-old", BASE_TS + index, project_id=project)
+        for index, project in enumerate(quiet)
+    ]
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 1000 + index, project_id="project-busy")
+        for index in range(25)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 9000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"], kwargs.get("limit")))
+        return real_reader(*args, **kwargs)
+
+    probes = []
+    real_probe = models.read_assigned_project_row_counts
+
+    def _counting_probe(*args, **kwargs):
+        probes.append(args)
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+    monkeypatch.setattr(models, "read_assigned_project_row_counts", _counting_probe)
+
+    counts = _assigned_counts(models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+    ))
+
+    assert len(probes) == 1, "exactly one GROUP BY probe per saturated build"
+    assert scoped_queries == [(("quiet-0",), 4), (("quiet-1",), 4),
+                              (("quiet-2",), 4), (("quiet-3",), 4)]
+    assert counts == {"project-busy": 4, "quiet-0": 1, "quiet-1": 1,
+                      "quiet-2": 1, "quiet-3": 1}
+    assert sum(counts.values()) <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+
+
+def test_followup_serves_every_starved_project_neediest_first(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Every starved project gets its follow-up, in neediest-first order.
+
+    The first version of the follow-up was capped at a fixed number of projects
+    per build; with the cap forced to 1, only the lower-numbered project id was
+    served and the other stayed unreachable on every rebuild (greptile P1 on
+    #6659). The cap is gone: both starved projects are served, in the same
+    deterministic order the cap used to cut.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-busy", "project-quiet-a", "project-quiet-b")
+
+    rows = [
+        _session("quiet-a-old", BASE_TS, project_id="project-quiet-a"),
+        _session("quiet-b-old", BASE_TS + 1, project_id="project-quiet-b"),
+    ]
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 100 + index, project_id="project-busy")
+        for index in range(12)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"][0], kwargs.get("limit")))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=3,
+    )
+
+    # Neediest first: both projects are equally starved, so id order wins.
+    assert scoped_queries == [("project-quiet-a", 3), ("project-quiet-b", 3)]
+    assert _assigned_counts(sessions) == {
+        "project-busy": 3,
+        "project-quiet-a": 1,
+        "project-quiet-b": 1,
+    }
+
+
+def test_every_starved_project_is_served_past_the_old_refill_cap(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The refill has no project-count cap: all 39 starved projects are served.
+
+    greptile P1 on #6659: with more starved projects than the old fixed refill
+    cap (32), only the first 32 were served and every later project stayed
+    unreachable on each rebuild — the recovery is re-derived from the database
+    on every build, so the same 32 won every time. Ceiling 40 over 40 projects
+    is a share of 1, one busy project saturates the global window, and all 39
+    quieter projects must still get their scoped follow-up.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 40)
+    quiet = [f"quiet-{index:02d}" for index in range(39)]
+    _register_projects(tmp_path, "project-busy", *quiet)
+
+    rows = [
+        _session(f"{project}-old", BASE_TS + index, project_id=project)
+        for index, project in enumerate(quiet)
+    ]
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 1000 + index, project_id="project-busy")
+        for index in range(40)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append(kwargs["project_ids"][0])
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+    )
+
+    counts = _assigned_counts(sessions)
+    assert set(counts) == {"project-busy", *quiet}
+    assert len(scoped_queries) == len(quiet)
+    assert set(scoped_queries) == set(quiet)
+    assert counts == {"project-busy": 5, **{project: 1 for project in quiet}}
+
+
+def test_scan_ceiling_is_shared_equally_between_projects(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Past the ceiling every project's share shrinks; none is left with zero.
+
+    Ceiling 6 over 3 projects is a share of 2 even though the requested budget is
+    5, so the recovered payload stays under the ceiling AND every project is
+    represented — the old code let the newest project take 5 of the 6.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 6)
+    _register_projects(tmp_path, "project-a", "project-b", "project-c")
+
+    rows = []
+    for offset, project in enumerate(("project-a", "project-b", "project-c")):
+        rows.extend(
+            _session(
+                f"{project}-{index}",
+                BASE_TS + offset * 100 + index,
+                project_id=project,
+            )
+            for index in range(4)
+        )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 900 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=5,
+    )
+
+    counts = _assigned_counts(sessions)
+    assert counts == {"project-a": 2, "project-b": 2, "project-c": 2}
+    assert sum(counts.values()) <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+
+
+# ── The reader-level contract the per-project follow-up relies on ─────────────
+
+
+def test_project_ids_narrows_the_assigned_query_to_one_project(tmp_path):
+    """``project_ids`` seeds the lineage CTE with one project's rows only."""
+    db_path = tmp_path / "state.db"
+    rows = [
+        _session("a-1", BASE_TS, project_id="project-a"),
+        _session("b-1", BASE_TS + 1, project_id="project-b"),
+        _session("plain", BASE_TS + 2),
+    ]
+    rows.extend(_lineage("b-chain", BASE_TS + 10, 3, project_id="project-b"))
+    _write_state_db(db_path, rows)
+
+    def _ids(**kwargs):
+        return sorted(
+            row["id"]
+            for row in agent_sessions.read_importable_agent_session_rows(
+                db_path, limit=50, exclude_sources=None, **kwargs
+            )
+        )
+
+    assert _ids(project_assignment="assigned") == ["a-1", "b-1", "b-chain-seg2"]
+    assert _ids(project_assignment="assigned", project_ids=("project-b",)) == [
+        "b-1", "b-chain-seg2",
+    ]
+    assert _ids(project_assignment="assigned", project_ids=("project-a",)) == ["a-1"]
+    # Unknown ids are not an error, they simply select nothing.
+    assert _ids(project_assignment="assigned", project_ids=("nope",)) == []
+
+
+def test_project_ids_requires_the_assigned_filter(tmp_path):
+    """A silently unnarrowed query is exactly the starvable one — refuse it."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("a-1", BASE_TS, project_id="project-a")])
+
+    for assignment in (None, "unassigned"):
+        with pytest.raises(ValueError, match="project_ids requires"):
+            agent_sessions.read_importable_agent_session_rows(
+                db_path, project_assignment=assignment, project_ids=("project-a",)
+            )
+
+
+def test_empty_project_ids_selects_nothing(tmp_path):
+    """``project_ids=()`` must not degrade to "every assigned conversation"."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("a-1", BASE_TS, project_id="project-a")])
+
+    assert agent_sessions.read_importable_agent_session_rows(
+        db_path, exclude_sources=None, project_assignment="assigned", project_ids=()
+    ) == []
+
+
+def test_project_ids_narrows_on_a_schema_without_lineage_columns(tmp_path):
+    """The no-parent_session_id schema takes the plain ``project_id IN`` path."""
+    db_path = tmp_path / "state.db"
+    _write_state_db(
+        db_path,
+        [
+            _session("a-1", BASE_TS, project_id="project-a"),
+            _session("b-1", BASE_TS + 1, project_id="project-b"),
+        ],
+        lineage_columns=False,
+    )
+
+    rows = agent_sessions.read_importable_agent_session_rows(
+        db_path,
+        limit=50,
+        exclude_sources=None,
+        project_assignment="assigned",
+        project_ids=("project-b",),
+    )
+
+    assert [row["id"] for row in rows] == ["b-1"]
+
+
+def test_assigned_project_row_counts_probe(tmp_path):
+    """The probe counts assigned RAW rows per project and honours exclusions."""
+    db_path = tmp_path / "state.db"
+    rows = [
+        _session("a-1", BASE_TS, project_id="project-a"),
+        _session("a-2", BASE_TS + 1, project_id="project-a"),
+        _session("b-1", BASE_TS + 2, project_id="project-b"),
+        _session("b-cron", BASE_TS + 3, project_id="project-b", source="cron"),
+        _session("plain", BASE_TS + 4),
+        _session("blank", BASE_TS + 5, project_id="   "),
+    ]
+    _write_state_db(db_path, rows)
+
+    assert agent_sessions.read_assigned_project_row_counts(db_path) == {
+        "project-a": 2, "project-b": 2,
+    }
+    assert agent_sessions.read_assigned_project_row_counts(
+        db_path, exclude_sources=("cron", "webhook", "kanban")
+    ) == {"project-a": 2, "project-b": 1}
+    # Missing db and a schema without project_id are answered, not raised.
+    assert agent_sessions.read_assigned_project_row_counts(tmp_path / "nope.db") == {}
+
+
+def test_assigned_project_row_counts_probe_on_schema_without_project_id(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+    conn.commit()
+    conn.close()
+
+    assert agent_sessions.read_assigned_project_row_counts(db_path) == {}
+
+
+# ── Finding 2: assigned rows must not spend the unassigned quota ──────────────
+
+
+def test_route_cap_keeps_full_unassigned_window_when_assigned_rows_lead(
+    fake_hermes_home,
+):
+    """3 assigned + 20 unassigned used to yield only 17 unassigned."""
+    rows = [
+        {
+            "session_id": f"assigned-{index}",
+            "is_cli_session": True,
+            "project_id": "project-prime",
+        }
+        for index in range(3)
+    ]
+    rows.extend(
+        {"session_id": f"unassigned-{index:02d}", "is_cli_session": True, "project_id": None}
+        for index in range(20)
+    )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+    unassigned_kept = [row for row in kept if not row.get("project_id")]
+
+    assert len(unassigned_kept) == 20
+    assert len(kept) == 23
+    # All three assigned rows are inside the recent window here, so none of them
+    # is demoted to a chip-only row.
+    assert not any(row.get("default_hidden") for row in kept)
+
+
+def test_route_cap_preserves_project_assigned_overflow_as_hidden(fake_hermes_home):
+    recent = [
+        {"session_id": f"recent-{index}", "is_cli_session": True, "project_id": None}
+        for index in range(20)
+    ]
+    assigned_overflow = {
+        "session_id": "assigned-overflow",
+        "is_cli_session": True,
+        "project_id": "project-prime",
+    }
+    unassigned_overflow = {
+        "session_id": "unassigned-overflow",
+        "is_cli_session": True,
+        "project_id": None,
+    }
+
+    kept = routes._cap_recent_cli_sessions(
+        recent + [assigned_overflow, unassigned_overflow],
+        cli_cap=20,
+    )
+
+    by_id = {row["session_id"]: row for row in kept}
+    assert len(kept) == 21
+    assert "unassigned-overflow" not in by_id
+    assert by_id["assigned-overflow"]["default_hidden"] is True
+    assert "default_hidden" not in assigned_overflow
+
+
+def test_model_refills_the_unassigned_window_consumed_by_assigned_rows(
+    fake_hermes_home, tmp_path
+):
+    """The first state.db pass fetches 20 rows TOTAL, so it must be refilled."""
+    _register_projects(tmp_path, "project-a")
+
+    rows = [
+        _session(f"assigned-{index}", BASE_TS + 1000 + index, project_id="project-a")
+        for index in range(3)
+    ]
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    unassigned = [s for s in sessions if not s["project_id"]]
+
+    assert len(unassigned) == models.CLI_VISIBLE_SESSION_LIMIT == 20
+    assert len([s for s in sessions if s["project_id"] == "project-a"]) == 3
+
+
+def _write_webui_sidecar(session_dir, sid, *, project_id, updated_at):
+    """A WebUI session sidecar carrying a project assignment.
+
+    This is what ``/api/session/move`` actually writes: it sets ``s.project_id``
+    and saves the sidecar. NOTHING writes ``state.db.sessions.project_id`` —
+    ``grep 'UPDATE sessions'`` only ever touches title / message_count /
+    parent_session_id — so the assignment exists only here.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / f"{sid}.json").write_text(
+        json.dumps({
+            "session_id": sid,
+            "title": sid,
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "message_count": 1,
+            "project_id": project_id,
+            "messages": [],
+            "tool_calls": [],
+        }),
+        encoding="utf-8",
+    )
+    models.clear_sidecar_metadata_cache()
+    models.clear_cli_sessions_cache()
+
+
+def test_sidecar_carried_assignment_does_not_spend_an_unassigned_slot(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A WebUI-side move must not shorten the unassigned sidebar window.
+
+    ``/api/session/move`` records the assignment on the WebUI sidecar ONLY, so
+    the model's unassigned counter — which read ``state.db.project_id`` — saw all
+    23 conversations as unassigned and stopped at its 20-row window. The route
+    then reclassified the 3 moved conversations as assigned (``all_sessions()``
+    re-surfaces the sidecar's ``project_id`` and the state row is dropped as
+    already represented), leaving only 17 unassigned CLI rows in the payload and
+    never fetching cli-00 / cli-01 / cli-02 at all — the reviewer's exact 3 + 20
+    -> 17 number, in the guarantee this file's docstring claims to pin.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(23)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    # The three NEWEST conversations were moved into a project from the WebUI.
+    moved = {"cli-22", "cli-21", "cli-20"}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    sessions = models.get_cli_sessions()
+
+    # The real route pipeline: the moved conversations come back as WebUI sidecar
+    # rows and their state.db projections are dropped as duplicates.
+    deduped = routes._dedupe_cli_sidebar_sessions_for_api(sessions, set(moved))
+    webui_rows = [
+        {
+            "session_id": sid,
+            "is_cli_session": True,
+            "project_id": "project-a",
+            "updated_at": BASE_TS + int(sid.split("-")[1]),
+        }
+        for sid in sorted(moved)
+    ]
+    merged = sorted(
+        webui_rows + deduped, key=lambda s: s.get("updated_at") or 0, reverse=True
+    )
+    kept = routes._cap_recent_cli_sessions(merged)
+
+    unassigned_cli = [
+        row for row in kept if row.get("is_cli_session") and not row.get("project_id")
+    ]
+    assert len(unassigned_cli) == routes.CLI_VISIBLE_SESSION_CAP == 20
+    # The three genuinely unassigned conversations at the bottom of state.db are
+    # what the lost slots cost: they were never fetched.
+    kept_ids = {row["session_id"] for row in kept}
+    assert {"cli-00", "cli-01", "cli-02"} <= kept_ids
+
+    # ...and the model's own notion of "unassigned" agrees with the
+    # classification the route applied, which is what made the refill reachable.
+    assert sum(1 for s in sessions if not s["project_id"]) == 20
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+
+def _sidebar_rows_after_route(sessions, moved, *, project_id="project-a"):
+    """Drive the real sidebar chain for WebUI-moved conversations.
+
+    ``/api/sessions`` merges the WebUI store's own rows (which carry the sidecar
+    ``project_id``) with the state.db projection, drops the state rows the WebUI
+    rows already represent, and then caps. Reproducing that here is what makes
+    these tests measure the payload the user actually sees rather than the
+    model's intermediate list.
+    """
+    deduped = routes._dedupe_cli_sidebar_sessions_for_api(sessions, set(moved))
+    # The WebUI row for a moved conversation carries the sidecar's own
+    # timestamp, which is the one the state projection reports for it too.
+    activity = {s["session_id"]: s.get("updated_at") for s in sessions}
+    webui_rows = [
+        {
+            "session_id": sid,
+            "is_cli_session": True,
+            "project_id": project_id,
+            "updated_at": activity.get(sid) or BASE_TS,
+        }
+        for sid in sorted(moved)
+    ]
+    merged = sorted(
+        webui_rows + deduped, key=lambda s: s.get("updated_at") or 0, reverse=True
+    )
+    return routes._cap_recent_cli_sessions(merged)
+
+
+def _unassigned_cli_ids(kept):
+    return [
+        row["session_id"]
+        for row in kept
+        if row.get("is_cli_session") and not row.get("project_id")
+    ]
+
+
+@pytest.mark.parametrize(
+    "total, moved_indexes, expected_unassigned_tail",
+    [
+        # (a) Three moves at the BOTTOM edge of the 20-row window (the window is
+        # cli-29..cli-10, so only cli-10 is inside it). The single pre-computed
+        # allowance saw ONE sidecar-only assignment, widened the refill to 21
+        # rows, and that 21st row (cli-09) turned out to be moved as well: 19
+        # unassigned rows in the payload and cli-07 never fetched at all.
+        (30, (8, 9, 10), "cli-07"),
+        # (b) Eleven moves straddling the window boundary (cli-25..cli-20 are
+        # inside it, cli-19..cli-15 are not): the refill widened by 6, fetched
+        # 26 rows, and 11 of them were moved -> 15 unassigned rows, with
+        # cli-09..cli-13 never fetched.
+        (40, tuple(range(15, 26)), "cli-09"),
+    ],
+    ids=["bottom-edge-of-the-window", "straddling-the-boundary"],
+)
+def test_sidecar_moves_below_the_window_still_deliver_the_full_window(
+    fake_hermes_home, tmp_path, monkeypatch, total, moved_indexes,
+    expected_unassigned_tail,
+):
+    """The unassigned window survives moves the FIRST refill could not see.
+
+    ``sidecar_only_assigned`` was computed once, from the pre-refill window, so
+    any conversation the refill itself brought back carrying a sidecar-only
+    assignment spent an unassigned slot again — the very failure the widening
+    exists to remove. Both arrangements below put moved conversations at or below
+    the window's bottom edge, where the first count cannot possibly know about
+    them.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(total)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:02d}" for index in moved_indexes}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    sessions = models.get_cli_sessions()
+
+    # The model has to FETCH the conversations the moved rows displaced; a cap
+    # applied to rows that were never read cannot invent them.
+    model_ids = {s["session_id"] for s in sessions}
+    assert expected_unassigned_tail in model_ids
+    # At LEAST the window: every widening estimates the depth it needs from the
+    # rows in hand, so it over-reads whenever the moved conversations are denser
+    # deeper in the history than that. How MUCH it can over-read is not "a few":
+    # a shape that keeps the window short through all three estimates reaches the
+    # forced ceiling query and the model then carries the whole band, up to
+    # UNASSIGNED_CLI_REFILL_SCAN_CEILING (200) rows to deliver 20. The sidebar cap
+    # below trims the surplus, but only after it has been read and stat()ed. The
+    # two cost pins further down hold the ordinary shapes off that path.
+    assert sum(1 for s in sessions if not s["project_id"]) >= 20
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+    kept = _sidebar_rows_after_route(sessions, moved)
+    unassigned_cli = _unassigned_cli_ids(kept)
+    assert len(unassigned_cli) == routes.CLI_VISIBLE_SESSION_CAP == 20
+    # Newest-first, skipping every moved conversation: the 20th unassigned
+    # conversation is exactly the tail row above.
+    expected = [
+        f"cli-{index:02d}"
+        for index in range(total - 1, -1, -1)
+        if index not in set(moved_indexes)
+    ][:20]
+    assert unassigned_cli == expected
+    assert expected[-1] == expected_unassigned_tail
+
+
+def test_refill_follows_recency_not_session_id_order(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The widening keys on RECENCY, which ids here deliberately contradict.
+
+    ``cli-00`` is the NEWEST conversation, so the window is cli-00..cli-19 and
+    the moved conversations at its bottom edge are cli-19/cli-20/cli-21. A loop
+    that reasoned about anything but the recency order the queries use would
+    widen in the wrong direction and miss cli-22.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    total = 30
+    rows = [
+        _session(f"cli-{index:02d}", BASE_TS + (total - index))
+        for index in range(total)
+    ]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {"cli-19", "cli-20", "cli-21"}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + (total - int(sid.split("-")[1])),
+        )
+
+    sessions = models.get_cli_sessions()
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+    kept = _sidebar_rows_after_route(sessions, moved)
+    unassigned_cli = _unassigned_cli_ids(kept)
+    # Newest first by TIMESTAMP: cli-00..cli-18, then cli-22 (cli-19..cli-21
+    # were moved).
+    assert unassigned_cli == [f"cli-{index:02d}" for index in range(19)] + ["cli-22"]
+
+
+def test_refill_stops_at_the_cap_when_the_cap_is_all_there_is(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """17 unassigned conversations exist and 17 is what the sidebar shows.
+
+    The loop must not keep widening after the database has handed over every
+    unassigned conversation it has — there is nothing left to find, so a wider
+    query would only re-read the same rows.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(20)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {"cli-19", "cli-18", "cli-17"}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+    kept = _sidebar_rows_after_route(sessions, moved)
+
+    assert _unassigned_cli_ids(kept) == [f"cli-{index:02d}" for index in range(16, -1, -1)]
+    assert len(unassigned_queries) == 1
+
+
+def test_unassigned_refill_query_count_is_bounded(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The re-examination loop is bounded, and it is bounded where it says.
+
+    Every other conversation among the newest 40 is moved from the WebUI, which
+    is the shape that makes the precise widening converge slowest (each pass
+    discovers half as many new assignments as the last). The guarantee still
+    holds, and the whole refill pays at most
+    ``models.UNASSIGNED_CLI_REFILL_MAX_QUERIES`` unassigned queries.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(80)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:02d}" for index in range(40, 80) if index % 2 == 0}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+
+    assert sum(1 for s in sessions if not s["project_id"]) == 20
+    assert 1 < len(unassigned_queries) <= models.UNASSIGNED_CLI_REFILL_MAX_QUERIES
+    # Strictly widening, and never past the documented scan ceiling.
+    assert unassigned_queries == sorted(set(unassigned_queries))
+    assert max(unassigned_queries) <= models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+
+    kept = _sidebar_rows_after_route(sessions, moved)
+    assert len(_unassigned_cli_ids(kept)) == 20
+
+
+def _refill_cost(fake_hermes_home, tmp_path, monkeypatch, *, total, moved_indexes):
+    """Build the sidebar for one arrangement and report what it COST.
+
+    Returns the width of every unassigned refill query plus the row counts the
+    model handed on, which is the part the sidebar cap cannot make cheaper: those
+    rows were read, sidecar-stat()ed and (on the gateway stream) serialised.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:03d}", BASE_TS + index) for index in range(total)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:03d}" for index in moved_indexes}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+    cli_rows = [s for s in sessions if s.get("is_cli_session")]
+    kept = _sidebar_rows_after_route(sessions, moved)
+    return {
+        "queries": unassigned_queries,
+        "model_rows": len(cli_rows),
+        "model_unassigned": sum(1 for s in cli_rows if not s["project_id"]),
+        "sidebar_unassigned": len(_unassigned_cli_ids(kept)),
+    }
+
+
+def test_moving_the_newest_conversations_does_not_buy_a_ceiling_read(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A filed-away newest 40 costs 60 rows, not the whole 200-row ceiling.
+
+    The FIRST refill query here finds zero still-unassigned conversations (all 40
+    it can reach were moved from the WebUI), so the proportional estimate has no
+    density to extrapolate from. Dividing by ``max(unassigned_seen, 1)`` instead
+    made it 20 * 40 = 800, clamped to the scan ceiling: every profile that had
+    moved >= 21 of its newest conversations jumped straight to a 200-row read
+    when the 60-row exact-width floor fills the window on the nose.
+
+    Cost pin, not a correctness pin -- the window is full either way. Widths are
+    asserted exactly so a future widening cannot quietly buy the ceiling back.
+    """
+    cost = _refill_cost(
+        fake_hermes_home, tmp_path, monkeypatch,
+        total=400, moved_indexes=range(360, 400),
+    )
+
+    assert cost["queries"] == [40, 60]
+    assert max(cost["queries"]) < models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+    # 60 rows carried to deliver 20, not 200 rows carrying 160 spares.
+    assert cost["model_rows"] == 60
+    assert cost["model_unassigned"] == 20
+    assert cost["sidebar_unassigned"] == 20
+
+
+def test_moves_clustered_at_the_window_edge_do_not_spend_the_whole_budget(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Eight moves at the bottom edge cost two queries, not four.
+
+    This is the other over-read shape. 19 unassigned conversations sit above the
+    moved block, so every re-count returns ``unassigned_seen == 19`` and the
+    proportional estimate advances by ~2 a time (21, 23, 25): all four queries
+    spent, the last of them reading the full ceiling band, and the model carrying
+    200 rows / 192 of them unassigned to deliver 20. Geometric growth paced by the
+    remaining budget reaches the needed depth of 28 on the second query instead.
+    """
+    cost = _refill_cost(
+        fake_hermes_home, tmp_path, monkeypatch,
+        total=200, moved_indexes=range(173, 181),
+    )
+
+    assert cost["queries"] == [21, 28]
+    assert len(cost["queries"]) < models.UNASSIGNED_CLI_REFILL_MAX_QUERIES
+    assert max(cost["queries"]) < models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+    # 28 rows for a 20-row window: the 8 moved conversations plus the window.
+    assert cost["model_rows"] == 28
+    assert cost["model_unassigned"] == 20
+    assert cost["sidebar_unassigned"] == 20
+
+
+def test_unassigned_refill_stops_widening_on_an_exhausted_database(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """No unassigned conversations left to find means no further queries.
+
+    25 conversations, the 10 oldest moved from the WebUI, so only 15 unassigned
+    conversations exist and the window can never reach 20. The loop widens once
+    (that pass does reach new conversations — all of them moved), then must
+    notice the next pass would only re-read the same rows and stop, instead of
+    re-querying up to its iteration cap on every sidebar build.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(25)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:02d}" for index in range(10)}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+
+    # Every unassigned conversation in the database is delivered...
+    assert sum(1 for s in sessions if not s["project_id"]) == 15
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+    # ...and the loop stopped as soon as widening stopped paying, well short of
+    # its iteration cap.
+    assert len(unassigned_queries) == 2
+
+
+def test_refill_handles_state_db_and_sidecar_assignments_together(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A mixed store, including a row the two stores DISAGREE about.
+
+    ``cli-29``/``cli-28`` are assigned in state.db (so the SQL filter already
+    excludes them), ``cli-10``/``cli-09`` only on their sidecars (so it does
+    not), and ``cli-27`` in BOTH, to different projects. state.db wins that
+    conflict — it is the agent's own record — but the classification that
+    matters to the window is the same either way: assigned, so it does not spend
+    an unassigned slot, and the widening must not double-count it either.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a", "project-b")
+
+    state_assigned = {"cli-29", "cli-28", "cli-27"}
+    rows = [
+        _session(
+            f"cli-{index:02d}",
+            BASE_TS + index,
+            project_id="project-a" if f"cli-{index:02d}" in state_assigned else None,
+        )
+        for index in range(30)
+    ]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sidecar_assigned = {"cli-27", "cli-10", "cli-09"}
+    for sid in sorted(sidecar_assigned):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-b",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    sessions = models.get_cli_sessions()
+
+    # state.db wins for the conflicted row; the sidecar-only pair keeps its own
+    # project; nothing else is assigned.
+    assert {s["session_id"]: s["project_id"] for s in sessions if s["project_id"]} == {
+        "cli-29": "project-a",
+        "cli-28": "project-a",
+        "cli-27": "project-a",
+        "cli-10": "project-b",
+        "cli-09": "project-b",
+    }
+
+    # Every conversation with a sidecar is surfaced by the WebUI store, so the
+    # route sees all three of those as assigned rows.
+    kept = _sidebar_rows_after_route(
+        sessions, sidecar_assigned, project_id="project-b"
+    )
+    assert _unassigned_cli_ids(kept) == [
+        f"cli-{index:02d}" for index in list(range(26, 10, -1)) + [8, 7, 6, 5]
+    ]
+
+
+def test_unassigned_refill_boundary_is_the_documented_scan_ceiling(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Where the guarantee stops, and it stops exactly where the code says.
+
+    The refill will not read deeper than
+    ``UNASSIGNED_CLI_REFILL_SCAN_CEILING`` conversations, because a build must
+    not be turned into a full-table scan by moving conversations into projects.
+    So the window is filled whenever at least 20 of the newest
+    ``ceiling`` state.db-unassigned conversations are still unassigned once
+    sidecars are read. Here 195 of the newest 210 were moved from the WebUI, so
+    only 5 unassigned conversations exist inside the ceiling: the sidebar is
+    honestly short, and the 10 unassigned conversations older than the ceiling
+    stay out of the payload (they remain reachable through search/pagination).
+    """
+    ceiling = models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    total = ceiling + 10
+    rows = [_session(f"cli-{index:03d}", BASE_TS + index) for index in range(total)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:03d}" for index in range(15, total)}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+
+    unassigned = {s["session_id"] for s in sessions if not s["project_id"]}
+    # The unassigned conversations that fit inside the ceiling — cli-010..cli-014
+    # are the newest 5 of the 15 — and nothing deeper.
+    assert unassigned == {f"cli-{index:03d}" for index in range(10, 15)}
+    assert len(unassigned_queries) <= models.UNASSIGNED_CLI_REFILL_MAX_QUERIES
+    assert max(unassigned_queries) == ceiling
+
+
+def test_unassigned_window_counts_logical_conversations_not_segments(
+    fake_hermes_home, tmp_path
+):
+    """The 20 unassigned rows must be 20 distinct conversations after dedup."""
+    _register_projects(tmp_path, "project-a")
+
+    rows = [
+        _session(f"assigned-{index}", BASE_TS + 9000 + index, project_id="project-a")
+        for index in range(3)
+    ]
+    for index in range(25):
+        rows.extend(_lineage(f"chain{index:02d}", BASE_TS + index * 100, 3))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    unassigned = [s for s in sessions if not s["project_id"]]
+    lineage_keys = {
+        s.get("_lineage_root_id") or s["session_id"] for s in unassigned
+    }
+
+    assert len(unassigned) == 20
+    assert len(lineage_keys) == 20
+
+
+# ── Finding 3: a stale assignment must not hide a session ─────────────────────
+
+
+@pytest.mark.parametrize("project_profile", ["default", "other-profile"])
+def test_unresolvable_project_id_leaves_the_session_unassigned(
+    fake_hermes_home, tmp_path, monkeypatch, project_profile
+):
+    """A deleted or cross-profile id resolves to None BEFORE either cap runs.
+
+    ``project-live`` is registered for the active profile; ``project-ghost`` is
+    either absent from projects.json entirely (deleted) or tagged to another
+    profile (foreign). Both must read as "unassigned" rather than exiling the row
+    to a ``default_hidden`` chip that cannot exist.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-live")
+    if project_profile != "default":
+        _register_projects(tmp_path, "project-ghost", profile=project_profile)
+
+    rows = [
+        _session("newest-ghost", BASE_TS + 500, project_id="project-ghost"),
+        _session("old-ghost", BASE_TS, project_id="project-ghost"),
+        _session("old-live", BASE_TS + 1, project_id="project-live"),
+    ]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    # Inside the recent window: still present, and back in "Unassigned".
+    assert "newest-ghost" in by_id
+    assert by_id["newest-ghost"]["project_id"] is None
+    # Outside the window: not resurrected as an orphan chip-only row. The
+    # live-project row in the same db proves the cap itself still recovers.
+    assert "old-ghost" not in by_id
+    assert by_id["old-live"]["project_id"] == "project-live"
+
+
+@pytest.mark.parametrize(
+    "row_profile, active, expected",
+    [
+        (None, None, True),
+        ("", None, True),
+        ("default", None, True),
+        (None, "default", True),
+        ("", "default", True),
+        ("default", "default", True),
+        # Renamed root: the legacy 'default' tag and the display name are the
+        # same profile, in both directions.
+        ("kinni", "default", True),
+        ("default", "kinni", True),
+        (None, "kinni", True),
+        # Genuinely different profiles never cross.
+        ("other", "default", False),
+        ("default", "other", False),
+        ("other", "other", True),
+    ],
+)
+def test_profile_scoped_project_ids_uses_the_canonical_profile_match(
+    fake_hermes_home, tmp_path, monkeypatch, row_profile, active, expected
+):
+    """Ownership is decided by ``_profiles_match``, not by a local copy of it.
+
+    ``api/profiles.py::_profiles_match`` documents that it exists so callers
+    stop duplicating this None/''/'default'/renamed-root matrix. Each row asserts
+    the catalog read agrees with the canonical helper cell for cell, so the two
+    cannot drift apart the way the duplicated body could.
+    """
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: active)
+    monkeypatch.setattr(
+        profiles, "_is_root_profile", lambda name: name in {"default", "kinni"}
+    )
+    (tmp_path / "projects.json").write_text(
+        json.dumps([
+            {"project_id": "p1", "name": "P1", "color": "#000",
+             "profile": row_profile, "created_at": 1.0},
+        ]),
+        encoding="utf-8",
+    )
+    models.clear_cli_sessions_cache()
+
+    assert profiles._profiles_match(row_profile, active) is expected
+    assert ("p1" in models.profile_scoped_project_ids()) is expected
+
+
+def test_unresolvable_project_overflow_is_not_marked_hidden(fake_hermes_home, tmp_path):
+    """End of the same chain: routes must see None, so no orphan default_hidden."""
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session("stale-assigned", BASE_TS, project_id="project-ghost")]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = sorted(
+        models.get_cli_sessions(), key=lambda s: s["updated_at"], reverse=True
+    )
+    kept = routes._cap_recent_cli_sessions(sessions)
+    by_id = {row["session_id"]: row for row in kept}
+
+    assert not any(
+        row.get("default_hidden") and not row.get("project_id") for row in kept
+    )
+    # It is plain unassigned overflow now, so the recent cap drops it outright
+    # instead of parking it under a chip nothing can select.
+    assert "stale-assigned" not in by_id
+
+
+# ── Finding 4: lineage project id on the ``tip is row`` early return ──────────
+
+
+def test_lineage_project_id_kept_when_root_is_the_freshest_segment():
+    """The assignment lives on a newer EMPTY continuation (agent_sessions:468).
+
+    ``compression_tip()`` resolves the project id across the whole lineage but
+    returns the ROOT as the tip (the continuation has no messages), so the
+    ``tip is row`` early return has to apply it too.
+    """
+    root = _session(
+        "root", 100.0, ended_at=110.0, end_reason="compression", messages=4,
+    )
+    root["actual_message_count"] = 4
+    root["last_activity"] = 120.0
+    empty_tip = _session("tip", 200.0, project_id="project-123", parent="root", title="")
+    empty_tip["actual_message_count"] = 0
+    empty_tip["last_activity"] = 200.0
+
+    projected = agent_sessions._project_agent_session_rows([root, empty_tip])
+
+    assert [row["id"] for row in projected] == ["root"]
+    assert projected[0]["project_id"] == "project-123"
+
+
+def test_assignment_on_empty_continuation_reaches_the_sidebar(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Same case end-to-end: the recovery pass must find and keep the lineage."""
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
+
+    rows = [
+        _session("root-with-messages", BASE_TS, ended_at=BASE_TS + 1, end_reason="compression"),
+        _session(
+            "empty-continuation",
+            BASE_TS + 2,
+            project_id="project-123",
+            parent="root-with-messages",
+            messages=0,
+        ),
+    ]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "root-with-messages" in by_id
+    assert by_id["root-with-messages"]["project_id"] == "project-123"
+    # The empty continuation is not a separately addressable conversation.
+    assert "empty-continuation" not in by_id
+
+
+# ── greptile P1, second half: compression segments eating the raw window ──────
+
+
+def test_candidate_window_widens_when_segments_consume_it(tmp_path):
+    """``limit`` counts logical conversations, so a short window must re-widen.
+
+    12 ten-segment chains: the first 8x candidate window (80 raw rows) only
+    reaches 8 whole chains, so a request for 10 conversations came back with 8.
+    """
+    rows = []
+    for index in range(12):
+        rows.extend(_lineage(f"chain{index:02d}", BASE_TS + index * 10_000, 10))
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, rows)
+
+    projected = agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=10, exclude_sources=None
+    )
+
+    assert len(projected) == 10
+    assert len({row["_lineage_root_id"] for row in projected}) == 10
+
+
+def test_project_assignment_filters_are_exact_complements(tmp_path):
+    """'assigned' and 'unassigned' must partition the logical conversations."""
+    rows = [
+        _session("plain-a", BASE_TS + 10),
+        _session("plain-b", BASE_TS + 20),
+        _session("owned", BASE_TS + 30, project_id="project-a"),
+    ]
+    # A lineage whose assignment only exists on the tip is assigned as a whole.
+    rows.extend(_lineage("chain", BASE_TS + 40, 3, tip_project_id="project-b"))
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, rows)
+
+    def _ids(**kwargs):
+        return {
+            row["id"]
+            for row in agent_sessions.read_importable_agent_session_rows(
+                db_path, limit=50, exclude_sources=None, **kwargs
+            )
+        }
+
+    everything = _ids()
+    assigned = _ids(project_assignment="assigned")
+    unassigned = _ids(project_assignment="unassigned")
+
+    assert assigned == {"owned", "chain-seg2"}
+    assert unassigned == {"plain-a", "plain-b"}
+    assert assigned | unassigned == everything
+    assert not assigned & unassigned
+
+
+def test_project_assignment_rejects_unknown_values(tmp_path):
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("plain", BASE_TS)])
+
+    with pytest.raises(ValueError):
+        agent_sessions.read_importable_agent_session_rows(
+            db_path, limit=5, project_assignment="maybe"
+        )
+
+
+def test_assigned_filter_is_empty_on_schemas_without_project_id(tmp_path):
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, [_session("plain", BASE_TS)], lineage_columns=False)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE sessions DROP COLUMN project_id")
+
+    assert agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=5, exclude_sources=None, project_assignment="assigned"
+    ) == []
+    unassigned = agent_sessions.read_importable_agent_session_rows(
+        db_path, limit=5, exclude_sources=None, project_assignment="unassigned"
+    )
+    assert [row["id"] for row in unassigned] == ["plain"]
+
+
+def test_schema_without_project_id_retains_prior_behavior(fake_hermes_home, tmp_path):
+    """An old state.db that cannot persist assignments is unchanged by all this.
+
+    The profile HAS a project registered, so the recovery pass is only skipped by
+    the schema probe. ``_state_db_supports_project_ids`` is asserted directly
+    because dropping the probe is behaviour-neutral (the assigned filter already
+    returns nothing for such a schema) — it is a query-budget guard, so the
+    contract worth pinning is the probe's own answer plus the unchanged output.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    db_path = fake_hermes_home / "state.db"
+    rows = [_session(f"plain-{index:02d}", BASE_TS + index) for index in range(25)]
+    _write_state_db(db_path, rows, lineage_columns=False)
+    assert models._state_db_supports_project_ids(db_path) is True
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE sessions DROP COLUMN project_id")
+    models.clear_cli_sessions_cache()
+
+    assert models._state_db_supports_project_ids(db_path) is False
+
+    sessions = models.get_cli_sessions()
+
+    assert len(sessions) == models.CLI_VISIBLE_SESSION_LIMIT == 20
+    assert all(session["project_id"] is None for session in sessions)
+    # Still the newest 20, in the pre-existing order.
+    assert [session["session_id"] for session in sessions][:3] == [
+        "plain-24", "plain-23", "plain-22",
+    ]
+
+
+def test_unassigned_refill_runs_when_the_mixed_window_under_delivers(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A SHORT mixed first pass is still a shortfall the refill must repair.
+
+    The first pass can return fewer than ``CLI_VISIBLE_SESSION_LIMIT``
+    conversations with plenty left in the db, because compression segments spend
+    its RAW candidate window (8x, then 32x) before the logical slice. Gating the
+    refill on "the first pass came back full" left the unassigned window short in
+    exactly that case. Three 43-segment assigned chains saturate both candidate
+    windows and yield 3 of the 4 requested conversations; the narrower
+    unassigned-only query skips those chains and can still deliver 4.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 4)
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session(f"plain-{index:02d}", BASE_TS + 100 + index) for index in range(10)]
+    for index in range(3):
+        rows.extend(_lineage(
+            f"deep{index}",
+            BASE_TS + 2000 + index * 1000,
+            43,
+            project_id="project-live",
+            step=1.0,
+        ))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    unassigned = sorted(s["session_id"] for s in sessions if s["project_id"] is None)
+
+    # Was 0: the mixed pass returned 3 conversations, so the old "was it
+    # saturated?" gate concluded the db had nothing left to give.
+    assert unassigned == ["plain-06", "plain-07", "plain-08", "plain-09"]
+    # The lineage-heavy assigned conversations are still there, once each.
+    assert sum(1 for s in sessions if s["project_id"] == "project-live") == 3
+
+
+def test_unassigned_refill_cannot_clobber_a_resolved_assignment(
+    fake_hermes_home, tmp_path
+):
+    """Recovery pass 2 must never un-fix this PR's own headline bug.
+
+    Pass 2 merges its rows into the same lineage-keyed table pass 1 fills, and
+    it used to overwrite an existing entry unconditionally. When the SQL
+    ``project_assignment='unassigned'`` filter and the Python lineage projection
+    disagree about where a compression lineage starts, pass 2 hands back the
+    lineage ROOT as its own "unassigned" conversation — and the unconditional
+    overwrite then replaced the assigned row with it, deleting the project chip
+    and swapping the session identity from the lineage tip back to the root.
+
+    They disagree here on a blank ``source``: ``_is_continuation_session``
+    treats an empty/whitespace source as "unknown, same conversation", while the
+    SQL lineage CTE compares ``LOWER(TRIM(parent.source)) = LOWER(TRIM(...))``
+    and so refuses to walk from the assigned tip up to the blank-source root.
+    The merge has to be safe whether or not the two ever line up exactly.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    rows = [
+        # Blank source: SQL will not join this root to its assigned tip, but the
+        # Python projection collapses the pair into one row keyed on both ids.
+        _session(
+            "chain-root",
+            BASE_TS + 500,
+            source="",
+            ended_at=BASE_TS + 505,
+            end_reason="compression",
+        ),
+        _session(
+            "chain-tip", BASE_TS + 510, parent="chain-root", project_id="project-live"
+        ),
+    ]
+    # Two spare unassigned rows so the window is short and pass 2 actually runs.
+    rows.extend(_session(f"plain-{index}", BASE_TS + index) for index in range(2))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    by_id = {s["session_id"]: s for s in models.get_cli_sessions()}
+
+    # Was: "chain-tip" gone, "chain-root" present with project_id None.
+    assert "chain-tip" in by_id, "pass 2 replaced the assigned row with its root"
+    assert by_id["chain-tip"]["project_id"] == "project-live"
+    assert "chain-root" not in by_id, "the lineage must stay one conversation"
+
+
+# ── Rebase guard: upstream's kanban pass shares the system-chip helper ────────
+
+
+def test_background_source_exclusion_literal_matches_the_constant():
+    """The interactive exclusion stays spelled as a tuple literal.
+
+    ``tests/test_issue2841_show_cron_sessions_toggle.py`` reads that call site as
+    SOURCE TEXT (``'("cron", "webhook", "kanban") if source_filter is None'``),
+    so replacing the literal with ``BACKGROUND_CLI_SOURCES`` turned a
+    pre-existing test red. The literal is therefore kept, and this test pins it
+    to the constant the new code paths use so the two cannot drift apart.
+    """
+    from pathlib import Path
+
+    source = Path(models.__file__).read_text(encoding="utf-8")
+    literal = ", ".join(f'"{name}"' for name in models.BACKGROUND_CLI_SOURCES)
+    assert f"exclude_sources=({literal}) if source_filter is None else None" in source, (
+        "the interactive exclude_sources literal must list exactly "
+        f"BACKGROUND_CLI_SOURCES ({models.BACKGROUND_CLI_SOURCES!r})"
+    )
+    assert '("cron", "webhook", "kanban") if source_filter is None' in source, (
+        "test_issue2841_show_cron_sessions_toggle.py pins this exact substring"
+    )
+
+
+def test_kanban_second_pass_still_projects_rows(fake_hermes_home, tmp_path):
+    """The system-chip helper keeps the (sid, source) signature kanban calls.
+
+    Upstream's kanban pass calls ``_state_row_project_id(sid, _source)``; giving
+    that helper a row-dict signature turned the whole pass into a swallowed
+    TypeError and silently dropped every kanban row.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session("kanban-old", BASE_TS, source="kanban")]
+    rows.extend(_session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sessions = models.get_cli_sessions()
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "kanban-old" in by_id
+    # Upstream semantics: kanban rows get no chip from this helper.
+    assert by_id["kanban-old"]["project_id"] is None
+
+
+def test_background_row_chip_is_the_same_on_both_projection_paths(
+    fake_hermes_home, tmp_path
+):
+    """One kanban row must not report two different chips.
+
+    The interactive projection loop is also what a ``source_filter='kanban'``
+    scan walks, so resolving state.db assignments there without excusing
+    background sources gave the SAME row ``None`` in the default view (its own
+    bounded second pass) and a resolved id under ``?source=kanban``.
+    """
+    _register_projects(tmp_path, "project-live")
+
+    rows = [_session("kan-1", BASE_TS, source="kanban", project_id="project-live")]
+    rows.extend(
+        _session(f"recent-{index:02d}", BASE_TS + 100 + index) for index in range(25)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    default_view = {s["session_id"]: s for s in models.get_cli_sessions()}
+    kanban_view = {s["session_id"]: s for s in models.get_cli_sessions("kanban")}
+
+    assert "kan-1" in default_view
+    assert "kan-1" in kanban_view
+    assert default_view["kan-1"]["project_id"] is None
+    assert kanban_view["kan-1"]["project_id"] == default_view["kan-1"]["project_id"]
+
+
+# ── The all-profiles sidebar view runs the same recovery passes ───────────────
+
+
+def test_all_profiles_view_recovers_project_assigned_sessions(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """``?all_profiles=1`` truncates by recency too, so it needs both passes.
+
+    That path passes ``visible_session_limit=None``, which reads like
+    "unbounded" but is mapped to ``CLI_VISIBLE_SESSION_LIMIT`` for the
+    interactive pass — only the cron/webhook/kanban limits reach the reader as
+    ``limit=`` directly, where None really does mean unbounded. Skipping the
+    assigned recovery pass here therefore lost exactly the sessions this
+    regression is about, in the one view that shows every profile at once.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-123")
+
+    db_path = fake_hermes_home / "state.db"
+    rows = [
+        _session(f"recent-{index:02d}", BASE_TS + 100 + index)
+        for index in range(25)
+    ]
+    rows.append(_session("older-assigned", BASE_TS, project_id="project-123"))
+    _write_state_db(db_path, rows)
+
+    # Enumerating real profiles shells out to the agent CLI; pin the one context.
+    monkeypatch.setattr(
+        models,
+        "_all_profiles_cli_contexts",
+        lambda: ([(fake_hermes_home, db_path, "default")], (("home", "default", 1),)),
+    )
+
+    sessions = models.get_cli_sessions(all_profiles=True)
+    by_id = {session["session_id"]: session for session in sessions}
+
+    assert "older-assigned" in by_id
+    assert by_id["older-assigned"]["project_id"] == "project-123"
+    assert [s["session_id"] for s in sessions].count("older-assigned") == 1
+    # The unassigned window is still bounded — the recovery pass is additive.
+    assert sum(1 for s in sessions if s["project_id"] is None) == 5
+
+
+def test_all_profiles_view_resolves_each_context_against_its_own_profile(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Review finding 3 asked for "the SESSION's profile", not the active one.
+
+    ``_load_cli_sessions_uncached`` runs once per profile context here, but the
+    project catalog it resolved against came from ``get_active_profile_name()``.
+    So a LIVE assignment owned by another profile was misread as unresolvable:
+    coerced to None, skipped by the assigned recovery pass, and unreachable by the
+    unassigned refill too (its state.db row DOES carry a ``project_id``, which the
+    "unassigned" SQL filter excludes) — the row left the payload entirely. Its
+    chip is selectable in this very view (``/api/projects`` returns every project
+    when ``all_profiles=1``), so selecting it showed nothing: exactly the
+    "assignment exists but the session is unreachable" failure finding 3 named.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-a")
+    _register_projects(tmp_path, "project-b", profile="other")
+
+    home_a = fake_hermes_home
+    db_a = home_a / "state.db"
+    rows_a = [_session(f"a-recent-{index:02d}", BASE_TS + 100 + index) for index in range(25)]
+    rows_a.append(_session("older-assigned-a", BASE_TS, project_id="project-a"))
+    _write_state_db(db_a, rows_a)
+
+    home_b = tmp_path / "hermes-other"
+    home_b.mkdir()
+    db_b = home_b / "state.db"
+    rows_b = [_session(f"b-recent-{index:02d}", BASE_TS + 100 + index) for index in range(25)]
+    rows_b.append(_session("older-assigned-b", BASE_TS, project_id="project-b"))
+    # The safe direction, in the same scan: project-a belongs to the OTHER
+    # profile as far as this context is concerned, so it must still coerce to
+    # None instead of gaining a chip that cannot reveal it.
+    rows_b.append(_session("newest-foreign-b", BASE_TS + 900, project_id="project-a"))
+    _write_state_db(db_b, rows_b)
+
+    # Enumerating real profiles shells out to the agent CLI; pin the two contexts.
+    monkeypatch.setattr(
+        models,
+        "_all_profiles_cli_contexts",
+        lambda: (
+            [(home_a, db_a, "default"), (home_b, db_b, "other")],
+            (("home-a", "default", 1), ("home-b", "other", 1)),
+        ),
+    )
+
+    sessions = models.get_cli_sessions(all_profiles=True)
+    by_id = {session["session_id"]: session for session in sessions}
+
+    # The active profile's own context is unaffected.
+    assert by_id["older-assigned-a"]["project_id"] == "project-a"
+    # The other profile's LIVE assignment survives, with its own chip.
+    assert "older-assigned-b" in by_id
+    assert by_id["older-assigned-b"]["project_id"] == "project-b"
+    # A foreign id is still not an assignment.
+    assert by_id["newest-foreign-b"]["project_id"] is None
