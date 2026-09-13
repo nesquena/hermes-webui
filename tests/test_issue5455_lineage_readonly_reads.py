@@ -98,23 +98,17 @@ def test_helper_encodes_special_path_chars(tmp_path, monkeypatch):
     assert calls[0]["target"].endswith("?mode=ro")
 
 
-def test_helper_falls_back_to_writable_and_logs(tmp_path, monkeypatch, caplog):
+def test_helper_propagates_readonly_failure_without_writable_fallback(tmp_path, monkeypatch, caplog):
     db = tmp_path / "state.db"
     _make_lineage_db(db)
-    real_connect = sqlite3.connect
-
     def fail_read_only(target, *args, **kwargs):
-        if kwargs.get("uri"):
-            raise sqlite3.OperationalError("synthetic read-only URI failure")
-        return real_connect(target, *args, **kwargs)
+        assert kwargs.get("uri") is True
+        raise sqlite3.OperationalError("synthetic read-only URI failure")
 
     monkeypatch.setattr(agent_sessions.sqlite3, "connect", fail_read_only)
     with caplog.at_level(logging.WARNING, logger="api.agent_sessions"):
-        conn = open_state_db_readonly(db)
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 2
-    finally:
-        conn.close()
+        with pytest.raises(sqlite3.OperationalError, match="synthetic read-only URI failure"):
+            open_state_db_readonly(db)
     assert "read-only open failed" in caplog.text
     assert "synthetic read-only URI failure" in caplog.text
 

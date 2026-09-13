@@ -331,7 +331,13 @@ class GatewayWatcher:
 
         cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
         current_time = time.monotonic() if now is None else now
-        fingerprint_changed = cheap_fp is None or cheap_fp != self._last_cheap_fp
+        # A missing fingerprint means the read-only probe could not establish a
+        # trustworthy view of state.db. Do not run the projection and publish an
+        # empty snapshot: preserve the last known-good sidebar until a later poll
+        # can read the database again.
+        if cheap_fp is None:
+            return False
+        fingerprint_changed = cheap_fp != self._last_cheap_fp
         parity_due = (
             self._last_full_projection_at is None
             or current_time - self._last_full_projection_at

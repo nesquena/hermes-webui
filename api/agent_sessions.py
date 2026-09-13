@@ -656,7 +656,6 @@ def read_importable_agent_session_rows(
         use_preaggregated_candidate_order = (
             use_messages_join
             and messages_has_timestamp
-            and included == ("cron",)
             and not messages_index_present
         )
         if use_preaggregated_candidate_order:

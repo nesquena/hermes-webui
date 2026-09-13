@@ -445,6 +445,28 @@ def test_projection_failure_preserves_populated_state_and_parity_retry(
     assert watcher._last_full_projection_at == at_deadline + 1.0
 
 
+def test_fingerprint_failure_preserves_populated_state(tmp_path, monkeypatch):
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "tg1", "telegram", mc=2)
+    conn.close()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    subscriber.get_nowait()
+    initial_sessions = watcher._last_sessions
+    initial_hash = watcher._last_hash
+    initial_fingerprint = watcher._last_cheap_fp
+
+    monkeypatch.setattr(gw, "_cheap_change_fingerprint", lambda _path: None)
+    assert watcher._poll_once(now=2.0) is False
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+
+
 def test_cheap_fingerprint_detects_lineage_only_change(tmp_path):
     """Lineage/visibility fields the projection uses for collapse (parent_session_id,
     end_reason, ended_at) must be part of the fingerprint."""
