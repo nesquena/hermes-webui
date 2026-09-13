@@ -476,6 +476,8 @@ const LOCALES = {
     workspace_files_tab: 'Files',
     workspace_artifacts_tab: 'Artifacts',
     workspace_artifact_source_session: 'session',
+    workspace_artifact_outside_workspace: 'Outside the active workspace',
+    workspace_artifact_unsupported: 'This artifact path cannot be opened from the workspace',
     workspace_hidden_files_visible: 'hidden visible',
     workspace_hidden_files_visible_title: 'Hidden files are visible — click for options',
     workspace_options: 'Workspace options',
