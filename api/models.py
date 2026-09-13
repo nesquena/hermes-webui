@@ -355,7 +355,7 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     return p.exists()
 
 
-def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
+def _write_session_index_locked(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
     """Update the session index file.
 
     When *updates* is provided (a list of Session objects whose compact
@@ -486,7 +486,20 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
         )
 
 
-def prune_session_from_index(session_id: str) -> None:
+def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
+    """Update the index under the cross-process session-store authority."""
+    from api.session_batch_transaction import session_store_transaction_lock
+
+    resolved_session_dir = session_dir or SESSION_DIR
+    with session_store_transaction_lock(resolved_session_dir):
+        return _write_session_index_locked(
+            updates=updates,
+            session_dir=resolved_session_dir,
+            session_index_file=session_index_file,
+        )
+
+
+def _prune_session_from_index_locked(session_id: str) -> None:
     """Remove one session row from the persisted sidebar index if present."""
     sid = str(session_id or "")
     if not sid or not SESSION_INDEX_FILE.exists():
@@ -522,6 +535,14 @@ def prune_session_from_index(session_id: str) -> None:
 
     if _fallback:
         _write_session_index(updates=None)
+
+
+def prune_session_from_index(session_id: str) -> None:
+    """Remove one index row under the cross-process session-store authority."""
+    from api.session_batch_transaction import session_store_transaction_lock
+
+    with session_store_transaction_lock(SESSION_DIR):
+        _prune_session_from_index_locked(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1386,28 +1407,12 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
-        if not is_safe_session_id(self.session_id):
-            raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
-        # ── #1558 P0 guard ──────────────────────────────────────────────
-        # Refuse to save a session that was loaded with metadata_only=True.
-        # Such sessions have messages=[] (it's the whole point of the partial
-        # load), and save() unconditionally writes self.messages to disk via
-        # an atomic os.replace(). Saving a metadata-only stub thus wipes the
-        # full conversation history — which is exactly the v0.50.279
-        # _clear_stale_stream_state() regression that lost users 1000+
-        # message conversations. Any caller that needs to mutate persisted
-        # fields on a metadata-only session must reload with
-        # metadata_only=False first.
-        if getattr(self, '_loaded_metadata_only', False):
-            raise RuntimeError(
-                f"Refusing to save metadata-only session {self.session_id!r}: "
-                f"would atomically overwrite on-disk messages with []. "
-                f"Reload with metadata_only=False before mutating state. "
-                f"See #1558."
-            )
-        if touch_updated_at:
-            self.updated_at = time.time()
+    def _serialize_payload(self) -> str:
+        """Serialize the complete sidecar without publishing it.
+
+        Keeping serialization separate from ``save()`` lets callers stage and
+        validate a multi-session transaction before the first durable replace.
+        """
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1462,7 +1467,61 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        return json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        from api.session_batch_transaction import session_store_transaction_lock
+
+        # Callers own the per-session agent lock.  Acquire the shared store
+        # authority second so ordinary sidecar/index publication serializes with
+        # recoverable lineage batches in this and sibling WebUI processes.
+        with session_store_transaction_lock(self.path.parent):
+            self._save_under_store_lock(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+            )
+
+    def _save_under_store_lock(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        _expected_snapshot: bytes | None = None,
+    ) -> bool:
+        """Save while the caller owns the cross-process session-store lock.
+
+        ``_expected_snapshot`` is the exact byte generation observed by a
+        read-repair path.  A mismatch returns ``False`` without replacing the
+        sidecar; ordinary saves omit it and retain the public ``save()`` API.
+        """
+        if not is_safe_session_id(self.session_id):
+            raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        # ── #1558 P0 guard ──────────────────────────────────────────────
+        # Refuse to save a session that was loaded with metadata_only=True.
+        # Such sessions have messages=[] (it's the whole point of the partial
+        # load), and save() unconditionally writes self.messages to disk via
+        # an atomic os.replace(). Saving a metadata-only stub thus wipes the
+        # full conversation history — which is exactly the v0.50.279
+        # _clear_stale_stream_state() regression that lost users 1000+
+        # message conversations. Any caller that needs to mutate persisted
+        # fields on a metadata-only session must reload with
+        # metadata_only=False first.
+        if getattr(self, '_loaded_metadata_only', False):
+            raise RuntimeError(
+                f"Refusing to save metadata-only session {self.session_id!r}: "
+                f"would atomically overwrite on-disk messages with []. "
+                f"Reload with metadata_only=False before mutating state. "
+                f"See #1558."
+            )
+        if _expected_snapshot is not None:
+            try:
+                if self.path.read_bytes() != _expected_snapshot:
+                    return False
+            except OSError:
+                return False
+        if touch_updated_at:
+            self.updated_at = time.time()
+        payload = self._serialize_payload()
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1498,7 +1557,7 @@ class Session:
                         incoming_msg_count,
                         self.active_stream_id,
                     )
-                    return
+                    return False
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
@@ -1533,6 +1592,14 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+            if _expected_snapshot is not None:
+                try:
+                    current_snapshot = self.path.read_bytes()
+                except OSError:
+                    current_snapshot = None
+                if current_snapshot != _expected_snapshot:
+                    tmp.unlink(missing_ok=True)
+                    return False
             _safe_replace(tmp, self.path)
         except Exception:
             try:
@@ -1566,9 +1633,10 @@ class Session:
                     self.session_id,
                     exc_info=True,
                 )
+        return True
 
     @classmethod
-    def load(cls, sid):
+    def load(cls, sid, *, _self_heal_attempts: int = 3):
         # Validate session ID format to prevent path traversal.  API/gateway
         # session ids may contain hyphens (for example ``api-*`` and
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
@@ -1581,17 +1649,41 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        raw_snapshot = p.read_bytes()
+        data = json.loads(raw_snapshot)
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
-            try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
-            except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+            # This read path becomes a writer only after joining the normal
+            # per-session -> cross-process store lock order.  Non-blocking
+            # acquisition avoids deadlocking callers that already hold the
+            # intentionally non-reentrant agent lock; a later load can heal.
+            lock = _get_session_agent_lock(sid)
+            if _self_heal_attempts > 0 and lock.acquire(blocking=False):
+                persisted = False
+                try:
+                    from api.session_batch_transaction import session_store_transaction_lock
+
+                    with session_store_transaction_lock(p.parent):
+                        # Exact byte CAS is checked again immediately before
+                        # replace.  If an archive batch or another writer changed
+                        # the sidecar after our read, publish nothing stale.
+                        persisted = session._save_under_store_lock(
+                            touch_updated_at=False,
+                            skip_index=True,
+                            _expected_snapshot=raw_snapshot,
+                        )
+                except Exception:
+                    logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                finally:
+                    lock.release()
+                if not persisted:
+                    # Reload the durable generation and retry the repair.  The
+                    # final bounded attempt remains read-only under contention.
+                    return cls.load(
+                        sid,
+                        _self_heal_attempts=_self_heal_attempts - 1,
+                    )
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -5667,63 +5759,66 @@ def persist_recovered_workspace_binding(
     path = SESSION_DIR / f"{sid}.json"
     lock = _get_session_agent_lock(sid)
     with lock:
-        if not path.exists():
-            # Recovery only repairs an existing WebUI sidecar. Creating a new
-            # sidecar here can resurrect a session that was deleted after the
-            # recovery decision but before this lock was acquired.
-            raise WorkspaceBindingPersistenceError(
-                "Failed to persist recovered workspace: session sidecar is missing"
-            )
+        from api.session_batch_transaction import session_store_transaction_lock
 
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise WorkspaceBindingPersistenceError(
-                "Failed to persist recovered workspace: unreadable session sidecar"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise WorkspaceBindingPersistenceError(
-                "Failed to persist recovered workspace: invalid session sidecar"
-            )
-        current = str(payload.get("workspace") or "")
-        if current != resolved:
-            if current != expected:
+        with session_store_transaction_lock(path.parent):
+            if not path.exists():
+                # Recovery only repairs an existing WebUI sidecar. Creating a new
+                # sidecar here can resurrect a session that was deleted after the
+                # recovery decision but before this lock was acquired.
                 raise WorkspaceBindingPersistenceError(
-                    "Failed to persist recovered workspace: session workspace changed"
+                    "Failed to persist recovered workspace: session sidecar is missing"
                 )
-            payload["workspace"] = resolved
-            tmp = path.with_suffix(
-                f".tmp.{os.getpid()}.{threading.current_thread().ident}"
-            )
-            try:
-                with open(tmp, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, ensure_ascii=False, indent=2)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                _safe_replace(tmp, path)
-            except Exception as exc:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise WorkspaceBindingPersistenceError(
-                    "Failed to persist recovered workspace"
-                ) from exc
 
-        session.workspace = resolved
-        with LOCK:
-            cached = SESSIONS.get(sid)
-            if cached is not None:
-                cached.workspace = resolved
-        try:
-            _write_session_index(updates=[cached or session])
-        except Exception:
-            logger.debug(
-                "Failed to refresh session index after workspace recovery for %s",
-                sid,
-                exc_info=True,
-            )
-        return cached or session
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise WorkspaceBindingPersistenceError(
+                    "Failed to persist recovered workspace: unreadable session sidecar"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise WorkspaceBindingPersistenceError(
+                    "Failed to persist recovered workspace: invalid session sidecar"
+                )
+            current = str(payload.get("workspace") or "")
+            if current != resolved:
+                if current != expected:
+                    raise WorkspaceBindingPersistenceError(
+                        "Failed to persist recovered workspace: session workspace changed"
+                    )
+                payload["workspace"] = resolved
+                tmp = path.with_suffix(
+                    f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+                )
+                try:
+                    with open(tmp, "w", encoding="utf-8") as handle:
+                        json.dump(payload, handle, ensure_ascii=False, indent=2)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    _safe_replace(tmp, path)
+                except Exception as exc:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise WorkspaceBindingPersistenceError(
+                        "Failed to persist recovered workspace"
+                    ) from exc
+
+            session.workspace = resolved
+            with LOCK:
+                cached = SESSIONS.get(sid)
+                if cached is not None:
+                    cached.workspace = resolved
+            try:
+                _write_session_index(updates=[cached or session])
+            except Exception:
+                logger.debug(
+                    "Failed to refresh session index after workspace recovery for %s",
+                    sid,
+                    exc_info=True,
+                )
+            return cached or session
 
 
 def get_session_for_file_ops(sid: str):
@@ -6787,12 +6882,14 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    persist: bool = True,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
     Preserve parent_session_id from state.db so imported continuation segments
     keep their lineage in the WebUI store and sidebar instead of reappearing as
-    detached orphan chats.
+    detached orphan chats. ``persist=False`` constructs a complete session for
+    callers that will publish it through a larger durable transaction.
     """
     s = Session(
         session_id=session_id,
@@ -6810,16 +6907,17 @@ def import_cli_session(
     # clear the tombstone entry so the freshly-imported session is visible
     # on the next poll. Wrapped because a tombstone failure must never block
     # an import.
-    try:
-        _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-    except Exception:
-        logger.debug(
-            "Failed to clear webui tombstone for %s",
-            s.session_id,
-            exc_info=True,
-        )
-    s.save(touch_updated_at=False)
+    if persist:
+        try:
+            _clear_webui_zero_message_orphan_tombstone(s.session_id)
+            _clear_webui_deleted_session_tombstone(s.session_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear webui tombstone for %s",
+                s.session_id,
+                exc_info=True,
+            )
+        s.save(touch_updated_at=False)
     return s
 
 
