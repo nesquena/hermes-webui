@@ -19587,13 +19587,81 @@ async function regenerateResponse(btn) {
 // this rAF fires. Wrap the post-process (and the media-reflow frame right after
 // it) in the same suppression so the browser layer cannot re-anchor during the
 // async settle window. Desktop rests at `none`, so this is a no-op there.
+// Desktop post-process scroll-drift fix (issue #5637 follow-up; the
+// virtualize_transcript creep). The rAF-deferred post-process above runs AFTER
+// _restoreMessageViewportAnchor has already realigned the reader, and it GROWS
+// rows that sit ABOVE the viewport: Prism highlighting, the .code-copy-btn this
+// pass injects into every .pre-header, inline diff/csv/pdf/html hydration,
+// mermaid/katex. Nothing re-anchors after that growth.
+//
+// On a touch viewport the browser's native overflow-anchor engine absorbs it
+// (which is precisely why _postProcessWithAnchorSuppression must suppress the
+// engine for the JS write — otherwise the two stack, the #5637 mobile yank).
+// Desktop `.messages` rests at overflow-anchor:none, so on desktop NOTHING
+// absorbs it: the reader slides backward by the full above-viewport growth, and
+// the NEXT render's _captureMessageViewportAnchor records the already-drifted
+// offset as its new target, so the error ratchets instead of healing. Measured
+// on a 2000-message session with virtualize_transcript ON, reader scrolled up,
+// 12 streamed appends: +64px per append, +646px cumulative (~54px/render).
+// Virtualization is what makes it constant: every append shifts the virtual
+// window, so the rows above the viewport are rebuilt as FRESH elements and get
+// post-processed (and re-grown) again on every single render.
+//
+// The fix is NOT to refuse the realign — see the #5637 gate comment in
+// _restoreMessageViewportAnchor: on desktop, refusing leaves the reader unheld,
+// which is the regression that gate exists to prevent. It is to EXTEND the
+// realign across the post-process, giving desktop in JS the same hold the touch
+// path gets from the engine: snapshot the viewport anchor before the pass, and
+// realign to it after.
+//
+// Returns null (no hold) when:
+//   - the native engine is active for this viewport (_isTouchLikeMessageViewport)
+//     -> touch/Android keeps its existing behavior unchanged; and even if this
+//     gate were ever wrong, _restoreMessageViewportAnchor's own #5637 refusal
+//     would decline the write there anyway (content grew, no input intent).
+//   - the reader is following the tail (bottom<=250, the readerAwayFromBottom
+//     idiom of _captureMessageScrollSnapshot): a pinned follower must stay bound
+//     to the BOTTOM, not to a row, and the pin path owns scrollTop for them.
+//   - there is no scroller or no anchor row to hold.
+// The applied hold is additionally abandoned when the reader took over during
+// the pass (_messageScrollInputGeneration moved): the monotonic generation is
+// the same ownership token the delayed snapshot restores use.
+function _beginPostProcessAnchorHold(scroller){
+  if(!scroller) return null;
+  if(typeof _captureMessageViewportAnchor!=='function'||typeof _restoreMessageViewportAnchor!=='function') return null;
+  // Only where the browser will NOT hold the reader itself.
+  if(typeof _isTouchLikeMessageViewport==='function'&&_isTouchLikeMessageViewport(scroller)) return null;
+  const bottom=Number(scroller.scrollHeight)-Number(scroller.scrollTop)-Number(scroller.clientHeight);
+  if(!(bottom>250)) return null;
+  const anchor=_captureMessageViewportAnchor();
+  if(!anchor) return null;
+  const generation=(typeof _messageScrollInputGeneration==='number')?_messageScrollInputGeneration:0;
+  return function _holdPostProcessAnchor(){
+    const current=(typeof _messageScrollInputGeneration==='number')?_messageScrollInputGeneration:generation;
+    if(current!==generation) return false;
+    const held=_restoreMessageViewportAnchor(anchor,0);
+    // Sync the scroll bookkeeping the anchor restore's callers own, so this
+    // programmatic shift cannot false-trigger sticky-unpin (#1731).
+    if(held){
+      if(typeof _lastScrollTop!=='undefined') _lastScrollTop=scroller.scrollTop;
+      if(typeof _lastMessageClientHeight!=='undefined') _lastMessageClientHeight=scroller.clientHeight;
+    }
+    return held;
+  };
+}
 function _postProcessWithAnchorSuppression(container){
   const scroller=$('messages');
   const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
     ? _suppressBrowserOverflowAnchor(scroller) : null;
+  // Desktop anchor hold across the pass (see _beginPostProcessAnchorHold above).
+  const holdAnchor=(typeof _beginPostProcessAnchorHold==='function')
+    ? _beginPostProcessAnchorHold(scroller) : null;
   try{
     postProcessRenderedMessages(container);
   }finally{
+    // The pass grew content above the viewport; on desktop this realign is the
+    // only thing holding the reader there. Runs before the suppression release.
+    if(holdAnchor){ try{ holdAnchor(); }catch(_){ } }
     // Hold suppression across ONE more frame so late media/layout reflow
     // (image decode, katex/mermaid measure) cannot re-anchor either, then let
     // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.
