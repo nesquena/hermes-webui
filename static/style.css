@@ -7058,11 +7058,23 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-profile-lane-head{display:flex;justify-content:space-between;align-items:center;color:var(--text);font-size:13px;font-weight:600;margin-bottom:8px}
 .kanban-profile-lane-unassigned .kanban-profile-lane-head{border-bottom:1px solid color-mix(in srgb,var(--warning,#f5c542) 45%,var(--border));padding-bottom:6px}
 .kanban-board-in-lane{min-height:0;overflow-x:auto}
-.kanban-card-topline{display:flex;gap:6px;align-items:center;margin-bottom:4px;font-size:10px;color:var(--muted)}
+.kanban-card-topline{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px;font-size:10px;color:var(--muted)}
 .kanban-card-id{font-family:var(--font-mono);opacity:.8}
-.kanban-badge{border:1px solid var(--border);border-radius:999px;padding:1px 6px;font-size:10px;color:var(--muted)}
+.kanban-badge{border:1px solid var(--border);border-radius:999px;padding:1px 6px;font-size:10px;color:var(--muted);white-space:nowrap}
 .kanban-badge.priority{color:var(--accent)}
 .kanban-badge.tenant{color:var(--text)}
+.kanban-badge.model{color:var(--accent)}
+.kanban-model-picker-wrap{position:relative;width:100%;}
+.kanban-model-picker-wrap .settings-model-chip{width:100%;text-align:left;padding:6px 10px;}
+.kanban-model-picker-wrap .settings-model-dropdown{z-index:260;width:100%;min-width:100%;box-sizing:border-box;}
+.kanban-detail-model{margin:2px 0 8px;font-size:12px;color:var(--muted)}
+.kanban-detail-model strong{color:var(--text);font-weight:600}
+/* Touch targets: the 6px-padded chip is ~26px tall, under the 44px minimum
+   for a finger. Only bump it where the pointer is coarse / the viewport is
+   phone-sized so the desktop modal keeps its compact row height. */
+@media (pointer: coarse), (max-width: 640px){
+  .kanban-model-picker-wrap .settings-model-chip{min-height:44px;padding:10px 12px;}
+}
 .kanban-card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:6px}
 .kanban-card-assignee{color:var(--accent)}
 .kanban-card-unassigned{opacity:.75}
