@@ -293,14 +293,196 @@ class TestMediaEndpointUnit(unittest.TestCase):
                       "SVG MIME type must be handled (forced download) in _handle_media")
 
     def test_inline_preview_mime_whitelist_exists(self):
-        """Only the explicit safe preview whitelist should be eligible for inline display."""
+        """Security contract: only the explicit safe preview whitelist may be
+        browser-inline. HTML and Markdown are session-scoped grants only — they
+        may authorize a fetch/download through the session media token, but
+        neither may enter the browser-inline MIME whitelist (_INLINE_PREVIEW_TYPES).
+        """
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
         self.assertIn("_AUDIO_VIDEO_PDF_TYPES", routes_src,
                       "shared audio/video/PDF preview MIME whitelist must exist in _handle_media")
-        self.assertIn('{"text/html"}', routes_src,
-                      "HTML must be added only to the session-token whitelist")
+        # HTML + Markdown are both authorized via the session-scoped media grant
+        self.assertIn('{"text/html", "text/markdown"}', routes_src,
+                      "HTML and Markdown must both be session-token-granted types")
+        # ...and neither may be browser-inline: _INLINE_PREVIEW_TYPES must stay
+        # exactly the safe image/audio/video/PDF set.
+        inline_idx = routes_src.index("_INLINE_PREVIEW_TYPES =")
+        inline_line_end = routes_src.index("\n", inline_idx)
+        inline_block = routes_src[inline_idx:inline_line_end]
+        self.assertNotIn("text/html", inline_block,
+                         "text/html must NOT enter the browser-inline MIME whitelist")
+        self.assertNotIn("text/markdown", inline_block,
+                         "text/markdown must NOT enter the browser-inline MIME whitelist")
+
+    def test_markdown_mime_map_serves_text_markdown(self):
+        """MIME_MAP must map the supported Markdown extensions to text/markdown."""
+        from api.config import MIME_MAP
+        for ext in (".md", ".mkd", ".mkdn"):
+            self.assertEqual(
+                MIME_MAP.get(ext), "text/markdown",
+                f"{ext} must map to text/markdown",
+            )
+
+    def test_session_media_token_allows_markdown_path_when_mime_safe(self):
+        """A session that mentioned a .md artifact may fetch it (text/markdown)."""
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            md = pathlib.Path(tmpd) / "notes.md"
+            md.write_text("# Notes", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{md}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_path(
+                        "s-media", md, {"text/markdown"}
+                    )
+                )
+
+    def test_session_media_token_rejects_unmentioned_markdown_path(self):
+        """A session that never referenced the file must not authorize it."""
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            md = pathlib.Path(tmpd) / "notes.md"
+            md.write_text("# Notes", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": "MEDIA:/tmp/other.md"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_path(
+                        "s-media", md, {"text/markdown"}
+                    )
+                )
+
+    def test_session_media_token_rejects_markdown_when_mime_not_allowed(self):
+        """A Markdown path is not authorized through a non-Markdown MIME grant."""
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            md = pathlib.Path(tmpd) / "notes.md"
+            md.write_text("# Notes", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{md}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_path(
+                        "s-media", md, {"image/png"}
+                    )
+                )
+
+    def test_markdown_never_served_browser_inline(self):
+        """A .md file must always be served with Content-Disposition: attachment,
+        even when inline=1 is requested and the session grant authorizes it —
+        the browser must never render Markdown inline (same invariant as HTML
+        without the CSP sandbox)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            md = pathlib.Path(outside) / "notes.md"
+            md.write_text("# Notes\n\n```python\nprint(1)\n```", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{md}"}])
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=(
+                            f"path={urllib.parse.quote(str(md.resolve()))}"
+                            "&session_id=s-media&inline=1"
+                        ),
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 200)
+            self.assertIn("text/markdown", handler.headers.get("content-type", ""))
+            disposition = handler.headers.get("content-disposition", "")
+            self.assertIn("attachment", disposition,
+                          f"Markdown must be attachment-disposition, got {disposition!r}")
+            self.assertNotIn("inline", disposition,
+                             "Markdown must never be browser-inline")
+            self.assertIn(b"# Notes", handler.body)
+
+    def test_handle_media_serves_markdown_via_session_grant(self):
+        """A .md artifact outside allowed roots is served when the session grant
+        authorizes it (session-scoped media grant for Markdown)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            md = pathlib.Path(outside) / "README.md"
+            md.write_text("# Hello", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{md}"}])
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=f"path={urllib.parse.quote(str(md.resolve()))}&session_id=s-media",
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 200)
+            self.assertIn("text/markdown", handler.headers.get("content-type", ""))
+            self.assertIn(b"Hello", handler.body)
 
     def test_media_allowed_roots_env_var_referenced(self):
         """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
@@ -1079,3 +1261,76 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         self.assertEqual(status, 200)
         d = json.loads(body)
         self.assertEqual(d["status"], "ok")
+
+
+# ── Static analysis: inline Markdown preview loader (PR #6277) ───────────────
+
+class TestMarkdownInlineLoader(unittest.TestCase):
+    """Static checks for the deferred-fetch inline Markdown preview."""
+
+    CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    def test_markdown_extension_regex_defined(self):
+        self.assertIn("_MD_EXTS", UI_JS)
+        idx = UI_JS.find("const _MD_EXTS=")
+        self.assertGreater(idx, 0, "_MD_EXTS regex must be defined")
+        regex_line = UI_JS[idx:UI_JS.index("\n", idx)]
+        for ext in ["md", "mkd", "mkdn"]:
+            self.assertIn(ext, regex_line,
+                          f"extension {ext} must be covered by _MD_EXTS")
+
+    def test_md_media_produces_inline_loading_placeholder(self):
+        idx = UI_JS.find("_MD_EXTS.test(ref)")
+        self.assertGreater(idx, 0, "loadMarkdownInline placeholder branch must exist")
+        block = UI_JS[idx:idx + 400]
+        self.assertIn("md-inline-load", block)
+
+    def test_load_markdown_inline_called_from_post_process(self):
+        idx = UI_JS.find("function postProcessRenderedMessages")
+        block = UI_JS[idx:idx + 600]
+        self.assertIn("loadMarkdownInline(container)", block)
+
+    def test_renders_through_renderMd(self):
+        idx = UI_JS.find("function loadMarkdownInline")
+        block = UI_JS[idx:idx + 2400]
+        self.assertIn("renderMd(text)", block,
+                      "preview must keep rendering through renderMd() (sanitizer boundary)")
+
+    def test_preview_and_download_urls_share_encoded_session_id(self):
+        idx = UI_JS.find("function loadMarkdownInline")
+        block = UI_JS[idx:idx + 2400]
+        # preview URL carries the session-scoped grant...
+        self.assertIn(
+            "mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '')",
+            block,
+        )
+        # ...and the download URL is derived from the same session-bearing URL
+        self.assertIn("const downloadUrl = mediaUrl + '&download=1';", block)
+
+    def test_fetched_subtree_is_post_processed(self):
+        idx = UI_JS.find("function loadMarkdownInline")
+        block = UI_JS[idx:idx + 2600]
+        self.assertIn("_postProcessMdInlineSubtree(contentEl)", block,
+                      "post-processors must run on the inserted Markdown subtree")
+        self.assertIn("function _postProcessMdInlineSubtree", UI_JS)
+        self.assertIn("renderMermaidBlocks(root)", UI_JS)
+        self.assertIn("renderKatexBlocks(root)", UI_JS)
+        self.assertIn("initTreeViews(root)", UI_JS)
+        self.assertIn("addCopyButtons(root)", UI_JS)
+
+    def test_md_inline_content_css_is_height_bounded(self):
+        idx = self.CSS.find(".md-inline-content{")
+        self.assertGreater(idx, 0)
+        rule = self.CSS[idx:idx + 220]
+        self.assertIn("max-height", rule, ".md-inline-content must have a max-height")
+        self.assertIn("overflow:auto", rule,
+                      ".md-inline-content must scroll both axes (overflow:auto)")
+
+    def test_md_keys_exist_in_every_locale(self):
+        # 14 top-level locales + the nested zh-Hant block — every block must
+        # define the three md_* keys (maintainer gate: not English-only).
+        for key in ("md_loading", "md_too_large", "md_error"):
+            self.assertEqual(
+                I18N_JS.count(key + ":"), 15,
+                f"{key} must be defined in every supported locale (15)",
+            )
