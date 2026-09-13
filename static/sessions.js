@@ -1842,6 +1842,14 @@ async function loadSession(sid){
     if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
       closeOtherLiveStreams(sid);
     }
+    // #6421: invalidate any in-flight older-page continuation before
+    // releasing the loading lock so a late-resolving prefetch does not
+    // prepend stale rows onto the fresh authoritative transcript that
+    // _ensureMessagesLoaded is about to install (#6392 same-session reload
+    // race).  _loadOlderMessages snapshots _messagesGeneration before its
+    // await; bumping now poisons that snapshot's post-await generation check
+    // so the stale continuation bails out cleanly.
+    _bumpMessagesGeneration();
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
@@ -3157,14 +3165,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
+  // When reloadLimit exceeds the server's msg_limit ceiling, cap at the ceiling
+  // instead of falling back to the bare full-transcript request (the old
+  // behaviour).  A full reload of a long session (800+ messages) on every turn
+  // causes progressive slowdown and eventual freezes (#6392).  Capping at
+  // _msgLimitMax bounds the payload to at most 500 renderable rows — a minor
+  // window shift compared to loading the entire history on every reply.
+  const boundedReloadLimit = (reloadLimit == null) ? null : Math.min(reloadLimit, _msgLimitMax);
   const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
@@ -3183,6 +3190,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
+  // Capture the currently loaded absolute base before the response
+  // overwrites _oldestIdx. Used below to reconcile by server interval.
+  const _prevOldestIdx = _oldestIdx;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
@@ -3212,6 +3222,26 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+  // #6392/#6421: reconcile a capped same-session reload response by the
+  // server's absolute interval [_oldestIdx, _oldestIdx + msgs.length),
+  // not by array length.  Preserve only rows strictly before that
+  // interval and set _oldestIdx to the actual first retained index.
+  if(Array.isArray(S.messages) && S.messages.length > 0 && msgs.length > 0 && _prevOldestIdx >= 0 && _prevOldestIdx < _oldestIdx){
+    const keepCount = _oldestIdx - _prevOldestIdx;
+    if(keepCount > 0 && keepCount <= S.messages.length){
+      msgs = S.messages.slice(0, keepCount).concat(msgs);
+      _oldestIdx = _prevOldestIdx;
+    }
+  }
+  // #6421: invalidate any in-flight _loadOlderMessages continuation that
+  // started during the api() round-trip above (after loadSession's initial
+  // bump but before this point).  A second bump is needed here because
+  // _loadOlderMessages snapshots _messagesGeneration before its await, and
+  // a prefetch may have begun during the metadata/messages fetch.  Bumping
+  // now means the old prefetch's post-await generation check will mismatch
+  // and bail out instead of prepending stale rows onto the fresh
+  // authoritative transcript we are about to install (#6392).
+  _bumpMessagesGeneration();
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
