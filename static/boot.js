@@ -3743,20 +3743,154 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
-  if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
-    try{
-      await newSession(true);
-      // New-chat PWA launches need the empty conversation visible immediately.
-      // Boot model hydration can take several seconds when /api/models falls
-      // into a cold provider-catalog rebuild; it is already safe to finish in
-      // the background because newSession() posted the configured default and
-      // rendered the session's authoritative model/provider.
-      if(S.session){
-        try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+  // ?workspace=<path> (one-shot, symmetric to ?profile=) — route the boot
+  // into a fresh session bound to that workspace instead of restoring the
+  // saved one. Reuses the S._profileSwitchWorkspace one-shot contract that
+  // newSession() already consumes (same path as a profile-switch workspace).
+  // Combined with ?q=, this lets an external launcher open the agent on the
+  // right project with a prefilled composer. Path trust/existence decisions
+  // are the server's (resolve_trusted_workspace()); a rejected path falls
+  // back to the normal restore below.
+  //
+  // This block runs BEFORE the action=new-chat launch branch and owns the
+  // single new-session creation for the whole boot. Ordered the other way,
+  // `?action=new-chat&workspace=…` created a first session WITHOUT the
+  // requested workspace and returned early, leaving `workspace` unconsumed
+  // in the URL — so a hard reload created a SECOND session, this time with
+  // it. One launch must produce exactly one session.
+  const workspaceIntent=(typeof _workspaceQueryIntentFromLocation==='function')?_workspaceQueryIntentFromLocation():null;
+  // Set whenever a workspace launch is still outstanding for this URL: the
+  // action=new-chat shortcut must then stay out of the way, or the launch
+  // would produce a workspace-less session now plus a workspace-bound one on
+  // the retry that eventually succeeds.
+  let _workspaceLaunchOwnsSession=false;
+  if(workspaceIntent&&workspaceIntent.hasParam){
+    // Compound ?profile=&workspace= launch: if a valid profile switch was
+    // requested but did not complete (returned false or threw), creating the
+    // session now would silently bind the workspace to the wrong profile.
+    // Leave the workspace parameter in the URL so a retry after the profile
+    // issue is resolved still carries the intent.
+    const _profileSwitchPending=!!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!_profileSwitchCompleted);
+    if(_profileSwitchPending){
+      _workspaceLaunchOwnsSession=true;
+      console.warn('[boot] workspace query deferred: profile switch did not complete');
+    }else if(workspaceIntent.valid){
+      // Track creation by observing S.session rather than by a flag set after
+      // newSession() returns: newSession() keeps initializing client state
+      // AFTER the server accepted (todo hydration, stream start, dropdown
+      // sync), and a throw from any of those steps would otherwise leave the
+      // "created" signal false for a session that exists server-side —
+      // replaying the launch on reload and orphaning it.
+      const _sessionBefore=S.session;
+      const _createdWorkspaceSession=()=>!!(S.session&&S.session!==_sessionBefore);
+      try{
+        S._profileSwitchWorkspace=workspaceIntent.path;
+        await newSession(true,{worktree:false});
+        // Consume the launch intents only now that the server accepted the
+        // session. Consuming before the POST loses the intent whenever the
+        // request fails for a transport reason — most visibly on a 401,
+        // where api() redirects to `login?next=<pathname+search>` and that
+        // snapshot would no longer carry `workspace`, so the post-login
+        // bounce would silently drop the requested project.
+        if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+        if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)&&typeof _consumeLaunchActionParamFromLocation==='function') _consumeLaunchActionParamFromLocation();
+        if(S.session){
+          try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+        }
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+      }catch(e){
+        S._profileSwitchWorkspace=null;
+        if(_createdWorkspaceSession()){
+          // Post-create rendering failure. The launch already produced its one
+          // session, so the intent is spent: consume the parameter, keep the
+          // session, and let the normal boot path below finish drawing the UI.
+          if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+          console.warn('[boot] workspace session created but boot rendering failed', e);
+        }else{
+        // Consume the parameter only on an objective verdict about the path
+        // itself: POST /api/session/new tags that one 400 with
+        // `code:"invalid_workspace"` (api/routes.py), so a 400 raised by any
+        // other field in the same request — an invalid enabled_toolsets
+        // payload, say — is NOT mistaken for a permanent path rejection.
+        // Everything else (401, network error, timeout, 5xx) is transport
+        // rather than a verdict: keep the parameter so the retry, including
+        // the `login?next=<pathname+search>` bounce, still carries the intent.
+        let _serverRejectedPath=false;
+        if(e&&Number(e.status)===400&&e.body){
+          try{_serverRejectedPath=JSON.parse(e.body).code==='invalid_workspace';}catch(_){}
+        }
+        if(_serverRejectedPath&&typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+        // A deferred or failed workspace launch must not fall through into the
+        // action=new-chat branch below: that would create a workspace-less
+        // session now, and the retry that succeeds later would create a second
+        // one from the same launch. Suppress the shortcut for this boot; the
+        // preserved parameter carries the intent to the next load.
+        if(!_serverRejectedPath) _workspaceLaunchOwnsSession=true;
+        console.warn('[boot] workspace query routing failed', e);
+        }
       }
-      S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
-    }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+    }else{
+      if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+      console.warn('[boot] ignored invalid workspace query', workspaceIntent.path);
+    }
+  }
+  if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
+    // A workspace launch still outstanding for this URL (deferred profile
+    // switch, or a transport failure that preserved the parameter) owns this
+    // boot's session creation. Minting a workspace-less session here would
+    // leave the retry that eventually succeeds to create a second one from
+    // the same launch.
+    if(!_workspaceLaunchOwnsSession){
+      try{
+        await newSession(true);
+        // New-chat PWA launches need the empty conversation visible immediately.
+        // Boot model hydration can take several seconds when /api/models falls
+        // into a cold provider-catalog rebuild; it is already safe to finish in
+        // the background because newSession() posted the configured default and
+        // rendered the session's authoritative model/provider.
+        if(S.session){
+          try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+        }
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+      }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+    }
+  }
+  if(_workspaceLaunchOwnsSession){
+    // The workspace launch is still outstanding for this URL and the preserved
+    // `workspace` parameter is the only carrier of that intent. Falling into
+    // the normal restore would destroy it two ways: loadSession() calls
+    // _setActiveSessionUrl(), which rewrites the whole query string, and the
+    // no-saved-session path can auto-bind a fresh default-workspace session.
+    // Either way the deep link is lost, or a second wrong-workspace session
+    // exists by the time the user retries. Stop here instead: render the empty
+    // state, leave the URL untouched, and let the reload carry the intent.
+    //
+    // Deliberately NOT calling _finalizeComposerPrefillOnBoot(): it consumes
+    // `q=` and fills the composer. Both are wrong here. Consuming would strip
+    // the prefill from the URL the retry depends on, and a filled composer
+    // invites a Send that routes through plain newSession() — no workspace cue
+    // — creating a session on the default workspace while the requested
+    // workspace is still pending, which is exactly the duplicate this branch
+    // exists to prevent. The prefill stays in the URL and lands when the
+    // launch completes.
+    //
+    // For the same reason the composer is locked, not merely left empty: a
+    // manually typed Send would also route through plain newSession() and
+    // bind to the profile-default workspace while the requested one is still
+    // pending. lockComposerForClarify() is the existing mechanism for exactly
+    // this shape (disable + explanatory placeholder); reload is the retry.
+    S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+    S._bootReady=true;
+    if(typeof lockComposerForClarify==='function'){
+      try{lockComposerForClarify('Workspace launch pending — reload the page to retry opening the requested project.');}catch(_){}
+    }
+    syncTopbar();syncWorkspacePanelState();
+    try{$('emptyState').style.display='';}catch(_){}
+    await renderSessionList();
+    if(typeof startGatewaySSE==='function')startGatewaySSE();
+    return;
   }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
