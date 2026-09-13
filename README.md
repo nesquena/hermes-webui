@@ -444,7 +444,14 @@ Set `environmentFiles` for secrets like API keys. Protected WebUI runtime keys f
 
 ### Remote access (SSH tunnel, Tailscale, phone)
 
-The server binds to `127.0.0.1` by default. To reach it from another machine use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh` prints for you over SSH), or join your server and phone to a [Tailscale](https://tailscale.com) network and browse to `http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` + `HERMES_WEBUI_PASSWORD` set. Full walkthrough (incl. a community ARM64-Android field report): [`docs/remote-access.md`](docs/remote-access.md).
+The server binds to `127.0.0.1` by default. To reach it from another machine,
+use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh`
+prints for you over SSH) or, on a single-operator or access-restricted tailnet,
+use the preferred [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)
+flow, which keeps WebUI on loopback behind tailnet-only HTTPS. Direct access to
+`http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` and
+`HERMES_WEBUI_PASSWORD` is a fallback when Serve is unavailable. Full setup and
+the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-access.md).
 
 ### Manual launch (without start.sh)
 
