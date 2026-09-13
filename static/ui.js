@@ -19837,6 +19837,25 @@ function addCopyButtons(container){
 let _mermaidLoading=false;
 let _mermaidReady=false;
 
+function _mediaPreviewErrorKey(error,fallbackKey){
+  const status=Number(error&&error.status);
+  if(status===401) return 'media_preview_unauthorized';
+  if(status===403) return 'media_preview_forbidden';
+  if(status===404) return 'media_preview_not_found';
+  return fallbackKey;
+}
+
+function _mediaPreviewAllowsDownload(errorKey){
+  return errorKey!=='media_preview_forbidden'&&errorKey!=='media_preview_not_found';
+}
+
+function _requireMediaResponse(response){
+  if(response.ok) return response;
+  const error=new Error(String(response.status));
+  error.status=response.status;
+  throw error;
+}
+
 function loadDiffInline(container){
   const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
   const root=container||document;
@@ -19845,7 +19864,7 @@ function loadDiffInline(container){
     const path=el.dataset.path;
     const snapQuery=_mediaSnapQuery(el);
     fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
-      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
           el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_too_large')}</span></div>`;
@@ -19860,8 +19879,8 @@ function loadDiffInline(container){
         }).join('\n');
         el.outerHTML=`<div class="diff-inline"><div class="pre-header">${esc(path.split('/').pop())}</div><pre class="diff-block"><code>${lines}</code></pre></div>`;
       })
-      .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
+      .catch(error=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(_mediaPreviewErrorKey(error,'diff_error'))}</span></div>`;
       });
   });
 }
@@ -19916,7 +19935,10 @@ function buildCsvTablePreview(path, text, downloadUrl=''){
 function _csvPreviewErrorHtml(path, errorKey){
   const fname=path.split('/').pop()||path;
   const downloadUrl=_csvMediaUrl(path,{download:true});
-  return `<div class="diff-inline-error">${esc(fname)}<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+  const downloadHtml=_mediaPreviewAllowsDownload(errorKey)
+    ? `<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : '';
+  return `<div class="diff-inline-error">${esc(fname)}${downloadHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
 }
 
 function loadCsvInline(container){
@@ -19928,13 +19950,13 @@ function loadCsvInline(container){
     const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
     const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl)
-      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error');
       })
-      .catch(()=>{
-        el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error');
+      .catch(error=>{
+        el.outerHTML=_csvPreviewErrorHtml(path, _mediaPreviewErrorKey(error,'csv_error'));
       });
   });
 }
@@ -19947,7 +19969,7 @@ function loadExcalidrawInline(container){
     const path=el.dataset.path;
     const snapQuery=_mediaSnapQuery(el);
     fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
-      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
           el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_too_large')}</span></div>`;
@@ -19975,8 +19997,8 @@ function loadExcalidrawInline(container){
         // Lazy-init Excalidraw render after DOM insertion
         requestAnimationFrame(()=>_renderExcalidrawCanvases());
       })
-      .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
+      .catch(error=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(_mediaPreviewErrorKey(error,'excalidraw_error'))}</span></div>`;
       });
   });
 }
@@ -20080,7 +20102,7 @@ function loadPdfInline(container){
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
-        .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
+        .then(r=>_requireMediaResponse(r).arrayBuffer())
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
             const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
@@ -20129,9 +20151,13 @@ function loadPdfInline(container){
           };
           renderPage(1);
         })
-        .catch(()=>{
+        .catch(error=>{
+          const errorKey=_mediaPreviewErrorKey(error,'pdf_error');
           const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
-          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          const fileHtml=_mediaPreviewAllowsDownload(errorKey)
+            ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+            : esc(fname);
+          el.outerHTML=`<div class="pdf-preview-fallback">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
         });
     };
     if(_pdfjsReady){
@@ -20175,7 +20201,7 @@ function loadHtmlInline(container){
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     fetch(mediaUrl, {cache:'no-store'})
-      .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
           const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
@@ -20186,9 +20212,13 @@ function loadHtmlInline(container){
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
-      .catch(()=>{
+      .catch(error=>{
+        const errorKey=_mediaPreviewErrorKey(error,'html_error');
         const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
-        el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
+        const fileHtml=_mediaPreviewAllowsDownload(errorKey)
+          ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+          : esc(fname);
+        el.outerHTML=`<div class="html-preview-fallback">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
       });
   });
 }
