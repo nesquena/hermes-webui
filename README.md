@@ -228,6 +228,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
+- **Codex session bridge (read-only)** -- conversations from a local OpenAI Codex CLI (`~/.codex/sessions/*.jsonl` + `state_5.sqlite`) appear in the sidebar with a "codex" badge; click to view the transcript read-only. Additive and defensive: nothing outside `~/.codex` is ever opened, and it disables cleanly when Codex is absent. Toggle via **Settings → Show Codex sessions** (on by default). For very long conversations the newest 1000 turns are kept (the transcript grows newest-last, so the latest turns are retained rather than dropped); very large transcripts are tail-read rather than rejected, so a session never disappears as it grows. A `truncated` / `cli_transcript_truncated` flag surfaces on both the detail API and the real viewer path so the UI can show that older turns were omitted. See `docs/codex-sessions.md`.
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
 
 ### Workspace file browser
