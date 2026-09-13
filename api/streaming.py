@@ -10762,6 +10762,12 @@ def _run_agent_streaming(
                     except Exception:
                         _active_sids = set()
                     with SESSION_AGENT_CACHE_LOCK:
+                        # Initialize the per-entry turn lease: insertion happens
+                        # on the turn path, so the fresh entry is live.  The
+                        # governor revalidates mid-turn state from this lease at
+                        # release time (not the stale plan-time snapshot);
+                        # unregister_active_run clears it when the turn ends.
+                        agent._turn_active = True
                         SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
                         SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                         from api.config import SESSION_AGENT_CACHE_MAX
