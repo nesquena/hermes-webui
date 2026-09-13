@@ -14,6 +14,15 @@ def _install_lightweight_resolve_stubs(monkeypatch, models) -> None:
     monkeypatch.setattr(models, "_sync_sidecar_from_state_db_if_newer", lambda _session: False)
     monkeypatch.setattr(models, "_repair_stale_pending", lambda _session: False)
     monkeypatch.setattr(models, "_session_has_pending_journal_retry", lambda _session: False)
+    # These gate tests replace Session.load with tiny in-memory stubs rather
+    # than opening a real sidecar descriptor. Generation validation belongs to
+    # the sidecar/CAS regressions; declare these synthetic loads trusted so this
+    # module continues to exercise only single-flight slot behavior.
+    monkeypatch.setattr(
+        models,
+        "_session_has_current_persisted_generation",
+        lambda _session, authority=None: True,
+    )
 
 
 def _empty_session(models, sid: str):
