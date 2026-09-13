@@ -258,8 +258,9 @@ Refs #2785, #4483.
 ## Three-service unified setup (v0.14+)
 
 Since v0.14, `hermes-agent` can serve the gateway API and the built-in dashboard
-from the same process by setting `HERMES_DASHBOARD_HOST` and
-`HERMES_DASHBOARD_PORT`. Running agent and dashboard in one container means a
+from the same process. Enable the dashboard with `HERMES_DASHBOARD=1` and bind it
+via `HERMES_DASHBOARD_HOST`/`HERMES_DASHBOARD_PORT` — the flag is required;
+host/port alone never start it. Running agent and dashboard in one container means a
 single writer to `hermes-home`, eliminating the concurrent-init write conflicts
 that occur when `hermes-agent` and `hermes-dashboard` both start from the same
 image against the same volume.
@@ -289,8 +290,20 @@ services:
       - HERMES_HOME=/home/hermes/.hermes
       - HERMES_UID=${UID:-1000}
       - HERMES_GID=${GID:-1000}
+      - HERMES_DASHBOARD=1
       - HERMES_DASHBOARD_HOST=0.0.0.0
       - HERMES_DASHBOARD_PORT=9119
+      # Required: the dashboard auth gate refuses a non-loopback bind without
+      # a registered provider. Set DASHBOARD_PASSWORD in your .env.
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${DASHBOARD_USER:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+      # Gateway API (port 8642): the listener must be enabled AND bound
+      # off-loopback inside the container, otherwise the WebUI in the sibling
+      # container cannot reach http://hermes-agent:8642. The key (>=16 chars)
+      # is what authenticates the WebUI health probe and Tasks calls.
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY:?set a >=16-char API_SERVER_KEY in .env}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -312,6 +325,10 @@ services:
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
+      # Same gateway over the compose network, authenticated with the
+      # matching key, so the health pill and the Tasks surfaces work.
+      - HERMES_API_URL=http://hermes-agent:8642
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:?set a >=16-char API_SERVER_KEY in .env}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -326,9 +343,20 @@ volumes:
 ```
 
 Open http://localhost:8787 for chat and http://localhost:9119 for the dashboard.
+Because the dashboard binds beyond loopback inside the container, it is protected
+by its own basic-auth provider — the browser will prompt for the `DASHBOARD_USER` /
+`DASHBOARD_PASSWORD` you set. `API_SERVER_KEY` does not cover the dashboard; it
+guards only the gateway API on port 8642.
+Set `API_SERVER_KEY` (a random string of at least 16 characters) in `.env`
+before `docker compose up`: without it — or without `API_SERVER_ENABLED=true`
+and `API_SERVER_HOST=0.0.0.0`, which the snippet above sets — the agent leaves
+port 8642 closed and the WebUI reports the agent gateway as unreachable in
+System Settings and in the Tasks panel. `HERMES_API_URL` together with the matching
+`HERMES_WEBUI_GATEWAY_API_KEY` is what points the UI at that gateway and
+authenticates its health probe.
 Check `hermes gateway run --help` for the exact flag names for your agent release —
-the env-var equivalents shown above (`HERMES_DASHBOARD_HOST`, `HERMES_DASHBOARD_PORT`)
-are available in recent releases alongside the CLI flags.
+the env-var equivalents shown above (`HERMES_DASHBOARD=1`, `HERMES_DASHBOARD_HOST`,
+`HERMES_DASHBOARD_PORT`) are available in recent releases alongside the CLI flags.
 
 If you need the separate dashboard container (e.g. resource limits per service),
 `docker-compose.three-container.yml` still works. Add a `depends_on` from

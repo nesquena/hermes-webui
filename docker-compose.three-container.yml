@@ -1,3 +1,9 @@
+# ⚠️ DEPRECATED (issue #6876): the separate hermes-dashboard container below
+# runs `dashboard --host 0.0.0.0 --insecure`, which the current agent image
+# rejects when no dashboard auth provider is registered. Prefer
+# docker-compose.three-service.yml (v0.14+): the dashboard runs inside the
+# hermes-agent process via HERMES_DASHBOARD_HOST / HERMES_DASHBOARD_PORT.
+#
 # Three-container Docker Compose: Hermes Agent + Dashboard + WebUI
 #
 # QUICK START:
