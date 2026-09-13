@@ -84,6 +84,7 @@ eval(extractFunc('_mdImageHtml'));
 eval(extractFunc('_inlineMediaHtmlForRef'));
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_mediaTokenParts'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
