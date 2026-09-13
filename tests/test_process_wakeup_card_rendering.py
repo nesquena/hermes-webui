@@ -12,9 +12,13 @@ import json
 import re
 import shutil
 import subprocess
+from html import unescape
 from pathlib import Path
 
 import pytest
+
+from api.background_process import format_wakeup_prompt
+from api.process_event_utils import wakeup_display_meta
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,7 +98,22 @@ const metaOverParse = _processWakeupInfo(
 
 const extras = {timeHtml: '<span class="msg-time">14:32</span>', filesHtml: '', footHtml: '<div class="msg-foot"></div>'};
 
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const parsed = _parseProcessWakeupBody(input.body);
+const info = _processWakeupInfo(input.message || {}, input.body);
+// Execute the real render branch's markup decision, including raw fallback.
+const markupStart = src.indexOf('      const wakeupInfo=_processWakeupInfo(m, processText);');
+const markupEnd = src.indexOf('      if(row){', markupStart);
+const renderNotice = new Function('m', 'processText', 'timeHtml', 'filesHtml', 'copyBtn',
+  'processFootHtml', '_processWakeupInfo', '_processWakeupCardHtml', 'esc', 'li', 't',
+  src.slice(markupStart, markupEnd) + '\nreturn nextRowHtml;');
+const notice = renderNotice(input.message || {}, input.body, '', '', '', '',
+  _processWakeupInfo, _processWakeupCardHtml, esc, li, t);
+const sourceGate = src.match(/const isProcessWakeup=([^;]+);/);
+const isProcessWakeup = new Function('m', 'return ' + sourceGate[1])(input.message || {});
+
 process.stdout.write(JSON.stringify({
+  parsed, info, notice, isProcessWakeup,
   okInfo, failInfo, watchInfo, metaOnlyInfo,
   metaOverParseTaskId: metaOverParse.taskId,
   unparseableIsNull: _processWakeupInfo({}, 'plain text') === null,
@@ -113,11 +132,12 @@ process.stdout.write(JSON.stringify({
 """
 
 
-def _run_driver():
+def _run_driver(body="", message=None):
     assert NODE is not None
     proc = subprocess.run(
         [NODE, "-e", _DRIVER, str(UI_JS_PATH)],
         text=True,
+        input=json.dumps({"body": body, "message": message}),
         capture_output=True,
         timeout=30,
         check=False,
@@ -253,3 +273,97 @@ def test_render_branch_and_css_wire_the_card_variant():
     assert base_summary and "flex-wrap:wrap" in base_summary.group(0)
     assert "@media(max-width:700px){.process-wakeup-card>summary{min-height:44px;}}" in STYLE_CSS
     assert ".process-wakeup-pattern-row" in STYLE_CSS
+    assert ".process-wakeup-cmd-row code{white-space:pre-wrap;}" in STYLE_CSS
+
+
+@pytest.fixture(params=["single-line", "multiline", "heredoc", "watch-match", "unicode-crlf", "watch-cr", "legacy-json-looking"])
+def formatted_event(request):
+    command = {
+        "single-line": "npm run build",
+        "unicode-crlf": ' \r\n猫 😀\u2028 "quoted" \\path\r\n\nOutput:\nMatched output:\n ',
+        "watch-cr": '\r猫 "quoted" \\path\r ',
+        "legacy-json-looking": '"literal\\ncommand"',
+        "multiline": "printf 'starting\\n'\n\nprintf 'finished\\n'",
+        "heredoc": "cat <<'REPORT'\nOutput:\n  <report>& ready\nMatched output:\nREPORT",
+        "watch-match": "cat <<'LOG'\nMatched output:\nERROR timeout\nOutput:\nLOG",
+    }[request.param]
+    event = {
+        "type": "watch_match" if request.param in {"watch-match", "watch-cr"} else "completion",
+        "session_id": "proc_roundtrip",
+        "command": command,
+        "exit_code": 0,
+        "pattern": 'ERROR.*"timeout"',
+        "output": "    <result>& ready\nOutput:\nlog line\nMatched output:\nlast line]\n\n",
+    }
+    return event
+
+
+def test_formatter_event_server_metadata(formatted_event):
+    evt = formatted_event
+    expected = {"type": evt["type"], "task_id": evt["session_id"], "command": evt["command"]}
+    key = "pattern" if evt["type"] == "watch_match" else "exit_code"
+    expected[key] = evt[key]
+    assert wakeup_display_meta(format_wakeup_prompt(evt)) == expected
+
+
+def test_formatter_event_client_round_trip(formatted_event):
+    evt = formatted_event
+    parsed = _run_driver(format_wakeup_prompt(evt))["parsed"]
+    assert parsed == {
+        "type": evt["type"],
+        "taskId": evt["session_id"],
+        "command": evt["command"],
+        "output": evt["output"],
+        "exitCode": "0" if evt["type"] == "completion" else None,
+        "pattern": evt["pattern"] if evt["type"] == "watch_match" else None,
+    }
+
+
+def test_formatter_event_renders_collapsed_card(formatted_event):
+    evt = formatted_event
+    body = format_wakeup_prompt(evt)
+    message = {"role": "user", "_source": "process_wakeup", "content": body}
+    meta = wakeup_display_meta(body)
+    if meta is not None:
+        message["_wakeup_meta"] = meta
+    notice = _run_driver(body, message)["notice"]
+    assert '<details class="process-wakeup-card">' in notice
+    assert "process_wakeup_label" in notice
+    detail = notice.split('<div class="process-wakeup-detail">', 1)[1]
+    command = re.search(r'<div class="process-wakeup-cmd-row"><code>(.*?)</code>', detail, re.S)
+    output = re.search(r'<pre class="process-wakeup-text">(.*?)</pre>', detail, re.S)
+    assert command and unescape(command[1]) == evt["command"]
+    assert output and unescape(output[1]) == evt["output"]
+    assert "[IMPORTANT:" not in notice
+
+
+@pytest.mark.parametrize("body", [
+    '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: build\nMatched output:\nx]',
+    '[IMPORTANT: Background process p matched watch pattern "ERR".\nCommand: tail\nOutput:\nx]',
+    '[IMPORTANT: Background process p completed (exit_code=0).\nOutput:\nx]',
+    '[IMPORTANT: Watch patterns disabled for process p.]',
+])
+def test_malformed_or_unsupported_body_keeps_raw_fallback(body):
+    assert wakeup_display_meta(body) is None
+    result = _run_driver(body, {"role": "user", "_source": "process_wakeup"})
+    assert result["parsed"] is None
+    assert result["info"] is None
+    assert '<details' not in result["notice"]
+    assert f'<pre class="process-wakeup-text">{body}</pre>' in unescape(result["notice"])
+
+
+def test_ordinary_user_formatter_body_is_not_promoted(formatted_event):
+    body = format_wakeup_prompt(formatted_event)
+    message = {"role": "user", "content": body}
+    assert _run_driver(body, message)["isProcessWakeup"] is False
+    message["_source"] = "process_wakeup"
+    assert _run_driver(body, message)["isProcessWakeup"] is True
+
+
+@pytest.mark.parametrize("value", ['"unterminated', '"bad\\q"', 'null', '42', 'true', '[]', '{}', '"ok" trailing', '"ok"\r'])
+@pytest.mark.parametrize("kind", ["completion", "watch_match"])
+def test_invalid_json_command_keeps_raw_fallback(value, kind):
+    header = 'completed (exit_code=0)' if kind == "completion" else 'matched watch pattern "ERR"'
+    delimiter = "Output" if kind == "completion" else "Matched output"
+    body = f"[IMPORTANT: Background process p {header}.\nCommand JSON: {value}\n{delimiter}:\nx]"
+    test_malformed_or_unsupported_body_keeps_raw_fallback(body)
