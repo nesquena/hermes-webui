@@ -72,8 +72,11 @@ def test_issue5250_settings_search_dropdown_escape():
             "playwright is unavailable; run manual local browser hit-test for issue #5250"
         )
 
+    from tests._playwright_utils import launch_chromium_or_skip
+
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
+        browser = launch_chromium_or_skip(
+            playwright,
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
