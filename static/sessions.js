@@ -38,6 +38,10 @@ let _pendingCarryForwardSnapshot = null;
 let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
+// Session IDs are stable across reloads; this in-memory set prevents duplicate
+// dispatches while one new-session path is still settling. Existing sessions
+// are never auto-greeted because loadSession() does not consult this set.
+const _autoGreetedSessionIds = new Set();
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
@@ -1580,6 +1584,28 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    // Use the normal send path so the greeting is a real persisted user turn.
+    // Only blank sessions created here qualify; loadSession() never consults
+    // this branch, so reloads and resumed conversations stay quiet.
+    if(window._autoGreetNewChat===true
+        && S.messages.length===0
+        && S.session && S.session.session_id
+        && !$('msg').value.trim()
+        && !_autoGreetedSessionIds.has(S.session.session_id)){
+      _autoGreetedSessionIds.add(S.session.session_id);
+      $('msg').value='Please greet me briefly.';
+      await send({autoGreeting:true});
+      // Keep the automatic-only conversation neutral. Once the user sends a
+      // real message, ordinary title generation can take over normally.
+      if(S.session&&S.session.session_id){
+        try{
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:'New conversation'})});
+          S.session.title='New conversation';
+          if(typeof syncTopbar==='function') syncTopbar();
+          if(typeof renderSessionList==='function') await renderSessionList();
+        }catch(_){ /* greeting itself already succeeded */ }
+      }
+    }
   })();
   try{
     return await _newSessionInFlight;
