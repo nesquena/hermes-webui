@@ -14634,6 +14634,9 @@ def handle_get(handler, parsed) -> bool:
             handler,
             {
                 "name": active_profile_name,
+                "display_name": profiles_api._profile_display_name_from_meta(
+                    profiles_api.get_active_hermes_home()
+                ),
                 "path": str(profiles_api.get_active_hermes_home()),
                 "is_default": profiles_api._is_root_profile(active_profile_name),
                 "default_workspace": _profile_default_workspace,

@@ -3585,7 +3585,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {
+          status: 'resolved',
+          profile: p.name || 'default',
+          profileDisplay: (p.display_name && typeof p.display_name === 'string' && p.display_name.trim()) ? p.display_name.trim() : (p.name || 'default'),
+          isDefault: !!p.is_default,
+        };
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -3613,13 +3618,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const activeProfileState = await _resolveActiveProfileBootstrapState();
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
+  S.activeProfileDisplay = activeProfileState.profileDisplay || activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=S.activeProfileDisplay||S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
-  if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  if(titleLabel) titleLabel.textContent=S.activeProfileDisplay||S.activeProfile||'default';
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
   const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
   const _profileSwitchProfileBefore=S.activeProfile||'default';
