@@ -1,8 +1,10 @@
 """Hermes Web UI -- Session model and in-memory session store."""
 import collections
+from bisect import bisect_left
 import copy
 import datetime
 import hashlib
+import heapq
 import inspect
 import json
 import logging
@@ -28,7 +30,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
-from api.compression_anchor import is_context_compression_marker
+from api.compression_anchor import _content_text, is_context_compression_marker, is_lcm_context_recovery_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -44,7 +46,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import build_active_turn_token, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -880,10 +882,13 @@ def _append_recovered_context_projection(
                 recovered.get('timestamp'),
                 recovered.get('_source'),
                 recovered.get('attachments'),
+                active_turn_token=recovered.get('_active_turn_token'),
             ):
                 return
         else:
-            for existing in reversed(context_messages[-8:]):
+            for existing in reversed(context_messages):
+                if isinstance(existing, dict) and existing.get('role') == 'user':
+                    break
                 if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
                     continue
                 if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
@@ -912,7 +917,9 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     _append_recovered_context_projection(session, context_messages, projected)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+def _append_recovered_pending_turn(
+    session, *, timestamp: int | None = None, before_lcm_output: bool = False,
+) -> dict | None:
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
@@ -926,11 +933,49 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(
+        recovered, pending_source,
+        active_turn_token=build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_started_at', None),
+        ),
+    )
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
+    if before_lcm_output:
+        context = session.context_messages
+        pending_started_at = getattr(session, 'pending_started_at', None)
+        for index in range(len(context) - 2, -1, -1):
+            message = context[index]
+            if isinstance(message, dict) and message.get('role') == 'user' and not is_lcm_context_recovery_marker(message):
+                break
+            marker_timestamp = _message_timestamp(message)
+            # Recovery checkpoints use integer seconds, unlike the turn token.
+            if (
+                marker_timestamp is not None
+                and math.isfinite(marker_timestamp)
+                and isinstance(pending_started_at, (int, float))
+                and pending_started_at > 0
+                and int(marker_timestamp) < int(pending_started_at)
+            ):
+                continue
+            if (
+                is_lcm_context_recovery_marker(message)
+                and _normalize_journal_recovery_text(_content_text(
+                    message.get('content'), part_types={'text', 'input_text', 'output_text'},
+                ))
+                == _normalize_journal_recovery_text(pending_text)
+            ):
+                # Count the output suffix, since display may retain more history.
+                visible_index = len(session.messages) - 1 - sum(
+                    not is_lcm_context_recovery_marker(row)
+                    for row in context[index + 1:-1]
+                )
+                context.insert(index + 1, context.pop())
+                session.messages.insert(visible_index, session.messages.pop())
+                break
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
     # merge_session_messages_append_only() still filters out replaced
@@ -2336,8 +2381,10 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
-    if not isinstance(message, dict) or message.get('role') != 'user':
+def _message_matches_pending_checkpoint(
+    message, pending_text, timestamp, source, attachments, *, active_turn_token=None,
+):
+    if not _message_matches_pending_text(message, pending_text, active_turn_token=active_turn_token):
         return False
     try:
         message_timestamp = int(message.get('timestamp'))
@@ -2345,16 +2392,19 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
     except (TypeError, ValueError):
         return False
     return (
-        _normalize_journal_recovery_text(message.get('content'))
-        == _normalize_journal_recovery_text(pending_text)
-        and message_timestamp == expected_timestamp
+        message_timestamp == expected_timestamp
         and (message.get('_source') or 'webui') == (source or 'webui')
         and list(message.get('attachments') or []) == list(attachments or [])
     )
 
 
-def _message_matches_pending_text(message, pending_text):
+def _message_matches_pending_text(message, pending_text, *, active_turn_token=None):
     if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if is_lcm_context_recovery_marker(message):
+        return False
+    token = message.get('_active_turn_token')
+    if token and active_turn_token and token != active_turn_token:
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
@@ -2362,12 +2412,12 @@ def _message_matches_pending_text(message, pending_text):
     )
 
 
-def _latest_user_matches_pending_text(messages, pending_text):
+def _latest_user_matches_pending_text(messages, pending_text, *, active_turn_token=None):
     if not isinstance(messages, list) or not pending_text:
         return False
     for message in reversed(messages):
         if isinstance(message, dict) and message.get('role') == 'user':
-            return _message_matches_pending_text(message, pending_text)
+            return _message_matches_pending_text(message, pending_text, active_turn_token=active_turn_token)
     return False
 
 
@@ -2667,6 +2717,7 @@ def _pending_recovery_turn_start(session) -> int | None:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return None
+    pending_token = build_active_turn_token(getattr(session, 'active_stream_id', None), session.pending_started_at)
     for idx in range(len(session.messages or []) - 1, -1, -1):
         message = session.messages[idx]
         if _message_matches_pending_checkpoint(
@@ -2675,7 +2726,8 @@ def _pending_recovery_turn_start(session) -> int | None:
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+            active_turn_token=pending_token,
+        ) or _message_matches_pending_text(message, pending_text, active_turn_token=pending_token):
             return idx
     return None
 
@@ -2822,6 +2874,7 @@ def _append_journaled_partial_output(
     assistant_started_at: float | None = None
     current_assistant_idx: int | None = None
     recovered_tool_calls: list[dict] = []
+    pending_token = build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None))
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
 
@@ -2843,6 +2896,7 @@ def _append_journaled_partial_output(
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
+            active_turn_token=pending_token,
         ):
             return False
 
@@ -2857,6 +2911,7 @@ def _append_journaled_partial_output(
                 session.pending_started_at,
                 session.pending_user_source,
                 session.pending_attachments,
+                active_turn_token=pending_token,
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -3403,6 +3458,7 @@ def _apply_core_sync_or_error_marker(
         if require_stream_dead and session.active_stream_id in _active_stream_ids():
             return False
     _stream_id = stream_id_for_recheck or session.active_stream_id
+    _pending_token = build_active_turn_token(_stream_id, session.pending_started_at)
     _terminal_recovery = _recoverable_unsaved_gateway_terminal_error(
         session, _stream_id,
     )
@@ -3421,14 +3477,16 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts,
             session.pending_user_source,
             session.pending_attachments,
+            active_turn_token=_pending_token,
         )
         _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
             session.messages[-1],
             session.pending_user_message,
+            active_turn_token=_pending_token,
         )
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message, active_turn_token=_pending_token)):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _append_journaled_partial_output(
                 session,
@@ -3457,8 +3515,7 @@ def _apply_core_sync_or_error_marker(
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
+            stamp_message_source(recovered, pending_source, active_turn_token=_pending_token)
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -3497,6 +3554,12 @@ def _apply_core_sync_or_error_marker(
         core_messages = core.get('messages', [])
         if core_messages:
             session.messages = core_messages
+            if any(is_lcm_context_recovery_marker(message) for message in core_messages):
+                session.context_messages = copy.deepcopy(core_messages)
+                session.messages = [
+                    message for message in core_messages
+                    if not is_lcm_context_recovery_marker(message)
+                ]
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
@@ -3505,16 +3568,33 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-                _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
+            _already_checkpointed = any(
+                (
+                    isinstance(message, dict)
+                    and message.get('role') == 'user'
+                    and _pending_token
+                    and message.get('_active_turn_token') == _pending_token
+                )
+                or (
+                    _message_matches_pending_checkpoint(
+                        message, session.pending_user_message, _recovered_ts,
+                        session.pending_user_source, session.pending_attachments,
+                        active_turn_token=_pending_token,
+                    )
+                    and not message.get('_active_turn_token')
+                )
+                for message in session.messages
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+            _pending_is_lcm = is_lcm_context_recovery_marker({
+                'role': 'user', 'content': session.pending_user_message,
+            })
+            _tail_user_already_checkpointed = _already_checkpointed or (
+                not _pending_is_lcm
+                and _message_matches_pending_text(
+                    session.messages[-1] if session.messages else None,
+                    session.pending_user_message,
+                    active_turn_token=_pending_token,
+                )
             )
             if (
                 _pending_text
@@ -3522,9 +3602,12 @@ def _apply_core_sync_or_error_marker(
                 and (
                     _run_journal_has_visible_output(session, _stream_id)
                     or _terminal_recovery is not None
+                    or _pending_is_lcm
                 )
             ):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+                _append_recovered_pending_turn(
+                    session, timestamp=_recovered_ts, before_lcm_output=True,
+                )
             recovered_output, terminal_error_recovered = (
                 _recover_journaled_output_and_terminal_error(
                     session,
@@ -3942,6 +4025,20 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         # writer's newer record.
         locked.messages = merged_messages
         locked.context_messages = merged_context
+        pending_token = build_active_turn_token(locked_stream_id, locked.pending_started_at)
+        if (
+            pending_token
+            and is_lcm_context_recovery_marker({
+                'role': 'user', 'content': locked.pending_user_message,
+            })
+            and not any(
+                row.get('role') == 'user' and row.get('_active_turn_token') == pending_token
+                for row in merged_messages
+            )
+        ):
+            _append_recovered_pending_turn(
+                locked, timestamp=locked.pending_started_at, before_lcm_output=True,
+            )
         locked.active_stream_id = None
         locked.pending_user_message = None
         locked.pending_attachments = []
@@ -8867,7 +8964,9 @@ def _normalized_message_timestamp_for_key(value):
 def _message_timestamp_as_float(msg):
     if not isinstance(msg, dict):
         return None
-    value = msg.get("timestamp")
+    value = msg.get("_ts")
+    if value is None or value == "":
+        value = msg.get("timestamp")
     if value is None or value == "":
         return None
     try:
@@ -8886,14 +8985,19 @@ def _session_message_api_content_key(msg: dict | None):
 
 
 def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
-    """Append provider sidecar identity only when one is actually present.
+    """Extend duplicate keys with provider and turn identity when present.
 
-    The no-sidecar key shape is an internal compatibility surface used by
-    reconciliation tests and callers.  A present sidecar must extend that
-    identity so different provider bytes cannot collapse into one duplicate.
+    Ordinary rows without private metadata retain the legacy key shape.
+    Envelopes and their authentic owners must never share duplicate identity.
     """
     sidecar = _session_message_api_content_key(msg)
-    return base_key if sidecar is None else (*base_key, sidecar)
+    key = base_key if sidecar is None else (*base_key, sidecar)
+    token = msg.get('_active_turn_token')
+    if isinstance(token, str) and token.strip():
+        key = (*base_key, sidecar, ('_active_turn_token', token))
+    elif is_lcm_context_recovery_marker(msg):
+        key = (*base_key, sidecar, ('_lcm_envelope',))
+    return key
 
 
 _SESSION_MESSAGE_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
@@ -8984,20 +9088,57 @@ def _session_message_merge_key(msg: dict):
         "legacy",
         str(msg.get("role") or ""),
         str(msg.get("content") or ""),
-        _normalized_message_timestamp_for_key(msg.get("timestamp")),
+        _normalized_message_timestamp_for_key(
+            msg.get("_ts") if msg.get("_ts") not in (None, "") else msg.get("timestamp")
+        ),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
         _tc_key,
     ), msg)
 
 
-def _session_messages_have_prefix(messages, prefix) -> bool:
+def _message_private_identity_key(message):
+    metadata = message if isinstance(message, dict) else {}
+    token = metadata.get('_active_turn_token')
+    return (
+        token if isinstance(token, str) and token.strip() else None,
+        _stable_message_identity_details(message)[0],
+        _state_db_row_identity_details(message)[0],
+        _session_message_api_content_key(message),
+    )
+
+
+def _message_display_mirror_compatible(target, source):
+    """Check private claims and timestamp evidence after public content matches."""
+    if not _message_private_identity_compatible(target, source):
+        return False
+    target_private = _message_private_identity_key(target)
+    source_private = _message_private_identity_key(source)
+    if any(a is not None and a == b for a, b in zip(target_private, source_private, strict=True)):
+        return True
+    target_time = _message_timestamp_as_float(target)
+    source_time = _message_timestamp_as_float(source)
+    return target_time is None or source_time is None or target_time == source_time
+
+
+def _session_messages_have_prefix(messages, prefix, *, compatible=False) -> bool:
+    """Match strict identity, or compatible provider mirrors for display."""
     messages = list(messages or [])
     prefix = list(prefix or [])
     if len(prefix) > len(messages):
         return False
     for idx, expected in enumerate(prefix):
-        if _session_message_merge_key(messages[idx]) != _session_message_merge_key(expected):
+        if compatible:
+            if (
+                not _message_display_mirror_compatible(messages[idx], expected)
+                or messages[idx].get("tool_call_id") != expected.get("tool_call_id")
+                or (messages[idx].get("tool_name") or messages[idx].get("name") or "")
+                != (expected.get("tool_name") or expected.get("name") or "")
+                or _session_message_visible_key(messages[idx], normalize_workspace_prefix=True)[:3]
+                != _session_message_visible_key(expected, normalize_workspace_prefix=True)[:3]
+            ):
+                return False
+        elif _session_message_merge_key(messages[idx]) != _session_message_merge_key(expected):
             return False
     return True
 
@@ -9033,6 +9174,12 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     """Preserve display-only turn metadata when duplicate transcript rows merge."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
+    if (
+        source.get('_active_turn_token')
+        and not target.get('_active_turn_token')
+        and _message_private_identity_compatible(target, source)
+    ):
+        target['_active_turn_token'] = source['_active_turn_token']
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
         if _message_display_metadata_value_present(target.get(key)):
             continue
@@ -9107,8 +9254,18 @@ def _stable_message_identity_details(message: dict | None) -> tuple[str | None, 
     return (next(iter(values)) if values else None), True
 
 
-def _message_private_identity_compatible(target: dict | None, source: dict | None) -> bool:
+def _message_private_identity_compatible(
+    target: dict | None, source: dict | None, *, include_api_content: bool = True,
+) -> bool:
     """Return whether private identities do not contradict one another."""
+    target_token = target.get('_active_turn_token') if isinstance(target, dict) else None
+    source_token = source.get('_active_turn_token') if isinstance(source, dict) else None
+    if target_token != source_token and (
+        (target_token and source_token)
+        or is_lcm_context_recovery_marker(target)
+        or is_lcm_context_recovery_marker(source)
+    ):
+        return False
     target_stable, target_stable_valid = _stable_message_identity_details(target)
     source_stable, source_stable_valid = _stable_message_identity_details(source)
     if not target_stable_valid or not source_stable_valid:
@@ -9121,6 +9278,8 @@ def _message_private_identity_compatible(target: dict | None, source: dict | Non
         return False
     if target_row_id is not None and source_row_id is not None and target_row_id != source_row_id:
         return False
+    if not include_api_content:
+        return True
     target_api_content = _session_message_api_content_key(target)
     source_api_content = _session_message_api_content_key(source)
     return not (
@@ -9132,19 +9291,10 @@ def _message_private_identity_compatible(target: dict | None, source: dict | Non
 
 def _message_identity_compatible(target: dict | None, source: dict | None) -> bool:
     """Check legacy ordinary visible-content identity; intentionally excludes api_content."""
-    target_stable, target_stable_valid = _stable_message_identity_details(target)
-    source_stable, source_stable_valid = _stable_message_identity_details(source)
-    if not target_stable_valid or not source_stable_valid:
-        return False
-    if target_stable is not None and source_stable is not None and target_stable != source_stable:
-        return False
-    target_row_id, target_row_id_valid = _state_db_row_identity_details(target)
-    source_row_id, source_row_id_valid = _state_db_row_identity_details(source)
-    if not target_row_id_valid or not source_row_id_valid:
-        return False
-    if target_row_id is not None and source_row_id is not None and target_row_id != source_row_id:
-        return False
-    return _visible_content_compatible(target, source)
+    return (
+        _message_private_identity_compatible(target, source, include_api_content=False)
+        and _visible_content_compatible(target, source)
+    )
 
 
 def _message_exact_timestamp(message: dict | None):
@@ -9651,7 +9801,7 @@ def _reconcile_api_content_sidecars(sidecar_messages: list, state_messages: list
         _copy_api_content_sidecar(sidecar[target_index], state[source_index])
 
 
-def _session_message_dedup_key(msg: dict):
+def _session_message_dedup_key(msg: dict, *, include_stable_id=True):
     """Like _session_message_merge_key but preserves full-precision timestamp.
 
     Two messages are true duplicates only if role, content, AND exact
@@ -9662,7 +9812,7 @@ def _session_message_dedup_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     message_identity = msg.get("id") or msg.get("message_id")
-    if message_identity:
+    if include_stable_id and message_identity:
         return _session_message_key_with_sidecar(
             ("message_id", str(message_identity)), msg
         )
@@ -9671,11 +9821,12 @@ def _session_message_dedup_key(msg: dict):
     # are never collapsed into one.  (#3346 regression)
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    timestamp = _message_timestamp_as_float(msg)
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
         str(msg.get("content") or ""),
-        str(msg.get("timestamp") or ""),
+        timestamp if timestamp is not None else str(msg.get("timestamp") or ""),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
         _tc_key,
@@ -9763,6 +9914,7 @@ def _session_message_visible_key(
 
 def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     by_role = {}
+    by_exact = {}
     for key in visible_keys:
         try:
             role = key[0]
@@ -9772,10 +9924,12 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
         if not content:
             continue
         by_role.setdefault(role, []).append(key)
+        sidecar = key[3] if len(key) > 3 else None
+        by_exact.setdefault((key[:3], sidecar), []).append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
-    return {"keys": visible_keys, "by_role": by_role, "loose_by_key": {}}
+    return {"keys": visible_keys, "by_role": by_role, "by_exact": by_exact, "loose_by_key": {}}
 
 
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
@@ -9787,25 +9941,39 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""
     sidecar = visible_key[3] if len(visible_key) > 3 else None
+    turn_identity = visible_key[4] if len(visible_key) > 4 else None
     if not content:
         return None
     # Exact identity above remains authoritative at every size. The fallback
     # below scans the existing keys for every candidate, so it becomes
     # quadratic on long transcripts even when each individual message is small.
     # Prefer an occasional near-duplicate over blocking every WebUI endpoint.
-    if len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
-        return None
     if lookup is None:
+        if len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
+            return None
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
-    for existing_key in lookup.get("by_role", {}).get(role, []):
+    candidates = (
+        lookup.get("by_exact", {}).get((visible_key[:3], sidecar), [])
+        if len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
+        else lookup.get("by_role", {}).get(role, [])
+    )
+    for existing_key in candidates:
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
+        existing_turn_identity = existing_key[4] if len(existing_key) > 4 else None
         if role != existing_role or sidecar != existing_sidecar or not existing_content:
             continue
-        # Exact visible-key equality was checked above. For very large payloads
+        if turn_identity != existing_turn_identity and (
+            (turn_identity is not None and existing_turn_identity is not None)
+            or ('_lcm_envelope',) in (turn_identity, existing_turn_identity)
+        ):
+            continue
+        if visible_key[:3] == existing_key[:3]:
+            return existing_key
+        # Exact compatible-content equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token
         # comparisons are both expensive and low-value; doing them repeatedly
         # made session loading block the whole WebUI for many seconds. Keep
@@ -9912,6 +10080,7 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
             offset + length < len(sidecar_keys)
             and length < len(state_keys)
             and sidecar_keys[offset + length] == state_keys[length]
+            and _message_private_identity_compatible(sidecar_context[offset + length], state_messages[length])
         ):
             length += 1
         if length > best_len:
@@ -9932,7 +10101,10 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     sidecar_index = best_len
     state_index = best_len
     while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
-        if state_keys[state_index] == sidecar_keys[sidecar_index]:
+        if (
+            state_keys[state_index] == sidecar_keys[sidecar_index]
+            and _message_private_identity_compatible(sidecar_context[sidecar_index], state_messages[state_index])
+        ):
             sidecar_index += 1
         state_index += 1
     if sidecar_index == len(sidecar_keys):
@@ -10116,6 +10288,7 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
                 idx < len(messages)
                 and idx > 0
                 and messages[idx - 1].get("role") == msg.get("role")
+                and _message_timestamp_as_float(messages[idx - 1]) == timestamp
                 and _message_timestamp_as_float(messages[idx]) == timestamp
                 and not _tool_call_assistant_should_precede_content_assistant(messages[idx], msg)
             ):
@@ -10127,6 +10300,151 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
         return True
     messages.append(msg)
     return True
+
+
+def merge_session_display_messages(
+    primary: list, incoming: list, *, truncation_watermark=None, truncation_boundary=None,
+) -> list:
+    """Keep primary order/multiplicity, inserting only unmatched display rows."""
+    primary = list(primary or [])
+    incoming = list(incoming or [])
+    def dedupe_blank_assistants(rows):
+        seen = {}
+        retained = []
+        for row in rows:
+            is_blank_separator = (
+                isinstance(row, dict)
+                and row.get("role") == "assistant"
+                and not row.get("content")
+                and not row.get("reasoning")
+                and not row.get("tool_calls")
+                and not row.get("tool_call_id")
+            )
+            key = _message_timestamp_as_float(row) if is_blank_separator else None
+            existing = seen.get(key) if key is not None else None
+            if existing is not None:
+                _merge_session_display_metadata(existing, row)
+                continue
+            retained.append(row)
+            if key is not None:
+                seen[key] = row
+        return retained
+
+    primary = dedupe_blank_assistants(primary)
+    incoming = dedupe_blank_assistants(incoming)
+    if truncation_watermark is not None or truncation_boundary is not None:
+        retained = merge_session_messages_append_only(
+            primary, incoming, truncation_watermark=truncation_watermark,
+            truncation_boundary=truncation_boundary,
+        )
+        retained_ids = {id(row) for row in retained}
+        incoming = [row for row in incoming if id(row) in retained_ids]
+    if not primary:
+        return merge_session_messages_append_only([], incoming)
+    if _session_messages_have_prefix(primary, incoming, compatible=True):
+        for target, source in zip(primary, incoming, strict=False):
+            _merge_session_display_metadata(target, source)
+        return primary
+    if _session_messages_have_prefix(incoming, primary, compatible=True):
+        for target, source in zip(primary, incoming, strict=False):
+            _merge_session_display_metadata(target, source)
+        return primary + incoming[len(primary):]
+    if incoming and _session_messages_have_prefix(
+        primary[-len(incoming):], incoming,
+        compatible=True,
+    ):
+        for target, source in zip(primary[-len(incoming):], incoming, strict=True):
+            _merge_session_display_metadata(target, source)
+        return primary
+
+    def public_key(row):
+        return (_session_message_visible_key(row, normalize_workspace_prefix=True)[:3],
+                row.get("tool_call_id"), row.get("tool_name") or row.get("name") or "")
+
+    def effective_times(rows):
+        times = [_message_timestamp_as_float(row) for row in rows]
+        following = None
+        for index in range(len(times) - 1, -1, -1):
+            if times[index] is None:
+                times[index] = following
+            else:
+                following = times[index]
+        previous = 0
+        for index, timestamp in enumerate(times):
+            if timestamp is not None:
+                previous = timestamp
+            times[index] = previous
+        return times
+
+    positions = collections.defaultdict(list)
+    dated = collections.defaultdict(list)
+    strong = collections.defaultdict(list)
+    indexed_claims = set()
+
+    def index_claims(index):
+        row = primary[index]
+        key = public_key(row)
+        for field, value in enumerate(_message_private_identity_key(row)):
+            claim = (key, field, value)
+            if value is not None and (claim, index) not in indexed_claims:
+                bucket = strong[claim]
+                bucket.insert(bisect_left(bucket, index), index)
+                indexed_claims.add((claim, index))
+
+    for index, row in enumerate(primary):
+        key = public_key(row)
+        positions[key].append(index)
+        dated[key, _message_timestamp_as_float(row)].append(index)
+        index_claims(index)
+    primary_times = effective_times(primary)
+    before = [[] for _ in range(len(primary) + 1)]
+    cursor = 0
+    inserted = collections.defaultdict(list)
+    for row, timestamp in zip(incoming, effective_times(incoming), strict=True):
+        key = public_key(row)
+        row_time = _message_timestamp_as_float(row)
+        groups = [strong.get((key, field, value), [])
+                  for field, value in enumerate(_message_private_identity_key(row)) if value is not None]
+        if row_time is not None:
+            groups.append(dated.get((key, row_time), []))
+        anonymous = dated.get((key, None), []) if row_time is not None else positions.get(key, [])
+        match = None
+        for forward in (True, False):
+            streams = []
+            for group in [*groups, anonymous]:
+                split = bisect_left(group, cursor)
+                start, stop = (split, len(group)) if forward else (0, split)
+                if group is anonymous:
+                    stop = min(stop, start + 16)
+                streams.append(map(group.__getitem__, range(start, stop)))
+            match = next((index for index in heapq.merge(*streams)
+                          if _message_display_mirror_compatible(primary[index], row)), None)
+            if match is not None:
+                break
+        if match is not None:
+            _merge_session_display_metadata(primary[match], row)
+            index_claims(match)
+            cursor = max(cursor, match + 1)
+            continue
+        inserted_key = (public_key(row), _message_timestamp_as_float(row))
+        mirror = next((existing for existing in inserted[inserted_key]
+                       if _message_private_identity_compatible(existing, row)), None)
+        if mirror is not None:
+            _merge_session_display_metadata(mirror, row)
+            continue
+        while cursor < len(primary) and primary_times[cursor] < timestamp:
+            cursor += 1
+        # Only the current boundary may admit an owner ahead of equal-time output.
+        owner_before_output = (cursor < len(primary) and row.get('_active_turn_token')
+                               and row.get('role') == 'user'
+                               and primary[cursor].get('role') in ('assistant', 'tool'))
+        if not owner_before_output:
+            while cursor < len(primary) and primary_times[cursor] == timestamp:
+                cursor += 1
+        before[cursor].append(row)
+        inserted[inserted_key].append(row)
+    return [row for index, original in enumerate(primary)
+            for row in [*before[index], original]] + before[-1]
 
 
 def merge_session_messages_append_only(
@@ -10196,6 +10514,7 @@ def merge_session_messages_append_only(
     _message_key_helpers = {
         "merge": _session_message_merge_key,
         "dedup": _session_message_dedup_key,
+        "public_dedup": lambda msg: _session_message_dedup_key(msg, include_stable_id=False),
         "content_sidecar": lambda msg: _session_message_content_key(
             msg, normalize_workspace_prefix=False
         ),
@@ -10220,10 +10539,15 @@ def merge_session_messages_append_only(
             return value
 
         helper = _message_key_helpers[kind]
+        # Stringifying provider parts would erase their envelope identity.
+        if isinstance(msg.get('content'), list) and is_lcm_context_recovery_marker(msg):
+            value = helper(msg)
+            _cached_msg_keys[cache_key] = value
+            return value
         msg_cache_key = id(msg)
         prepared_msg = _cached_msg_prepared.get(msg_cache_key)
 
-        if kind in {"merge", "dedup"}:
+        if kind in {"merge", "dedup", "public_dedup"}:
             if prepared_msg is None:
                 value = helper(msg)
                 # If this is a legacy message key, keep the already-stringified
@@ -10312,17 +10636,50 @@ def merge_session_messages_append_only(
 
         # Deduplicate true duplicates (same role, content, exact timestamp)
         # without collapsing legitimately-repeated identical turns (#3346).
-        seen = set()
         seen_messages = {}
         deduped = []
         for msg in filtered:
-            key = _cached_message_key(msg, "dedup")
-            if key not in seen:
-                seen.add(key)
-                seen_messages[key] = msg
+            private = _message_private_identity_key(msg)
+            if private[1] is not None:
+                key = _cached_message_key(msg, "dedup")
+                base_key = key[:2]
+            elif private[2] is not None:
+                base_key = ("state_row", private[2])
+            else:
+                key = _cached_message_key(msg, "public_dedup")
+                base_key = key[:7] if key[0] == "legacy" else key[:2]
+            rows, claims, exact, fields = seen_messages.setdefault(base_key, ([], [], {}, [{}, {}, {}, {}]))
+            # Probe exact provenance first; index partial mirrors by their most
+            # selective supplied field.
+            # Cap ambiguous fallback at 32 probes; require stronger identity beyond that.
+            pools = min((
+                (field.get(value, {}), field.get(None, {}))
+                for field, value in zip(fields, private, strict=True) if value is not None
+            ), key=lambda pair: len(pair[0]) + len(pair[1]), default=(range(len(rows)), ()))
+            candidates = [exact.get(private)] + [
+                index for pool in pools for _, index in zip(range(16), pool, strict=False)
+            ]
+            existing_index = next((index for index in candidates if index is not None
+                                   and _message_private_identity_compatible(rows[index], msg)
+                                   and all(a is None or b is None or a == b
+                                           for a, b in zip(claims[index], private, strict=True))), None)
+            if existing_index is None:
+                existing_index = len(rows)
+                rows.append(msg)
+                claims.append(private)
                 deduped.append(msg)
             else:
-                _merge_session_display_metadata(seen_messages.get(key), msg)
+                _merge_session_display_metadata(rows[existing_index], msg)
+            # An anonymous row may accept one private claim, not conflicting
+            # later claims. Keep source provenance even when display metadata
+            # promotion does not copy that private field onto the target.
+            exact.setdefault(private, existing_index)
+            private = tuple(a if a is not None else b
+                            for a, b in zip(claims[existing_index], private, strict=True))
+            claims[existing_index] = private
+            exact.setdefault(private, existing_index)
+            for field, value in zip(fields, private, strict=True):
+                field.setdefault(value, {})[existing_index] = None
         return deduped
 
     merged_messages = []
@@ -10470,8 +10827,11 @@ def merge_session_messages_append_only(
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
+            if (
+                _message_private_identity_compatible(sidecar_visible_messages[state_replay_idx], msg)
+                and (visible_key == expected_visible_key or _has_visible_duplicate(
+                    visible_key, {expected_visible_key}
+                ))
             ):
                 replays_sidecar_prefix = True
                 replay_target = sidecar_visible_messages[state_replay_idx]
@@ -10596,15 +10956,26 @@ def merge_session_messages_append_only(
             and str(msg.get("role", "")).lower() == "user"
         ):
             continue
+        duplicate = merged_by_dedup_key.get(dedup_key) or merged_by_message_key.get(key)
+        duplicate_identity_conflict = (
+            duplicate is not None
+            and multimodal_mirror_key not in ambiguous_state_multimodal_mirrors
+            and not _message_private_identity_compatible(duplicate, msg)
+        )
         # Check for true duplicates using full-precision timestamp (#3346).
         # Must run before the merge-key guards so that legitimately distinct
         # sub-second messages with the same second-level merge key are not
         # collapsed.  The merge key truncates to seconds; the dedup key does
         # not.
-        if dedup_key in seen_dedup_keys:
+        if dedup_key in seen_dedup_keys and not duplicate_identity_conflict:
             _merge_session_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
             continue
-        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+        if (
+            not duplicate_identity_conflict
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
             # For message_id keys the merge key is authoritative — skip if
             # already seen.  For legacy keys the dedup check above already
             # handled true duplicates; same-second distinct messages must
@@ -10621,7 +10992,7 @@ def merge_session_messages_append_only(
                 if key in seen_message_keys:
                     _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
-        if key in seen_message_keys and key[0] == "message_id":
+        if key in seen_message_keys and key[0] == "message_id" and not duplicate_identity_conflict:
             _merge_session_display_metadata(merged_by_message_key.get(key), msg)
             continue
         matched_visible_key = _matching_visible_duplicate(
@@ -10629,7 +11000,9 @@ def merge_session_messages_append_only(
             sidecar_visible_keys,
             sidecar_visible_lookup,
         )
-        if matched_visible_key is not None:
+        if matched_visible_key is not None and _message_private_identity_compatible(
+            merged_by_visible_key.get(matched_visible_key), msg,
+        ):
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
             if skipped_count < sidecar_count:
@@ -10652,6 +11025,7 @@ def merge_session_messages_append_only(
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
             and not row_id_sidecar_conflict
+            and not duplicate_identity_conflict
         ):
             # When a truncation watermark is active and the sidecar holds only
             # the edited user checkpoint, state.db may contain an assistant/tool
@@ -10721,6 +11095,7 @@ def reconciled_state_db_messages_for_session(
     session,
     *,
     prefer_context: bool = False,
+    display_messages: list | None = None,
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
     with_revision: Literal[False] = False,
 ) -> list: ...
@@ -10731,6 +11106,7 @@ def reconciled_state_db_messages_for_session(
     session,
     *,
     prefer_context: bool = False,
+    display_messages: list | None = None,
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
     with_revision: Literal[True],
 ) -> StateDBSessionMessagesSnapshot: ...
@@ -10740,10 +11116,11 @@ def reconciled_state_db_messages_for_session(
     session,
     *,
     prefer_context: bool = False,
+    display_messages: list | None = None,
     state_messages: list | StateDBSessionMessagesSnapshot | None = None,
     with_revision: bool = False,
 ):
-    """Return append-only messages reconciled with state.db for a WebUI session."""
+    """Reconcile state.db with context or a display projection (including lineage)."""
     if session is None:
         return _state_db_session_messages_result([], None, with_revision=with_revision)
     state_revision = None
@@ -10758,7 +11135,10 @@ def reconciled_state_db_messages_for_session(
             local_messages = context_messages
             using_context_messages = True
     if not local_messages:
-        local_messages = getattr(session, 'messages', None) or []
+        local_messages = (
+            display_messages if display_messages is not None and not prefer_context
+            else getattr(session, 'messages', None) or []
+        )
     if state_messages is None:
         session_id = getattr(session, 'session_id', None)
         session_profile = getattr(session, 'profile', None)
@@ -10826,6 +11206,9 @@ def reconciled_state_db_messages_for_session(
                         )
                     state_messages = list(state_messages or [])[anchor_index + 1 :]
         state_messages = state_db_delta_after_context(local_messages, state_messages)
+    if not prefer_context:
+        local_messages = [m for m in local_messages if not is_lcm_context_recovery_marker(m)]
+        state_messages = [m for m in state_messages or [] if not is_lcm_context_recovery_marker(m)]
     reconciled_messages = merge_session_messages_append_only(
         local_messages,
         state_messages,

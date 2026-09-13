@@ -215,9 +215,8 @@ def test_session_clear_preserves_imported_messaging_transcript_and_blocks_state_
     routes.handle_get(handler, urlparse(handler.path))
     assert handler.status == 200
     payload_messages = handler.response_json["session"]["messages"]
-    assert [(m["role"], m["content"], m["timestamp"]) for m in payload_messages] == [
-        (m["role"], m["content"], m["timestamp"]) for m in external_messages
-    ]
+    # Clear keeps the external store intact but its tombstone applies to display too.
+    assert payload_messages == []
 
     merged = merge_session_messages_append_only(
         loaded.messages,

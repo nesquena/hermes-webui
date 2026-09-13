@@ -2173,3 +2173,873 @@ def test_state_db_reconciliation_preserves_tool_metadata(monkeypatch, tmp_path):
     assert messages[-1]["content"] == "used a tool"
     assert messages[-1]["tool_name"] == "terminal"
     assert messages[-1]["tool_calls"] == [{"id": "call_1", "function": {"name": "terminal"}}]
+
+
+@pytest.mark.parametrize('limit', ['', '&msg_limit=10'])
+def test_session_get_keeps_lcm_state_rows_context_only(monkeypatch, tmp_path, limit):
+    import api.models as models
+    import api.routes as routes
+
+    sid = 'lcm_display_projection'
+    prompt = {'role': 'user', 'content': 'Current prompt', 'timestamp': 1000.0}
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 1001.0}
+    answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 1002.0}
+    session = _install_test_session(monkeypatch, tmp_path, sid, [prompt])
+    _make_state_db(tmp_path / 'state.db', sid, [prompt, marker, answer])
+    handler = _GetHandler(f'/api/session?session_id={sid}&messages=1&resolve_model=0{limit}')
+
+    routes.handle_get(handler, urlparse(handler.path))
+    assert handler.status == 200
+    assert handler.response_json["session"]["message_count"] == 2
+    assert [m['content'] for m in handler.response_json['session']['messages']] == [
+        prompt['content'], answer['content'],
+    ]
+    assert marker['content'] in [m['content'] for m in models.reconciled_state_db_messages_for_session(
+        session, prefer_context=True,
+    )]
+
+
+@pytest.mark.parametrize('limit', ['', '&msg_limit=10'])
+def test_legacy_lcm_sidecar_empty_state_get_is_display_only(monkeypatch, tmp_path, limit):
+    import api.routes as routes
+    import api.models as models
+
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 1000}
+    owned = dict(marker, timestamp=1001, _active_turn_token='stream_1:1001')
+    answer = {'role': 'assistant', 'content': 'Answer', 'timestamp': 1002}
+    session = _install_test_session(monkeypatch, tmp_path, 'legacy_lcm', [marker, owned, answer])
+    session.context_messages = [marker, owned, answer]
+    session.save()
+    handler = _GetHandler(f'/api/session?session_id={session.session_id}&messages=1&resolve_model=0{limit}')
+    routes.handle_get(handler, urlparse(handler.path))
+    assert handler.status == 200
+    rows = handler.response_json['session']['messages']
+    assert [m['content'] for m in rows] == [owned['content'], answer['content']]
+    assert models.Session.load(session.session_id).context_messages == [marker, owned, answer]
+
+
+def test_lcm_parent_lineage_fork_persists_clean_display(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 1000}
+    owned = dict(marker, timestamp=1001, _active_turn_token='stream_1:1001')
+    answer = {'role': 'assistant', 'content': 'Answer', 'timestamp': 1002}
+    parent = _install_test_session(monkeypatch, tmp_path, 'lcm_parent', [marker, owned])
+    child = _install_test_session(monkeypatch, tmp_path, 'lcm_child', [answer])
+    child.parent_session_id = parent.session_id
+    child.context_messages = [marker, owned, answer]
+    child.save()
+    monkeypatch.setattr(routes, 'get_session', lambda sid, **k: parent if sid == parent.session_id else child)
+    monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+    monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': child.session_id})
+    handler = _GetHandler('/api/session/branch')
+    routes.handle_post(handler, urlparse(handler.path))
+    assert handler.status == 200
+    forked = models.Session.load(handler.response_json['session_id'])
+    assert forked.messages == [owned, answer]
+    assert child.context_messages == [marker, owned, answer]
+
+
+def test_lcm_fork_user_boundary_retains_owner(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 1000}
+    owned = dict(marker, _active_turn_token='stream_1:1000')
+    answer = {'role': 'assistant', 'content': 'Answer', 'timestamp': 1001}
+    source = _install_test_session(monkeypatch, tmp_path, 'lcm_boundary', [owned, answer])
+    source.context_messages = [marker, owned, answer]
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+    monkeypatch.setattr(routes, 'read_body', lambda handler: {
+        'session_id': source.session_id, 'keep_count': 1,
+    })
+    handler = _GetHandler('/api/session/branch')
+    routes.handle_post(handler, urlparse(handler.path))
+    assert handler.status == 200
+    forked = models.Session.load(handler.response_json['session_id'])
+    assert forked.messages == [owned]
+    assert forked.context_messages == [marker, owned]
+    assert source.context_messages == [marker, owned, answer]
+
+
+@pytest.mark.parametrize('role', ['user', 'assistant'])
+@pytest.mark.parametrize('action', ['get', 'branch'])
+@pytest.mark.parametrize('with_sidecar', [False, True])
+def test_lcm_messaging_display_and_branch(monkeypatch, tmp_path, role, action, with_sidecar):
+    import api.models as models
+    import api.routes as routes
+
+    marker = {'role': role, 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 1000}
+    owned = dict(marker, role='user', timestamp=1001, _active_turn_token='stream_1:1001')
+    answer = {'role': 'assistant', 'content': 'Answer', 'timestamp': 1002}
+    source = _install_test_session(monkeypatch, tmp_path, 'lcm_messaging', [owned] if with_sidecar else [])
+    source.session_source = 'messaging'
+    source.context_messages = [marker, owned, answer]
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: [marker, owned, answer])
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [m['content'] for m in handler.response_json['session']['messages']] == [owned['content'], 'Answer']
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        forked = models.Session.load(handler.response_json['session_id'])
+        assert forked.messages == [owned, answer]
+        assert forked.context_messages == [marker, owned, answer]
+    assert models.Session.load(source.session_id).context_messages == [marker, owned, answer]
+
+
+@pytest.mark.parametrize('action', ['get', 'branch'])
+def test_messaging_merge_keeps_current_owner_before_same_timestamp_answer(monkeypatch, tmp_path, action):
+    import api.models as models
+    import api.routes as routes
+
+    prior = {'role': 'user', 'content': 'Prior request', 'timestamp': 1}
+    prior_answer = {'role': 'assistant', 'content': 'Prior answer', 'timestamp': 1.5}
+    envelope = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': 1}
+    owner = dict(envelope, timestamp=2, _active_turn_token='current:2')
+    answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 2}
+    expected = [prior, prior_answer, owner, answer]
+    source = _install_test_session(monkeypatch, tmp_path, 'messaging_order', [prior, envelope, owner, answer])
+    source.session_source = 'messaging'
+    source.context_messages = [prior, prior_answer, envelope, owner, answer]
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: expected)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [(row['role'], row['content']) for row in handler.response_json['session']['messages']] == [
+            (row['role'], row['content']) for row in expected
+        ]
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == expected
+        assert fork.context_messages == source.context_messages
+
+
+@pytest.mark.parametrize('split', [0, 1])
+@pytest.mark.parametrize('multipart', [False, True])
+@pytest.mark.parametrize('provenance', [{}, {'id': 'same'}, {'_row_id': 7, 'api_content': 'provider'}])
+@pytest.mark.parametrize('tokens,heading,distinct', [
+    ((None, 'owner:100'), '[Recent Summary (d0, node 418)]', True),
+    (('old:100', 'new:100'), 'Repeated request', True),
+    ((None, None), 'Repeated request', False),
+    (('owner:100', 'owner:100'), '[Recent Summary (d0, node 418)]', False),
+])
+def test_append_only_merge_respects_turn_identity(split, multipart, provenance, tokens, heading, distinct):
+    import copy
+    import api.models as models
+
+    content = [{'type': 'input_text', 'input_text': heading}] if multipart else heading
+    rows = [dict(provenance, role='user', content=content, timestamp=100) for _ in tokens]
+    for row, token in zip(rows, tokens, strict=True):
+        if token:
+            row['_active_turn_token'] = token
+    expected = rows if distinct else rows[:1]
+    assert models.merge_session_messages_append_only(
+        copy.deepcopy(rows[:split]), copy.deepcopy(rows[split:]),
+    ) == expected
+    session = models.Session(messages=copy.deepcopy(rows[:split]))
+    context = models.reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=copy.deepcopy(rows[split:]),
+    )
+    assert context == expected
+    display = models.reconciled_state_db_messages_for_session(
+        session, state_messages=copy.deepcopy(rows[split:]),
+    )
+    assert display == [row for row in expected if not models.is_lcm_context_recovery_marker(row)]
+
+
+@pytest.mark.parametrize('history_size', [0, 1001])
+def test_large_exact_tokenless_mirror_merge(history_size):
+    import api.models as models
+
+    owner = {'role': 'user', 'content': 'x' * 200001, 'timestamp': 10000, '_active_turn_token': 'owner:10000'}
+    replay = {key: value for key, value in owner.items() if key != '_active_turn_token'}
+    history = [{'role': 'user', 'content': f'History {i}', 'timestamp': i} for i in range(history_size)]
+    assert models.merge_session_messages_append_only([*history, owner], [replay]) == [*history, owner]
+
+
+@pytest.mark.parametrize('action', ['get', 'branch'])
+def test_large_ordinary_messaging_replay_is_one_turn(monkeypatch, tmp_path, action):
+    import api.models as models
+    import api.routes as routes
+
+    owner = {'role': 'user', 'content': 'x' * 200001, 'timestamp': 100, '_active_turn_token': 'owner:100'}
+    replay = {key: value for key, value in owner.items() if key != '_active_turn_token'}
+    source = _install_test_session(monkeypatch, tmp_path, 'large_mirror', [owner])
+    source.session_source = 'messaging'
+    source.context_messages = [owner]
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: [replay])
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        rows = handler.response_json['session']['messages']
+        assert len(rows) == 1
+        assert rows[0]['content'] == owner['content']
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == [owner]
+        assert fork.context_messages == [owner]
+
+
+@pytest.mark.parametrize('action', ['lineage', 'get', 'branch'])
+def test_lineage_same_timestamp_owner_precedes_answer(monkeypatch, tmp_path, action):
+    import api.models as models
+    import api.routes as routes
+
+    owner = {'role': 'user', 'content': 'Request', 'timestamp': 100, '_active_turn_token': 'owner:100'}
+    answer = {'role': 'assistant', 'content': 'Answer', 'timestamp': 100}
+    parent = _install_test_session(monkeypatch, tmp_path, 'tie_parent', [owner])
+    child = _install_test_session(monkeypatch, tmp_path, 'tie_child', [answer])
+    child.parent_session_id = parent.session_id
+    child.context_messages = [owner, answer]
+    child.save()
+    monkeypatch.setattr(routes, 'get_session', lambda sid, **k: parent if sid == parent.session_id else child)
+    if action == 'lineage':
+        assert routes._merged_webui_lineage_messages_for_display(child) == [owner, answer]
+    elif action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={child.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [row['content'] for row in handler.response_json['session']['messages']] == ['Request', 'Answer']
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': child.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == [owner, answer]
+        assert fork.context_messages == [owner, answer]
+
+
+@pytest.mark.parametrize('action', ['get', 'branch'])
+@pytest.mark.parametrize('marker', [False, True])
+@pytest.mark.parametrize('sidecar_longer', [False, True])
+def test_messaging_tokenless_mirror_preserves_owner_order(monkeypatch, tmp_path, action, marker, sidecar_longer):
+    import api.models as models
+    import api.routes as routes
+
+    text = '[Recent Summary (d0, node 418)]' if marker else 'Continue'
+    earlier = dict(role='user', content='Earlier request', timestamp=1)
+    owner = dict(role='user', content=text, timestamp=2, _active_turn_token='owner:2')
+    replay = {key: value for key, value in owner.items() if key != '_active_turn_token'}
+    answer = dict(role='assistant', content='Current answer', timestamp=2)
+    expected = [earlier, owner, answer]
+    source = _install_test_session(monkeypatch, tmp_path, 'mirror_order', expected if sidecar_longer else [owner])
+    source.session_source = 'messaging'
+    source.context_messages = [earlier, replay, owner, answer] if marker else expected
+    source.save()
+    cli = [replay, answer] if sidecar_longer else [earlier, replay, answer]
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: cli)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    assert routes._merged_session_messages_for_display(source, cli) == expected
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [row['content'] for row in handler.response_json['session']['messages']] == [row['content'] for row in expected]
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == expected
+        assert fork.context_messages == source.context_messages
+
+
+@pytest.mark.parametrize('length', [8, 200001])
+def test_append_merge_promotes_mirror_without_collapsing_conflicting_owner(length):
+    import api.models as models
+
+    replay = dict(role='user', content='x' * length, timestamp=100)
+    old = dict(replay, _active_turn_token='old:100')
+    new = dict(replay, _active_turn_token='new:100')
+    assert models.merge_session_messages_append_only([dict(replay)], [old, new]) == [old, new]
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('shape', ['short', 'large', 'multipart', 'envelope', 'conflict', 'same_token'])
+def test_empty_primary_merge_preserves_owner_identity(reverse, shape):
+    import copy
+    import api.models as models
+
+    text = '[Recent Summary (d0, node 418)]' if shape == 'envelope' else 'x' * (200001 if shape == 'large' else 8)
+    content = [{'type': 'text', 'text': text}] if shape == 'multipart' else text
+    first = dict(role='user', content=content, timestamp=100)
+    owner = dict(first, _active_turn_token='current:100')
+    if shape in ('conflict', 'same_token'):
+        first['_active_turn_token'] = 'old:100' if shape == 'conflict' else 'current:100'
+    pair = [owner, first] if reverse else [first, owner]
+    answer = dict(role='assistant', content='Historical answer', timestamp=100)
+    rows = [pair[0], answer, pair[1]]
+    expected = rows if shape in ('envelope', 'conflict') else [owner, answer]
+    assert models.merge_session_messages_append_only([], copy.deepcopy(rows)) == expected
+
+
+@pytest.mark.parametrize('action', ['get', 'branch'])
+@pytest.mark.parametrize('sidecar_owned', [False, True])
+def test_messaging_union_keeps_one_owned_mirror(monkeypatch, tmp_path, action, sidecar_owned):
+    import api.models as models
+    import api.routes as routes
+
+    earlier = dict(role='user', content='Earlier', timestamp=1)
+    replay = dict(role='user', content='Continue', timestamp=2)
+    owner = dict(replay, _active_turn_token='current:2')
+    answer = dict(role='assistant', content='Answer', timestamp=2)
+    expected = [earlier, owner, answer]
+    source = _install_test_session(monkeypatch, tmp_path, 'union_mirror', [owner if sidecar_owned else replay])
+    source.session_source = 'messaging'
+    source.context_messages = list(expected)
+    source.save()
+    cli = [earlier, replay if sidecar_owned else owner, answer]
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: cli)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    assert routes._merged_session_messages_for_display(source, cli) == expected
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [m['content'] for m in handler.response_json['session']['messages']] == ['Earlier', 'Continue', 'Answer']
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == expected
+        assert fork.context_messages == expected
+
+
+@pytest.mark.parametrize('sidecar_owned', [False, True])
+def test_sidecar_primary_preserves_distinct_ids_and_mirror_order(sidecar_owned):
+    from types import SimpleNamespace
+    import api.routes as routes
+
+    earlier = dict(role='user', content='Earlier', timestamp=1)
+    replay = dict(role='user', content='Continue', timestamp=2)
+    owner = dict(replay, _active_turn_token='current:2')
+    answer = dict(role='assistant', content='Answer', timestamp=2)
+    cli_retry = dict(role='user', content='Retry', timestamp=3, id='cli-retry')
+    sidecar_retry = dict(cli_retry, id='sidecar-retry')
+    session = SimpleNamespace(messages=[owner if sidecar_owned else replay, sidecar_retry])
+    cli = [earlier, replay if sidecar_owned else owner, answer, cli_retry]
+    assert routes._merged_session_messages_for_display(session, cli) == [
+        earlier, owner, answer, sidecar_retry, cli_retry,
+    ]
+
+
+@pytest.mark.parametrize('action', ['lineage', 'get', 'branch'])
+@pytest.mark.parametrize('parent_owned', [False, True])
+@pytest.mark.parametrize('marker', [False, True])
+def test_lineage_mirror_keeps_owner(monkeypatch, tmp_path, action, parent_owned, marker):
+    import api.models as models
+    import api.routes as routes
+
+    text = '[Recent Summary (d0, node 418)]' if marker else 'Continue'
+    replay = dict(role='user', content=text, timestamp=100)
+    owner = dict(replay, _active_turn_token='current:100')
+    answer = dict(role='assistant', content='Current answer', timestamp=100)
+    parent = _install_test_session(monkeypatch, tmp_path, 'mirror_parent', [owner if parent_owned else replay])
+    child = _install_test_session(monkeypatch, tmp_path, 'mirror_child', [replay if parent_owned else owner, answer])
+    child.parent_session_id = parent.session_id
+    child.context_messages = [replay, owner, answer] if marker else [owner, answer]
+    child.save()
+    monkeypatch.setattr(routes, 'get_session', lambda sid, **k: parent if sid == parent.session_id else child)
+    if action == 'lineage':
+        assert routes._merged_webui_lineage_messages_for_display(child) == [owner, answer]
+    elif action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={child.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [m['content'] for m in handler.response_json['session']['messages']] == [text, 'Current answer']
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': child.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == [owner, answer]
+        assert fork.context_messages == child.context_messages
+
+
+@pytest.mark.parametrize('identity_field,identities', [
+    ('_active_turn_token', ('old:100', 'new:100')),
+    ('id', ('parent-user', 'child-user')),
+])
+def test_lineage_keeps_distinct_same_time_identities(monkeypatch, tmp_path, identity_field, identities):
+    import api.routes as routes
+
+    first = dict(role='user', content='Continue', timestamp=100)
+    current = dict(first)
+    first[identity_field], current[identity_field] = identities
+    answer = dict(role='assistant', content='Current answer', timestamp=100)
+    parent = _install_test_session(monkeypatch, tmp_path, 'distinct_parent', [first])
+    child = _install_test_session(monkeypatch, tmp_path, 'distinct_child', [current, answer])
+    child.parent_session_id = parent.session_id
+    monkeypatch.setattr(routes, 'get_session', lambda sid, **k: parent if sid == parent.session_id else child)
+    assert routes._merged_webui_lineage_messages_for_display(child) == [first, current, answer]
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('same_time', [False, True])
+@pytest.mark.parametrize('action', ['merge', 'get', 'branch'])
+def test_distinct_ids_are_not_prefix_replays(monkeypatch, tmp_path, reverse, same_time, action):
+    import api.models as models
+    import api.routes as routes
+
+    earlier = dict(role='user', content='Continue', timestamp=1, id='cli-user')
+    answer = dict(role='assistant', content='Answer', timestamp=1 if same_time else 2)
+    later = dict(role='user', content='Continue', timestamp=1 if same_time else 3, id='sidecar-user')
+    primary, incoming = ([later], [earlier, answer]) if reverse else ([earlier, answer], [later])
+    if action == 'merge':
+        merged = models.merge_session_messages_append_only(primary, incoming)
+        assert [m['id'] for m in merged if m['role'] == 'user'] == ([later['id'], earlier['id']] if reverse else [earlier['id'], later['id']])
+        return
+    source = _install_test_session(monkeypatch, tmp_path, 'distinct_prefix', primary)
+    source.session_source = 'messaging'
+    source.context_messages = [earlier, answer, later]
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: incoming)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    # Sidecar is authoritative on equal timestamps, independent of source length.
+    expected = [later, earlier, answer] if reverse and same_time else [earlier, answer, later]
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        rows = handler.response_json['session']['messages']
+        assert [m.get('id') for m in rows] == [m.get('id') for m in expected]
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert models.Session.load(handler.response_json['session_id']).messages == expected
+
+
+@pytest.mark.parametrize('same_time', [False, True])
+def test_durable_row_ids_are_not_prefix_replays(same_time):
+    import api.models as models
+
+    first = dict(role='user', content='Continue', timestamp=1, _row_id=7)
+    later = dict(first, timestamp=1 if same_time else 3, _row_id=8)
+    assert models.merge_session_messages_append_only([first], [later]) == [first, later]
+
+
+@pytest.mark.parametrize('action', ['get', 'branch'])
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('same_time', [False, True])
+def test_mixed_messaging_union_preserves_middle_exchange(monkeypatch, tmp_path, action, reverse, same_time):
+    import api.models as models
+    import api.routes as routes
+
+    first = dict(role='user', content='First request', timestamp=1, id='first')
+    first_answer = dict(role='assistant', content='Initial response', timestamp=2)
+    owner = dict(role='user', content='Middle request', timestamp=3, _active_turn_token='middle:3')
+    answer = dict(role='assistant', content='Middle response', timestamp=3 if same_time else 4)
+    tail = dict(role='user', content='Latest request', timestamp=5, id='tail')
+    long, short = [first, first_answer, tail], [owner, answer]
+    sidecar, cli = (long, short) if reverse else (short, long)
+    expected = [first, first_answer, owner, answer, tail]
+    source = _install_test_session(monkeypatch, tmp_path, 'mixed_union', sidecar)
+    source.session_source = 'messaging'
+    source.context_messages = list(expected)
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: cli)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    assert routes._merged_session_messages_for_display(source, cli) == expected
+    if action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [m['content'] for m in handler.response_json['session']['messages']] == [m['content'] for m in expected]
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert models.Session.load(handler.response_json['session_id']).messages == expected
+
+
+@pytest.mark.parametrize('action', ['lineage', 'get', 'branch'])
+@pytest.mark.parametrize('parent_owned', [False, True])
+@pytest.mark.parametrize('same_time', [False, True])
+def test_lineage_compatible_prefix_preserves_child_tail(monkeypatch, tmp_path, action, parent_owned, same_time):
+    import api.models as models
+    import api.routes as routes
+
+    replay = dict(role='user', content='Continue', timestamp=100)
+    owner = dict(replay, _active_turn_token='current:100')
+    history = dict(role='assistant', content='Prior response', timestamp=100)
+    tail = [dict(role='user', content='Next question'), dict(role='assistant', content='Next response')]
+    if same_time:
+        tail = [dict(row, timestamp=100) for row in tail]
+    parent = _install_test_session(monkeypatch, tmp_path, 'prefix_parent', [owner if parent_owned else replay, history])
+    child = _install_test_session(monkeypatch, tmp_path, 'prefix_child', [replay if parent_owned else owner, history, *tail])
+    child.parent_session_id = parent.session_id
+    expected = [owner, history, *tail]
+    child.context_messages = list(expected)
+    child.save()
+    monkeypatch.setattr(routes, 'get_session', lambda sid, **k: parent if sid == parent.session_id else child)
+    if action == 'lineage':
+        assert routes._merged_webui_lineage_messages_for_display(child) == expected
+    elif action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={child.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert [m['content'] for m in handler.response_json['session']['messages']] == [m['content'] for m in expected]
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': child.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        fork = models.Session.load(handler.response_json['session_id'])
+        assert fork.messages == expected
+        assert fork.context_messages == expected
+
+
+@pytest.mark.parametrize('shape', ['overlap', 'missing', 'numeric', 'tools'])
+@pytest.mark.parametrize('action', ['direct', 'get', 'branch', 'lineage'])
+def test_display_union_stable_identity(shape, action, monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+    from api.models import merge_session_display_messages
+
+    def row(role, content, **kw):
+        return dict(role=role, content=content, timestamp=1, **kw)
+
+    a, aa, b, bb, c, cc = [row(role, text) for role, text in
+                            [('user', 'A'), ('assistant', 'a'), ('user', 'B'),
+                             ('assistant', 'b'), ('user', 'C'), ('assistant', 'c')]]
+    if shape == 'overlap':
+        primary, incoming, expected = [a, aa, b, bb], [b, bb, c, cc], [a, aa, b, bb, c, cc]
+    elif shape == 'missing':
+        bb.pop('timestamp')
+        b['timestamp'] = 2
+        primary, incoming, expected = [a, aa], [b, bb], [a, aa, b, bb]
+    elif shape == 'numeric':
+        owner = dict(a, timestamp=1.0, _active_turn_token='current:1', _turnDuration=9)
+        primary, incoming, expected = [a, aa], [owner, c], [owner, aa, c]
+    else:
+        a = row('tool', 'same', tool_call_id='first')
+        b = row('tool', 'same', tool_call_id='second')
+        primary, incoming, expected = [a], [b], [a, b]
+    merged = merge_session_display_messages(primary, incoming)
+    assert merged == expected
+    if action == 'direct':
+        return
+    source = _install_test_session(monkeypatch, tmp_path, 'stable_union', primary)
+    source.session_source = 'messaging'
+    source.context_messages = list(expected)
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: incoming)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    if action == 'lineage':
+        child = _install_test_session(monkeypatch, tmp_path, 'stable_child', incoming)
+        child.parent_session_id = source.session_id
+        source.session_source = 'webui'
+        source.save()
+        assert routes._merged_webui_lineage_messages_for_display(child) == expected
+    elif action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        rows = handler.response_json['session']['messages']
+        assert [(r['role'], r['content'], r.get('tool_call_id')) for r in rows] == [
+            (r['role'], r['content'], r.get('tool_call_id')) for r in expected]
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda handler: {'session_id': source.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert models.Session.load(handler.response_json['session_id']).messages == expected
+
+
+@pytest.mark.parametrize('action', ['helper', 'get', 'branch', 'lineage'])
+@pytest.mark.parametrize('timestamps', [(1, 2, 3, 4), (.1, .2, .3, .4), (1, 1, 1.2, 1.4)])
+@pytest.mark.parametrize(
+    'timestamp_fields', [('timestamp', 'timestamp'), ('_ts', 'timestamp'), ('timestamp', '_ts')],
+)
+def test_display_union_keeps_newer_repeated_owned_exchange(
+    monkeypatch, tmp_path, action, timestamps, timestamp_fields,
+):
+    import api.models as models
+    import api.routes as routes
+
+    primary = [
+        dict(role='user', content='Repeat', **{timestamp_fields[0]: timestamps[0]}),
+        dict(role='assistant', content='Done', **{timestamp_fields[0]: timestamps[1]}),
+    ]
+    incoming = [
+        dict(
+            role='user', content='Repeat', _active_turn_token='turn-new',
+            **{timestamp_fields[1]: timestamps[2]},
+        ),
+        dict(role='assistant', content='Done', **{timestamp_fields[1]: timestamps[3]}),
+    ]
+
+    def assert_display(rows):
+        assert [
+            (row['role'], row['content'], row.get('_ts', row.get('timestamp'))) for row in rows
+        ] == [
+            ('user', 'Repeat', timestamps[0]),
+            ('assistant', 'Done', timestamps[1]),
+            ('user', 'Repeat', timestamps[2]),
+            ('assistant', 'Done', timestamps[3]),
+        ]
+        assert [row.get('_active_turn_token') for row in rows] == [
+            None, None, 'turn-new', None,
+        ]
+
+    if action == 'helper':
+        assert_display(models.merge_session_display_messages(primary, incoming))
+        return
+
+    source = _install_test_session(monkeypatch, tmp_path, 'repeated_owned', primary)
+    source.session_source = 'messaging'
+    source.context_messages = list(primary)
+    source.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: incoming)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+
+    if action == 'get':
+        assert_display(routes._merged_session_messages_for_display(source, incoming))
+        handler = _GetHandler(
+            f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0'
+        )
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        rows = handler.response_json['session']['messages']
+        assert [
+            (row['role'], row['content'], row.get('_ts', row.get('timestamp'))) for row in rows
+        ] == [
+            ('user', 'Repeat', timestamps[0]),
+            ('assistant', 'Done', timestamps[1]),
+            ('user', 'Repeat', timestamps[2]),
+            ('assistant', 'Done', timestamps[3]),
+        ]
+        assert all('_active_turn_token' not in row for row in rows)
+    elif action == 'branch':
+        monkeypatch.setattr(routes, '_check_csrf', lambda handler: True)
+        monkeypatch.setattr(
+            routes, 'read_body', lambda handler: {'session_id': source.session_id}
+        )
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        assert_display(models.Session.load(handler.response_json['session_id']).messages)
+    else:
+        child = _install_test_session(monkeypatch, tmp_path, 'repeated_owned_child', incoming)
+        child.parent_session_id = source.session_id
+        child.save()
+        monkeypatch.setattr(
+            routes,
+            'get_session',
+            lambda sid, **k: source if sid == source.session_id else child,
+        )
+        assert_display(routes._merged_webui_lineage_messages_for_display(child))
+
+
+@pytest.mark.parametrize('timestamp_field', ['timestamp', '_ts'])
+def test_strict_prefix_distinguishes_unequal_timestamps(timestamp_field):
+    from api.models import _session_messages_have_prefix
+
+    first = dict(role='user', content='Repeat', **{timestamp_field: 1})
+    second = dict(role='user', content='Repeat', **{timestamp_field: 3})
+    assert not _session_messages_have_prefix([first], [second])
+
+
+def test_display_union_near_cumulative_probe_bound(monkeypatch):
+    import api.models as models
+
+    rows = [dict(role='user' if i % 2 == 0 else 'assistant', content=str(i), timestamp=1)
+            for i in range(5000)]
+    probes = 0
+    original = models._message_timestamp_as_float
+    def counted(row):
+        nonlocal probes
+        probes += 1
+        return original(row)
+    monkeypatch.setattr(models, '_message_timestamp_as_float', counted)
+    merged = models.merge_session_display_messages(rows[:-2], rows[2:])
+    assert merged == rows
+    assert probes < 100000
+
+
+@pytest.mark.parametrize('kind', ['multiplicity', 'owned_order', 'undated'])
+def test_display_union_preserves_primary_and_incoming_order(kind):
+    from api.models import merge_session_display_messages
+    primary = [dict(role=role, content=text, timestamp=1) for role, text in
+               [('user', 'U1'), ('assistant', 'A1'), ('user', 'U2'), ('assistant', 'A2')]]
+    if kind == 'multiplicity':
+        primary[2:] = [dict(primary[0]), dict(primary[1])]
+    if kind == 'owned_order':
+        primary[0]['_active_turn_token'] = 'one:1'
+        primary[2]['_active_turn_token'] = 'two:1'
+    tail = [dict(role='user', content='Next', timestamp=2), dict(role='assistant', content='Reply', timestamp=2)]
+    if kind == 'undated':
+        tail[0].pop('timestamp')
+    incoming = [dict(role='user', content='Earlier', timestamp=0)] + tail if kind == 'undated' else tail
+    expected = incoming[:1] + primary + tail if kind == 'undated' else primary + tail
+    assert merge_session_display_messages(primary, incoming) == expected
+
+
+@pytest.mark.parametrize('action', ['helper', 'get', 'branch'])
+def test_messaging_display_union_honors_truncation(monkeypatch, tmp_path, action):
+    import api.models as models
+    import api.routes as routes
+    primary = [dict(role='user', content=text, timestamp=i) for i, text in enumerate('ABC', 1)]
+    incoming = [primary[0], dict(role='assistant', content='Deleted', timestamp=4)]
+    session = _install_test_session(monkeypatch, tmp_path, 'union_truncated', primary)
+    session.session_source = 'messaging'
+    session.truncation_watermark = session.truncation_boundary = 3
+    session.context_messages = list(primary)
+    session.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: session)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: incoming)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+    if action == 'helper':
+        assert routes._merged_session_messages_for_display(session, incoming) == primary
+    elif action == 'get':
+        handler = _GetHandler(f'/api/session?session_id={session.session_id}&messages=1&resolve_model=0')
+        routes.handle_get(handler, urlparse(handler.path))
+        assert [r['content'] for r in handler.response_json['session']['messages']] == list('ABC')
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda h: True)
+        monkeypatch.setattr(routes, 'read_body', lambda h: {'session_id': session.session_id})
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert models.Session.load(handler.response_json['session_id']).messages == primary
+
+
+@pytest.mark.parametrize('field', ['api_content', '_active_turn_token'])
+@pytest.mark.parametrize('count', [128, 512, 2048])
+def test_empty_primary_private_identity_probe_growth(monkeypatch, field, count):
+    import api.models as models
+    original = models._message_private_identity_compatible
+    probes = 0
+    def counted(a, b, **kw):
+        nonlocal probes
+        probes += 1
+        assert probes < count * 8
+        return original(a, b, **kw)
+    monkeypatch.setattr(models, '_message_private_identity_compatible', counted)
+    rows = [dict(role='user', content='Same', timestamp=1, **{field: str(i)}) for i in range(count)]
+    assert models.merge_session_messages_append_only([], rows + [dict(r) for r in rows]) == rows
+    assert probes < count * 8
+
+
+def test_display_union_promotes_inserted_mirror_without_dropping_primary_repeats():
+    from api.models import merge_session_display_messages
+    history = dict(role='assistant', content='Prior', timestamp=1)
+    user = dict(role='user', content='Current', timestamp=2)
+    answer = dict(role='assistant', content='Answer', timestamp=2)
+    owner = dict(user, _active_turn_token='current:2')
+    assert merge_session_display_messages([history, dict(history)], [user, answer, owner]) == [history, history, owner, answer]
+
+
+def test_empty_primary_partial_identity_finds_late_mirror():
+    from api.models import merge_session_messages_append_only
+    rows = [dict(role='user', content='Same', timestamp=1, api_content=str(i),
+                 _active_turn_token=f'turn:{i}') for i in range(100)]
+    mirror = dict(rows[-1])
+    mirror.pop('_active_turn_token')
+    assert merge_session_messages_append_only([], rows + [mirror]) == rows
+
+
+@pytest.mark.parametrize('field', ['api_content', '_active_turn_token', 'id', '_row_id'])
+def test_empty_primary_anonymous_row_accepts_only_one_private_claim(field):
+    from api.models import merge_session_messages_append_only
+    bare = dict(role='user', content='Same', timestamp=1)
+    first = dict(bare, **{field: 1 if field == '_row_id' else 'a'})
+    second = dict(bare, **{field: 2 if field == '_row_id' else 'b'})
+    rows = merge_session_messages_append_only([], [bare, first, second, dict(first), dict(second)])
+    if field in {'id', '_row_id'}:
+        assert rows == [bare, first, second]
+    else:
+        assert len(rows) == 2
+        assert rows[0] is bare
+        assert rows[1] is second
+
+
+@pytest.mark.parametrize('field', ['id', '_row_id', 'api_content', '_active_turn_token', None])
+def test_display_restamp_requires_shared_strong_identity(field):
+    from api.models import merge_session_display_messages
+    primary = [dict(role='assistant', content=text, timestamp=i) for i, text in enumerate('ABC', 1)]
+    if field:
+        for i, row in enumerate(primary):
+            row[field] = i + 1 if field == '_row_id' else f'identity-{i}'
+    incoming = [dict(row, timestamp=row['timestamp'] + .1) for row in primary[1:]]
+    tail = dict(role='assistant', content='D', timestamp=4.1)
+    merged = merge_session_display_messages(primary, incoming + [tail])
+    assert merged == (primary + [tail] if field else [primary[0], primary[1], incoming[0], primary[2], incoming[1], tail])
+
+
+def test_display_prefix_does_not_claim_restamped_anonymous_answer():
+    from api.models import merge_session_display_messages
+    first = dict(role='assistant', content='Done', timestamp=1)
+    second = dict(first, timestamp=2)
+    tail = dict(role='user', content='Next', timestamp=3)
+    assert merge_session_display_messages([first], [second, tail]) == [first, second, tail]
+
+
+@pytest.mark.parametrize('count', [128, 512, 5000])
+def test_display_repeated_content_distinct_times_probe_bound(monkeypatch, count):
+    import api.models as models
+    original = models._message_private_identity_compatible
+    probes = 0
+    def counted(a, b, **kw):
+        nonlocal probes
+        probes += 1
+        assert probes < count * 12
+        return original(a, b, **kw)
+    monkeypatch.setattr(models, '_message_private_identity_compatible', counted)
+    primary = [dict(role='assistant', content='Same', timestamp=i * 2) for i in range(count)]
+    incoming = [dict(role='assistant', content='Same', timestamp=i * 2 + 1) for i in range(count)]
+    lead = dict(role='user', content='Lead', timestamp=-1)
+    tail = dict(role='user', content='Tail', timestamp=count * 2)
+    expected = [lead] + [row for pair in zip(primary, incoming, strict=True) for row in pair] + [tail]
+    assert models.merge_session_display_messages([lead] + primary, incoming + [tail]) == expected

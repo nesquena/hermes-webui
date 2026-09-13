@@ -653,3 +653,54 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             {'role': 'assistant', 'content': 'done normally', 'timestamp': 101},
         ]
         assert q.empty(), "late cancel must not emit a terminal cancel event after done"
+
+
+@pytest.mark.parametrize('marker', [False, True])
+@pytest.mark.parametrize('current', [False, True])
+def test_cancel_stream_respects_pending_owner_token(marker, current):
+    text = '[Recent Summary (d0, node 418)]' if marker else 'Continue'
+    token = 'stream_1361:100.75'
+    owner = dict(role='user', content=text, timestamp=100 if current else 100.75,
+                 _active_turn_token=token if current else 'old:100')
+    session = _make_session(pending_msg=text, messages=[owner])
+    session.pending_started_at = 100.75
+    session.context_messages = [dict(owner)]
+    session.save()
+    stream_id, _ = _setup_cancel_state(session.session_id)
+    assert cancel_stream(stream_id)
+    for saved in (session, Session.load(session.session_id)):
+        users = [row for row in saved.messages if row['role'] == 'user']
+        assert [row['_active_turn_token'] for row in users] == ([token] if current else ['old:100', token])
+        assert [row for row in saved.context_messages if row['role'] == 'user'] == users
+        assert saved.pending_user_message is None
+        assert saved.pending_started_at is None
+
+
+@pytest.mark.parametrize('marker', [False, True])
+@pytest.mark.parametrize('provenance,timestamp', [(None, 100), (None, 100.9), (None, '100'), (None, '100.9'), ('current', 100), ('old', 100.9)])
+def test_cancel_tokenless_checkpoint_requires_precise_time(monkeypatch, marker, provenance, timestamp):
+    text = '[Recent Summary (d0, node 418)]' if marker else 'Continue'
+    from api.process_event_utils import build_active_turn_token
+
+    token = build_active_turn_token('stream_1361', 100.9)
+    row = dict(role='user', content=text, timestamp=timestamp)
+    if provenance:
+        row['_active_turn_token'] = token if provenance == 'current' else 'old:100'
+    answer = dict(role='assistant', content='Historical answer', timestamp=100.5)
+    session = _make_session(pending_msg=text, messages=[row, answer])
+    session.pending_started_at = 100.9
+    session.context_messages = [dict(row), dict(answer)]
+    session.save()
+    stream_id, _ = _setup_cancel_state(session.session_id)
+    monkeypatch.setattr('api.streaming.get_session', lambda *a, **k: session)
+    assert cancel_stream(stream_id)
+    recovered = provenance != 'current' and (provenance == 'old' or marker or float(timestamp) < 100.9)
+    for saved in (session, Session.load(session.session_id)):
+        assert saved.context_messages[:2] == [row, answer]
+        owners = [m for m in saved.messages if m.get('_active_turn_token') == token]
+        assert len(owners) == int(recovered or provenance == 'current'), saved.messages
+        if recovered:
+            assert saved.messages.index(owners[0]) > saved.messages.index(answer)
+            assert owners[0] in saved.context_messages
+        assert saved.pending_user_message is None
+        assert saved.pending_started_at is None

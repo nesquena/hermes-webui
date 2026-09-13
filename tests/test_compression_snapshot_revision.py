@@ -1494,3 +1494,89 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         for message in reloaded.messages
         if isinstance(message, dict) and message.get("role") == "assistant"
     ].count("historical answer") == 1
+
+
+@pytest.mark.parametrize('extra_role', [None, 'user', 'assistant', 'real_user', 'owned_user'])
+def test_self_heal_accepts_authoritative_lcm_envelope_then_settles_owner(extra_role):
+    from types import SimpleNamespace
+
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]'}
+    owned = dict(marker, _active_turn_token='stream_1:100.25', timestamp=100.25)
+    previous = [{'role': 'user', 'content': 'Previous prompt'}, owned]
+    answer = {'role': 'assistant', 'content': 'Recovered answer'}
+    result = {'completed': True, 'turn_id': 'retry-turn', 'current_turn_user_idx': 1,
+              'messages': [{'role': 'assistant', 'content': 'Compacted summary'}, marker, answer]}
+    if extra_role == 'user':
+        result['messages'].insert(2, dict(marker))
+    elif extra_role == 'assistant':
+        result['messages'][-1] = dict(marker, role='assistant')
+    elif extra_role == 'real_user':
+        result['messages'].insert(2, {'role': 'user', 'content': 'A different request'})
+    elif extra_role == 'owned_user':
+        result['messages'].insert(2, dict(marker, _active_turn_token='next-stream:101'))
+    identity = streaming._resolve_active_turn_authority(
+        {'token': owned['_active_turn_token'], 'checkpoint': owned, 'text': marker['content']},
+        result=result,
+    )
+    if extra_role in ('assistant', 'real_user', 'owned_user'):
+        assert not streaming._self_heal_result_succeeded(result, previous, identity, marker['content'])
+        return
+    assert streaming._self_heal_result_succeeded(result, previous, identity, marker['content'])
+    assert streaming._find_active_turn_checkpoint_index(result['messages'], previous, identity, marker['content']) is None
+    session = SimpleNamespace(messages=list(previous), context_messages=previous)
+    streaming._settle_result_messages(session, list(previous), previous, result['messages'], marker['content'], 'webui', identity)
+    assert session.messages == [*previous, answer]
+    assert '_active_turn_token' not in marker
+    assert marker in session.context_messages
+    owners = [i for i, row in enumerate(session.context_messages)
+              if row.get('_active_turn_token') == owned['_active_turn_token']]
+    assert len(owners) == 1
+    assert owners[0] < session.context_messages.index(answer)
+
+
+@pytest.mark.parametrize('part_type', ['input_text', 'output_text'])
+@pytest.mark.parametrize('payload_key', ['text', 'typed'])
+def test_self_heal_type_named_marker_is_not_answer(part_type, payload_key):
+    heading = '[Recent Summary (d0, node 418)]'
+    key = part_type if payload_key == 'typed' else payload_key
+    owner = {'role': 'user', 'content': 'Request', '_active_turn_token': 'stream:100'}
+    marker = {'role': 'assistant', 'content': [{'type': part_type, key: heading}]}
+    result = {'completed': True, 'turn_id': 'retry', 'current_turn_user_idx': 0,
+              'messages': [owner, marker]}
+    identity = streaming._resolve_active_turn_authority(
+        {'token': 'stream:100', 'checkpoint': owner, 'text': 'Request'}, result=result,
+    )
+    assert not streaming._self_heal_result_succeeded(result, [], identity, 'Request')
+
+
+@pytest.mark.parametrize('has_answer', [False, True])
+def test_self_heal_direct_boundary_precedes_prefix_heuristic(has_answer):
+    heading = '[Recent Summary (d0, node 418)]'
+    summary = {'role': 'assistant', 'content': 'Summary'}
+    old = {'role': 'user', 'content': heading, '_active_turn_token': 'old:100'}
+    envelope = {'role': 'user', 'content': heading}
+    messages = [summary, old, {'role': 'assistant', 'content': 'Historical answer'}, envelope]
+    if has_answer:
+        messages.append({'role': 'assistant', 'content': 'Current answer'})
+    result = {'completed': True, 'turn_id': 'retry', 'current_turn_user_idx': 3, 'messages': messages}
+    identity = streaming._resolve_active_turn_authority(
+        {'token': 'new:101', 'text': heading}, result=result,
+    )
+    assert streaming._self_heal_result_succeeded(result, [summary], identity, heading) is has_answer
+
+
+def test_settlement_direct_index_precedes_summary_prefix():
+    heading = '[Recent Summary (d0, node 418)]'
+    summary = {'role': 'assistant', 'content': 'Summary'}
+    old = {'role': 'user', 'content': heading, '_active_turn_token': 'old:100'}
+    old_answer = {'role': 'assistant', 'content': 'Historical answer'}
+    envelope = {'role': 'user', 'content': heading}
+    answer = {'role': 'assistant', 'content': 'Current answer'}
+    rows = [summary, old, old_answer, envelope, answer]
+    result = {'turn_id': 'current', 'current_turn_user_idx': 3, 'messages': rows}
+    identity = streaming._resolve_active_turn_authority({'token': 'new:101', 'text': heading}, result=result)
+    settled = streaming._settle_current_turn_boundary([summary], rows, identity, heading, 'webui')
+    assert settled[:3] == [summary, old, old_answer]
+    assert settled[3]['_active_turn_token'] == 'new:101'
+    assert settled[4:] == [envelope, answer]
+    assert '_active_turn_token' not in envelope

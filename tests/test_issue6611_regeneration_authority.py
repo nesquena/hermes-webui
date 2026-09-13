@@ -926,3 +926,43 @@ def test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted(monk
     assert full_rev
     plan = plan_regeneration(session, expected_revision=full_rev, lock_held=True)
     assert plan is not None and plan.revision == full_rev
+
+
+def test_untagged_lcm_recovery_envelope_cannot_authorize_regeneration():
+    from api.compression_anchor import is_lcm_context_recovery_marker
+
+    marker = "[Recent Summary (d0, node 418)]"
+    session = _session()
+    session.messages[0] = {"role": "user", "content": marker}
+    session.context_messages[0] = {"role": "user", "content": marker}
+
+    assert is_lcm_context_recovery_marker(session.messages[0])
+    assert regeneration_authority(session) is None
+    with pytest.raises(RegenerationUnavailable) as raised:
+        resolve_regeneration_turn(session)
+    assert raised.value.code == "no_regenerable_turn"
+    assert "_active_turn_token" not in session.messages[0]
+
+
+def test_token_owned_lcm_text_remains_regenerable():
+    marker = "[Recent Summary (d0, node 418)]"
+    token = "stream-01f4c8d2:1779348286.3954952"
+    session = _session()
+    session.messages[0] = {
+        "role": "user",
+        "content": marker,
+        "_source": "webui",
+        "timestamp": 1779348286.3954952,
+        "_active_turn_token": token,
+    }
+    session.context_messages[0] = {
+        "role": "user",
+        "content": marker,
+        "_active_turn_token": token,
+    }
+
+    revision = regeneration_authority(session)
+    assert revision
+    turn = resolve_regeneration_turn(session, expected_revision=revision)
+    assert turn.message["content"] == marker
+    assert turn.message["_active_turn_token"] == token
