@@ -63,7 +63,7 @@ function _isRecoveryControlMessage(){ return false; }
 function _messageHasReasoningPayload(){ return false; }
 function _assistantMessageHasVisibleContent(m){ return !!String(msgContent(m)).trim(); }
 
-global.window = {};
+global.window = {_showBackgroundWakeups: process.argv[2] !== 'false'};
 global.S = {messages: []};
 let _visWithIdxCache = null;
 let _visWithIdxCacheLen = 0;
@@ -73,6 +73,10 @@ const heightStart = src.indexOf('const MESSAGE_RENDER_WINDOW_DEFAULT');
 const heightEnd = src.indexOf('const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS', heightStart);
 if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd));
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
+if(src.indexOf('function _hasHiddenProcessWakeupBoundaryBefore') !== -1) eval(extractFunc('_hasHiddenProcessWakeupBoundaryBefore'));
+function _assistantVisibleContentForReasoningCompare(m){ return String((m && m.content) || ''); }
+eval(extractFunc('_assistantTurnFinalVisibleContentMap'));
+eval(extractFunc('_assistantTurnVisibleContentMap'));
 eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
@@ -92,6 +96,11 @@ S.messages = [
 ];
 
 const visible = _getVisibleMessagesWithIdx();
+const hiddenBoundaryBeforeFinal = typeof _hasHiddenProcessWakeupBoundaryBefore === 'function'
+  ? _hasHiddenProcessWakeupBoundaryBefore(2)
+  : false;
+const turnFinalVisible = _assistantTurnFinalVisibleContentMap(visible);
+const turnVisibleContents = _assistantTurnVisibleContentMap(visible);
 const turns = [];
 let current = [];
 for(const entry of visible){
@@ -124,6 +133,11 @@ const markerWakeupContent = [
 
 process.stdout.write(JSON.stringify({
   visible: visible.map(e => ({rawIdx: e.rawIdx, role: e.m.role, source: e.m._source || '', text: String(e.m.content).slice(0, 32)})),
+  hiddenBoundaryBeforeFinal,
+  finalVisibleBefore: turnFinalVisible.get(0),
+  finalVisibleAfter: turnFinalVisible.get(2),
+  visibleContentsBefore: turnVisibleContents.get(0),
+  visibleContentsAfter: turnVisibleContents.get(2),
   turns,
   virtualRole,
   virtualHeight,
@@ -133,10 +147,16 @@ process.stdout.write(JSON.stringify({
 """
 
 
-def _run_driver():
+def _run_driver(show_background_wakeups=True):
     assert NODE is not None
     proc = subprocess.run(
-        [NODE, "-e", _DRIVER, str(UI_JS_PATH)],
+        [
+            NODE,
+            "-e",
+            _DRIVER,
+            str(UI_JS_PATH),
+            "true" if show_background_wakeups else "false",
+        ],
         text=True,
         capture_output=True,
         timeout=30,
@@ -159,6 +179,20 @@ def test_process_wakeup_message_stays_visible_and_preserves_turn_boundary():
         ["user:process_wakeup:[IMPORTANT: Background process proc"],
         ["assistant:assistant response to wakeup"],
     ]
+
+
+def test_process_wakeup_can_be_hidden_without_losing_its_turn_boundary():
+    result = _run_driver(show_background_wakeups=False)
+
+    assert result["visible"] == [
+        {"rawIdx": 0, "role": "assistant", "source": "", "text": "previous assistant report"},
+        {"rawIdx": 2, "role": "assistant", "source": "", "text": "assistant response to wakeup"},
+    ]
+    assert result["hiddenBoundaryBeforeFinal"] is True
+    assert result["finalVisibleBefore"] == "previous assistant report"
+    assert result["finalVisibleAfter"] == "assistant response to wakeup"
+    assert result["visibleContentsBefore"] == ["previous assistant report"]
+    assert result["visibleContentsAfter"] == ["assistant response to wakeup"]
 
 
 def test_process_wakeup_has_its_own_virtual_height_role():
