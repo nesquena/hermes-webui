@@ -4936,11 +4936,44 @@ main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
 main.main > #mainKanban,
+main.main > #mainBotGroups,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin):not(.showing-botGroups) > #mainChat{display:flex;}
+main.main.showing-botGroups > #mainBotGroups{display:flex;}
+/* Group creation lives in its contextual panel, not the ordinary Chat shortcut. */
+body:has(main.main.showing-botGroups) #btnTitlebarNewChat{display:none!important;}
+/* A Bot room has no ordinary chat workspace; preserve its state while hidden. */
+main.main.showing-botGroups ~ .rightpanel,
+main.main.showing-botGroups ~ #btnWorkspacePanelEdgeToggle{display:none!important;}
+[data-panel="botGroups"][hidden], #mainBotGroups [hidden]{display:none!important;}
+.bot-groups-toolbar{display:flex;gap:8px;flex-wrap:wrap;padding:12px 16px;}
+.bot-groups-button{border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);padding:8px 12px;min-height:40px;cursor:pointer;font:inherit;}
+.bot-groups-button:hover,.bot-groups-button.selected{background:var(--surface-subtle-hover);}
+.bot-groups-button:disabled{opacity:.5;cursor:default;}
+.bot-groups-list{display:flex;flex-direction:column;gap:4px;padding:8px 12px;overflow:auto;}
+.bot-groups-list .bot-groups-button{text-align:start;overflow-wrap:anywhere;}
+.bot-groups-muted{color:var(--muted);font-size:12px;line-height:1.5;}
+.bot-groups-messages{flex:1;min-height:80px;overflow:auto;padding:16px 32px;overflow-anchor:none;}
+.bot-groups-message,.bot-groups-notice{max-width:820px;margin:0 auto 24px;line-height:1.6;}
+.bot-groups-message strong{font-size:12px;color:var(--muted);}
+.bot-groups-prose{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-conversation);}
+.bot-groups-notice{color:var(--muted);font-size:12px;border-inline-start:2px solid var(--border);padding-inline-start:12px;}
+.bot-groups-error{color:var(--error);font-size:13px;white-space:pre-wrap;margin:0 16px;}
+.bot-groups-error:empty{display:none;}
+.bot-groups-create{padding:16px;overflow:auto;max-height:60vh;}
+.bot-groups-create label{display:flex;gap:8px;align-items:center;padding:8px 0;}
+.bot-groups-create fieldset{border:1px solid var(--border);border-radius:8px;margin-top:12px;padding:12px;}
+.bot-groups-create input[name="name"],.bot-groups-composer textarea{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:12px;font:inherit;min-width:0;}
+.bot-groups-actions{max-height:35vh;overflow:auto;padding:0 16px;}
+.bot-groups-approval{border:1px solid var(--border);padding:12px;margin:8px 0;border-radius:8px;}
+.bot-groups-approval button{margin-inline-end:8px;}
+.bot-groups-composer{display:flex;flex-wrap:wrap;gap:8px;padding:16px;border-top:1px solid var(--border);}
+.bot-groups-composer label{flex-basis:100%;}
+.bot-groups-composer textarea{flex:1;resize:vertical;max-height:180px;}
+@media(max-width:767px){.bot-groups-messages{padding:12px 16px;}.bot-groups-composer{padding:12px;}.bot-groups-button{min-height:44px;}}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
