@@ -7706,7 +7706,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # that case. Still respect any pre-warm result that
                         # ``auto_detected_models_by_provider`` already
                         # populated (cheap to keep).
-                        if _live_models is None:
+                        # Honor the explicit discover opt-out here too: a
+                        # provider pinned with ``discover_models: false``
+                        # must not inherit pre-warmed endpoint-advertised
+                        # ids — only its curated ``models:`` list.
+                        if _live_models is None or not _provider_discover_allowed(_cp):
                             _live_models = []
                     elif _live_models is None:
                         _live_models, _live_error = _read_custom_endpoint_models(
