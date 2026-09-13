@@ -76,7 +76,7 @@ def test_profile_dropdown_uses_shared_fetch_promise_and_validated_local_storage_
 
 
 def test_profile_dropdown_closing_invalidates_inflight_refresh():
-    close_body = _function_body(PANELS_JS, "function closeProfileDropdown() {")
+    close_body = _function_body(PANELS_JS, "function closeProfileDropdown(opts) {")
     assert "_profileDropdownOpenGeneration++;" in close_body
 
     toggle_body = _function_body(PANELS_JS, "function toggleProfileDropdown(e) {")
@@ -105,7 +105,10 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
         ],
         _function_body(PANELS_JS, "function renderProfileDropdown(data) {"),
         _function_body(PANELS_JS, "function toggleProfileDropdown(e) {"),
-        _function_body(PANELS_JS, "function closeProfileDropdown() {"),
+        _function_body(PANELS_JS, "function closeProfileDropdown(opts) {"),
+        _function_body(PANELS_JS, "function _profileDropdownOptions(){"),
+        _function_body(PANELS_JS, "function _focusProfileDropdownOption(){"),
+        _function_body(PANELS_JS, "function _profileDropdownKeydownHandler(e){"),
     ]
     script = textwrap.dedent(
         f"""
@@ -129,7 +132,9 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
             this.style = {{}};
             this.onclick = null;
             this.textContent = '';
+            this.isConnected = true;
             this._innerHTML = '';
+            this._attrs = {{}};
           }}
           set innerHTML(value) {{
             this._innerHTML = String(value || '');
@@ -137,6 +142,14 @@ def test_poisoned_profile_cache_opens_then_switches_after_fresh_refresh():
           }}
           get innerHTML() {{ return this._innerHTML; }}
           appendChild(child) {{ this.children.push(child); return child; }}
+          setAttribute(key, value) {{ this._attrs[key] = String(value); }}
+          getAttribute(key) {{ return this._attrs[key] !== undefined ? this._attrs[key] : null; }}
+          querySelectorAll(selector) {{
+            if (selector === '.profile-opt') return this.children.filter((child) => String(child.className).split(/\\s+/).includes('profile-opt'));
+            return [];
+          }}
+          contains(child) {{ return child === this || !!this.children.find((c) => typeof c.contains === 'function' && c.contains(child)); }}
+          focus() {{ document.activeElement = this; }}
         }}
         const elements = new Map();
         for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel']) {{
