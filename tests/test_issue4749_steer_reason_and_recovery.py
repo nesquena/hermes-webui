@@ -41,6 +41,7 @@ BACKEND_CODES = {
 
 HANDLED_NON_RECOVERY_CODES = {
     "gateway_steer_queued",
+    "queue_item_not_found",
 }
 
 FRONTEND_NETWORK_CODE = "network_error"
