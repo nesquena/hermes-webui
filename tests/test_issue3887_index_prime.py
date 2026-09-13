@@ -1,4 +1,4 @@
-"""Regression tests for #3887 — defensive index prime for the sidebar scan.
+"""Regression tests for #3887 — safe index handling for the sidebar scan.
 
 The sidebar's CLI-session scan (``read_importable_agent_session_rows``) orders
 candidate sessions by a correlated ``MAX(mx.timestamp)`` subquery over the
@@ -9,9 +9,9 @@ reimported db) has no such index and the scan degrades to a full ``messages``
 scan per candidate session — stalling ``/api/sessions`` for seconds on every
 refresh.
 
-These tests assert the intent (the index is primed when missing so the listing
-self-heals) and the cross-cell isolation (the prime is a no-op when the index
-already exists, is skipped when the schema lacks the columns, and degrades
+These tests assert the intent (the listing remains usable when the index is
+missing) and the cross-cell isolation (the read-only projection never mutates
+the database, is skipped when the schema lacks the columns, and degrades
 silently on a read-only db without ever failing the listing).
 """
 import os
@@ -74,8 +74,8 @@ def _messages_indexes(path):
     return {r[0] for r in rows}
 
 
-def test_prime_creates_missing_index(tmp_path):
-    """A db missing idx_messages_session gets it primed on the first scan."""
+def test_missing_index_does_not_mutate_database(tmp_path):
+    """A db missing idx_messages_session is read without a write fallback."""
     db = tmp_path / "state.db"
     _full_schema_db(db)
     assert "idx_messages_session" not in _messages_indexes(db)
@@ -86,16 +86,8 @@ def test_prime_creates_missing_index(tmp_path):
 
     # Listing still returns the sessions ...
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    # ... and the index now exists on (session_id, timestamp).
-    assert "idx_messages_session" in _messages_indexes(db)
-    conn = sqlite3.connect(str(db))
-    try:
-        sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name='idx_messages_session'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert "session_id" in sql and "timestamp" in sql
+    # The sidebar projection must not change the live agent database.
+    assert "idx_messages_session" not in _messages_indexes(db)
 
 
 def test_prime_is_noop_when_index_exists(tmp_path):
