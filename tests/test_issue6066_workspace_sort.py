@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from api import workspace as workspace_api
+from tests.i18n_locale_loader import locale_source_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = locale_source_text()
 
 
 def test_list_dir_emits_birthtime_ns(tmp_path):

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for issue #4749: steer failure reason display and recovery bar.
 
 Covers:
@@ -13,7 +14,7 @@ import textwrap
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
-I18N_JS = REPO / "static" / "i18n.js"
+I18N_SOURCE = locale_source_text()
 COMMANDS_JS = REPO / "static" / "commands.js"
 STREAMING_PY = REPO / "api" / "streaming.py"
 
@@ -48,10 +49,10 @@ FRONTEND_NETWORK_CODE = "network_error"
 
 def test_i18n_steer_failure_keys_exist():
     """All 10 expected i18n keys are present in the en locale block."""
-    text = I18N_JS.read_text(encoding="utf-8")
+    text = I18N_SOURCE
     # Find the en locale block: from 'en:' or 'en =' up to the next top-level locale key
     en_match = re.search(r"\ben\s*:\s*\{", text)
-    assert en_match, "Could not locate 'en:' locale block in i18n.js"
+    assert en_match, "Could not locate 'en:' locale block in split locale bundles"
     # Grab a large slice starting at the en block; the block is thousands of lines
     en_block = text[en_match.start():]
     for key in EXPECTED_I18N_KEYS:

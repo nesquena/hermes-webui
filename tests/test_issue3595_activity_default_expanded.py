@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Pin the full behavioral contract for the Worklog expanded-default setting."""
 import json
 import pathlib
@@ -169,8 +170,8 @@ def test_panels_wiring():
 
 
 def test_i18n_keys():
-    src = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    src = locale_source_text()
     assert "settings_label_worklog_details_expanded_default" in src, \
-        "i18n.js must have the label key for the setting"
+        "split locale bundles must have the label key for the setting"
     assert "settings_desc_worklog_details_expanded_default" in src, \
-        "i18n.js must have the description key for the setting"
+        "split locale bundles must have the description key for the setting"

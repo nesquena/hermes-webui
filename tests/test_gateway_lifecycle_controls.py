@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 import subprocess
@@ -253,7 +254,7 @@ def test_gateway_lifecycle_frontend_renders_valid_actions():
 def test_gateway_lifecycle_i18n_keys_exist():
     from pathlib import Path
 
-    i18n = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = locale_source_text()
     for key in (
         "gateway_start",
         "gateway_stop",

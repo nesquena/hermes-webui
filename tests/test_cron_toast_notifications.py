@@ -1,6 +1,7 @@
 """Coverage for per-cron completion toast notification settings."""
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import io
 import json
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 class _JSONHandler:
@@ -167,7 +168,7 @@ def test_cron_polling_suppresses_toasts_but_keeps_unread_badges():
 
 
 def test_cron_toast_i18n_keys_exist():
-    assert "cron_toast_notifications_label" in I18N_JS
-    assert "cron_toast_notifications_hint" in I18N_JS
-    assert "cron_toast_notifications_enabled" in I18N_JS
-    assert "cron_toast_notifications_disabled" in I18N_JS
+    assert "cron_toast_notifications_label" in I18N_SOURCE
+    assert "cron_toast_notifications_hint" in I18N_SOURCE
+    assert "cron_toast_notifications_enabled" in I18N_SOURCE
+    assert "cron_toast_notifications_disabled" in I18N_SOURCE

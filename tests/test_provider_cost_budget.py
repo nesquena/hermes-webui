@@ -1,12 +1,13 @@
 """Tests for configurable monthly budget limit with percentage-used tracking (#692).
 
 Covers:
-  - Static analysis: hooks present in config.py, providers.py, panels.js, style.css, i18n.js
+  - Static analysis: hooks present in config.py, providers.py, panels.js, style.css, split locale bundles
   - Backend: monthly_budget propagates through all three response paths
   - Backend: save_settings validates and coerces provider_cost_budget
 """
 
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 from io import BytesIO
@@ -74,14 +75,14 @@ def test_budget_dom_classes_in_style_css():
         assert cls in src, f"CSS class '{cls}' must appear in style.css"
 
 
-def test_budget_i18n_keys_in_i18n_js():
-    src = _read("static/i18n.js")
+def test_budget_i18n_keys_in_I18N_SOURCE():
+    src = locale_source_text()
     for key in (
         "provider_cost_budget_label",
         "provider_cost_budget_pct",
         "provider_cost_budget_save_failed",
     ):
-        assert key in src, f"i18n key '{key}' must appear in i18n.js"
+        assert key in src, f"i18n key '{key}' must appear in split locale bundles"
 
 
 def test_settings_post_in_panels_js_for_budget():

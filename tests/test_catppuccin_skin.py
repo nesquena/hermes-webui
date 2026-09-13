@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Catppuccin skin: Latte light / Mocha dark, opt-in via Settings → Skin."""
 
 from pathlib import Path
@@ -7,7 +8,7 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def test_catppuccin_skin_present_in_picker_list():
@@ -26,7 +27,7 @@ def test_catppuccin_skin_in_client_and_server_allowlists():
     assert '"catppuccin"' in CONFIG_PY, (
         "Catppuccin missing from server settings skin allowlist"
     )
-    assert "/catppuccin/" in I18N_JS, "Catppuccin missing from /theme help text"
+    assert "/catppuccin/" in I18N_SOURCE, "Catppuccin missing from /theme help text"
 
 
 def test_catppuccin_skin_palette_has_latte_and_mocha_tokens():

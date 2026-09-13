@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for the Settings → Extensions diagnostics and toggles."""
 from pathlib import Path
 import re
@@ -11,7 +12,7 @@ ROOT = Path(__file__).parent.parent
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 DOCS_EXTENSIONS = (ROOT / "docs" / "EXTENSIONS.md").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
@@ -31,15 +32,15 @@ def _between(start_marker: str, end_marker: str) -> str:
 
 
 def _locale_count() -> int:
-    return len(re.findall(r"^  (?:[A-Za-z_][A-Za-z0-9_]*|'[^']+'):\s*\{", I18N_JS, re.MULTILINE))
+    return len(re.findall(r"^  (?:[A-Za-z_][A-Za-z0-9_]*|'[^']+'):\s*\{", I18N_SOURCE, re.MULTILINE))
 
 
 def _locale_blocks() -> dict[str, str]:
-    matches = list(re.finditer(r"^  ((?:[A-Za-z_][A-Za-z0-9_]*|'[^']+')):\s*\{", I18N_JS, re.MULTILINE))
+    matches = list(re.finditer(r"^  ((?:[A-Za-z_][A-Za-z0-9_]*|'[^']+')):\s*\{", I18N_SOURCE, re.MULTILINE))
     blocks = {}
     for idx, match in enumerate(matches):
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(I18N_JS)
-        blocks[match.group(1)] = I18N_JS[match.start():end]
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(I18N_SOURCE)
+        blocks[match.group(1)] = I18N_SOURCE[match.start():end]
     return blocks
 
 
@@ -519,7 +520,7 @@ def test_extensions_post_install_i18n_is_localized_outside_english():
 
 
 def test_extensions_i18n_does_not_include_replacement_characters():
-    assert "\ufffd" not in I18N_JS
+    assert "\ufffd" not in I18N_SOURCE
 
 
 def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims():

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for localized Docker manual-update guidance (#5959)."""
 
 import re
@@ -12,7 +13,7 @@ def read(relative_path: str) -> str:
 
 
 def test_manual_update_instruction_exists_in_every_locale():
-    source = read("static/i18n.js")
+    source = locale_source_text()
     assert source.count("settings_update_manual_docker:") == 15
 
     values = re.findall(r"settings_update_manual_docker:\s*'([^']*)'", source)

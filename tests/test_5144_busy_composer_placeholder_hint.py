@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression checks for Issue #5144 busy composer placeholder hints."""
 
 import re
@@ -8,7 +9,7 @@ CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _function_block(src: str, name: str) -> str:
@@ -77,7 +78,7 @@ def test_busy_placeholder_helper_preserves_compression_and_drafts():
 
 
 def test_locale_blocks_cover_new_keys():
-    locale_blocks = I18N_JS.count("settings_default_message_mode_steer")
+    locale_blocks = I18N_SOURCE.count("settings_default_message_mode_steer")
     assert locale_blocks == 15
     for key in [
         "settings_label_busy_placeholder_hint",
@@ -86,4 +87,4 @@ def test_locale_blocks_cover_new_keys():
         "composer_placeholder_busy_interrupt",
         "composer_placeholder_busy_steer",
     ]:
-        assert I18N_JS.count(key) == locale_blocks, f"{key} should exist in every locale block"
+        assert I18N_SOURCE.count(key) == locale_blocks, f"{key} should exist in every locale block"

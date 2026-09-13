@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Static-contract regression tests for the composer footer-control visibility
 toggles (#4598).
 
@@ -20,7 +21,7 @@ CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 # The 15 composer-control visibility flags this feature ships.
@@ -143,16 +144,16 @@ def test_new_i18n_keys_exist_across_all_locale_blocks():
     parity), not just `en` — otherwise the locale-coverage suite goes red."""
     # 13 locale blocks (en + 12). Each key should appear at least 13 times.
     for key in I18N_KEYS:
-        count = I18N_JS.count(f"{key}:")
+        count = I18N_SOURCE.count(f"{key}:")
         assert count >= 13, (
-            f"{key} appears {count}x in i18n.js — expected >=13 (one per locale "
+            f"{key} appears {count}x in split locale bundles — expected >=13 (one per locale "
             f"block) for strict locale parity"
         )
 
     assert "Drag chips to reorder each footer group." in INDEX_HTML
     assert "Reordering is not supported." not in INDEX_HTML
-    assert "Reordering is not supported." not in I18N_JS
-    assert "不支持重新排序" not in I18N_JS
+    assert "Reordering is not supported." not in I18N_SOURCE
+    assert "不支持重新排序" not in I18N_SOURCE
 
 
 def test_composer_control_order_is_validated_and_deduped():

@@ -10,6 +10,7 @@ Covers:
 6. /api/media endpoint: integration test via live server (requires 8788)
 """
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 import os
@@ -27,7 +28,7 @@ from tests.conftest import TEST_WORKSPACE
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
@@ -83,7 +84,7 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("msg-artifact-download", UI_JS)
         self.assertIn("msg-media-img", UI_JS)
         self.assertIn("t('media_download')", UI_JS)
-        self.assertIn("media_download:", I18N_JS)
+        self.assertIn("media_download:", I18N_SOURCE)
         # The clean-image redesign drops the permanent card chrome.
         self.assertNotIn("msg-artifact-card", UI_JS)
         self.assertNotIn("msg-artifact-actions", UI_JS)

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression tests for sidebar tab visibility feature.
 
 Covers backend validation round-trip, frontend static contracts,
@@ -21,7 +22,7 @@ UI_PATH = ROOT / "static" / "ui.js"
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 NODE = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
@@ -396,8 +397,8 @@ def test_boot_restores_visibility_from_localstorage():
 
 def test_i18n_coverage():
     """Label and description keys must exist in all locales with matching counts."""
-    label_count = I18N_JS.count("settings_label_tab_visibility")
-    desc_count = I18N_JS.count("settings_desc_tab_visibility")
+    label_count = I18N_SOURCE.count("settings_label_tab_visibility")
+    desc_count = I18N_SOURCE.count("settings_desc_tab_visibility")
     assert label_count >= 12, f"Expected ≥12 locales, found {label_count}"
     assert desc_count >= 12, f"Expected ≥12 locales, found {desc_count}"
     assert label_count == desc_count, \

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.i18n_locale_loader import locale_source_text
 
 import json
 from pathlib import Path
@@ -353,7 +354,7 @@ def test_messaging_source_badge_in_sidebar_not_gated_on_is_cli_session():
 
 def test_compression_queue_discoverability_ux():
     ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-    i18n_js = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    I18N_SOURCE = locale_source_text()
 
     # Old misleading tooltip key must be gone from the compression branch
     assert "composer_disabled_compression','Waiting for compression to finish'" not in ui_js
@@ -368,4 +369,4 @@ def test_compression_queue_discoverability_ux():
     assert "_compressionPlaceholderSaved" in ui_js
 
     # New i18n key must appear in all 11 locales (count occurrences)
-    assert i18n_js.count("composer_compression_will_queue") >= 11
+    assert I18N_SOURCE.count("composer_compression_will_queue") >= 11

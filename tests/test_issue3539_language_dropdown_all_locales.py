@@ -1,10 +1,10 @@
-"""Regression: the Settings language dropdown must list ALL locales in LOCALES.
+"""Regression: the Settings language dropdown must list ALL registered locales.
 
 #3539 (zh localization) briefly added an `allowed=['en','zh']` filter to the
 language `<select>` population in loadSettingsPanel(). Because saveSettings()
 falls back to 'en' when the select has no matching option, that filter would
 silently reset an existing it/ja/ru/es/de/pt/ko/fr/tr user to English on the
-next Settings save. The dropdown must keep enumerating every LOCALES entry;
+next Settings save. The dropdown must keep enumerating every LOCALE_REGISTRY entry;
 partially-translated locales fall back per-key to English at render time, which
 is the established behavior — far better than dropping the user's choice.
 """
@@ -15,7 +15,7 @@ PANELS_JS = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_
 
 def _language_dropdown_block() -> str:
     # Anchor on the dropdown-population site (langSel.innerHTML='' precedes the
-    # LOCALES enumeration); there is an earlier settingsLanguage reference for
+    # registry enumeration); there is an earlier settingsLanguage reference for
     # the apply-on-load path, so don't anchor on the first match.
     i = PANELS_JS.index("langSel.innerHTML=''")
     return PANELS_JS[i:i + 700]
@@ -23,9 +23,9 @@ def _language_dropdown_block() -> str:
 
 def test_language_dropdown_lists_all_locales_no_allowlist():
     block = _language_dropdown_block()
-    # It must iterate every LOCALES entry...
-    assert "Object.entries(LOCALES)" in block, (
-        "the language dropdown must enumerate all LOCALES entries"
+    # It must iterate every eager metadata entry...
+    assert "Object.entries(LOCALE_REGISTRY)" in block, (
+        "the language dropdown must enumerate all LOCALE_REGISTRY entries"
     )
     # ...with NO hardcoded allow-list filter that drops existing locales.
     assert "allowed=[" not in block.replace(" ", "") and "allowed = [" not in block, (
@@ -40,6 +40,6 @@ def test_language_dropdown_lists_all_locales_no_allowlist():
 def test_language_change_applies_locale_instantly():
     """#3539 keeper: changing the dropdown applies the locale live, not just on save."""
     block = _language_dropdown_block()
-    assert "setLocale(this.value)" in block.replace(" ", "").replace("\n", "") or "setLocale(this.value)" in block, (
-        "language change should call setLocale() for instant apply"
+    assert "_settleSettingsLocale(this.value,this)" in block.replace(" ", "").replace("\n", "") or "_settleSettingsLocale(this.value,this)" in block, (
+        "language change should await the locale bundle before applying it"
     )
