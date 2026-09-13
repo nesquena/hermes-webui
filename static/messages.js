@@ -2104,9 +2104,10 @@ function closeLiveStream(sessionId, streamId, source){
 
 function closeOtherLiveStreams(activeSid){
   // Keep the live token SSE connection scoped to the conversation pane the user
-  // is actually viewing. Background sessions still show running/finished state
-  // through the session list and can reattach when selected, but they should not
-  // keep one EventSource each and exhaust the browser connection pool (#2313).
+  // is actually viewing. attachLiveStream's event handlers close over shared UI
+  // state, so retaining them after a pane switch lets a background completion
+  // mutate the foreground pane. Background runs continue server-side and reattach
+  // from their persisted inflight/run-journal state when selected again (#2313).
   for(const sid of Object.keys(LIVE_STREAMS)){
     if(sid!==activeSid) closeLiveStream(sid);
   }
@@ -5708,12 +5709,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
 
-  function _wireSSE(source){
+  function _registerLiveStream(activeSid,streamId,source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+    // Registration can follow an asynchronous status/replay probe. Re-arbitrate
+    // after publishing so a late completion from a previously selected session
+    // cannot retain background handlers that close over the foreground UI.
+    const foregroundSid=(S&&S.session&&S.session.session_id)
+      ?String(S.session.session_id)
+      :activeSid;
+    closeOtherLiveStreams(foregroundSid);
+  }
+
+  function _wireSSE(source){
+    _registerLiveStream(activeSid,streamId,source);
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
