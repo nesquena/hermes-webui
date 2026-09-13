@@ -7647,11 +7647,17 @@ function _applyTabOrder(order){
 function _applyTabVisibility(hidden){
   hidden=_sanitizeTabPanelList(hidden);
   _applyTabOrder(_getTabOrder());
+  // Chat-todos: when the in-chat tray is enabled, the sidebar Todos entry
+  // must remain hidden regardless of hidden_tabs content (avoid duplication).
+  // We re-apply this preference after every hidden_tabs change so profile
+  // switches or settings saves cannot overwrite it.
+  var chatTodosOn=(typeof chatTodosEnabled==='function'?chatTodosEnabled():false);
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
     if(!panel)return;
     var shouldHide=hidden.indexOf(panel)!==-1;
+    if(panel==='todos'&&chatTodosOn) shouldHide=true;
     // Never hide always-visible panels (chat, settings) even if present in hidden_tabs
     if(_ALWAYS_VISIBLE_TABS.has(panel)) shouldHide=false;
     el.classList.toggle('nav-tab-hidden',shouldHide);
@@ -9104,14 +9110,25 @@ async function loadSettingsPanel(){
       };
     }
     const endlessScrollCb=$('settingsSessionEndlessScroll');
-    if(endlessScrollCb){
-      endlessScrollCb.checked=!!settings.session_endless_scroll;
-      window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
-      endlessScrollCb.onchange=function(){
-        window._sessionEndlessScrollEnabled=this.checked;
-        _scheduleAppearanceAutosave();
-      };
-    }
+        if(endlessScrollCb){
+          endlessScrollCb.checked=!!settings.session_endless_scroll;
+          window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
+          endlessScrollCb.onchange=function(){
+            window._sessionEndlessScrollEnabled=this.checked;
+            _scheduleAppearanceAutosave();
+          };
+        }
+        const chatTodosCb=$('settingsChatTodosInChat');
+        if(chatTodosCb){
+          chatTodosCb.checked=!!(typeof chatTodosEnabled==='function'&&chatTodosEnabled());
+          chatTodosCb.onchange=function(){
+            if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(this.checked);
+            _scheduleAppearanceAutosave();
+          };
+        }
+        if(typeof _syncChatTodosAlignRadios==='function'&&typeof _chatTodosReadAlign==='function'){
+          _syncChatTodosAlignRadios(_chatTodosReadAlign());
+        }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');
     if(autoScrollFollowCb){
       autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
