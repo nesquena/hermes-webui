@@ -3919,6 +3919,52 @@ window.addEventListener('pageshow', async (event) => {
   }
 });
 
+async function restartServer() {
+  const ok = await showConfirmDialog({
+    title: (typeof t === 'function' ? t('settings_restart_confirm_title') : 'Restart Hermes WebUI'),
+    message: (typeof t === 'function' ? t('settings_restart_confirm_message') : 'Restart the Hermes WebUI server now?'),
+    confirmLabel: (typeof t === 'function' ? t('settings_restart_confirm_btn') : 'Restart'),
+  });
+  if (!ok) return;
+  try {
+    const baselineHealth = await api('/health', { timeoutMs: 1000, retries: 0, timeoutToast: false, redirect401: false });
+    const baselineServerStartedAt = baselineHealth && baselineHealth.server_started_at;
+    if (!baselineServerStartedAt) {
+      showToast(typeof t === 'function' ? t('settings_restart_unsupported_message') : 'Automatic restart is unavailable.');
+      return;
+    }
+    const result = await api('/api/restart', { method: 'POST' });
+    if (!result || result.status !== 'restart_scheduled') {
+      showToast((result && result.error) || (typeof t === 'function' ? t('settings_restart_unsupported_message') : 'Automatic restart is unavailable.'));
+      return;
+    }
+    _showServerRestarting(typeof t === 'function' ? t('settings_restart_pending_message') : 'Server is restarting. Reconnecting automatically…');
+    void _waitForServerRestart(String(baselineServerStartedAt));
+  } catch (error) {
+    showToast((error && error.message) || (typeof t === 'function' ? t('settings_restart_unsupported_message') : 'Automatic restart is unavailable.'));
+  }
+}
+
+async function _waitForServerRestart(baselineServerStartedAt) {
+  const maxAttempts = 30;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const health = await api('/health', { timeoutMs: 1000, retries: 0, timeoutToast: false, redirect401: false });
+      if (health && health.status === 'ok' && health.server_started_at && String(health.server_started_at) !== baselineServerStartedAt) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {}
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  _showServerRestarting(typeof t === 'function' ? t('settings_restart_timeout_message') : 'The server did not return in time. Start it manually, then refresh this page.');
+}
+
+function _showServerRestarting(message) {
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:system-ui,ui-sans-serif;font-size:14px"><p id="serverRestartingMessage"></p></div>';
+  document.getElementById('serverRestartingMessage').textContent = message;
+}
+
 async function shutdownServer() {
   const ok = await showConfirmDialog({
     title: (typeof t === 'function' ? t('settings_shutdown_confirm_title') : 'Stop Hermes WebUI'),
