@@ -1229,8 +1229,18 @@ async function cmdStop(){
 
 async function cmdGoal(args){
   if(!S.session){await newSession();await renderSessionList();}
-  if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
+  if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return false;}
   const activeSid=S.session.session_id;
+  const _goalMessages=Array.isArray(S.messages)?S.messages.slice():[];
+  // A session id alone does not identify the visible pane: loadSession()
+  // exposes its destination id before the replacement transcript has settled.
+  // Fence delayed goal responses to the exact load generation that dispatched
+  // them, matching the ownership rule used by other async session controls.
+  const _goalPaneGeneration=_loadSessionGeneration;
+  const _goalPaneIsCurrent=()=>!!(
+    S.session&&S.session.session_id===activeSid
+    &&_loadSessionGeneration===_goalPaneGeneration
+  );
   try{
     // #6703: re-assert the explicit-pick marker on /api/goal the same way
     // /api/chat/start does. Without it the server's model resolver treats a
@@ -1278,12 +1288,16 @@ async function cmdGoal(args){
       }
       return raw;
     })();
-    if(msg){
+    const _goalStillCurrent=_goalPaneIsCurrent();
+    // A goal-set message describes intent, not a started run. Only surface it
+    // after stream ownership is confirmed; otherwise Goal finish would roll
+    // back its optimistic user row while leaving a false success status/toast.
+    if(msg&&_goalStillCurrent&&r&&r.stream_id){
       S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
     }
-    if(!r||!r.stream_id)return;
+    if(!r||!r.stream_id)return false;
     // #6705: consume the one-shot pending explicit-pick marker only after a
     // successful kickoff. Re-read the stored marker and clear it only if it
     // still matches the model/provider captured above — a control command (no
@@ -1297,30 +1311,39 @@ async function cmdGoal(args){
         _clearPendingSessionModel(activeSid);
       }
     }
-    S.toolCalls=[];
-    if(typeof clearLiveToolCards==='function')clearLiveToolCards();
-    appendThinking();setBusy(true);
-    setComposerStatus(t('goal_working_toward'));
-    S.activeStreamId=r.stream_id;
-    if(S.session&&S.session.session_id===activeSid){
+    if(_goalStillCurrent){
+      S.toolCalls=[];
+      if(typeof clearLiveToolCards==='function')clearLiveToolCards();
+      appendThinking();setBusy(true);
+      setComposerStatus(t('goal_working_toward'));
+      S.activeStreamId=r.stream_id;
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
       if(r.effective_model)S.session.model=r.effective_model;
       if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
     }
-    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    INFLIGHT[activeSid]={messages:_goalStillCurrent?[...S.messages]:_goalMessages,uploaded:[],toolCalls:[]};
     if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
     if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
-    startApprovalPolling(activeSid);
-    startClarifyPolling(activeSid);
-    if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
-    attachLiveStream(activeSid,r.stream_id,[]);
+    // Attaching an old session here would close the newly visible session's
+    // EventSource. The original run remains durable and will reattach when its
+    // conversation is opened again.
+    if(_goalStillCurrent){
+      startApprovalPolling(activeSid);
+      startClarifyPolling(activeSid);
+      if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
+      attachLiveStream(activeSid,r.stream_id,[]);
+    }
     if(typeof renderSessionList==='function')void renderSessionList();
+    return true;
   }catch(e){
     const err=String((e&&e.message)||e||'Goal command failed');
-    S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
-    renderMessages({preserveScroll:true});
-    showToast(err,3000);
+    if(_goalPaneIsCurrent()){
+      S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
+      renderMessages({preserveScroll:true});
+      showToast(err,3000);
+    }
+    return false;
   }
 }
 
