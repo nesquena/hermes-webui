@@ -1668,7 +1668,9 @@ async function _trySteer(msg, explicitSteer){
       }
       _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     }
-    showToast(t('cmd_steer_delivered'),2500);
+    const persistenceDegraded=result.durable===false||result.fallback==='persistence_error';
+    if(persistenceDegraded) showToast(t('steer_delivery_not_durable'),5000,'warning');
+    else showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
