@@ -3926,7 +3926,7 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
 
 
 _TITLE_ATTACHMENT_SUFFIX_RE = re.compile(
-    r'(?:\n\n|\r\n\r\n)\[Attached files(?: for this steer)?: [^\]]+\]\s*$'
+    r'(?:\n\n|\r\n\r\n)\[Attached files(?: for this steer)?: [^\r\n]+\]\s*$'
 )
 
 
