@@ -1381,6 +1381,16 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  // #7440 gate: resolve the steer-leftover ack for THIS turn before any
+  // await can interleave. The queue drain passes the durable slot's run id
+  // via options.leftoverAck (queue entry's _leftover_id); a manual send of
+  // an exactly-matching restored prefill pops it from the tracking state.
+  // The server retires the durable slot transactionally with the turn that
+  // ships the guidance — matched by run id, never by text or timestamps.
+  let _steerLeftoverAck=String((options&&options.leftoverAck)||'').trim();
+  if(!_steerLeftoverAck&&typeof _popLeftoverAckForSend==='function'){
+    _steerLeftoverAck=String(_popLeftoverAckForSend(S.session&&S.session.session_id,text)||'').trim();
+  }
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;
@@ -1806,7 +1816,10 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      // #7440 gate: transactional steer-leftover retirement — the server
+      // clears the durable slot (matched by run id) with THIS turn.
+      steer_leftover_ack:_steerLeftoverAck||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -6486,7 +6499,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             model:_modelState.model,
             model_provider:_modelState.model_provider,
             profile:(S&&S.activeProfile)||'default',
-          });
+          }, String(d.run_id||'').trim());
           if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
           if(_ownerIsViewed) showToast(t('steer_leftover_queued'),3000);
         }

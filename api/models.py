@@ -1226,6 +1226,9 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_steer_leftover_text: str="",
+                 pending_steer_leftover_run_id: str="",
+                 pending_steer_leftover_at=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1311,6 +1314,15 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        # #7440 gate: server-durable terminal-steer leftover slot. When a
+        # gateway run completes with accepted-but-unconsumed guidance, the
+        # relay persists it here (owner-scoped, keyed by the gateway run id)
+        # so recovery never depends on a live SSE consumer. Cleared only by
+        # an explicit ack (the turn that ships the text, or user dismissal)
+        # -- see routes /api/chat/start + /api/session/steer_leftover/dismiss.
+        self.pending_steer_leftover_text = str(pending_steer_leftover_text or "")
+        self.pending_steer_leftover_run_id = str(pending_steer_leftover_run_id or "")
+        self.pending_steer_leftover_at = pending_steer_leftover_at
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1418,6 +1430,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_steer_leftover_text', 'pending_steer_leftover_run_id', 'pending_steer_leftover_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',

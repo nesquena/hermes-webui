@@ -6,9 +6,9 @@ composer in Chromium, and supplies deterministic runtime events through a
 fake Hermes Gateway Runs API — the same harness pattern as
 browser_conversation_lifecycle.py.
 
-Proves the greptile P1/P2 chain as observable browser behavior, through the
-application's real stream and session-switch lifecycle (no source slicing,
-no stubbed collaborators):
+Proves the greptile P1/P2 chain AND the #7440 re-gate's reproduced blockers
+as observable browser behavior, through the application's real stream and
+session-switch lifecycle (no source slicing, no stubbed collaborators):
 
   1. A gateway run for session A completes with a terminal
      ``run.completed { output, pending_steer }`` while the user is viewing a
@@ -20,6 +20,24 @@ no stubbed collaborators):
      session's next run (observable: the fake Gateway's captured
      ``POST /v1/runs`` request body carries the leftover text for A).
   3. Session B's queue stays empty (no cross-session leakage).
+  4. Re-gate blocker 1: switching to an EXISTING session (a completed turn
+     of its own) closes the owning stream's live consumer — no live queue
+     write happens on that shape — and the terminal leftover must STILL be
+     durably recoverable: it is persisted server-side on the owning session
+     (observable via /api/session's pending_steer_leftover_* fields),
+     surviving the switch.
+  5. Closed-tab restoration: a brand-new browser context (no client queue,
+     no sessionStorage — also the cross-device/cleared-storage shape)
+     re-offers the unconsumed leftover as a restore-for-review composer
+     prefill from the durable slot, and sending that prefill retires the
+     slot transactionally (matched by run id) — exactly-once delivery.
+  6. Re-gate blocker 2: queue application is idempotent by STABLE run id —
+     the same id replayed queues once, while two intentional identical
+     steers with distinct ids both queue (never deduped by text or a time
+     window).
+  7. Explicit dismissal: clearing the restored prefill (a real user input
+     event) retires the durable slot so it stops being re-offered.
+  8. No foreign-session copies after all scenarios.
 """
 
 from __future__ import annotations
@@ -44,9 +62,12 @@ from browser_conversation_lifecycle import (  # noqa: E402
 PROMPT_A1 = "Exercise the gateway steer-leftover browser gate."
 FOLLOWUP_A2 = "Continue with the second turn."
 LEFTOVER_TEXT = "use the safer path"
+LEFTOVER_RESTORE = "reopen via the durable slot"
+LEFTOVER_DISMISS = "dismiss me after review"
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 QUEUE_WRITE_TIMEOUT = 20.0
 DRAIN_DELIVERY_TIMEOUT = 45.0
+SLOT_POLL_TIMEOUT = 30.0
 
 
 class SteerLeftoverGateway:
@@ -60,14 +81,38 @@ class SteerLeftoverGateway:
     """
 
     def __init__(self) -> None:
-        self.release_completion = threading.Event()
-        self.first_delta_sent = threading.Event()
-        self.completion_sent = threading.Event()
         self.request_bodies: list[dict] = []
         self._lock = threading.Lock()
         self._run_counter = 0
+        self._gates: dict[int, dict] = {}
+        # The original scenario pre-arms gate 1 (the initial blocked run).
+        gate1 = self._new_gate(LEFTOVER_TEXT, 1)
+        self._gates[1] = gate1
+        # Backward-compatible aliases used by the original flow.
+        self.release_completion = gate1["release"]
+        self.first_delta_sent = gate1["first_delta"]
+        self.completion_sent = gate1["sent"]
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def _new_gate(self, pending_steer: str, run_no: int) -> dict:
+        return {
+            "run_no": run_no,
+            "release": threading.Event(),
+            "first_delta": threading.Event(),
+            "sent": threading.Event(),
+            "pending_steer": pending_steer,
+        }
+
+    def arm_gated_completion(self, pending_steer: str) -> dict:
+        """Reserve the NEXT run number for a blocked completion carrying
+        ``pending_steer``. The caller must send the turn that creates that
+        run immediately after arming (the scenarios do)."""
+        with self._lock:
+            run_no = self._run_counter + 1
+            gate = self._new_gate(pending_steer, run_no)
+            self._gates[run_no] = gate
+            return gate
 
     @property
     def base_url(self) -> str:
@@ -118,27 +163,35 @@ class SteerLeftoverGateway:
                     self._json({"error": "not found"}, status=404)
                     return
                 run_id = request_path[len("/v1/runs/"):-len("/events")]
+                run_no = 0
+                if run_id.startswith("leftover-run-"):
+                    try:
+                        run_no = int(run_id[len("leftover-run-"):])
+                    except ValueError:
+                        run_no = 0
+                gate = owner._gates.get(run_no)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 try:
-                    if run_id == "leftover-run-1":
+                    if gate is not None:
                         self._event("message.delta", {
                             "event": "message.delta",
                             "delta": "working through the turn",
                         })
-                        owner.first_delta_sent.set()
-                        if not owner.release_completion.wait(timeout=60):
+                        gate["first_delta"].set()
+                        if not gate["release"].wait(timeout=60):
                             return
-                        self._event("run.completed", {
+                        completed_payload = {
                             "event": "run.completed",
                             "output": "first turn done",
-                            "pending_steer": LEFTOVER_TEXT,
+                            "pending_steer": gate["pending_steer"],
                             "usage": {"input_tokens": 7, "output_tokens": 3},
-                        })
-                        owner.completion_sent.set()
+                        }
+                        self._event("run.completed", completed_payload)
+                        gate["sent"].set()
                     else:
                         self._event("message.delta", {
                             "event": "message.delta",
@@ -197,6 +250,33 @@ def _queue_entry_texts(page, sid: str) -> list[str]:
     if not isinstance(entries, list):
         return []
     return [str((entry or {}).get("text") or "") for entry in entries if isinstance(entry, dict)]
+
+
+def _webui_session_slot(base_url: str, sid: str) -> tuple[str, str]:
+    """Read the durable leftover slot straight from the WebUI session API."""
+    import urllib.request
+
+    url = f"{base_url}/api/session?session_id={sid}&messages=0"
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read())
+    session = (data or {}).get("session") or {}
+    return (
+        str(session.get("pending_steer_leftover_run_id") or ""),
+        str(session.get("pending_steer_leftover_text") or ""),
+    )
+
+
+def _wait_for_slot(base_url: str, sid: str, want_run_id: str, timeout: float = SLOT_POLL_TIMEOUT) -> None:
+    deadline = time.monotonic() + timeout
+    last = ("", "")
+    while time.monotonic() < deadline:
+        last = _webui_session_slot(base_url, sid)
+        if last[0] == want_run_id:
+            return
+        time.sleep(0.25)
+    raise AssertionError(
+        f"durable leftover slot never held run {want_run_id!r} for {sid} (last: {last!r})"
+    )
 
 
 def _fill_and_send(page, text: str, timeout: float = 15.0) -> None:
@@ -402,6 +482,259 @@ def main() -> int:
                 f"owning session's next gateway run (bodies: {gateway.request_bodies!r})"
             )
         print("OK  drain delivered the leftover as session A's next gateway run")
+
+        # ── Scenario 4 (#7440 re-gate blocker 1): existing-session switch +
+        # closed-tab restoration through the SERVER-DURABLE slot. Switching to
+        # an EXISTING session closes the owning stream's live consumer — the
+        # exact reproduced loss (the queue write above only happens on the
+        # new-chat shape that leaves the owner stream open) — so recovery must
+        # come from the session sidecar, not from SSE delivery.
+        # Create a real EXISTING session C with a completed turn (empty
+        # new-chat drafts are pruned from the sidebar on navigation).
+        page.locator("#btnNewChat").click()
+        page.wait_for_function(
+            "(sidA) => {"
+            "  const rows = document.querySelectorAll('.session-item[data-sid]');"
+            "  const sids = new Set(Array.from(rows).map(r => r.dataset.sid));"
+            "  return sids.size >= 2 && sids.has(sidA) &&"
+            "         typeof S !== 'undefined' && S.session && S.session.session_id !== sidA;"
+            "}",
+            arg=sid_a,
+            timeout=10000,
+        )
+        sid_c = page.evaluate(
+            "(sidA) => {"
+            "  const rows = document.querySelectorAll('.session-item[data-sid]');"
+            "  for (const row of rows) {"
+            "    if (row.dataset.sid !== sidA) return row.dataset.sid;"
+            "  }"
+            "  return null;"
+            "}",
+            arg=sid_a,
+        )
+        if not sid_c:
+            raise AssertionError("new-chat C did not appear for the existing-session switch")
+        _fill_and_send(page, "Seed turn for the existing session C")
+        deadline = time.monotonic() + DRAIN_DELIVERY_TIMEOUT
+        c_seed_seen = False
+        while time.monotonic() < deadline:
+            with gateway._lock:
+                bodies = list(gateway.request_bodies)
+            if any(body.get("session_id") == sid_c for body in bodies):
+                c_seed_seen = True
+                break
+            time.sleep(0.25)
+        if not c_seed_seen:
+            raise AssertionError(
+                "session C's seed turn never reached the fake Gateway "
+                f"(bodies: {gateway.request_bodies!r})"
+            )
+        print("OK  session C created as a real existing session")
+
+        # Back to A, start the gated run that will complete with a leftover.
+        page.locator(f".session-item[data-sid={json.dumps(sid_a)}]").click()
+        page.wait_for_function(
+            "(sidA) => typeof S !== 'undefined' && S.session && S.session.session_id === sidA",
+            arg=sid_a,
+            timeout=10000,
+        )
+        gate2 = gateway.arm_gated_completion(LEFTOVER_RESTORE)  # reserves the next run
+        _fill_and_send(page, "Second durable-slot check")
+        if not gate2["first_delta"].wait(timeout=GATEWAY_ACTIVITY_TIMEOUT):
+            raise AssertionError("fake Gateway never streamed the gated second run")
+        # Switch to the EXISTING session C while A's run is still in flight —
+        # this closes the owning stream's live consumer.
+        page.locator(f".session-item[data-sid={json.dumps(sid_c)}]").click()
+        page.wait_for_function(
+            "(sidC) => typeof S !== 'undefined' && S.session && S.session.session_id === sidC",
+            arg=sid_c,
+            timeout=10000,
+        )
+        gate2["release"].set()
+        if not gate2["sent"].wait(timeout=10):
+            raise AssertionError("fake Gateway never completed the gated second run")
+        _wait_for_slot(base_url, sid_a, f"leftover-run-{gate2['run_no']}")
+        print("OK  terminal leftover persisted server-side across an existing-session switch")
+        # The live queue write does NOT happen on this shape (the owning
+        # stream's consumer is closed) — the durable slot is the recovery.
+        time.sleep(1.0)
+        if any(LEFTOVER_RESTORE in text for text in _queue_entry_texts(page, sid_a)):
+            raise AssertionError(
+                "unexpected live queue write after an existing-session switch "
+                "(the owning stream consumer should be closed on this shape)"
+            )
+        if any(LEFTOVER_RESTORE in text for text in _queue_entry_texts(page, sid_c)):
+            raise AssertionError("leftover guidance leaked into session C's queue")
+        print("OK  existing-session switch left no live queue copy (slot is the recovery)")
+
+        # Closed-tab restoration: a brand-new browser context has NO client
+        # queue and NO sessionStorage — the durable slot is the only recovery
+        # source (also the cross-device / cleared-storage shape).
+        context2 = browser.new_context(base_url=base_url)
+        page2 = context2.new_page()
+        try:
+            page2.goto("/", wait_until="domcontentloaded")
+            page2.wait_for_selector("#msg", state="visible", timeout=15000)
+            page2.locator(f".session-item[data-sid={json.dumps(sid_a)}]").click()
+            page2.wait_for_function(
+                "(promptText) => {"
+                "  const pane = document.querySelector('#messages');"
+                "  return pane && (pane.innerText || '').includes(promptText);"
+                "}",
+                arg=PROMPT_A1,
+                timeout=15000,
+            )
+            page2.wait_for_function(
+                "(leftover) => document.getElementById('msg').value.trim() === leftover",
+                arg=LEFTOVER_RESTORE,
+                timeout=15000,
+            )
+            queue_raw = page2.evaluate(
+                "(sid) => localStorage.getItem('hermes-queue-' + sid)", sid_a
+            )
+            if queue_raw not in (None, "", "[]"):
+                raise AssertionError(
+                    "recovery must restore-for-review (prefill), not re-queue: "
+                    f"storage held {queue_raw!r}"
+                )
+            print("OK  closed-tab restore prefilled the composer from the durable slot")
+
+            # Sending the restored prefill must retire the slot transactionally.
+            page2.locator("#btnSend").click()
+            delivered2 = None
+            deadline = time.monotonic() + DRAIN_DELIVERY_TIMEOUT
+            while time.monotonic() < deadline:
+                with gateway._lock:
+                    bodies = list(gateway.request_bodies)
+                for body in bodies:
+                    input_value = body.get("input")
+                    input_text = ""
+                    if isinstance(input_value, str):
+                        input_text = input_value
+                    elif isinstance(input_value, list):
+                        input_text = json.dumps(input_value)
+                    if LEFTOVER_RESTORE in input_text and body.get("session_id") == sid_a:
+                        delivered2 = body
+                        break
+                if delivered2:
+                    break
+                time.sleep(0.25)
+            if delivered2 is None:
+                raise AssertionError(
+                    "restored leftover was never delivered as session A's next run "
+                    f"(bodies: {gateway.request_bodies!r})"
+                )
+            deadline = time.monotonic() + SLOT_POLL_TIMEOUT
+            while time.monotonic() < deadline:
+                run_id, _text = _webui_session_slot(base_url, sid_a)
+                if run_id == "":
+                    break
+                time.sleep(0.25)
+            else:
+                raise AssertionError("sending the restored prefill never retired the durable slot")
+            print("OK  sending the restored prefill retired the slot transactionally")
+        finally:
+            context2.close()
+
+        # ── Scenario 5 (#7440 re-gate blocker 2): application-level
+        # idempotency by STABLE IDENTITY — the same event id replayed must not
+        # duplicate, while two intentional identical steers (distinct ids)
+        # must BOTH queue. Never dedupe by text or a time window.
+        id_counts = None
+        context3 = browser.new_context(base_url=base_url)
+        page3 = context3.new_page()
+        try:
+            page3.goto("/", wait_until="domcontentloaded")
+            page3.wait_for_selector("#msg", state="visible", timeout=15000)
+            page3.locator(f".session-item[data-sid={json.dumps(sid_a)}]").click()
+            page3.wait_for_function(
+                "() => typeof queueSessionMessage === 'function'",
+                timeout=15000,
+            )
+            page3.wait_for_function(
+                "(sidA) => typeof S !== 'undefined' && S.session && S.session.session_id === sidA",
+                arg=sid_a,
+                timeout=15000,
+            )
+            id_counts = page3.evaluate(
+                """(sid) => {
+                    const key = 'hermes-queue-' + sid;
+                    localStorage.removeItem(key);
+                    queueSessionMessage(sid, {text: 'identical guidance'}, 'run-id-x');
+                    queueSessionMessage(sid, {text: 'identical guidance'}, 'run-id-x');
+                    queueSessionMessage(sid, {text: 'identical guidance'}, 'run-id-y');
+                    const entries = JSON.parse(localStorage.getItem(key) || '[]');
+                    return entries.map(e => e._leftover_id || null);
+                }""",
+                arg=sid_a,
+            )
+        finally:
+            context3.close()
+        if id_counts != ["run-id-x", "run-id-y"]:
+            raise AssertionError(
+                "queue idempotency by stable identity failed: "
+                f"expected one entry per distinct run id, got {id_counts!r}"
+            )
+        print("OK  queue application is idempotent by run id (replay once, distinct ids twice)")
+
+        # ── Scenario 6 (#7440 re-gate): explicit dismissal — clearing a
+        # restored prefill retires the durable slot so it stops being
+        # re-offered on every load.
+        gate3 = gateway.arm_gated_completion(LEFTOVER_DISMISS)
+        context4 = browser.new_context(base_url=base_url)
+        page4 = context4.new_page()
+        try:
+            page4.goto("/", wait_until="domcontentloaded")
+            page4.wait_for_selector("#msg", state="visible", timeout=15000)
+            page4.locator(f".session-item[data-sid={json.dumps(sid_a)}]").click()
+            page4.wait_for_function(
+                "(promptText) => {"
+                "  const pane = document.querySelector('#messages');"
+                "  return pane && (pane.innerText || '').includes(promptText);"
+                "}",
+                arg=PROMPT_A1,
+                timeout=15000,
+            )
+            _fill_and_send(page4, "Third durable-slot check")
+            if not gate3["first_delta"].wait(timeout=GATEWAY_ACTIVITY_TIMEOUT):
+                raise AssertionError("fake Gateway never streamed the gated third run")
+            gate3["release"].set()
+            if not gate3["sent"].wait(timeout=10):
+                raise AssertionError("fake Gateway never completed the gated third run")
+            _wait_for_slot(base_url, sid_a, f"leftover-run-{gate3['run_no']}")
+            # Reload: recovery prefills the unconsumed leftover for review.
+            page4.reload(wait_until="domcontentloaded")
+            page4.wait_for_selector("#msg", state="visible", timeout=15000)
+            page4.wait_for_function(
+                "(leftover) => document.getElementById('msg').value.trim() === leftover",
+                arg=LEFTOVER_DISMISS,
+                timeout=15000,
+            )
+            # The user reviews and discards: select-all + delete (a real
+            # user input event, unlike programmatic .value writes).
+            page4.locator("#msg").fill("")
+            deadline = time.monotonic() + SLOT_POLL_TIMEOUT
+            dismissed = False
+            while time.monotonic() < deadline:
+                run_id, _text = _webui_session_slot(base_url, sid_a)
+                if run_id == "":
+                    dismissed = True
+                    break
+                time.sleep(0.25)
+            if not dismissed:
+                raise AssertionError("clearing the restored prefill never dismissed the slot")
+            print("OK  explicit dismissal retired the durable slot")
+        finally:
+            context4.close()
+
+        # Cross-session zero-copy re-check after all scenarios.
+        queued_for_b_final = _queue_entry_texts(page, sid_b)
+        for leftover in (LEFTOVER_TEXT, LEFTOVER_RESTORE, LEFTOVER_DISMISS):
+            if any(leftover in text for text in queued_for_b_final):
+                raise AssertionError(
+                    f"leftover guidance leaked into session B's queue ({queued_for_b_final!r})"
+                )
+        print("OK  no foreign-session copies after all scenarios")
 
         if errors:
             raise AssertionError(f"page errors during the gate: {errors!r}")

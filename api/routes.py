@@ -13199,6 +13199,13 @@ def _handle_session_get(handler, parsed) -> bool:
             "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
             "pending_started_at": getattr(s, "pending_started_at", None),
             "pending_user_source": getattr(s, "pending_user_source", None),
+            # #7440 gate: server-durable terminal-steer leftover (owner-scoped,
+            # keyed by gateway run id). Surfaced on every load so recovery
+            # never depends on a live SSE consumer; text flows through the
+            # same redaction sweep as pending_user_message.
+            "pending_steer_leftover_text": getattr(s, "pending_steer_leftover_text", None) or "",
+            "pending_steer_leftover_run_id": getattr(s, "pending_steer_leftover_run_id", None) or "",
+            "pending_steer_leftover_at": getattr(s, "pending_steer_leftover_at", None),
             "context_length": _persisted_cl,
             "threshold_tokens": _threshold_tokens,
             "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
@@ -15843,6 +15850,24 @@ def handle_post(handler, parsed) -> bool:
             handler,
             {"session": public_session_projection(s.compact() | {"messages": s.messages})},
         )
+    if parsed.path == "/api/session/steer_leftover/dismiss":
+        # #7440 gate: explicit user dismissal of a recovered terminal-steer
+        # leftover. Matched by run id (a stale dismissal can never clear a
+        # newer leftover). The consumed-side ack is transactional in
+        # /api/chat/start instead; this endpoint is the "user reviewed the
+        # restored guidance and chose to discard it" path.
+        sid = body.get("session_id", "")
+        if not sid or not isinstance(sid, str) or not sid.strip():
+            return bad(handler, "session_id must be a non-empty string", status=400)
+        sid = sid.strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        run_id = str(body.get("run_id") or "").strip()
+        if not run_id:
+            return bad(handler, "run_id must be a non-empty string", status=400)
+        ok = _ack_steer_leftover(sid, run_id, action="dismissed")
+        return j(handler, {"ok": ok})
+
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -22542,6 +22567,7 @@ def _prepare_chat_start_session_for_stream(
     retained_user=None,
     retained_context_user=_RETAINED_CONTEXT_USER_UNSET,
     defer_save: bool = False,
+    steer_leftover_ack: str = "",
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -22567,6 +22593,19 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = effective_source
+    # #7440 gate — transactional steer-leftover ack: THIS turn ships the
+    # leftover text, so retire the durable slot now (matched by run id so a
+    # stale ack can never clear a newer leftover). Doing it here — under the
+    # session lock, at the same mutation point that claims the turn — makes
+    # consume-and-ack one atomic state change: a crash either leaves the
+    # slot intact (guidance re-offered on reload, never silently lost) or
+    # leaves a normally-pending user turn (recovered by the existing
+    # pending_user_message machinery).
+    if steer_leftover_ack and getattr(s, "pending_steer_leftover_run_id", ""):
+        if steer_leftover_ack == s.pending_steer_leftover_run_id:
+            s.pending_steer_leftover_text = ""
+            s.pending_steer_leftover_run_id = ""
+            s.pending_steer_leftover_at = None
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 
@@ -23040,6 +23079,7 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    steer_leftover_ack: str = "",
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -23134,6 +23174,7 @@ def _start_chat_stream_for_session(
                     model_provider=model_provider,
                     stream_id=stream_id,
                     source=source,
+                    steer_leftover_ack=steer_leftover_ack,
                 )
                 break
         if needs_stale_cleanup:
@@ -23290,6 +23331,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
+    steer_leftover_ack: str = "",
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -23334,6 +23376,7 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                steer_leftover_ack=steer_leftover_ack,
             )
 
         def _legacy_adapter_factory():
@@ -23376,6 +23419,7 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        steer_leftover_ack=steer_leftover_ack,
     )
 
 
@@ -24015,6 +24059,55 @@ def _is_silent_control_message(message) -> bool:
     return str(message or "").strip() == "[SILENT]"
 
 
+def _ack_steer_leftover(session_id: str, run_id: str, *, action: str = "consumed") -> bool:
+    """Retire a session's durable steer-leftover slot (#7440 gate).
+
+    Matched by the stable gateway run id so a stale ack can never clear a
+    NEWER leftover, and taken under the per-session agent lock so it cannot
+    interleave with the relay's persistence write. Called transactionally
+    from the chat-start turn that ships the leftover text (action=consumed)
+    and from the explicit user-dismissal endpoint (action=dismissed). Any
+    other next turn does NOT implicitly clear the slot — the client queue
+    may still hold the leftover behind another in-flight turn.
+    """
+    session_id = str(session_id or "").strip()
+    run_id = str(run_id or "").strip()
+    if not session_id or not run_id:
+        return False
+    lock = _get_session_agent_lock(session_id)
+    if not lock.acquire(timeout=5):
+        return False
+    try:
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return False
+        if s is None:
+            return False
+        if getattr(s, "pending_steer_leftover_run_id", "") != run_id:
+            return False  # no slot, or a newer leftover owns it now
+        if getattr(s, "_loaded_metadata_only", False):
+            from api.models import Session as _Session
+            s = _Session.load(session_id)
+            if s is None or getattr(s, "pending_steer_leftover_run_id", "") != run_id:
+                return False
+        s.pending_steer_leftover_text = ""
+        s.pending_steer_leftover_run_id = ""
+        s.pending_steer_leftover_at = None
+        s.save()
+        logger.debug(
+            "Steer leftover %s for session %s (action=%s)", run_id, session_id, action
+        )
+        return True
+    except Exception:
+        logger.debug(
+            "Failed to ack steer leftover for %s", session_id, exc_info=True
+        )
+        return False
+    finally:
+        lock.release()
+
+
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
@@ -24285,6 +24378,10 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            # #7440 gate: the browser tags the chat-start turn that ships a
+            # recovered steer leftover with the durable slot's run id, so the
+            # server retires the slot transactionally with the turn.
+            "steer_leftover_ack": str(body.get("steer_leftover_ack") or "").strip(),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

@@ -263,34 +263,6 @@ def gateway_steer_run(stream_id: str, text: str):
         return False, "gateway_steer_error"
 
 
-_WORKSPACE_RELAY_ROOT = "/workspace"
-
-
-def _gateway_workspace_for_relay(workspace):
-    """Return a normalized workspace path ONLY when it is at or contained
-    under the shared workspace root; None otherwise.
-
-    ``str.startswith("/workspace")`` is not a containment check: it accepts
-    ``/workspace-other`` and ``/workspace/../etc``, and a symlink inside the
-    tree can point anywhere. Realpath the candidate and the root, then require
-    ``candidate == root`` or under ``root + os.sep``. The gateway is expected
-    to re-validate containment in ITS OWN filesystem before honoring the path.
-    """
-    try:
-        raw = str(workspace or "").strip()
-        if not raw:
-            return None
-        if not raw.startswith(_WORKSPACE_RELAY_ROOT):
-            return None
-        root = os.path.realpath(_WORKSPACE_RELAY_ROOT)
-        cand = os.path.realpath(raw)
-        if cand == root or cand.startswith(root + os.sep):
-            return cand
-    except Exception:
-        return None
-    return None
-
-
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
@@ -704,6 +676,71 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     }
 
 
+def _persist_gateway_steer_leftover(session_id: str, run_id: str, text: str) -> bool:
+    """Persist a terminal-steer leftover into the owning session (#7440 gate).
+
+    The gate review reproduced that translating ``run.completed.pending_steer``
+    into a live ``pending_steer_leftover`` SSE event alone loses the guidance
+    whenever no consumer is attached to the owning session's stream at
+    completion time (the browser switches sessions, closes the tab, or the
+    process retires the stream). Recovery therefore cannot depend on SSE
+    delivery: the leftover is made SERVER-DURABLE and OWNER-SCOPED here,
+    keyed by the stable gateway run id, and surfaced by ``GET /api/session``
+    so any later load restores it.
+
+    Semantics:
+      - single slot, newest completed run wins (a session runs one gateway
+        run at a time; an older unconsumed leftover is superseded by a newer
+        terminal one);
+      - written under the per-session agent lock (mutation + save only),
+        never on the SSE critical path when contended: acquire with a
+        bounded timeout so a long writer can never wedge the relay thread;
+      - cleared ONLY by an explicit ack -- the ``/api/chat/start`` turn that
+        ships the text (``steer_leftover_ack`` matches the run id) or the
+        user's explicit dismissal. Any next turn does NOT implicitly clear
+        it, because the client queue may still hold it behind another turn.
+
+    Best-effort for the durable slot (the live SSE event still fires on
+    failure): returns True when the slot was persisted.
+    """
+    session_id = str(session_id or "").strip()
+    run_id = str(run_id or "").strip()
+    text = str(text or "").strip()
+    if not session_id or not run_id or not text:
+        return False
+    lock = _get_session_agent_lock(session_id)
+    if not lock.acquire(timeout=5):
+        logger.debug(
+            "Steer-leftover persistence skipped (lock contention) for %s", session_id
+        )
+        return False
+    try:
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return False
+        if s is None:
+            return False
+        if getattr(s, "_loaded_metadata_only", False):
+            # Never save a metadata-only stub (#1558 guard); reload fully.
+            from api.models import Session as _Session
+            s = _Session.load(session_id)
+            if s is None:
+                return False
+        s.pending_steer_leftover_text = text
+        s.pending_steer_leftover_run_id = run_id
+        s.pending_steer_leftover_at = time.time()
+        s.save()
+        return True
+    except Exception:
+        logger.debug(
+            "Failed to persist steer leftover for %s", session_id, exc_info=True
+        )
+        return False
+    finally:
+        lock.release()
+
+
 def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
@@ -770,15 +807,14 @@ def _run_gateway_runs_api_streaming(
             **body_extras,
             "session_id": session_id,
         }
-        # C1: propagate the webui session's workspace so gateway tool execution
-        # runs in the SAME directory the browser shows (the runs path otherwise
-        # falls back to the gateway's $HOME). Only forward paths that RESOLVE
-        # inside the shared workspace root (realpath + containment, rejecting
-        # sibling prefixes, .. escapes and symlink escapes); the gateway must
-        # re-validate containment in its own mount before honoring the path.
-        run_workspace = _gateway_workspace_for_relay(workspace)
-        if run_workspace:
-            run_body["workspace"] = run_workspace
+        # #7440 re-gate: per-session workspace propagation is SPLIT OUT of
+        # this PR onto feat/gateway-workspace-relay (companion Agent PR
+        # #109230). The installed gateway's runs API does not read a
+        # ``workspace`` field, so sending one here is an inert no-op that
+        # silently misreports execution-parity — the gate review's SILENT
+        # blocker. Re-land it together with a capability advertisement the
+        # WebUI can negotiate against (agent /v1/capabilities) so the field
+        # is only ever sent to a gateway that provably consumes it.
         if instructions_parts:
             run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
         if conversation_history:
@@ -910,10 +946,21 @@ def _run_gateway_runs_api_streaming(
                 # the journaling put_gateway_event gives reconnecting clients
                 # exact-once replay via the run-journal cursor. Suppressed on
                 # error completions and cancelled turns (local-path parity).
+                #
+                # Gate must-fix 2 (#7440 re-gate): the SSE event alone loses
+                # the guidance when no consumer is attached to the owning
+                # session's stream at completion (switch-to-existing-session,
+                # closed tab, retired stream). ALSO persist the leftover
+                # server-side (owner-scoped, keyed by the run id) so any later
+                # GET /api/session restores it, and stamp the run id into the
+                # event payload so the client can dedupe/ack by stable
+                # identity instead of text or timestamps.
                 pending_steer_text = str(payload.get("pending_steer") or "").strip()
                 if pending_steer_text:
+                    _persist_gateway_steer_leftover(session_id, run_id, pending_steer_text)
                     put_gateway_event("pending_steer_leftover", {
                         "session_id": session_id,
+                        "run_id": run_id,
                         "text": pending_steer_text,
                     })
                 usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})

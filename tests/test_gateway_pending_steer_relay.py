@@ -174,14 +174,14 @@ def test_run_completed_pending_steer_emits_leftover_event(tmp_path):
         if event == "pending_steer_leftover"
     ]
     assert leftovers == [
-        ("pending_steer_leftover", {"session_id": session_id, "text": "use the safer path"})
+        ("pending_steer_leftover", {"session_id": session_id, "run_id": f"run-{stream_id}", "text": "use the safer path"})
     ]
     # Journal rows carry the envelope the SSE replay layer re-emits.
     rows = _journal_rows(tmp_path, session_id, stream_id)
     leftover_rows = [row for row in rows if row.get("event") == "pending_steer_leftover"]
     assert len(leftover_rows) == 1
     row = leftover_rows[0]
-    assert row.get("payload") == {"session_id": session_id, "text": "use the safer path"}
+    assert row.get("payload") == {"session_id": session_id, "run_id": f"run-{stream_id}", "text": "use the safer path"}
     assert row.get("event_id")
     assert int(row.get("seq") or 0) > 0
     # Emitted BEFORE terminal completion: it is the last event the translator
