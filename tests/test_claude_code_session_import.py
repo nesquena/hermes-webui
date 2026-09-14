@@ -153,6 +153,7 @@ def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch,
                 "message_count": calls,
                 "actual_message_count": calls,
                 "actual_user_message_count": 1,
+                "pinned": True,
                 "last_activity": float(calls),
                 "started_at": 1.0,
             }
@@ -169,6 +170,8 @@ def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch,
     assert calls == 8
     # First pass of first call returned message_count=1 (calls was 1).
     assert first[0]["message_count"] == 1
+    assert first[0]["_agent_pinned"] is True
+    assert first[0]["pinned"] is False
     # First pass of second call returned message_count=5 (calls was 5;
     # source-specific passes incremented the other counters but excluded the
     # cli-source session from those pass results).
