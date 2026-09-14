@@ -8531,7 +8531,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # Mark that a build may be in progress BEFORE acquiring the lock.
     # If another thread has already started the cold path, we will wait for
     # its result rather than running the cold path concurrently.
-    should_wait = _cache_build_in_progress
+    #
+    # prefer_cache callers must NOT wait: their contract is "serve the warm /
+    # disk cache or a network-free minimal catalog, never run OR wait for the
+    # live provider probe". The wait below is bounded only by the rebuild
+    # budget, so any in-flight rebuild — routine on networks where a provider
+    # probe blackholes (e.g. the botocore IMDS fetch) — hands a multi-second
+    # stall to EVERY concurrent session-switch model resolution (observed:
+    # /api/session t3 stage 4447-4843ms, tracking the rebuild budget exactly).
+    # Every cache tier checked below is safe to serve without the wait; a
+    # cold-miss prefer_cache caller falls through to the minimal catalog as
+    # designed.
+    should_wait = _cache_build_in_progress and not prefer_cache
     force_refresh_started_at = time.monotonic() if force_refresh else None
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
