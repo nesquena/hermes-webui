@@ -1572,9 +1572,29 @@ function _steerPendingIndicatorStatus(count){
   return t('steer_pending_count', n);
 }
 
+// The steer indicator shares the single composer-status channel with unrelated
+// features (compression, uploads, errors). A passive refresh must therefore
+// never clear a status it does not own: remember the exact text we wrote and
+// only retire the channel while it still shows that text.
+let _steerComposerStatusText='';
+function _steerComposerStatusIsMine(){
+  if(!_steerComposerStatusText) return false;
+  if(typeof $!=='function') return true;
+  const el=$('composerStatus');
+  if(!el) return true;
+  return String(el.textContent||'')===_steerComposerStatusText;
+}
+
 function _updateSteerPendingIndicatorStatus(count){
   if(typeof setComposerStatus!=='function') return;
-  setComposerStatus(_steerPendingIndicatorStatus(count));
+  const text=_steerPendingIndicatorStatus(count);
+  if(text){
+    setComposerStatus(text);
+    _steerComposerStatusText=text;
+    return;
+  }
+  if(_steerComposerStatusIsMine()) setComposerStatus('');
+  _steerComposerStatusText='';
 }
 
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){

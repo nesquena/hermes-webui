@@ -20574,6 +20574,7 @@ const LOCALES = {
     steer_fail_unknown: 'Steer nedostupný',
     steer_leftover_queued: 'Řízení ve frontě na další tah',
     steer_pending_count: (n) => n === 1 ? '1 steer doru\u010Deno na hranici n\u00E1stroj\u016F' : `${n} steer doru\u010Deno na hranici n\u00E1stroj\u016F`,
+    steer_recovery_dismiss: 'Zam\u00EDtnout',
     steer_recovery_retry: 'Zkusit znovu',
     stream_stopped: 'Odpověď byla zastavena.',
     subagent_children: 'Relace subagentů',

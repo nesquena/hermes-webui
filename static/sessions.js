@@ -2230,6 +2230,10 @@ async function loadSession(sid){
     }
     _deferWorkspaceRefreshForSession(sid);
     setBusy(true);setComposerStatus('');
+    // setComposerStatus('') above is an unconditional channel reset; a session
+    // that already holds accepted-but-unconsumed steers must restore its own
+    // indicator afterwards or the count is silently hidden on return.
+    if(typeof updateSteerPendingBadge==='function') updateSteerPendingBadge(sid);
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);

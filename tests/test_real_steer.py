@@ -1237,6 +1237,67 @@ class TestFrontendWiring:
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
+    def test_zero_count_steer_refresh_preserves_unrelated_composer_status(self):
+        """A passive render must not wipe another feature's composer status.
+
+        The steer indicator shares one text channel with /compress, uploads and
+        errors. A zero-count refresh previously wrote an empty string, so e.g.
+        /compress setting "Compressing..." and then calling renderMessages()
+        made the status vanish silently.
+        """
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        start = self.cmds.find("function _steerPendingIndicatorStatus")
+        assert start >= 0
+        end = self.cmds.find("async function _steerPersistDraftForOwner", start)
+        assert end > start
+        status_src = self.cmds[start:end]
+
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            let status = 'compressing';   // an unrelated feature owns the channel
+            globalThis.t = (key, n) => `${{n}} ${{key}}`;
+            globalThis.setComposerStatus = (value) => {{ status = value; }};
+            globalThis.$ = (id) => id === 'composerStatus'
+              ? {{ get textContent() {{ return status; }} }}
+              : null;
+            eval({json.dumps(status_src)});
+            _updateSteerPendingIndicatorStatus(0);
+            assert.strictEqual(status, 'compressing',
+              'a zero-count steer refresh must not clear a status it does not own');
+            _updateSteerPendingIndicatorStatus(2);
+            assert.strictEqual(status, '2 steer_pending_count', 'steer status renders');
+            _updateSteerPendingIndicatorStatus(0);
+            assert.strictEqual(status, '', 'steer-owned status is cleared on zero count');
+            _updateSteerPendingIndicatorStatus(1);
+            status = 'uploading';
+            _updateSteerPendingIndicatorStatus(0);
+            assert.strictEqual(status, 'uploading',
+              'a channel taken over by another feature must not be cleared');
+            """
+        )
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+    def test_loadSession_running_branch_restores_steer_badge(self):
+        """Returning to a running session must restore its pending-steer count."""
+        start = self.sessions.index("    setBusy(true);setComposerStatus('');")
+        end = self.sessions.index("    // Phase 2b: Idle session", start)
+        running_tail = self.sessions[start:end]
+        assert "updateSteerPendingBadge(sid)" in running_tail, (
+            "loadSession resets the composer status when reattaching to a running "
+            "session; without a following badge refresh a preserved pending count "
+            "is silently hidden for the whole turn"
+        )
+
     def test_file_steer_targets_captured_session_when_user_switches_mid_upload(self):
         import json
         import shutil
@@ -1773,6 +1834,18 @@ class TestI18nKeys:
         assert self.i18n.count("steer_leftover_queued:") >= 6, (
             f"steer_leftover_queued appears {self.i18n.count('steer_leftover_queued:')} times; "
             f"expected ≥6 (one per locale)"
+        )
+
+    def test_steer_recovery_dismiss_survives_pending_count_addition(self):
+        """Adding steer_pending_count must not displace steer_recovery_dismiss.
+
+        The first revision replaced the Czech recovery-dismiss entry instead of
+        adding alongside it, so the failed-steer recovery card fell back to
+        English "Dismiss" for Czech users.
+        """
+        assert self.i18n.count("steer_recovery_dismiss:") == 15, (
+            f"steer_recovery_dismiss appears {self.i18n.count('steer_recovery_dismiss:')} times; "
+            f"expected 15 (one per locale, none overwritten)"
         )
 
 
