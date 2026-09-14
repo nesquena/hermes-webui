@@ -34,7 +34,18 @@ def test_model_picker_renders_selected_badge_without_replacing_configured_badge(
 
 
 def test_selected_badge_is_keyed_to_current_model_value():
-    assert "String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" in UI_JS
+    # #7400 re-gate: the selected row must be matched by CANONICAL identity on
+    # BOTH sides — the bare model derived with _qualifiedCatalogOptionMeta for a
+    # provider-qualified row (@provider:model). Comparing a canonicalized row
+    # against a RAW selected value drops the active row and the Selected badge
+    # whenever the selected option comes from a producer that does not stamp
+    # dataset.model (Settings population, live-model insertion).
+    assert "const _canonicalRowModelForCompare=(m)=>{" in UI_JS
+    assert "const _canonicalSelectedModelForCompare=()=>{" in UI_JS
+    assert "const _selectedModelForCompare=_canonicalSelectedModelForCompare();" in UI_JS
+    assert "String(_canonicalRowModelForCompare(m))===_selectedModelForCompare" in UI_JS
+    # The raw-value comparison is what silently lost the badge: it must not return.
+    assert "String(_canonicalRowModelForCompare(m))===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" not in UI_JS
 
 
 def test_selected_badge_is_keyed_to_current_model_provider():
