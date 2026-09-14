@@ -3833,6 +3833,12 @@ function _addLiveModelsToSelect(provider, models, sel){
     // dataset.provider-only stamp left _modelStateForSelect() returning the raw
     // routing id for a selected live row, so its row lost `active` and the
     // Selected badge while the catalog rows of the same picker kept theirs.
+    // The provider stamp stays UNCONDITIONAL: _stampQualifiedOptionMeta() only
+    // writes metadata for an exact @<provider>:<model> value, so routing the
+    // direct assignment through it dropped dataset.provider from every
+    // unqualified live row. Stamp the provider for EVERY live option first,
+    // then let the helper add the bare-model stamp for qualified values.
+    opt.dataset.provider=provider;
     _stampQualifiedOptionMeta(opt, mid, provider);
     if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
       opt.dataset.fast='1';
@@ -4436,7 +4442,14 @@ function renderModelDropdown(){
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      // #7400: root-level <option> entries must expose the same provider data
+      // the optgroup path uses. providerId:'' made
+      // _modelProviderForSelectedBadge() fall back to parsing the value at its
+      // LAST colon, so a colon-bearing routing id like @ollama:qwen3:32b
+      // resolved to provider "ollama:qwen3" / model "32b" while the selected
+      // option carried provider "ollama" / model "qwen3:32b" — the row then
+      // lost `active` and its Selected badge.
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:_getOptionProviderId(child),badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
       _groupMeta.get(groupKey).modelCount++;
     }
   }

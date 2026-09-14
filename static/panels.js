@@ -12767,10 +12767,24 @@ async function _applyAuxModels(){
 }
 
 async function saveSettings(andClose){
-  const model=($('settingsModel')||{}).value;
+  let model=($('settingsModel')||{}).value;
   const modelState=(typeof _captureModelDropdownSelection==='function'&&$('settingsModel'))
     ? (_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null})
     : {model:String(model||''),model_provider:null};
+  // #7400: modelState carries the CANONICAL identity of the picked row (bare
+  // model + owning provider) while <select>.value keeps the routing id
+  // (@provider:model) for a provider-qualified Settings row. Left raw, the
+  // `modelState.model===model` identity check below is false for a correctly
+  // stamped row, so a successful save posted the routing id as the default model
+  // and mirrored default_model_provider=null, wiping window._activeProvider and
+  // _settingsHermesDefaultModelProviderOnOpen. Save the same canonical pair
+  // /api/default-model returns for that row: compare canonical identity, not the
+  // raw option value.
+  const _qualifiedSavedMeta=(modelState&&modelState.model&&String(modelState.model)!==String(model||'')
+      &&typeof _qualifiedCatalogOptionMeta==='function')
+    ? _qualifiedCatalogOptionMeta(model,modelState.model_provider)
+    : null;
+  if(_qualifiedSavedMeta&&_qualifiedSavedMeta.model===String(modelState.model)) model=String(modelState.model);
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;

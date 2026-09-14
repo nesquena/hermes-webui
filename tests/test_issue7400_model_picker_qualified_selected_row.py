@@ -341,8 +341,15 @@ const payload = JSON.parse(process.argv[3]);
 const dropdown = makeNode('div');
 dropdown.classList.add('open');
 
+// Settings save-path mode (#7400 re-gate): saveSettings() resolves its model
+// select through $('settingsModel'), everything else through null-tolerant
+// lookups.
+let _settingsSaveSelect = null;
+let modelSelect = null;
+
 function $(id) {
   const _settingsPicker = payload.settingsPicker === true;
+  if (id === 'settingsModel' && _settingsSaveSelect) return _settingsSaveSelect;
   if (id === (_settingsPicker ? 'settingsModelDropdown' : 'composerModelDropdown')) return dropdown;
   if (id === (_settingsPicker ? 'settingsModel' : 'modelSelect')) return modelSelect;
   return null;
@@ -350,12 +357,16 @@ function $(id) {
 const window = {
   _configuredModelBadges: payload.configuredBadges || {},
   _activeProvider: payload.activeProvider || '',
+  _defaultModel: null,
+  _showThinking: true,
+  _workspaceTodosTab: false,
 };
 const S = { session: {} };
 const _dynamicModelLabels = {};
 function _applyModelToDropdown() { return false; }
 function syncModelChip() {}
-const document = { createElement(tag) { return makeNode(tag); } };
+const document = { createElement(tag) { return makeNode(tag); }, documentElement: { dataset: {} } };
+const localStorage = { getItem() { return null; }, setItem() {} };
 function esc(v) { return String(v || ''); }
 function t(key, ...args) {
   if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
@@ -374,6 +385,43 @@ function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || n
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
 
+// --- Settings save-path environment (#7400 re-gate) -------------------------
+// The settings-save mode drives the REAL saveSettings() + the REAL
+// _applySavedSettingsUi() with only the network boundary and the unrelated
+// settings widgets stubbed, so the assertion is on what the client posts and
+// what it mirrors afterwards — not on the shape of the source.
+const _settingsPosts = [];
+const _settingsOpenState = { model: '', provider: null };
+function api(path, opts) { _settingsPosts.push({ path: String(path), body: String((opts && opts.body) || '') }); return Promise.resolve({}); }
+function _enqueueSettingsPost(opts) { _settingsPosts.push({ path: '/api/preferences', body: String((opts && opts.body) || '') }); return Promise.resolve({ auth_enabled: false, password_auth_enabled: false }); }
+function showToast() {}
+function _speechPreferencesPayloadFromUi() { return {}; }
+function _structuredCodeViewFromUi() { return {}; }
+function _composerControlVisibilityPayload() { return {}; }
+function _getComposerControlOrder() { return []; }
+function _syncChatActivityDisplayModeControl() {}
+function _syncTransparentEventTimestampsControl() {}
+function _ensureComposerControlVisibilityState() {}
+function _renderComposerControlChips() {}
+function _renderComposerSituationalControlChips() {}
+function _setComposerControlOrder(list) { return list || []; }
+function _setSettingsAuthButtonsVisible() {}
+function _resetSettingsPanelState() {}
+function _hideSettingsPanel() {}
+function _updateCurrentPasswordVisibility() {}
+function _renderSettingsAuthStatus() {}
+function _updateAuthWarningBadge() {}
+function _updateAuthDisabledWarning() {}
+function renderMessages() {}
+var _settingsDirty = false;
+var _pendingSettingsTargetPanel = null;
+var _settingsPasswordAuthEnabled = false;
+var _settingsHermesDefaultModelOnOpen = '';
+var _settingsHermesDefaultModelProviderOnOpen = null;
+var _settingsThemeOnOpen = '';
+var _settingsSkinOnOpen = '';
+var _settingsFontSizeOnOpen = '';
+
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
@@ -382,6 +430,7 @@ for (const name of [
   '_stampQualifiedOptionMeta',
   '_modelStateForSelect',
   '_getOptionProviderId',
+  '_captureModelDropdownSelection',
   '_addLiveModelsToSelect',
   'renderModelDropdown',
 ]) {
@@ -420,9 +469,35 @@ if (payload.mode === 'live-stamp') {
   process.exit(0);
 }
 
+// Settings save path (#7400 re-gate): the Settings panel opens with a
+// provider-qualified row selected, the user hits Save. Drive the REAL
+// saveSettings() so the posted default-model pair and the mirrored
+// window._activeProvider / _settingsHermesDefaultModelProviderOnOpen are the
+// observable result.
+if (payload.mode === 'settings-save') {
+  _settingsSaveSelect = makeSelect(payload.groups, payload.selectedValue, null, false, 'settingsModel');
+  _settingsHermesDefaultModelOnOpen = payload.openedModel || '';
+  _settingsHermesDefaultModelProviderOnOpen = payload.openedProvider || null;
+  eval(extractFunc('_applySavedSettingsUi', panels));
+  eval(extractFunc('saveSettings', panels));
+  saveSettings(false).then(() => {
+    process.stdout.write(JSON.stringify({
+      mode: payload.mode,
+      posts: _settingsPosts,
+      activeProvider: window._activeProvider === undefined ? null : window._activeProvider,
+      defaultModelMirror: window._defaultModel === undefined ? null : window._defaultModel,
+      providerMirror: _settingsHermesDefaultModelProviderOnOpen === undefined ? null : _settingsHermesDefaultModelProviderOnOpen,
+      modelMirror: _settingsHermesDefaultModelOnOpen === undefined ? null : _settingsHermesDefaultModelOnOpen,
+      selectValue: _settingsSaveSelect.value,
+    }));
+  }).catch(err => {
+    process.stdout.write(JSON.stringify({ mode: payload.mode, error: String(err && err.message || err) }));
+  });
+} else {
+
 // Build the select AFTER the real helpers are eval'd — makeOption's metadata
 // stamping calls _qualifiedCatalogOptionMeta.
-const modelSelect = makeSelect(payload.groups, payload.selectedValue, payload.rootOption, payload.unstamped, payload.selectId);
+modelSelect = makeSelect(payload.groups, payload.selectedValue, payload.rootOption, payload.unstamped, payload.selectId);
 
 renderModelDropdown(payload.renderOpts);
 const initial = snapshot(dropdown);
@@ -437,6 +512,7 @@ if (showAllRow && showAllRow.onclick) {
 }
 
 process.stdout.write(JSON.stringify({ initial, afterExpand }));
+}
 """
 
 
@@ -731,4 +807,111 @@ def test_live_model_insertion_stamps_qualified_row_metadata(driver_path):
     )
     assert live["datasetProvider"] == "custom:omni", live["datasetProvider"]
     # Unqualified live ids keep the pre-existing shape (no bare-model stamp).
-    assert by_value["custom:omni:plain-live"]["datasetModel"] is None, by_value["custom:omni:plain-live"]
+    plain_live = by_value["custom:omni:plain-live"]
+    assert plain_live["datasetModel"] is None, plain_live
+    # Finding 1 (#7400 re-gate): the provider stamp stays UNCONDITIONAL, so an
+    # unqualified live row must keep datasetProvider == the live provider (the
+    # assertion test_chat_start_provider_fallback.py relies on).
+    assert plain_live["datasetProvider"] == "custom:omni", plain_live
+
+
+COLON_BARE = "qwen3:32b"
+COLON_QUALIFIED = f"@ollama:{COLON_BARE}"
+COLON_PROVIDER_BARE = "model-a:free"
+COLON_PROVIDER_QUALIFIED = f"@custom:backup:{COLON_PROVIDER_BARE}"
+
+
+def _root_injected_groups(provider_id, provider_label, qualified_id, bare_model, other_id):
+    """Composer picker after a live/overflow pick: the qualified model sits at
+    the <select> ROOT (it is absent from every group's model list), its owning
+    group advertises it as overflow so a Show-all expander renders, and a second
+    provider offers an unrelated model."""
+    return [
+        {
+            "provider": provider_label,
+            "provider_id": provider_id,
+            "models": [{"id": other_id, "label": "Other"}],
+            "extra_models": [{"id": qualified_id, "label": bare_model}],
+        },
+        {
+            "provider": "Custom Omni",
+            "provider_id": "custom:omni",
+            "models": [{"id": "custom:omni:unrelated", "label": "Unrelated"}],
+        },
+    ]
+
+
+def _assert_single_active_qualified_row(snap, qualified_id, label):
+    active = _active_rows(snap)
+    assert len(active) == 1, (
+        f"{label}: exactly one row must be active for a root-injected routing id; "
+        f"got {[a['className'] for a in active]}"
+    )
+    assert active[0]["html"].count("model-opt-badge--selected") == 1, (label, active[0]["html"])
+    assert "Selected" in active[0]["html"], (label, active[0]["html"])
+    assert _row_model_ids(active) == [qualified_id], (label, _row_model_ids(active))
+    ids = _row_model_ids(snap)
+    assert ids.count(qualified_id) == 1, (
+        f"{label}: the qualified id must render exactly once (no orphan root row "
+        f"next to the group row); ids={ids}"
+    )
+
+
+def test_root_injected_colon_model_id_keeps_single_active_before_and_after_move(driver_path):
+    """Finding 4 (#7400 re-gate), colon INSIDE the model id: the root <option>
+    for @ollama:qwen3:32b must expose dataset.provider ("ollama") instead of
+    being reparsed by the ambiguous last-colon fallback (which yields provider
+    "ollama:qwen3" / model "32b"). One active row + one Selected badge before
+    AND after the root-to-optgroup Show-all move."""
+    groups = _root_injected_groups(
+        "ollama", "Ollama", COLON_QUALIFIED, COLON_BARE, "ollama:llama3.3:70b")
+    out = _run(driver_path, groups, COLON_QUALIFIED,
+               root_option={"id": COLON_QUALIFIED, "label": COLON_BARE, "provider": "ollama"})
+
+    assert out["initial"] is not None and out["afterExpand"] is not None, (
+        "the root-injected selected option must render its row AND its group must "
+        "advertise a Show-all expander to click"
+    )
+    for label, snap in (("before", out["initial"]), ("after", out["afterExpand"])):
+        _assert_single_active_qualified_row(snap, COLON_QUALIFIED, label)
+
+
+def test_root_injected_colon_provider_id_keeps_single_active_before_and_after_move(driver_path):
+    """Finding 4 (#7400 re-gate), colon INSIDE the provider id: the root
+    <option> for @custom:backup:model-a:free belongs to provider
+    "custom:backup" with model "model-a:free" — the last-colon fallback would
+    claim provider "custom:backup:model-a" / model "free" and drop the selected
+    state. Same single-active-row + single-Selected-badge contract."""
+    groups = _root_injected_groups(
+        "custom:backup", "Custom Backup", COLON_PROVIDER_QUALIFIED,
+        COLON_PROVIDER_BARE, "custom:backup:other")
+    out = _run(driver_path, groups, COLON_PROVIDER_QUALIFIED,
+               root_option={"id": COLON_PROVIDER_QUALIFIED,
+                            "label": COLON_PROVIDER_BARE, "provider": "custom:backup"})
+
+    assert out["initial"] is not None and out["afterExpand"] is not None, (
+        "the root-injected selected option must render its row AND its group must "
+        "advertise a Show-all expander to click"
+    )
+    for label, snap in (("before", out["initial"]), ("after", out["afterExpand"])):
+        _assert_single_active_qualified_row(snap, COLON_PROVIDER_QUALIFIED, label)
+
+
+def test_settings_save_qualified_cross_provider_row_posts_canonical_pair(driver_path):
+    """Finding 3 (#7400 re-gate): the Settings panel was opened on the DEFAULT
+    provider's bare row; the user picks the provider-qualified row owned by a
+    custom provider offering the SAME bare model and hits Save. The client must
+    POST the canonical pair (bare model + owning provider) and must NOT wipe
+    window._activeProvider / _settingsHermesDefaultModelProviderOnOpen to null."""
+    out = _run(driver_path, _two_provider_groups(), QUALIFIED_CUSTOM,
+               mode="settings-save", openedModel=BARE_MODEL, openedProvider=None)
+
+    assert "error" not in out, out
+    model_posts = [post for post in out["posts"] if post["path"] == "/api/default-model"]
+    assert len(model_posts) == 1, out["posts"]
+    assert json.loads(model_posts[0]["body"]) == {"model": BARE_MODEL, "provider": "custom:omni"}, model_posts[0]
+    assert out["selectValue"] == QUALIFIED_CUSTOM, out
+    assert out["activeProvider"] == "custom:omni", out
+    assert out["providerMirror"] == "custom:omni", out
+    assert out["modelMirror"] == BARE_MODEL, out
+    assert out["defaultModelMirror"] == BARE_MODEL, out
