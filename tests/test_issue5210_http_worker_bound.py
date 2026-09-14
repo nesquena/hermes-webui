@@ -201,7 +201,7 @@ def test_over_capacity_plain_http_gets_fast_503_without_starting_handler(monkeyp
 
         assert status == 503
         assert headers["Connection"].lower() == "close"
-        assert body == b""
+        assert body == b'{"error":"server_busy","retry_after":5}'
         _assert_worker_count_stays(srv.httpd, 1)
 
         srv.httpd.release_event.set()
@@ -239,7 +239,7 @@ def test_slow_overflow_cleanup_does_not_block_later_rejects(monkeypatch):
             status, headers, body = _request(srv.port, "/fast", timeout=1)
             assert status == 503
             assert headers["Connection"].lower() == "close"
-            assert body == b""
+            assert body == b'{"error":"server_busy","retry_after":5}'
             _assert_worker_count_stays(srv.httpd, 1)
         finally:
             release_drain.set()
@@ -262,7 +262,7 @@ def test_worker_slot_releases_after_request_finishes(monkeypatch):
         status, headers, body = _request(srv.port, "/fast")
         assert status == 503
         assert headers["Connection"].lower() == "close"
-        assert body == b""
+        assert body == b'{"error":"server_busy","retry_after":5}'
 
         srv.httpd.release_event.set()
         hold_thread.join(timeout=5)
@@ -298,7 +298,7 @@ def test_worker_slot_releases_after_handler_error_or_disconnect(monkeypatch, mod
         status, headers, body = _request(srv.port, "/fast")
         assert status == 503
         assert headers["Connection"].lower() == "close"
-        assert body == b""
+        assert body == b'{"error":"server_busy","retry_after":5}'
 
         if mode == "boom":
             srv.httpd.release_event.set()

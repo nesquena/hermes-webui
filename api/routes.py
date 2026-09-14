@@ -12274,6 +12274,18 @@ def _accept_loop_health(handler) -> dict:
     }
 
 
+def _worker_pool_health(handler) -> dict:
+    """Expose worker-pool occupancy + overflow rejects for watchdog visibility."""
+    server = getattr(handler, "server", None)
+    max_workers = int(getattr(server, "max_request_workers", 0) or 0)
+    slots = getattr(server, "_request_worker_slots", None)
+    available = int(getattr(slots, "_value", 0) or 0)
+    return {
+        "workers_in_use": max(0, max_workers - available),
+        "overflow_rejects_total": int(getattr(server, "overflow_rejects_total", 0) or 0),
+    }
+
+
 def _streams_lock_health(timeout_seconds: float = 0.5) -> dict:
     t0 = time.time()
     acquired = STREAMS_LOCK.acquire(timeout=timeout_seconds)
@@ -12465,6 +12477,7 @@ def _handle_health(handler, parsed):
         "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
         "accept_loop": _accept_loop_health(handler),
+        **_worker_pool_health(handler),
     }
     if "oldest_run_age_seconds" in run_check:
         payload["oldest_run_age_seconds"] = run_check["oldest_run_age_seconds"]

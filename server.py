@@ -100,7 +100,7 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from api.auth import check_auth, reset_trusted_auth_request_state
-from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
+from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE, _env_int
 from api.helpers import (
     j,
     get_profile_cookie,
@@ -118,14 +118,17 @@ class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
-    max_request_workers = 128
+    max_request_workers = _env_int("HERMES_WEBUI_MAX_REQUEST_WORKERS", 128)
     max_overflow_reject_workers = 16
+    _OVERFLOW_BODY = b'{"error":"server_busy","retry_after":5}'
     _OVERFLOW_RESPONSE = (
         b"HTTP/1.1 503 Service Unavailable\r\n"
         b"Connection: close\r\n"
-        b"Content-Length: 0\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: %d\r\n"
+        b"Retry-After: 5\r\n"
         b"\r\n"
-    )
+    ) % (len(_OVERFLOW_BODY),) + _OVERFLOW_BODY
 
     def __init__(self, *args, **kwargs):
         server_address = args[0] if args else kwargs.get('server_address', None)
@@ -137,6 +140,8 @@ class QuietHTTPServer(ThreadingHTTPServer):
         self._overflow_reject_slots = threading.BoundedSemaphore(self.max_overflow_reject_workers)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
+        self.overflow_rejects_total = 0
+        self._overflow_reject_last_warn_at = 0.0
 
     def server_bind(self):
         if sys.platform == 'win32':
@@ -228,6 +233,15 @@ class QuietHTTPServer(ThreadingHTTPServer):
                 pass
 
     def _reject_overflow_request(self, request) -> None:
+        self.overflow_rejects_total += 1
+        in_use = self.max_request_workers - self._request_worker_slots._value
+        now = time.monotonic()
+        if now - self._overflow_reject_last_warn_at >= 10.0:
+            self._overflow_reject_last_warn_at = now
+            logger.warning(
+                "worker pool overflow: %d/%d slots in use, rejecting request (total rejects: %d)",
+                in_use, self.max_request_workers, self.overflow_rejects_total,
+            )
         if getattr(self, "ssl_context", None) is not None:
             self._close_request_quietly(request)
             return
