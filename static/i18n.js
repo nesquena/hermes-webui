@@ -875,6 +875,7 @@ const LOCALES = {
     settings_main_advanced_service_tier_priority: 'Priority (fast)',
     settings_label_auxiliary_models: 'Auxiliary Models',
     settings_desc_auxiliary_models: 'Side-task routing for vision, compression, title generation, etc. "Auto" uses your main chat model.',
+    settings_vcf_load_failed: 'Could not load vision routing. Reopen Settings to retry.',
     settings_label_vision_capability_first: 'Send images directly to vision-capable models',
     settings_desc_vision_capability_first: 'When on, any model that advertises vision support receives attached images as native pixels instead of routing them through the auxiliary vision model above — which then stays reserved for models that cannot see images themselves. When off, a configured auxiliary vision model handles all images.',
     settings_vcf_on: 'Vision-capable models now receive images directly',
