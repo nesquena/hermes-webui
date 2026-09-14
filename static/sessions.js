@@ -2165,6 +2165,12 @@ async function loadSession(sid){
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
+      // The journal-backed Anchor scene is authoritative through its resume
+      // cursor; newer rows arrive through the reattached SSE stream. Replaying
+      // the older INFLIGHT tool cache after a successful scene restore would
+      // redraw all N rows N times. Keep the #3707 replay only for legacy HTML
+      // restoration or a failed/unavailable scene render.
+      if(restoredAnchorScene) return;
       const liveToolCalls=Array.isArray(S.toolCalls)
         ? S.toolCalls
         : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);

@@ -8534,7 +8534,11 @@ if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatAct
 function _pickTransparentEventTimestamps(enabled){
   _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  // Reconcile both preserved live rows and settled history immediately. A full
+  // transcript rebuild can restore a structurally-ahead live turn unchanged.
+  if(typeof _syncTransparentEventTimestampVisibility==='function'){
+    document.querySelectorAll('#msgInner .transparent-event-row').forEach(_syncTransparentEventTimestampVisibility);
+  }
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
