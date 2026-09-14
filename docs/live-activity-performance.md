@@ -4,7 +4,11 @@ Tool rows in long active turns are reused when their inputs haven't changed. Thi
 
 The reuse signature is stored on the DOM node, not in a global session cache. HTML-restored nodes therefore rebuild once, and removing a turn releases its cached signatures. Compact tool groups retain their disclosure wrapper when the card nodes are unchanged. Transparent ordering ignores hidden legacy prose anchors, which carry stream metadata but aren't visible activity.
 
-The running-dot pulse animates opacity rather than a spreading shadow, and respects reduced motion.
+The running-dot pulse animates opacity rather than a spreading shadow, and respects reduced motion. Lifecycle/state semantics are unchanged; the pulse and progress trajectory intentionally change visible motion and still require normal UX review.
+
+Timestamp visibility is reconciled in place on transparent tool cache hits rather than rebuilding the card. The timestamp picker also synchronizes mounted live and historical rows immediately, preserving detail DOM and text selection without waiting for SSE. Unchanged visibility performs no timestamp DOM writes; language and simplified-tool preferences remain content-signature inputs.
+
+The conversation lifecycle workflow runs the core Chromium energy, progress, fade and reconnect oracles without `continue-on-error`, alongside normal/error settlement and historical hydration. Repository branch-protection requirements remain administrator-owned.
 
 ## Checks
 

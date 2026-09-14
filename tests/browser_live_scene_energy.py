@@ -115,6 +115,51 @@ def main():
                             }""")
                             print(json.dumps(dict(engine=engine, mode=mode, **result)), flush=True)
                             assert result == dict(textBuilds=0, retained=True, completed=True), result
+                            if mode == 'transparent_stream':
+                                page.evaluate("""async()=>{
+                                  _syncChatActivityDisplayModeControl('transparent_stream');
+                                  const rows=()=>Array.from(document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]'));
+                                  const before=rows();
+                                  const detail=before[0].querySelector('.tool-card-detail');
+                                  detail.style.display='block';
+                                  const text=detail.querySelector('pre')||detail;
+                                  const range=document.createRange();range.selectNodeContents(text);
+                                  const selection=getSelection();selection.removeAllRanges();selection.addRange(range);
+                                  const selected=selection.toString();
+                                  if(!selected)throw new Error('empty preference selection');
+                                  const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
+                                  const check=enabled=>{
+                                    if(!before.every((row,i)=>row===rows()[i]&&row.isConnected))throw new Error('preference detached rows');
+                                    if(!before.every(row=>!!row.querySelector('.transparent-event-time')===enabled))throw new Error('stale timestamp preference');
+                                    if(selection.toString()!==selected||detail.style.display!=='block')throw new Error('preference lost detail/selection '+JSON.stringify({selected,current:selection.toString(),display:detail.style.display,connected:detail.isConnected,enabled}));
+                                  };
+                                  for(const enabled of [false,true]){
+                                    _pickTransparentEventTimestamps(enabled);
+                                    check(enabled); // Must update without waiting for SSE.
+                                    source.emit('token',{text:'Preference prose '});
+                                    await new Promise(r=>setTimeout(r,600));
+                                    check(enabled);
+                                  }
+                                  // Also exercise cache hits after preference reconciliation from
+                                  // another source (boot/settings response), without the picker.
+                                  for(const enabled of [false,true]){
+                                    window._transparentEventTimestamps=enabled;
+                                    _renderLiveAnchorActivitySceneForStream('run-fixture','fixture');
+                                    check(enabled);
+                                  }
+                                  selection.removeAllRanges();
+                                  // Sibling cache inputs must still invalidate rendered content.
+                                  const scene=_projectLiveAnchorActivitySceneForStream('run-fixture',chatActivityMode());
+                                  const row=scene.activity_rows.find(r=>r.role==='tool');
+                                  const signature=_anchorSceneToolRenderSignature(row,{live:true});
+                                  const lang=document.documentElement.lang;
+                                  document.documentElement.lang='fr';
+                                  if(signature===_anchorSceneToolRenderSignature(row,{live:true}))throw new Error('language missing from cache');
+                                  document.documentElement.lang=lang;
+                                  window._simplifiedToolCalling=false;
+                                  if(signature===_anchorSceneToolRenderSignature(row,{live:true}))throw new Error('tool mode missing from cache');
+                                  window._simplifiedToolCalling=true;
+                                }""")
                             # Corrections may mutate an existing row object; identity alone
                             # is not a valid cache key. Reordering/removal and mode switches
                             # must also invalidate ownership without duplicating tool rows.

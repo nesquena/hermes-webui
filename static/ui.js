@@ -7890,6 +7890,15 @@ function _transparentEventTimestampSeconds(row, opts){
   if(opts.live===true) return _activityNowSeconds();
   return null;
 }
+function _syncTransparentEventTimestampVisibility(row){
+  const header=row&&row.querySelector('.tool-card-header,.thinking-card-header');
+  if(!header) return;
+  const enabled=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
+  // A cache hit with unchanged preferences must remain free of DOM writes.
+  if(!!header.querySelector('.transparent-event-time')!==enabled){
+    _syncTransparentEventTimestamp(row,header,{});
+  }
+}
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
   opts=opts||{};
@@ -16383,6 +16392,9 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
     if(signature&&cached&&cached._anchorToolRenderSignature===signature){
+      // Timestamp visibility is presentation state, independent of tool content.
+      // Reconcile it in place so toggles preserve disclosure and text selection.
+      _syncTransparentEventTimestampVisibility(cached);
       preserveByKey.delete(dataKey);
       renderedRows.push(cached);
       continue;

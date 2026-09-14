@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Actual stylesheet: running progress animates without per-frame layout."""
 import json
+import os
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     with sync_playwright() as pw:
-        for engine in ('chromium', 'webkit'):
+        for engine in os.environ.get('BROWSERS', 'chromium,webkit').split(','):
             browser = getattr(pw, engine).launch(headless=True)
             try:
                 page = browser.new_page(viewport={'width': 390, 'height': 844})
