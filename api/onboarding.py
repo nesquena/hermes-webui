@@ -35,6 +35,34 @@ from api.workspace import get_last_workspace, load_workspaces
 logger = logging.getLogger(__name__)
 
 
+# ── OpenRouter namespace translation (#7514) ────────────────────────────────
+#
+# ``_FALLBACK_MODELS`` (api/config.py) is authored for the *direct* provider
+# endpoints, so its Z.AI entries carry the provider's own ``zai/`` prefix.
+# OpenRouter serves the same models under its canonical ``z-ai/`` slug, so
+# projecting that list into the OpenRouter setup verbatim handed the wizard
+# ids that 404 on openrouter.ai (``zai/glm-5.3`` instead of
+# ``z-ai/glm-5.3``).  Translate at this projection boundary only — the
+# fallback catalog and the direct ``zai`` setup keep their own namespace.
+#
+# Every other namespace in the fallback list is already OpenRouter-canonical:
+# openai/, anthropic/, google/, deepseek/, qwen/, x-ai/, mistralai/, minimax/,
+# openrouter/, tencent/, nvidia/, arcee-ai/ — hence a single mapping entry.
+_OPENROUTER_NAMESPACE_MAP = {"zai/": "z-ai/"}
+
+
+def _to_openrouter_namespace(model_id: str) -> str:
+    """Return *model_id* with direct-provider prefixes mapped to OpenRouter's.
+
+    Ids whose namespace already matches OpenRouter (or that carry no
+    namespace) are returned unchanged.
+    """
+    for direct_prefix, openrouter_prefix in _OPENROUTER_NAMESPACE_MAP.items():
+        if model_id.startswith(direct_prefix):
+            return openrouter_prefix + model_id[len(direct_prefix):]
+    return model_id
+
+
 _SUPPORTED_PROVIDER_SETUPS = {
     # ── Easy start ──────────────────────────────────────────────────────
     "openrouter": {
@@ -43,7 +71,8 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_model": "anthropic/claude-sonnet-4.6",
         "requires_base_url": False,
         "models": [
-            {"id": model["id"], "label": model["label"]} for model in _FALLBACK_MODELS
+            {"id": _to_openrouter_namespace(model["id"]), "label": model["label"]}
+            for model in _FALLBACK_MODELS
         ],
         "category": "easy_start",
         "quick": True,

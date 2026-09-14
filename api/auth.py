@@ -105,6 +105,12 @@ _TRUSTED_AUTH_HEADER_ENV = 'HERMES_WEBUI_TRUSTED_AUTH_HEADER'
 _TRUSTED_GROUPS_HEADER_ENV = 'HERMES_WEBUI_TRUSTED_GROUPS_HEADER'
 _TRUSTED_GROUP_PROFILE_MAP_ENV = 'HERMES_WEBUI_GROUP_PROFILE_MAP'
 _TRUSTED_AUTH_LOGOUT_URL_ENV = 'HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL'
+# Opt-in: also treat '|' as a group separator in the trusted-groups header.
+# Off by default so an existing deployment whose group NAME legitimately
+# contains a literal '|' is never silently re-split into two groups (which
+# could change its profile binding). Set to 1/true/yes/on for identity
+# providers (some Authentik outpost configs) that emit "admins|developpeur".
+_TRUSTED_GROUPS_PIPE_SEPARATOR_ENV = 'HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR'
 _TRUSTED_AUTH_WARNINGS_EMITTED: set[str] = set()
 
 
@@ -722,7 +728,20 @@ def _trusted_groups_header_value(handler) -> list[str]:
     if not raw:
         return []
     values = []
-    for part in str(raw).replace('\n', ',').split(','):
+    # Authentik's outpost typically joins multiple group names with a comma or
+    # newline; parse those as separators by default. Some proxy provider /
+    # property-mapping configs instead emit a pipe-separated list (e.g.
+    # "admins|developpeur"), which a comma-only split would treat as one
+    # unmatched group name — silently dropping the session to the unbound
+    # "default" profile despite a legitimate mapped membership. Pipe splitting
+    # is therefore available but OPT-IN (HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR),
+    # because a group NAME can legitimately contain a literal '|' and must not be
+    # re-split by default — doing so unconditionally could change an existing
+    # deployment's profile binding.
+    normalized = str(raw).replace('\n', ',')
+    if str(os.getenv(_TRUSTED_GROUPS_PIPE_SEPARATOR_ENV, '')).strip().lower() in ('1', 'true', 'yes', 'on'):
+        normalized = normalized.replace('|', ',')
+    for part in normalized.split(','):
         part = part.strip()
         if part:
             values.append(part)

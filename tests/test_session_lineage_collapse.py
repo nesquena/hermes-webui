@@ -554,6 +554,85 @@ console.log(JSON.stringify(rows));
     assert rows[0]["_child_sessions"][0]["session_id"] == "subagent_child"
 
 
+def test_read_only_child_sessions_are_stacked_after_writable_children():
+    """Read-only delegated children should render after fork/writable children."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isReadOnlySession'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{
+  session_id:'parent',
+  title:'Parent conversation',
+  message_count:3,
+  updated_at: 1700000010,
+  last_message_at: 1700000010,
+}}];
+const raw = [
+  collapsed[0],
+  {{
+    session_id:'read_only_subagent',
+    title:'Retained Subagent',
+    parent_session_id:'parent',
+    relationship_type:'child_session',
+    read_only: true,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    updated_at: 1700000030,
+    last_message_at: 1700000030,
+  }},
+  {{
+    session_id:'fork_child',
+    title:'Fork',
+    parent_session_id:'parent',
+    session_source:'fork',
+    raw_source:'webui',
+    source_tag:'webui',
+    source_label:'WebUI',
+    updated_at: 1700000040,
+    last_message_at: 1700000040,
+  }},
+  {{
+    session_id:'writable_subagent',
+    title:'Writable Subagent',
+    parent_session_id:'parent',
+    relationship_type:'child_session',
+    read_only: false,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    updated_at: 1700000020,
+    last_message_at: 1700000020,
+  }},
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows[0]._child_sessions.map(row => row.session_id)));
+"""
+    rows = json.loads(_run_node(source))
+    assert rows == ["fork_child", "writable_subagent", "read_only_subagent"]
+    assert "const sortedChildren=[...s._child_sessions];" in js
+    assert "const sortedChildren=[...s._child_sessions].sort" not in js
+
+
 def test_parent_source_label_display_text_does_not_force_external_orphaning():
     """Display-only source labels must not drive machine source classification."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")

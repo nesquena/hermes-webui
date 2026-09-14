@@ -265,6 +265,23 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
             live_local_tokens.add(live_entry_token)
             if not str(live_data.get("approval_id") or "").strip():
                 live_data["approval_id"] = f"gwlocal:{live_entry_token}"
+
+    # A raw id-less LOCAL entry in `_pending` (agent-side _pending_result drops
+    # `{command, pattern_key, pattern_keys, description}` verbatim when no
+    # gateway notifier is registered) is unactionable by contract: the frontend
+    # owner-capture requires an approval_id, so its card can neither be
+    # approved nor dismissed — the poll re-serves it forever. Mint a stable id
+    # on the entry itself (the same contract the producer-tokenization loop
+    # above applies to _gateway_queues producers). Minting on the stored dict
+    # keeps the id stable across polls, so frontend dismiss markers persist.
+    for entry in queue_list:
+        if not isinstance(entry, dict) or _is_gateway_mirror_entry(entry):
+            continue
+        if str(entry.get("approval_id") or "").strip():
+            continue
+        if str(entry.get("run_id") or "").strip():
+            continue
+        entry["approval_id"] = f"gwlocal-mirrorless:{uuid.uuid4().hex}"
     live_token = (
         _gateway_mirror_entry_token(live_head_entry)
         if live_head_entry and live_head_data

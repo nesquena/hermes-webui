@@ -249,6 +249,13 @@ def test_profile_goal_falls_back_when_session_db_path_is_frozen(monkeypatch, tmp
     """A context API alone cannot make an import-time SessionDB path profile-safe."""
     from api import goals as webui_goals
     native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    # Ensure the agent dir is on sys.path before importing the sibling top-level
+    # `hermes_state` module. importorskip("hermes_cli.goals") can succeed from a
+    # cached sys.modules entry even after a prior shard test stripped the agent
+    # dir from sys.path, but the bare `import hermes_state` below is uncached and
+    # would then fail with ModuleNotFoundError under full-suite ordering (every
+    # other test in this file already does this prepend).
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
     import hermes_state
 
     frozen_db_path = tmp_path / "frozen-home" / "state.db"

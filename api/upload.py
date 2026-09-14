@@ -122,8 +122,8 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
-def _upload_destination(session_id: str, safe_name: str) -> Path:
-    dest_dir = _session_attachment_dir(session_id)
+def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
+    dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
@@ -224,8 +224,20 @@ def handle_upload(handler):
         if _reject_invisible_session(handler, s):
             return True
         safe_name = _sanitize_upload_name(filename)
-        dest = _upload_destination(session_id, safe_name)
-        dest.write_bytes(file_bytes)
+        dest_dir = _session_attachment_dir(session_id)
+        dest = _upload_destination(session_id, safe_name, dest_dir)
+        # #3398-style TOCTOU hardening, mirrored from the workspace upload
+        # path: O_CREAT|O_EXCL|O_NOFOLLOW anchored open so a raced duplicate
+        # cannot be silently overwritten and a raced symlink subpath cannot
+        # redirect the write outside the attachment dir.
+        try:
+            _wfd = open_anchored_create_fd(dest_dir, dest)
+        except FileExistsError:
+            return j(handler, {'error': f'Upload destination already exists: {safe_name}'}, status=409)
+        except (ValueError, OSError):
+            return j(handler, {'error': 'Upload destination rejected'}, status=403)
+        with os.fdopen(_wfd, 'wb', closefd=True) as _wfh:
+            _wfh.write(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         return j(handler, {
             'filename': dest.name,
