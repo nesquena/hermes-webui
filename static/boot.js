@@ -47,6 +47,13 @@ async function cancelStream(reason){
   if(sid && S.activeStreamId !== streamId && typeof closeLiveStream==='function'){
     closeLiveStream(sid, streamId);
   }
+  // Derive persistence-failure truth DIRECTLY from the accepted response,
+  // independent of current pane/stream ownership (gate-certifier blocker #2:
+  // owner switch A→B suppressed a real persistence_failed response).  The old
+  // code only checked persistence_failed inside the old-owner branch, so an
+  // A→B (or A→B→A) switch while /api/chat/cancel was pending returned
+  // {persistence_failed:false} for a real failure and showed no warning.
+  const _persistenceFailed = !!(respOk && respBody && respBody.persistence_failed);
   // Owner guard: if the backend accepted the active-session cancel, leave
   // the current SSE transport and owner state intact so the terminal
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
@@ -57,11 +64,25 @@ async function cancelStream(reason){
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
-    // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
-    // distinguish reasons — keep the toast generic and short.
-    if(typeof showToast==='function') showToast('Stream is no longer active',2000);
+    // Surface persistence failure honestly: when the backend reports
+    // persistence_failed, the terminal fallback notice could not be saved —
+    // show a truthful warning instead of the generic "stream no longer
+    // active" toast.
+    if(_persistenceFailed && typeof showToast==='function'){
+      showToast(t('cancel_persistence_warning'),4000,'warning');
+    }else if(typeof showToast==='function'){
+      showToast(t('stream_no_longer_active'),2000);
+    }
+  }else if(_persistenceFailed && typeof showToast==='function'){
+    // Owner switched (A→B) before the response arrived — still surface the
+    // persistence-failure warning against the originating cancellation
+    // transaction without mutating successor B's state.
+    showToast(t('cancel_persistence_warning'),4000,'warning');
   }
-  return respOk;
+  // Return a structured cancellation result matching cancelSessionStream()'s
+  // contract so callers can distinguish success from persistence failure
+  // (gate-certifier blocker #4).
+  return {cancelled: respOk, persistence_failed: _persistenceFailed};
 }
 
 async function cancelSessionStream(session){
@@ -74,11 +95,23 @@ async function cancelSessionStream(session){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
   let respOk=false;
+  let respBody=null;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
+    try{respBody=await r.json();}catch(_){}
   }catch(e){/* close local stream; keep UI state honest below */}
-  if(!respOk) return false;
+  if(!respOk) return {cancelled: false, persistence_failed: false};
+  const persistenceFailed = !!(respBody && respBody.persistence_failed);
+  if(persistenceFailed){
+    if(typeof showToast==='function') showToast(t('cancel_persistence_warning'),4000,'warning');
+    // The backend DID cancel the stream (agent interrupted, cancel marker
+    // persisted) — only the fallback-notice stamping failed.  Continue with
+    // local UI cleanup (closeLiveStream, active_stream_id=null, INFLIGHT
+    // delete) so the sidebar does not stay stuck rendering "streaming".
+    // Mirrors cancelStream()'s active-chat path which clears state even on
+    // persistence_failed.  (greptile P1: cancelSessionStream streaming-state bug)
+  }
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -100,7 +133,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
-  return true;
+  return {cancelled: true, persistence_failed: persistenceFailed};
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
@@ -3310,6 +3343,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._notificationsEnabled=!!s.notifications_enabled;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
+    window._showFallbackNotices=s.show_fallback_notices!==false;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode=s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'
       ? s.chat_activity_display_mode
@@ -3467,6 +3501,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
+    window._showFallbackNotices=true;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
