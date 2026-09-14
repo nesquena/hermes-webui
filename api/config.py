@@ -7022,7 +7022,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     ``force_refresh=True`` is an internal escape hatch for bounded freshness
     checks that need a real live rebuild while preserving the default cache
     contract for every existing caller.
+
+    ``prefer_cache`` and ``force_refresh`` are mutually exclusive: the first
+    forbids live discovery ("never run or wait for the live provider probe"),
+    while the second requires it. The contradictory combination raises
+    ``ValueError`` at entry so the non-blocking contract holds for every
+    accepted input. (No in-tree caller passes both.)
     """
+    if prefer_cache and force_refresh:
+        raise ValueError(
+            "prefer_cache and force_refresh are mutually exclusive: "
+            "prefer_cache forbids live discovery while force_refresh requires it"
+        )
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
