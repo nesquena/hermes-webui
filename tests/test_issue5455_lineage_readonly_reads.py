@@ -16,6 +16,8 @@ from contextlib import closing
 import pytest
 
 import api.agent_sessions as agent_sessions
+import api.models as models
+import api.routes as routes
 from api.agent_sessions import (
     open_state_db_readonly,
     read_session_lineage_metadata,
@@ -165,3 +167,20 @@ def test_gateway_watcher_fingerprint_opens_read_only(tmp_path, monkeypatch):
     assert fp is not None  # a fingerprint (not the schema-bail None) was produced
     assert calls and calls[0]["uri"] is True
     assert "mode=ro" in calls[0]["target"]
+
+
+def test_state_db_session_source_uses_read_only_helper(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    _make_lineage_db(db)
+    calls = []
+    real_helper = routes.open_state_db_readonly
+
+    def spy(path, *args, **kwargs):
+        calls.append(path)
+        return real_helper(path, *args, **kwargs)
+
+    monkeypatch.setattr(routes, "open_state_db_readonly", spy)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    assert routes._state_db_session_source("child-1") == "cli"
+    assert calls == [db]

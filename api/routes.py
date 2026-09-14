@@ -8125,8 +8125,7 @@ def _state_db_session_source(sid: str) -> str:
         db_path = _active_state_db_path()
         if not db_path or not Path(db_path).exists():
             return ""
-        import sqlite3 as _sqlite
-        with closing(_sqlite.connect(str(db_path))) as _conn:
+        with closing(open_state_db_readonly(db_path, log=logger)) as _conn:
             row = _conn.execute(
                 "SELECT source FROM sessions WHERE id = ?", (sid,)
             ).fetchone()
@@ -8385,7 +8384,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         db_path = _active_state_db_path()
         if db_path and Path(db_path).exists():
             import sqlite3 as _sqlite
-            with closing(_sqlite.connect(str(db_path))) as _conn:
+            with closing(open_state_db_readonly(db_path, log=logger)) as _conn:
                 _conn.row_factory = _sqlite.Row
                 _row = _conn.execute(
                     "SELECT source, title, model, cwd, started_at, ended_at "
