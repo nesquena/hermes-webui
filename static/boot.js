@@ -1580,6 +1580,16 @@ window.renderTranscript=function(container, messages, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
+  // Generation snapshot for the current voice-mode turn (set by _speakResponse
+  // right after the stop/start boundary). Stale watchdogs compare against it
+  // so a replacement playback never has the mic reopened underneath it.
+  let _voiceTtsGenStart=0;
+  // Delayed mic rearm scheduled by a playback's terminal callbacks. Owned by
+  // the generation that scheduled it: a stale timer from playback A must not
+  // reopen the mic underneath a replacement playback B. Cleared on
+  // replacement/deactivation (defense in depth); the timer re-checks
+  // active+speaking+generation at execution time — the required guard.
+  let _voiceMicRearmTimer=null;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
   //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
   //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
@@ -1599,21 +1609,44 @@ window.renderTranscript=function(container, messages, opts){
     }
   }
 
+  // Owner-aware delayed mic rearm for every playback terminal callback.
+  // Captures the playback generation at schedule time; when the timer fires
+  // it requires voice mode to still be active+speaking AND the same
+  // generation to still own TTS, so a stale terminal callback from playback
+  // A can never construct SpeechRecognition while a replacement playback B
+  // is starting. Replacement/deactivation clear it as defense in depth.
+  function _clearVoiceMicRearm(){
+    if(_voiceMicRearmTimer){ clearTimeout(_voiceMicRearmTimer); _voiceMicRearmTimer=null; }
+  }
+  function _scheduleVoiceMicRearm(delayMs){
+    const _gen=_ttsGeneration;
+    _clearVoiceMicRearm();
+    _voiceMicRearmTimer=setTimeout(function(){
+      _voiceMicRearmTimer=null;
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(_ttsGeneration!==_gen) return;
+      _startListening();
+    },delayMs);
+  }
+
   function _armBrowserTtsRecovery(clean, rate){
+    // Capture this turn's generation: if a replacement playback claims a new
+    // one, these recovery timers are stale and must never reopen the mic.
+    const _gen=_voiceTtsGenStart;
     _clearBrowserTtsRecovery();
     _browserTtsSuppressNextErrorRearm=false;
     const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
     // Chromium can drop utter.onend on later turns, so force a recovery path.
     const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
     _browserTtsWatchdog=setTimeout(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      if(!_voiceModeActive||_voiceModeState!=='speaking'||_ttsGeneration!==_gen) return;
       _browserTtsSuppressNextErrorRearm=true;
       try{ speechSynthesis.cancel(); }catch(_){}
       _clearBrowserTtsRecovery();
       _startListening();
     },watchdogMs);
     _browserTtsKeepAlive=setInterval(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='speaking'){
+      if(!_voiceModeActive||_voiceModeState!=='speaking'||_ttsGeneration!==_gen){
         _clearBrowserTtsRecovery();
         return;
       }
@@ -1769,11 +1802,31 @@ window.renderTranscript=function(container, messages, opts){
         .trim();
     }
     if(!clean){ _startListening(); return; }
+
+    // Canonical replacement boundary — the same stop/start boundary as
+    // autoReadLastAssistant()/speakMessage(). Entering voice-mode speech
+    // replaces any active playback of any engine: stopTTS() invalidates every
+    // in-flight generation, cancels browser speech, stops Web Audio/audio
+    // elements, and resets every [data-speaking="1"] button. Stale browser
+    // recovery handles from a previous turn are cleared too, so their
+    // watchdog cannot reopen the mic under the new playback.
+    if(typeof stopTTS==='function') stopTTS();
+    _clearBrowserTtsRecovery();
+    _clearVoiceMicRearm();
+    _browserTtsSuppressNextErrorRearm=false;
+    // Snapshot for this turn's continuations (browser callbacks + watchdog):
+    // any later stop/replacement invalidates it.
+    const _voiceGenStart=_ttsGeneration;
+    _voiceTtsGenStart=_voiceGenStart;
+
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
     // via the extension, then play through the same Audio lifecycle as edge.
+    // The generation token gates the late synth completion: a promise that
+    // resolves after a stop/replacement must not start audio or mutate state.
     if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-      _ttsSpeaking=true;
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
       const _opts={
         voice: localStorage.getItem("hermes-tts-voice")||'',
         rate: parseFloat(localStorage.getItem("hermes-tts-rate")),
@@ -1781,112 +1834,130 @@ window.renderTranscript=function(container, messages, opts){
       };
       Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
         .then(function(buf){
+          if(!_owns()) return;
           const blob=new Blob([buf]);
           const url=URL.createObjectURL(blob);
           const audio=new Audio(url);
           _playingEdgeAudio=audio;
           audio.onended=function(){
-            _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
+            if(!_owns()) return;
+            _ttsSpeaking=false;
+            _scheduleVoiceMicRearm(500);
           };
           audio.onerror=function(){
-            _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(!_owns()) return;
+            _ttsSpeaking=false;
+            _scheduleVoiceMicRearm(1000);
           };
           audio.play().catch(function(){
-            _ttsSpeaking=false;
             if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
             URL.revokeObjectURL(url);
-            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+            if(!_owns()) return;
+            _ttsSpeaking=false;
+            _scheduleVoiceMicRearm(1000);
           });
         })
         .catch(function(){
+          if(!_owns()) return;
           _ttsSpeaking=false;
-          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+          _scheduleVoiceMicRearm(1000);
         });
       return;
     }
     if(engine==="elevenlabs"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // Shared /api/tts scheduler: paced across engines/generations with a
+      // bounded owner-aware 429 retry — a voice-mode request right after any
+      // other engine's fetch waits for the slot instead of hitting 429.
+      _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, engine: 'elevenlabs'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
+      }, _owns)
+      .then(res => {
+        if(!_owns()) return;
+        if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
+        const blob=new Blob([res.buf]);
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(500);
         };
         audio.onerror = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         };
         audio.play().catch(e => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         });
       })
       .catch(() => {
+        if(!_owns()) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        _scheduleVoiceMicRearm(1000);
       });
       return;
     }
     if(engine==="openai"){
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // Same shared scheduler as the other engines: this request competes for
+      // the per-client slot with every other /api/tts call.
+      _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, engine: 'openai'})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
+      }, _owns)
+      .then(res => {
+        if(!_owns()) return;
+        if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
+        const blob=new Blob([res.buf]);
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
         audio.onended = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(500);
         };
         audio.onerror = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         };
         audio.play().catch(() => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         });
       })
       .catch(() => {
+        if(!_owns()) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        _scheduleVoiceMicRearm(1000);
       });
       return;
     }
@@ -1897,17 +1968,17 @@ window.renderTranscript=function(container, messages, opts){
       let rate='', pitch='';
       if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
       if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-      _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      const gen=_beginTtsPlayback();
+      const _owns=function(){ return _ownsTtsPlayback(gen); };
+      _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, voice, rate, pitch})
-      })
-      .then(r => {
-        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
-        return r.blob();
-      })
-      .then(blob => {
+      }, _owns)
+      .then(res => {
+        if(!_owns()) return;
+        if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
+        const blob=new Blob([res.buf]);
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         // Register with the shared handle (declared in ui.js, same global scope;
@@ -1916,26 +1987,31 @@ window.renderTranscript=function(container, messages, opts){
         // Edge playback. Without this the audio is local here and unstoppable.
         _playingEdgeAudio=audio;
         audio.onended = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(500);
         };
         audio.onerror = () => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         };
         audio.play().catch(e => {
-          _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
-          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+          URL.revokeObjectURL(url);
+          if(!_owns()) return;
+          _ttsSpeaking=false;
+          _scheduleVoiceMicRearm(1000);
         });
       })
       .catch(() => {
+        if(!_owns()) return;
         _ttsSpeaking=false;
-        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        _scheduleVoiceMicRearm(1000);
       });
       return;
     }
@@ -1954,18 +2030,22 @@ window.renderTranscript=function(container, messages, opts){
     if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
 
     utter.onend=()=>{
+      // A stale utterance (replaced/stopped) must not resume listening under
+      // a newer playback — it would see state==='speaking' and reopen the mic.
+      if(_ttsGeneration!==_voiceGenStart) return;
       _browserTtsSuppressNextErrorRearm=false;
       _clearBrowserTtsRecovery();
       // After speaking, go back to listening
-      if(_voiceModeActive&&_voiceModeState==='speaking') setTimeout(()=>_startListening(),500);
+      _scheduleVoiceMicRearm(500);
     };
     utter.onerror=()=>{
+      if(_ttsGeneration!==_voiceGenStart) return;
       _clearBrowserTtsRecovery();
       if(_browserTtsSuppressNextErrorRearm){
         _browserTtsSuppressNextErrorRearm=false;
         return;
       }
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      _scheduleVoiceMicRearm(1000);
     };
 
     _armBrowserTtsRecovery(clean, utter.rate);
@@ -1973,7 +2053,7 @@ window.renderTranscript=function(container, messages, opts){
       speechSynthesis.speak(utter);
     }catch(_){
       _clearBrowserTtsRecovery();
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      _scheduleVoiceMicRearm(1000);
     }
   }
 
@@ -2041,6 +2121,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _clearVoiceMicRearm();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
