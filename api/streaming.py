@@ -9466,19 +9466,19 @@ def _run_agent_streaming(
         # Resolved the same way as `s.workspace` below so the bound cwd and the
         # session's own record cannot disagree. Guarded: a turn must not die
         # here because a workspace path is malformed.
+        s = get_session(session_id)
         try:
-            _turn_workspace_cwd = str(Path(workspace).expanduser().resolve())
+            _turn_workspace_cwd = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
         except Exception:
             _turn_workspace_cwd = ""
             logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
         _turn_session_identity_tokens = _set_turn_session_identity(
             session_id, workspace=_turn_workspace_cwd
         )
-        s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
+        s.workspace = _turn_workspace_cwd
         _last_persisted_model = None
         _last_persisted_provider = None
         _turn_owns_persisted_model = False

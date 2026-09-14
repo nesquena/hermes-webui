@@ -635,8 +635,13 @@ def handle_workspace_upload(handler):
         if _reject_invisible_session(handler, session):
             return True
 
-        # Resolve workspace root from session
-        workspace = resolve_trusted_workspace(session.workspace)
+        # Resolve workspace root using the session profile, not the ambient request profile.
+        try:
+            workspace = resolve_trusted_workspace(
+                session.workspace, profile=getattr(session, "profile", None)
+            )
+        except TypeError:
+            workspace = resolve_trusted_workspace(session.workspace)
 
         # Resolve target subdirectory within workspace
         target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace

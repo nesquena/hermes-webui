@@ -411,6 +411,17 @@ def test_detached_streaming_worker_preserves_session_profile_workspace(monkeypat
     resolved_ws = workspace._resolve_path("/srv/remote-alice", profile=s.profile)
     assert str(resolved_ws) == "/srv/remote-alice"
 
+    from api import streaming
+    turn_ws = streaming._resolve_path("/srv/remote-alice", profile=getattr(s, "profile", None))
+    assert str(turn_ws) == "/srv/remote-alice"
+
+    tokens = streaming._set_turn_session_identity(s.session_id, workspace=str(turn_ws))
+    try:
+        from agent.runtime_cwd import _SESSION_CWD
+        assert _SESSION_CWD.get() == "/srv/remote-alice"
+    finally:
+        streaming._reset_turn_session_identity(tokens)
+
 
 def test_gateway_multimodal_message_preserves_remote_profile_workspace(monkeypatch, tmp_path):
     """Gateway chat multimodal payload builder preserves remote profile workspace containment."""
