@@ -145,8 +145,16 @@ ENV HERMES_WEBUI_PORT=8787
 
 EXPOSE 8787
 
+# Real liveness probe against the configured port: ${HERMES_WEBUI_PORT}
+# resolves at run time (shell-form CMD), so a container started with
+# `-e HERMES_WEBUI_PORT=9000` probes 9000 instead of a baked-in 8787. The
+# direct curl covers the default plain-HTTP deployment; the TLS-aware
+# health_probe.sh fallback keeps HTTPS (HERMES_WEBUI_TLS_CERT/KEY) containers
+# reporting healthy instead of failing the plain-HTTP curl.
 HEALTHCHECK --interval=30s --timeout=8s --start-period=10s --retries=3 \
-  CMD bash /apptoo/scripts/lib/health_probe.sh localhost 8787 /health 2 >/dev/null || exit 1
+  CMD curl -fsS --max-time 3 "http://127.0.0.1:${HERMES_WEBUI_PORT:-8787}/health" >/dev/null 2>&1 \
+      || bash /apptoo/scripts/lib/health_probe.sh 127.0.0.1 "${HERMES_WEBUI_PORT:-8787}" /health 3 >/dev/null 2>&1 \
+      || exit 1
 
 # docker_init.bash performs root-only bind-mount setup, then drops to hermeswebui
 # before starting the WebUI server. The production image does not ship sudo.

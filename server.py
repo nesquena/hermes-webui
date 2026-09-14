@@ -461,6 +461,94 @@ class Handler(BaseHTTPRequestHandler):
         self._handle_write(handle_delete)
 
 
+def _overflow_watchdog_window_s() -> int:
+    """Continuous worker-pool-exhaustion window (seconds) before suicide.
+
+    HERMES_WEBUI_OVERFLOW_SUICIDE_S wins over the legacy WEBUI_OVERFLOW_SUICIDE_S
+    spelling. 0 (or a negative value) disables the watchdog; bad input falls
+    back to the 45s default.
+    """
+    for name in ("HERMES_WEBUI_OVERFLOW_SUICIDE_S", "WEBUI_OVERFLOW_SUICIDE_S"):
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            continue
+        return max(0, value)
+    return 45
+
+
+def _run_overflow_watchdog(httpd, window_s: float, poll_interval_s: float = 1.0, _exit=os._exit) -> None:
+    """Exit the process once the request worker pool stays exhausted too long.
+
+    A pool with zero free slots for ``window_s`` straight seconds is wedged
+    (leaked or deadlocked handler threads): the accept loop rejects every new
+    request with 503 forever while the process still looks alive to `kill -0`
+    and the port stays bound. Dying via os._exit(1) lets the supervisor
+    (docker_init.bash respawn loop, systemd/launchd Restart=) replace the
+    process with a working one. Graceful shutdown is skipped by design — the
+    pool is wedged, so a drain would never finish — and this thread must not
+    touch any lock a wedged handler could be holding.
+    """
+    exhausted_since = None
+    while True:
+        time.sleep(poll_interval_s)
+        slots = getattr(httpd, "_request_worker_slots", None)
+        free = getattr(slots, "_value", None)
+        if free is None:
+            return
+        if free > 0:
+            exhausted_since = None
+            continue
+        now = time.monotonic()
+        if exhausted_since is None:
+            exhausted_since = now
+            continue
+        elapsed = now - exhausted_since
+        if elapsed < window_s:
+            continue
+        max_workers = getattr(httpd, "max_request_workers", 0)
+        message = (
+            "[webui] FATAL: worker pool exhausted for %.0fs (window %.0fs): "
+            "%d/%d slots in use, %d overflow rejects total — exiting so the "
+            "supervisor can respawn a working process"
+            % (
+                elapsed,
+                window_s,
+                max_workers - free,
+                max_workers,
+                getattr(httpd, "overflow_rejects_total", 0),
+            )
+        )
+        try:
+            print(message, flush=True)
+            logger.critical(message)
+        except Exception:
+            pass
+        _exit(1)
+        return
+
+
+def _start_overflow_watchdog(httpd) -> None:
+    window = _overflow_watchdog_window_s()
+    if window <= 0:
+        print('[ok] Overflow watchdog disabled (HERMES_WEBUI_OVERFLOW_SUICIDE_S=0)', flush=True)
+        return
+    threading.Thread(
+        target=_run_overflow_watchdog,
+        args=(httpd, float(window)),
+        name="webui-overflow-watchdog",
+        daemon=True,
+    ).start()
+    print(
+        f'[ok] Overflow watchdog armed: exit(1) after {window}s of continuous '
+        f'worker-pool exhaustion (HERMES_WEBUI_OVERFLOW_SUICIDE_S)',
+        flush=True,
+    )
+
+
 def _raise_fd_soft_limit(target: int = 4096) -> dict:
     """Best-effort raise of RLIMIT_NOFILE for persistent WebUI hosts."""
     if resource is None:
@@ -733,6 +821,8 @@ def main() -> None:
     except (ValueError, OSError):
         # Not on the main thread (e.g. embedded/test harness); skip handler.
         logger.debug("Could not install SIGTERM handler", exc_info=True)
+
+    _start_overflow_watchdog(httpd)
 
     try:
         httpd.serve_forever()

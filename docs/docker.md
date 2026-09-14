@@ -336,6 +336,41 @@ If you need the separate dashboard container (e.g. resource limits per service),
 so the dashboard waits for the gateway to finish initialising agent-home before it
 starts its own init pass.
 
+## In-container supervision, health checks, and the overflow watchdog
+
+Three layers keep a containerized WebUI alive and observable:
+
+**1. Marker/respawn supervision.** `docker_init.bash` launches `server.py`
+through `scripts/lib/webui_supervisor.sh`, a marker-file + respawn loop. If
+the server process dies unexpectedly (crash, OOM kill, `pkill`), the
+supervisor respawns it within about a second instead of letting the container
+exit. `docker stop` (TERM) writes a stop marker and shuts down cleanly without
+respawning. Marker files live in `/tmp/hermeswebui_init/` inside the
+container: `webui.pid` (current server PID), `webui.stop` (stop intent),
+`webui.status` (one-line state telemetry). Tunables:
+
+- `HERMES_WEBUI_SUPERVISOR=0` — disable the loop (legacy single-shot launch).
+- `HERMES_WEBUI_SUPERVISOR_RESPAWN_DELAY_S` (default `1`) — delay before a respawn.
+- `HERMES_WEBUI_SUPERVISOR_MIN_UPTIME_S` (default `5`) /
+  `HERMES_WEBUI_SUPERVISOR_MAX_FAST_FAILS` (default `5`) — after this many
+  consecutive exits faster than the minimum uptime, the supervisor gives up
+  and exits non-zero so your `restart:` policy (and `docker ps`) surfaces a
+  genuinely broken install instead of hiding it behind a hot crash loop.
+
+**2. Docker `HEALTHCHECK`.** The image probes
+`http://127.0.0.1:${HERMES_WEBUI_PORT}/health` with `curl` (falling back to
+the TLS-aware `scripts/lib/health_probe.sh` for HTTPS deployments), so
+`docker ps` / `docker inspect` report real liveness on the configured port —
+including when you override `HERMES_WEBUI_PORT` at run time.
+
+**3. Overflow watchdog.** If the HTTP worker pool stays continuously
+exhausted (every sample of the last `HERMES_WEBUI_OVERFLOW_SUICIDE_S` seconds,
+default `45`; legacy spelling `WEBUI_OVERFLOW_SUICIDE_S` also accepted), the
+server logs a FATAL diagnostic and calls `os._exit(1)` — a pool that never
+frees a slot for that long is wedged, and dying lets the supervisor respawn a
+working process. Momentary load spikes never trigger it: one free-slot sample
+resets the window. Set the variable to `0` to disable.
+
 ## What goes wrong (and how to fix it)
 
 ### Compatibility policy and version pinning

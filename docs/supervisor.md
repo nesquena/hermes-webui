@@ -244,6 +244,19 @@ is reaching the process.
 process is still listening on the port but request handling is wedged, pair your
 supervisor with an HTTP probe and force a restart when the probe fails.
 
+Two built-in mechanisms complement the external probe:
+
+- **Docker:** the container entrypoint supervises ``server.py`` with a
+  marker/respawn loop of its own — see
+  [In-container supervision](docker.md#in-container-supervision-health-checks-and-the-overflow-watchdog).
+  Do not layer an extra host-side supervisor on the container process.
+- **Overflow watchdog (all platforms):** when the HTTP worker pool has been
+  continuously exhausted for ``HERMES_WEBUI_OVERFLOW_SUICIDE_S`` seconds
+  (default 45, ``0`` disables), the server logs a FATAL diagnostic and calls
+  ``os._exit(1)`` so the supervisor can respawn a working process. A wedged
+  pool rejects every request with 503 while still looking alive to a PID
+  check — exiting converts that silent failure into a supervised restart.
+
 Hermes Web UI exposes two health levels:
 
 - ``/health`` — cheap liveness probe with ``active_streams``, uptime, and an

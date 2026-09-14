@@ -513,7 +513,18 @@ fi
 ensure_hindsight_client_docker_dependency
 
 echo ""; echo "== Running hermes-webui"
-cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
+# Marker/respawn supervision (gateway-supervisor pattern): the server must be
+# a directly waited-on child of this init script — never a daemonized orphan —
+# so an in-container crash, OOM kill, or the overflow watchdog's exit(1)
+# respawns it within seconds instead of silently killing the container's only
+# service. TERM/INT (docker stop) write the stop marker and shut down cleanly
+# without respawning. Set HERMES_WEBUI_SUPERVISOR=0 for the legacy single-shot
+# launch. /apptoo fallback: a persistent /app seeded by an older image may not
+# contain the supervisor library yet.
+source /app/scripts/lib/webui_supervisor.sh 2>/dev/null \
+  || source /apptoo/scripts/lib/webui_supervisor.sh \
+  || error_exit "Failed to load scripts/lib/webui_supervisor.sh"
+cd /app; hermes_webui_supervise "$itdir" python server.py || error_exit "hermes-webui failed or exited with an error"
 
 # we should never be here because the server should be running indefinitely, but if we are, we exit safely
 ok_exit "Clean exit"
