@@ -873,3 +873,45 @@ def test_legacy_approval_without_run_id_retires_locally():
             r._pending.pop(session_id, None)
             r._gateway_queues.pop(session_id, None)
         _STREAM_RUN_IDS.pop(stream_id, None)
+
+
+def test_deny_retires_run_producer_so_reconciliation_cannot_resurrect_mirror():
+    """Deny must consume the producer as well as its WebUI mirror."""
+    from types import SimpleNamespace
+    from api import route_approvals as ra
+
+    sid = "sess-deny-no-resurrection"
+    approval_id = "approval-deny-no-resurrection"
+    run_id = "run-deny-no-resurrection"
+    approval = {
+        "approval_id": approval_id,
+        "run_id": run_id,
+        "command": "echo pricing",
+        "description": "Run pricing probe",
+    }
+    producer = SimpleNamespace(data=dict(approval), event=threading.Event(), result=None)
+    try:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues[sid] = [producer]
+        ra.submit_gateway_pending_mirror(sid, dict(approval))
+        mirror = ra.gateway_pending_mirror(sid, approval_id=approval_id, run_id=run_id)
+        assert mirror is not None
+
+        assert ra.retire_gateway_pending_mirror(
+            sid,
+            approval_id=approval_id,
+            run_id=run_id,
+            mirror_token=mirror[ra._GATEWAY_MIRROR_TOKEN],
+        )
+
+        # These are the same observations made by subsequent HTTP polling.
+        for _ in range(2):
+            with ra._lock:
+                ra.reconcile_gateway_pending_mirror_locked(sid)
+                assert sid not in ra._pending
+                assert sid not in ra._gateway_queues
+    finally:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues.pop(sid, None)

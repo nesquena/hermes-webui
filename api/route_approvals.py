@@ -558,7 +558,27 @@ def retire_gateway_pending_mirror(
             return changed
         for match in retired:
             entries.remove(match)
-        if normalized_run_id and not approval_id:
+        if normalized_run_id:
+            # A successful response may arrive with the exact approval_id. The
+            # mirror and its producer queue are one lifecycle: leaving the
+            # producer behind lets reconciliation recreate the just-retired
+            # mirror on the next poll (the completed-child resurrection bug).
+            # Remove only the matching approval for an active run; when the
+            # caller retires a run without an approval_id, retire the whole run.
+            def _same_retired_run_entry(entry) -> bool:
+                data = getattr(entry, "data", None) or {}
+                if str(data.get("run_id") or "").strip() != normalized_run_id:
+                    return False
+                if not approval_id:
+                    return True
+                queued_approval_id = str(data.get("approval_id") or "").strip()
+                return not queued_approval_id or queued_approval_id == approval_id
+
+            retained_gateway_queue = [
+                entry for entry in gateway_queue
+                if not _same_retired_run_entry(entry)
+            ]
+            gateway_queue_changed = len(retained_gateway_queue) != len(gateway_queue)
             if retained_gateway_queue:
                 _gateway_queues[session_key] = retained_gateway_queue
             else:
