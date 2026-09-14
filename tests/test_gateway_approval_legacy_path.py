@@ -876,24 +876,51 @@ def test_legacy_approval_without_run_id_retires_locally():
 
 
 def test_deny_retires_run_producer_so_reconciliation_cannot_resurrect_mirror():
-    """Deny must consume the producer as well as its WebUI mirror."""
+    """Deny must consume the producer as well as its WebUI mirror.
+
+    Selection is the behaviour under test, so the queue carries more than the
+    one entry being retired: a sibling approval for the same run, and a producer
+    belonging to a different run. Retiring one approval must consume exactly
+    that producer and leave both others queued.
+    """
     from types import SimpleNamespace
     from api import route_approvals as ra
 
     sid = "sess-deny-no-resurrection"
     approval_id = "approval-deny-no-resurrection"
     run_id = "run-deny-no-resurrection"
+    sibling_approval_id = "approval-deny-sibling"
+    other_run_id = "run-deny-unrelated"
     approval = {
         "approval_id": approval_id,
         "run_id": run_id,
         "command": "echo pricing",
         "description": "Run pricing probe",
     }
-    producer = SimpleNamespace(data=dict(approval), event=threading.Event(), result=None)
+    sibling_approval = {
+        "approval_id": sibling_approval_id,
+        "run_id": run_id,
+        "command": "echo sibling",
+        "description": "Sibling approval on the same run",
+    }
+    other_run_approval = {
+        "approval_id": "approval-deny-other-run",
+        "run_id": other_run_id,
+        "command": "echo else",
+        "description": "Approval on an unrelated run",
+    }
+
+    def producer(payload):
+        return SimpleNamespace(data=dict(payload), event=threading.Event(), result=None)
+
+    target = producer(approval)
+    same_run_sibling = producer(sibling_approval)
+    other_run = producer(other_run_approval)
     try:
         with ra._lock:
             ra._pending.pop(sid, None)
-            ra._gateway_queues[sid] = [producer]
+            ra._gateway_queues[sid] = [target, same_run_sibling, other_run]
+            queued_before = list(ra._gateway_queues[sid])
         ra.submit_gateway_pending_mirror(sid, dict(approval))
         mirror = ra.gateway_pending_mirror(sid, approval_id=approval_id, run_id=run_id)
         assert mirror is not None
@@ -905,12 +932,34 @@ def test_deny_retires_run_producer_so_reconciliation_cannot_resurrect_mirror():
             mirror_token=mirror[ra._GATEWAY_MIRROR_TOKEN],
         )
 
-        # These are the same observations made by subsequent HTTP polling.
+        assert queued_before == [target, same_run_sibling, other_run], (
+            "the queue should have held all three producers before retirement"
+        )
+        with ra._lock:
+            remaining = list(ra._gateway_queues.get(sid) or [])
+        assert target not in remaining, "the denied approval's producer must be consumed"
+        assert same_run_sibling in remaining, (
+            "a sibling approval on the same run must not be consumed by retiring another approval"
+        )
+        assert other_run in remaining, (
+            "an unrelated run's producer must not be consumed"
+        )
+
+        # These are the same observations made by subsequent HTTP polling: the
+        # denied approval must not come back, and the survivors must stay live.
+        # `gateway_pending_mirror` acquires `_lock` itself, so it must be called
+        # outside the locked section.
         for _ in range(2):
             with ra._lock:
                 ra.reconcile_gateway_pending_mirror_locked(sid)
-                assert sid not in ra._pending
-                assert sid not in ra._gateway_queues
+            assert ra.gateway_pending_mirror(
+                sid, approval_id=approval_id, run_id=run_id
+            ) is None, "reconciliation must not resurrect the denied approval's mirror"
+            with ra._lock:
+                refreshed = list(ra._gateway_queues.get(sid) or [])
+            assert target not in refreshed
+            assert same_run_sibling in refreshed
+            assert other_run in refreshed
     finally:
         with ra._lock:
             ra._pending.pop(sid, None)

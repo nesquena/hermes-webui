@@ -2,6 +2,23 @@
 
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
+
+Gateway approvals carry two pieces of state with one lifecycle:
+
+* the **producer** entry in ``tools.approval._gateway_queues`` — the queued
+  approval itself, which owns the lifecycle; and
+* the **mirror** entry in ``_pending`` — this module's projection of that
+  producer for the UI.
+
+Retirement resolves both together (``retire_gateway_pending_mirror``), and the
+ownership direction matters: reconciliation rebuilds mirrors from live
+producers, so a producer that survives its own resolution resurrects an
+approval the user already dismissed. Retiring a specific ``approval_id``
+therefore consumes that approval's producer, retiring a whole run consumes the
+run's producers, and a same-run producer carrying no ``approval_id`` is retired
+with it — it cannot be attributed to anything else, and leaving it queued is
+what permits the resurrection. Retiring one approval must leave sibling
+approvals and other runs queued.
 """
 import queue
 import threading
