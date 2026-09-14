@@ -8475,6 +8475,7 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    content_width: localStorage.getItem('hermes-content-width') || 'default',
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
@@ -8562,6 +8563,7 @@ function _rememberAppearanceSaved(payload){
   _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
   _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
   _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
+  // Width is mirrored at selection time, not when an older save completes.
 }
 
 function _scheduleAppearanceAutosave(){
@@ -8582,6 +8584,12 @@ async function _autosaveAppearanceSettings(payload){
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
+    }
+    // Only the save for the current selection may project its response.
+    if(saved&&saved.content_width&&payload&&localStorage.getItem('hermes-content-width')===payload.content_width){
+      localStorage.setItem('hermes-content-width',saved.content_width);
+      if(typeof _applyContentWidth==='function') _applyContentWidth(saved.content_width);
+      if(typeof _syncContentWidthPicker==='function') _syncContentWidthPicker(saved.content_width);
     }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
