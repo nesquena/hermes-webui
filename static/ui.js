@@ -300,10 +300,15 @@ function _wireLeftoverDismissal(){
     // real user edits: emptying the prefilled composer = explicit discard.
     if(el&&!el.value&&cur.sid===(S.session&&S.session.session_id)){
       _leftoverPrefill=null;
-      const _dismiss=typeof api==='function'
-        ?api('/api/session/steer_leftover/dismiss',{method:'POST',body:JSON.stringify({session_id:cur.sid,run_id:cur.runId})})
-        :fetch('/api/session/steer_leftover/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:cur.sid,run_id:cur.runId})});
-      try{_dismiss.catch(()=>{});}catch(_){}
+      // Route through the central api() wrapper (mount-relative for subpath
+      // deployments — never a literal root '/api/...' fetch). Best-effort:
+      // a lost dismissal just means the slot is re-offered on the next load,
+      // which is the safe direction.
+      if(typeof api==='function'){
+        try{
+          api('/api/session/steer_leftover/dismiss',{method:'POST',body:JSON.stringify({session_id:cur.sid,run_id:cur.runId})}).catch(()=>{});
+        }catch(_){}
+      }
     }
   });
 }
