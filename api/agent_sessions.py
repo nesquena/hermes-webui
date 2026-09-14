@@ -59,6 +59,7 @@ MESSAGING_SOURCES = {
     'telegram',
     'weixin',
     'matrix',
+    'signal',
 }
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
@@ -82,6 +83,7 @@ SOURCE_LABELS = {
     'webui': 'WebUI',
     'weixin': 'Weixin',
     'matrix': 'Matrix',
+    'signal': 'Signal',
 }
 
 
