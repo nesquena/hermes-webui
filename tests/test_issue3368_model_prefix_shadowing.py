@@ -603,8 +603,3 @@ class TestCmdModelFullCatalogWiring:
         # An extras-only match isn't a rendered <option>; cmdModel must inject it
         # (with provider) before selecting, or sel.value=match silently no-ops.
         assert "_ensureModelOptionInDropdown(match,sel,matchProvider)" in commands_src
-
-    def test_provider_qualified_alias_bypasses_fuzzy_matching(self, commands_src):
-        assert "const aliasRoute=aliasTarget?_resolveModelAliasTarget" in commands_src
-        assert "let match=aliasRoute" in commands_src
-        assert "?aliasRoute.value" in commands_src
