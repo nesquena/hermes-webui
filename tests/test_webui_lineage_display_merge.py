@@ -127,3 +127,16 @@ def test_webui_lineage_display_merge_skips_explicit_forks(monkeypatch):
     merged = routes._merged_webui_lineage_messages_for_display(fork, fork.messages)
 
     assert [m["content"] for m in merged] == ["fork starts here"]
+
+
+def test_lcm_parent_lineage_projection_preserves_owned_turn_and_context(monkeypatch):
+    marker = _msg('user', '[Recent Summary (d0, node 418)]', 1)
+    owned = dict(marker, timestamp=2, _active_turn_token='stream_1:2')
+    parent = SimpleNamespace(session_id='parent', messages=[marker, owned],
+                             context_messages=[marker, owned])
+    answer = _msg('assistant', 'Current answer', 3)
+    child = SimpleNamespace(session_id='child', parent_session_id='parent',
+                            session_source='webui', messages=[answer])
+    monkeypatch.setattr(routes, 'get_session', lambda *a, **k: parent)
+    assert routes._merged_webui_lineage_messages_for_display(child, [answer]) == [owned, answer]
+    assert parent.context_messages == [marker, owned]

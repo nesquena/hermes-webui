@@ -76,6 +76,31 @@ and 5; it does not mark every run-state boundary implemented.
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
 
+LCM recovery headings `[Recent Summary (d<digits>, node <digits>)]` and
+`[Current user objective preserved from compacted history]` are context-only
+under provider `user` and `assistant` roles. Preserve those roles in model
+context; omit the envelopes from transcript projection and compression anchors.
+A nonblank server-owned `_active_turn_token` protects a genuine user submission
+with matching text. An unowned row beginning with either canonical heading is
+synthetic, including the rare literal paste of raw recovery text. Recovery must
+not claim that envelope using prompt text alone: preserve it in context and
+materialize the pending user turn separately. Active-turn lookup keeps the
+current Agent result index domain; never probe a shifted historical index.
+
+Messaging display merges retain the sidecar as primary, including its order and
+repeated rows. Compatible CLI mirrors may promote ownership/display metadata;
+only unmatched rows are inserted in source order. Sidecar truncation watermarks
+and boundaries also constrain incoming display rows, including clear-to-empty,
+without deleting the external transcript. Cancellation persists both the owned
+user and any partial assistant output in model context before saving cleanup.
+
+A reconciliation may associate an anonymous mirror with one compatible private
+claim; later conflicting claims remain distinct. Shared stable IDs, state row
+IDs, active tokens, or nonempty provider content can establish a mirror across
+timestamp restamps. Anonymous assistant output at different known timestamps
+is distinct, including in cumulative prefixes. Cancelled partial-output recovery
+deduplicates only within the current user turn.
+
 ## Core Invariants
 
 1. **Visible current turns enter model context.** If the user can see a current

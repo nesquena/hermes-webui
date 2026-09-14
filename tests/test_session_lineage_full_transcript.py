@@ -126,7 +126,7 @@ def test_session_endpoint_preserves_distinct_messages_with_different_ids(monkeyp
 
     session = captured["payload"]["session"]
     retry_messages = [m for m in session["messages"] if m.get("content") == "retry the same request"]
-    assert [m.get("id") for m in retry_messages] == ["cli-retry", "sidecar-retry"]
+    assert [m.get("id") for m in retry_messages] == ["sidecar-retry", "cli-retry"]
 
 
 

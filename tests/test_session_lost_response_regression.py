@@ -1157,3 +1157,48 @@ def test_sync_revalidates_against_concurrent_disk_write_under_lock(monkeypatch):
     # On-disk record keeps the concurrent writer's value — not overwritten.
     reloaded = Session.load(sid)
     assert reloaded.active_stream_id == "rotated_stream_after_compression"
+
+
+@pytest.mark.parametrize('save_fails', [False, True])
+@pytest.mark.parametrize('part_type', [None, 'text', 'input_text', 'output_text'])
+@pytest.mark.parametrize('marker_timestamp', [10, 100, 100.1])
+def test_lcm_state_sync_materializes_pending_owner_before_answer(monkeypatch, save_fails, part_type, marker_timestamp):
+    prior = [{'role': 'user', 'content': 'Old prompt', 'timestamp': 1},
+             {'role': 'assistant', 'content': 'Old answer', 'timestamp': 2}]
+    marker = {'role': 'user', 'content': '[Recent Summary (d0, node 418)]', 'timestamp': marker_timestamp}
+    answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': marker_timestamp + 1}
+    session = Session(session_id='lcm_pending_sync', messages=prior,
+                      pending_user_message=marker['content'], active_stream_id='stream_1',
+                      pending_started_at=100.25)
+    session.save()
+    pending_text = marker['content']
+    if part_type:
+        marker['content'] = [{'type': part_type, 'text': pending_text}]
+    rows = [*prior, marker, answer]
+    monkeypatch.setattr(models, 'get_state_db_session_summary', lambda *a, **k: {
+        'message_count': len(rows), 'last_message_at': marker_timestamp + 1,
+    })
+    monkeypatch.setattr(models, 'get_state_db_session_messages', lambda *a, **k: rows)
+
+    if save_fails:
+        def fail_save(self, **kwargs):
+            raise OSError('disk full')
+
+        monkeypatch.setattr(Session, 'save', fail_save)
+        assert not models._sync_sidecar_from_state_db_if_newer(session)
+        for snapshot in (session, Session.load(session.session_id)):
+            assert snapshot.messages == prior
+            assert snapshot.pending_user_message == pending_text
+            assert snapshot.active_stream_id == 'stream_1'
+        return
+
+    assert models._sync_sidecar_from_state_db_if_newer(session)
+    for snapshot in (session, Session.load(session.session_id)):
+        assert len(snapshot.messages) == 4
+        owned = next(row for row in snapshot.messages if row.get('_active_turn_token'))
+        assert owned['_active_turn_token'] == models.build_active_turn_token('stream_1', 100.25)
+        expected = [answer, owned] if marker_timestamp == 10 else [owned, answer]
+        assert snapshot.messages == [*prior, *expected]
+        assert snapshot.context_messages == [*prior, marker, *expected]
+        assert snapshot.pending_user_message is None
+        assert snapshot.active_stream_id is None

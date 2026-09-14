@@ -58,7 +58,11 @@ from api.helpers import (
     scrub_internal_replay_fields,
     _redact_text,
 )
-from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.compression_anchor import (
+    is_context_compression_marker,
+    is_lcm_context_recovery_marker,
+    visible_messages_for_anchor,
+)
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
 from api.run_journal import RunJournalWriter
@@ -67,6 +71,9 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _append_recovered_turn_to_context,
+    _message_private_identity_compatible,
+    _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -1815,6 +1822,19 @@ def _mark_active_turn_checkpoint(message, identity):
     return message
 
 
+def _active_turn_checkpoint_candidate(message, identity, expected_text):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    token = message.get('_active_turn_token')
+    if token and token != identity.get('token'):
+        return False
+    return (
+        not is_lcm_context_recovery_marker(message)
+        and _normalize_user_text(_message_text(message.get('content')))
+        == _normalize_user_text(expected_text)
+    )
+
+
 def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, allow_index_fallback=True):
     messages = list(messages or [])
     if not isinstance(identity, dict):
@@ -1830,11 +1850,7 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
         return messages, False
     message = messages[idx]
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
-    if (
-        not isinstance(message, dict)
-        or message.get('role') != 'user'
-        or _normalize_user_text(_message_text(message.get('content'))) != _normalize_user_text(expected_text)
-    ):
+    if not _active_turn_checkpoint_candidate(message, identity, expected_text):
         return messages, False
     _mark_active_turn_checkpoint(message, identity)
     return messages, True
@@ -1881,12 +1897,7 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
     if idx < 0 or idx >= len(result_messages):
         return None
     message = result_messages[idx]
-    if (
-        isinstance(message, dict)
-        and message.get('role') == 'user'
-        and _normalize_user_text(_message_text(message.get('content')))
-        == _normalize_user_text(expected_text)
-    ):
+    if _active_turn_checkpoint_candidate(message, identity, expected_text):
         return idx
     return None
 
@@ -1987,14 +1998,12 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             _mark_active_turn_checkpoint(existing_checkpoint, identity)
         return result_messages
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
-        insert_at = len(previous_context)
-    elif _active_turn_boundary_is_valid(identity):
-        insert_at = identity['current_turn_user_idx'] - len(previous_context)
-        if insert_at < 0 or insert_at > len(result_messages):
-            insert_at = identity['current_turn_user_idx']
+    if _active_turn_boundary_is_valid(identity):
+        insert_at = identity['current_turn_user_idx']
         if insert_at < 0 or insert_at > len(result_messages):
             insert_at = None
+    elif _messages_have_prefix(result_messages, previous_context):
+        insert_at = len(previous_context)
     else:
         insert_at = None
     if insert_at is None and all(
@@ -2109,6 +2118,25 @@ def _settle_result_messages(
     source,
     active_turn_identity,
 ):
+    if (
+        _active_turn_boundary_is_valid(active_turn_identity)
+        and (
+            active_turn_identity.get('agent_turn_boundary_source') == 'result'
+            or (
+                active_turn_identity.get('agent_turn_boundary_source') == 'agent'
+                and active_turn_identity['current_turn_user_idx'] < len(result_messages)
+                and not _is_synthetic_control_message(
+                    result_messages[active_turn_identity['current_turn_user_idx']]
+                )
+            )
+        )
+    ):
+        # Agent indices address the raw result, before cleaning or replay can
+        # change its coordinates. Later settlement finds this exact token.
+        result_messages = _settle_current_turn_boundary(
+            previous_context_messages, result_messages, active_turn_identity,
+            msg_text, source,
+        )
     (
         result_messages,
         next_context_messages,
@@ -2130,6 +2158,7 @@ def _settle_result_messages(
             previous_context_messages,
             next_context_messages,
             msg_text,
+            active_turn_identity=active_turn_identity,
         )
         next_context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -5839,24 +5868,30 @@ def _deduplicate_context_messages(messages):
     Prevents the agent from seeing the same message twice in conversation_history
     when result_messages contain duplicates that weren't caught by display-merge.
     Compression/reference markers are internal recovery material: keep at most
-    one canonical assistant reference so a mis-role ``user`` marker cannot become
-    the next active user instruction.
+    one canonical assistant reference for legacy markers. LCM recovery markers
+    retain their provider-facing role and replay identity.
     """
     if not messages:
         return messages
     seen = set()
     deduped = []
     user_exact_index = {}
+    user_output_scopes = {}
+    output_owner = None
     for msg in messages:
         if _is_context_compression_marker(msg):
+            lcm_marker = is_lcm_context_recovery_marker(msg)
             marker_key = (
-                '__context_compression_marker__',
-                " ".join(_message_text(msg.get('content', '')).split())[:500],
+                ('__lcm_recovery_marker__', _message_replay_key(msg))
+                if lcm_marker else (
+                    '__context_compression_marker__',
+                    " ".join(_message_text(msg.get('content', '')).split())[:500],
+                )
             )
             if marker_key in seen:
                 continue
             seen.add(marker_key)
-            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+            if isinstance(msg, dict) and msg.get('role') != 'assistant' and not lcm_marker:
                 msg = copy.deepcopy(msg)
                 msg['role'] = 'assistant'
             deduped.append(msg)
@@ -5869,7 +5904,12 @@ def _deduplicate_context_messages(messages):
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
         key = _message_replay_key(msg)
+        # Identical output in different owned turns is not historical replay.
+        if key is not None and isinstance(msg, dict) and msg.get('role') != 'user':
+            key = (key, output_owner)
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
+            token = msg.get('_active_turn_token')
+            output_owner = token if isinstance(token, str) and token.strip() else None
             user_exact_key = (
                 key,
                 msg.get('timestamp'),
@@ -5877,18 +5917,26 @@ def _deduplicate_context_messages(messages):
                 msg.get('_source') or 'webui',
                 json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
             )
-            prior_exact_idx = user_exact_index.get(user_exact_key)
+            prior_exact_idx = next((
+                idx for idx in user_exact_index.get(user_exact_key, [])
+                if _message_private_identity_compatible(deduped[idx], msg)
+            ), None)
+            if prior_exact_idx is not None:
+                output_owner = user_output_scopes[prior_exact_idx]
+            else:
+                user_output_scopes[len(deduped)] = output_owner
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
                     continue
                 if key in seen:
                     deduped.append(msg)
-                    user_exact_index[user_exact_key] = len(deduped) - 1
+                    user_exact_index.setdefault(user_exact_key, []).append(len(deduped) - 1)
                     continue
             elif prior_exact_idx is not None:
                 continue
-            user_exact_index[user_exact_key] = len(deduped)
+            if key not in seen:
+                user_exact_index.setdefault(user_exact_key, []).append(len(deduped))
         if key is not None and key in seen:
             continue
         if key is not None:
@@ -6438,12 +6486,29 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
+def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None, *, active_turn_identity=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
+    current_idx = next((
+        idx for idx, row in enumerate(result_messages)
+        if _active_turn_token_matches(row, active_turn_identity)
+    ), None)
+    if current_idx is not None:
+        previous_idx = next((
+            idx for idx, row in enumerate(previous_context)
+            if _active_turn_token_matches(row, active_turn_identity)
+        ), len(previous_context))
+        previous_context = previous_context[:previous_idx]
+        # Current output is one owned suffix, never historical content replay.
+        leading = result_messages[:current_idx]
+        history = (
+            _dedupe_replayed_context_messages(previous_context, leading, msg_text)
+            if leading else previous_context
+        )
+        return history + result_messages[current_idx:]
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
     if not _messages_have_prefix(
         result_messages,
@@ -6495,6 +6560,7 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
                 return previous_context + candidates
         assistant_or_tool_only_result = bool(result_messages) and all(
             _is_context_compression_marker(m)
+            or _active_turn_token_matches(m, active_turn_identity)
             or (
                 isinstance(m, dict)
                 and m.get('role') in ('assistant', 'tool')
@@ -7617,7 +7683,11 @@ def _self_heal_result_succeeded(
         return False
     messages = result.get('messages') or []
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(messages, previous_context):
+    if (
+        not _active_turn_boundary_is_valid(active_turn_identity)
+        and not _active_turn_has_checkpoint(messages, active_turn_identity)
+        and _messages_have_prefix(messages, previous_context)
+    ):
         current_turn_rows = list(messages[len(previous_context):])
         current_user_idx = next(
             (
@@ -7639,10 +7709,26 @@ def _self_heal_result_succeeded(
             active_turn_identity,
             msg_text,
         )
+        if current_user_idx is None and _active_turn_boundary_is_valid(active_turn_identity):
+            index = active_turn_identity['current_turn_user_idx']
+            if 0 <= index < len(messages):
+                row = messages[index]
+                if (
+                    is_lcm_context_recovery_marker(row)
+                    and row.get('role') == 'user'
+                    and _normalize_user_text(_message_text(row.get('content')))
+                    == _normalize_user_text(msg_text)
+                ):
+                    # The direct result index proves the retry boundary, not
+                    # ownership of the envelope; settlement creates its owner.
+                    current_user_idx = index
         if current_user_idx is None:
             current_turn_rows = []
         else:
             current_turn_rows = list(messages[current_user_idx + 1:])
+    current_turn_rows = [
+        row for row in current_turn_rows if not is_lcm_context_recovery_marker(row)
+    ]
     next_user_idx = next(
         (
             index
@@ -8132,10 +8218,10 @@ def _materialize_pending_user_turn_before_error(
     active_turn_token = (
         active_turn_identity.get('token')
         if isinstance(active_turn_identity, dict)
-        else build_active_turn_token(
-            getattr(session, 'active_stream_id', None),
-            pending_started_at,
-        )
+        else None
+    ) or build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        pending_started_at,
     )
     session_messages = getattr(session, 'messages', None)
     if active_turn_token and isinstance(session_messages, list):
@@ -8165,6 +8251,11 @@ def _materialize_pending_user_turn_before_error(
         existing = messages[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
+        if is_lcm_context_recovery_marker(existing):
+            return False
+        existing_token = existing.get('_active_turn_token')
+        if existing_token and active_turn_token and existing_token != active_turn_token:
+            return False
         existing_source = existing.get('_source') or 'webui'
         try:
             existing_ts = int(existing.get('timestamp'))
@@ -8187,7 +8278,7 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(recovered, pending_source, active_turn_token=active_turn_token)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -13586,20 +13677,18 @@ def cancel_stream(stream_id: str) -> bool:
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
                                 break
+                        _expected_token = build_active_turn_token(stream_id, _pending_started)
                         _already_persisted = False
                         if _last_user is not None:
                             _last_content = _last_user.get('content')
-                            _last_ts = _last_user.get('timestamp') or 0
-                            # Only treat as already-persisted if the latest user turn
-                            # was created AT OR AFTER the current turn's pending_started_at.
-                            # An earlier turn whose content happens to be a substring
-                            # (e.g. prior reply was "ok", user now types "ok please continue")
-                            # must NOT short-circuit synthesis — that would re-introduce
-                            # the data-loss bug this guard is supposed to prevent.
-                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
-                                # Tolerate the workspace prefix the streaming thread prepends.
-                                if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
+                            _last_ts = _message_timestamp_as_float(_last_user) or 0
+                            _last_token = _last_user.get('_active_turn_token')
+                            if _expected_token and _last_token == _expected_token:
+                                _already_persisted = True
+                            elif not _last_token and not is_lcm_context_recovery_marker(_last_user):
+                                if isinstance(_last_content, str) and _last_ts >= _pending_started:
+                                    # Tolerate the workspace prefix on tokenless provider replay.
+                                    _already_persisted = _pending_user == _last_content or _pending_user in _last_content
                         if not _already_persisted:
                             _recovered_ts = int(time.time())
                             if isinstance(_pending_started, (int, float)) and _pending_started > 0:
@@ -13609,10 +13698,14 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn, _pending_source,
+                                active_turn_token=_expected_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            _append_recovered_turn_to_context(_cs, _user_turn)
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
@@ -13668,6 +13761,7 @@ def cancel_stream(stream_id: str) -> bool:
                         before_idx=_cancel_marker_idx,
                     ):
                         _cs.messages.insert(_cancel_marker_idx, _partial_msg)
+                    _append_recovered_turn_to_context(_cs, _partial_msg)
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).

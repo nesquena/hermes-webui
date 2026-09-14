@@ -407,3 +407,46 @@ class TestPartialMessageInContext:
             "must not dedup the new partial — it's from a completed earlier turn."
         )
 
+
+
+@pytest.mark.parametrize('existing_context', [False, True])
+@pytest.mark.parametrize('repeat_old_answer', [False, True])
+def test_cancel_partial_survives_context_reload(monkeypatch, tmp_path, existing_context, repeat_old_answer):
+    import queue
+    import api.models as models
+    session_dir = tmp_path / 'sessions'
+    session_dir.mkdir()
+    monkeypatch.setattr(models, 'SESSION_DIR', session_dir)
+    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', session_dir / '_index.json')
+    session = models.Session(session_id='cancel_context', title='Test')
+    prior = [dict(role='user', content='Earlier'), dict(role='assistant', content='Partial response' if repeat_old_answer else 'History')] if existing_context else []
+    session.messages = list(prior)
+    session.context_messages = list(prior)
+    session.active_stream_id = 'cancel_context_stream'
+    session.pending_user_message = 'Continue'
+    session.pending_started_at = 100.25
+    session.save()
+    monkeypatch.setattr(streaming, 'get_session', lambda sid: session)
+    monkeypatch.setattr(streaming, 'stream_owner_session_id', lambda sid: session.session_id)
+    config.STREAMS[session.active_stream_id] = queue.Queue()
+    config.CANCEL_FLAGS[session.active_stream_id] = threading.Event()
+    STREAM_PARTIAL_TEXT[session.active_stream_id] = 'Partial response'
+    assert streaming.cancel_stream('cancel_context_stream')
+    loaded = models.Session.load(session.session_id)
+    expected = [r['content'] for r in prior] + ['Continue', 'Partial response']
+    assert [r['content'] for r in loaded.context_messages] == expected
+    assert loaded.context_messages[-2]['_active_turn_token'] == 'cancel_context_stream:100.25'
+    assert loaded.pending_user_message is None
+    models._append_recovered_turn_to_context(loaded, loaded.messages[-2])
+    assert [r['content'] for r in loaded.context_messages] == expected
+    assert streaming._deduplicate_context_messages(loaded.context_messages) == loaded.context_messages
+
+    assert models.reconciled_state_db_messages_for_session(
+        loaded, prefer_context=True, state_messages=[],
+    ) == loaded.context_messages
+
+    monkeypatch.setattr(streaming, 'get_session', lambda sid: loaded)
+    config.STREAMS['cancel_context_stream'] = queue.Queue()
+    STREAM_PARTIAL_TEXT['cancel_context_stream'] = 'Partial response'
+    assert streaming.cancel_stream('cancel_context_stream')
+    assert [r['content'] for r in models.Session.load(loaded.session_id).context_messages] == expected

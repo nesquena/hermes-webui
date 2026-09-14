@@ -48,7 +48,7 @@ from api.agent_sessions import (
     is_cli_session_row_visible,
     read_session_lineage_report,
 )
-from api.compression_anchor import visible_messages_for_anchor
+from api.compression_anchor import is_lcm_context_recovery_marker, visible_messages_for_anchor
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
     clear_compression_recovery,
@@ -9103,11 +9103,8 @@ def _limited_webui_messages_for_display_with_sidecar(
             if _display_merge_cache_entry_usable(entry, cache_key):
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
-    merged = merge_session_messages_append_only(
-        sidecar_messages,
-        state_db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
-        truncation_boundary=getattr(session, "truncation_boundary", None),
+    merged = reconciled_state_db_messages_for_session(
+        session, display_messages=sidecar_messages, state_messages=state_db_messages,
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -9682,7 +9679,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
 
     segments = []
     current = session
-    session_messages = list(getattr(session, "messages", []) or [])
+    session_messages = reconciled_state_db_messages_for_session(session, state_messages=[])
     source = str(getattr(session, "session_source", "") or "").strip().lower()
     root_is_fork = source == "fork"
     seen = {str(getattr(session, "session_id", "") or "")}
@@ -9717,7 +9714,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             break
         if not segments and _messages_start_with_visible_prefix(
             session_messages,
-            getattr(parent, "messages", []) or [],
+            reconciled_state_db_messages_for_session(parent, state_messages=[]),
         ):
             return session_messages
         segments.append(parent)
@@ -9729,19 +9726,19 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent_signatures_complete = False
 
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        return session_messages
 
     merged = []
     for segment in reversed(segments):
         merged = merge_session_messages_append_only(
             merged,
-            getattr(segment, "messages", []) or [],
+            reconciled_state_db_messages_for_session(segment, state_messages=[]),
             truncation_watermark=getattr(segment, "truncation_watermark", None),
             truncation_boundary=getattr(segment, "truncation_boundary", None),
         )
     merged = merge_session_messages_append_only(
         merged,
-        getattr(session, "messages", []) or [],
+        session_messages,
         truncation_watermark=None,
     )
     if (
@@ -9775,32 +9772,15 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     fork keep-counts against this merged display list, so branch/fork must slice
     the same list rather than the sidecar-only ``session.messages`` array.
     """
-    cli_messages = list(cli_messages or [])
+    cli_messages = [row for row in cli_messages or [] if not is_lcm_context_recovery_marker(row)]
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    if cli_messages:
-        if sidecar_messages and sidecar_messages != cli_messages:
-            if len(sidecar_messages) >= len(cli_messages):
-                return merge_session_messages_append_only(
-                    sidecar_messages,
-                    cli_messages,
-                    truncation_watermark=getattr(session, "truncation_watermark", None),
-                    truncation_boundary=getattr(session, "truncation_boundary", None),
-                )
-            merged_messages = []
-            seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+    watermark = getattr(session, 'truncation_watermark', None)
+    return merge_session_display_messages(
+        sidecar_messages, cli_messages,
+        truncation_watermark=watermark,
+        truncation_boundary=getattr(session, 'truncation_boundary', None),
+    )
+
 
 
 
@@ -9814,7 +9794,7 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     generic child-session rows remain isolated; they intentionally start from a
     subset of their parent.
     """
-    primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
+    primary_messages = list(messages) if messages is not None else _webui_sidecar_lineage_messages_for_display(session)
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id:
         return primary_messages
@@ -9831,27 +9811,10 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
         parent = get_session(parent_id, metadata_only=False)
     except Exception:
         return primary_messages
-    parent_messages = list(getattr(parent, "messages", []) or [])
+    parent_messages = _webui_sidecar_lineage_messages_for_display(parent)
     if not parent_messages:
         return primary_messages
-    if _messages_start_with_visible_prefix(primary_messages, parent_messages):
-        return primary_messages
-    merged_messages = []
-    seen_message_keys = set()
-    seen_messages_by_key = {}
-    for msg in sorted(list(parent_messages) + list(primary_messages), key=lambda m: (
-        float(m.get("timestamp") or 0),
-        str(m.get("role") or ""),
-        str(m.get("content") or ""),
-    )):
-        key = _session_message_merge_key(msg)
-        if key in seen_message_keys:
-            _merge_session_display_metadata(seen_messages_by_key.get(key), msg)
-            continue
-        seen_message_keys.add(key)
-        seen_messages_by_key[key] = msg
-        merged_messages.append(msg)
-    return merged_messages
+    return merge_session_display_messages(parent_messages, primary_messages)
 
 
 def _message_summary(messages) -> dict:
@@ -10320,12 +10283,12 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    merge_session_display_messages,
+    reconciled_state_db_messages_for_session,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
-    _merge_session_display_metadata,
-    _session_message_merge_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
@@ -13042,11 +13005,9 @@ def _handle_session_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
             else:
-                _all_msgs = merge_session_messages_append_only(
-                    _webui_sidecar_lineage_messages_for_display(s),
-                    state_db_messages,
-                    truncation_watermark=getattr(s, "truncation_watermark", None),
-                    truncation_boundary=getattr(s, "truncation_boundary", None),
+                _all_msgs = reconciled_state_db_messages_for_session(
+                    s, display_messages=_webui_sidecar_lineage_messages_for_display(s),
+                    state_messages=state_db_messages,
                 )
                 _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
         else:
@@ -16201,14 +16162,12 @@ def handle_post(handler, parsed) -> bool:
             _backstop = _state_db_backstop_limit_for_display(source, None)
             if _backstop is not None:
                 _state_db_reader_kwargs["limit"] = _backstop
-            source_messages = merge_session_messages_append_only(
-                _webui_sidecar_lineage_messages_for_display(source),
-                get_state_db_session_messages(
+            source_messages = reconciled_state_db_messages_for_session(
+                source, display_messages=_webui_sidecar_lineage_messages_for_display(source),
+                state_messages=get_state_db_session_messages(
                     source.session_id,
                     **_state_db_reader_kwargs,
                 ),
-                truncation_watermark=getattr(source, "truncation_watermark", None),
-                truncation_boundary=getattr(source, "truncation_boundary", None),
             )
             source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
         if keep_count is not None:
