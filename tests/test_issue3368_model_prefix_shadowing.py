@@ -165,6 +165,87 @@ def catalog_driver(tmp_path_factory):
     return str(p)
 
 
+_CMD_ALIAS_DRIVER = r"""
+const fs = require('fs');
+const cmds = fs.readFileSync(process.argv[2], 'utf8');
+const ui = fs.readFileSync(process.argv[3], 'utf8');
+function extractFunc(src, name){
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start); let depth = 1; i++;
+  while (depth > 0 && i < src.length){ if(src[i]==='{')depth++; else if(src[i]==='}')depth--; i++; }
+  return src.slice(start, i);
+}
+for(const name of [
+  '_buildModelCandidates', '_resolveModelAliasTarget', '_looksLikeVersionedModel',
+  '_bestModelMatch', '_nearestModelSuggestion'
+]) eval(extractFunc(cmds, name));
+for(const name of [
+  '_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect',
+  '_ensureModelOptionInDropdown'
+]) eval(extractFunc(ui, name));
+eval('async '+extractFunc(cmds, 'cmdModel'));
+const args = JSON.parse(process.argv[4]);
+function makeOption(value){ return {value, textContent:value, dataset:{}}; }
+const sel = {
+  id:'modelSelect',
+  options: args.rendered.map(makeOption),
+  value: args.rendered[0] || '',
+  appendChild(opt){ this.options.push(opt); },
+  onchange: async () => {
+    const state=_modelStateForSelect(sel,sel.value);
+    result.persisted={
+      session_id:S.session.session_id,
+      model:state.model,
+      model_provider:state.model_provider||null,
+    };
+  },
+};
+const result = {persisted:null};
+function $(id){ return id === 'modelSelect' ? sel : null; }
+function t(key){ return key; }
+function showToast(){}
+function _applyModelToDropdown(){ return null; }
+function _refreshOpenModelDropdown(){}
+function syncModelChip(){}
+function getModelLabel(value){ return value; }
+const S={session:{session_id:'test-session',model_provider:'openrouter'}};
+const window={_activeProvider:'openrouter',_configuredModelBadges:{}};
+const document={
+  baseURI:'http://localhost/',
+  createElement(){ return makeOption(''); },
+};
+const location={href:'http://localhost/'};
+const modelsData={aliases:{sol:'openai-codex/gpt-5.6-sol'},groups:args.groups};
+async function fetch(){ return {ok:true,json:async()=>modelsData}; }
+(async()=>{
+  await cmdModel('sol');
+  process.stdout.write(JSON.stringify(result));
+})().catch(err=>{ console.error(err); process.exit(1); });
+"""
+
+
+@pytest.fixture(scope="module")
+def cmd_alias_driver(tmp_path_factory):
+    p = tmp_path_factory.mktemp("cmdalias3368") / "driver.js"
+    p.write_text(_CMD_ALIAS_DRIVER, encoding="utf-8")
+    return str(p)
+
+
+def _run_cmd_alias(driver, groups, rendered):
+    r = subprocess.run(
+        [NODE, driver, str(COMMANDS_JS_PATH), str(UI_JS_PATH), json.dumps({
+            "groups": groups,
+            "rendered": rendered,
+        })],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"node driver failed: {r.stderr}")
+    return json.loads(r.stdout)
+
+
 def _resolve(driver, query, groups, sel_options):
     r = subprocess.run(
         [NODE, driver, str(COMMANDS_JS_PATH),
@@ -195,6 +276,42 @@ def _best(driver, query, options):
     if r.returncode != 0:
         raise RuntimeError(f"node driver failed: {r.stderr}")
     return json.loads(r.stdout)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# cmdModel — provider-qualified aliases are authoritative
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdModelAliasProviderRouting:
+    GROUPS = [
+        {
+            "provider_id": "openrouter",
+            "models": [{"id": "openai/gpt-5.6-sol", "label": "GPT-5.6 Sol"}],
+        },
+        {
+            "provider_id": "openai-codex",
+            "models": [{"id": "@openai-codex:gpt-5.6-sol", "label": "GPT-5.6 Sol"}],
+        },
+    ]
+
+    def test_model_alias_switches_to_configured_provider(self, cmd_alias_driver):
+        got = _run_cmd_alias(cmd_alias_driver, self.GROUPS, ["openai/gpt-5.6-sol"])
+        assert got == {
+            "persisted": {
+                "session_id": "test-session",
+                "model": "gpt-5.6-sol",
+                "model_provider": "openai-codex",
+            },
+        }
+
+    def test_model_alias_does_not_fall_back_when_provider_model_is_uncatalogued(self, cmd_alias_driver):
+        got = _run_cmd_alias(cmd_alias_driver, self.GROUPS[:1], ["openai/gpt-5.6-sol"])
+        assert got["persisted"] == {
+            "session_id": "test-session",
+            "model": "gpt-5.6-sol",
+            "model_provider": "openai-codex",
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -485,4 +602,9 @@ class TestCmdModelFullCatalogWiring:
     def test_injects_option_for_extras_only_winner(self, commands_src):
         # An extras-only match isn't a rendered <option>; cmdModel must inject it
         # (with provider) before selecting, or sel.value=match silently no-ops.
-        assert "_ensureModelOptionInDropdown(match,sel,providerMap[match]||null)" in commands_src
+        assert "_ensureModelOptionInDropdown(match,sel,matchProvider)" in commands_src
+
+    def test_provider_qualified_alias_bypasses_fuzzy_matching(self, commands_src):
+        assert "const aliasRoute=aliasTarget?_resolveModelAliasTarget" in commands_src
+        assert "let match=aliasRoute" in commands_src
+        assert "?aliasRoute.value" in commands_src
