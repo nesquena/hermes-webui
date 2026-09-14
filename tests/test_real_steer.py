@@ -656,15 +656,10 @@ class TestFrontendWiring:
             globalThis._armSteerConsumption = (sid, streamId) => {{
               const current = _STEER_CONSUMPTION_ARMED[sid];
               if (current && current.streamId === streamId && current.armed) {{
-                if (current.consumed) {{
-                  delete _STEER_CONSUMPTION_ARMED[sid];
-                  clearSteerPending(sid);
-                  return true;
-                }}
-                return true;
+                return current.boundaryEpoch;
               }}
-              _STEER_CONSUMPTION_ARMED[sid] = {{ streamId, armed: true, consumed: false }};
-              return true;
+              _STEER_CONSUMPTION_ARMED[sid] = {{ streamId, armed: true, boundaryEpoch: 0 }};
+              return 0;
             }};
             globalThis.$ = () => null;
             globalThis.api = async () => ({{ accepted: true }});
@@ -731,10 +726,11 @@ class TestFrontendWiring:
         self._run_steer_consumption_script(
             "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
             "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.streamId, 'stream-1');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0);\n"
             "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
             "assert.deepStrictEqual(clearCalls, ['A']);\n"
             "assert.strictEqual(counts.A, undefined);\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'the arm survives the boundary with an advanced epoch so in-flight responses can debit');\n"
         )
 
     def test_parallel_batch_completion_requires_all_tool_ids(self):
@@ -997,8 +993,8 @@ class TestFrontendWiring:
             "  return { accepted: true };\n"
             "};\n"
             "assert.strictEqual(await _trySteer('first steer', true), true);\n"
-            "assert.strictEqual(counts.A, undefined, 'the boundary during the POST marked consumption; the accepted response reconciled it');\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'the reconciled arm was released');\n"
+            "assert.strictEqual(counts.A, undefined, 'the boundary advanced the epoch; the accepted response debited itself');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'the arm persists as the attribution source for later responses');\n"
             "assert.strictEqual(counts.A, undefined);\n"
         )
 
@@ -1020,12 +1016,56 @@ class TestFrontendWiring:
             "await Promise.resolve();\n"
             "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'pre-arm must exist before the response');\n"
             "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'count 0 cannot consume yet');\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.consumed, true, 'boundary must mark the pre-acceptance consumption');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'boundary must advance the epoch');\n"
             "accept();\n"
             "assert.strictEqual(await first, true);\n"
             "assert.strictEqual(counts.A, undefined, 'a consumed steer must not be counted by its delayed response');\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'the reconciled arm must be released');\n"
-            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'no stale arm remains');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'reconciling one response must not retire the shared arm');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'still nothing counted to clear');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 2, 'a later boundary advances the epoch again');\n"
+        )
+
+    def test_two_accepted_steers_across_one_boundary_leave_no_stranded_count(self):
+        """#7423 finding 4: one boundary crossing two accepted in-flight steers
+        must debit BOTH, not just whichever response lands first.
+
+        The shared boolean arm could only ever debit once: the first accepted
+        response consumed the marker and the second created a fresh arm and
+        incremented, stranding a false "1 pending" until terminal cleanup.
+        Per-request epochs debit every request that was in flight when the
+        boundary fired.
+        """
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let accept1 = null;\n"
+            "let accept2 = null;\n"
+            "let calls = 0;\n"
+            "globalThis.api = () => {\n"
+            "  calls++;\n"
+            "  if (calls === 1) return new Promise(r => { accept1 = () => r({ accepted: true }); });\n"
+            "  return new Promise(r => { accept2 = () => r({ accepted: true }); });\n"
+            "};\n"
+            "const first = _trySteer('steer one', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "const second = _trySteer('steer two', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0, 'both share one pre-boundary epoch');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'count 0: nothing to clear, epoch advances');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1);\n"
+            "accept1();\n"
+            "accept2();\n"
+            "assert.strictEqual(await first, true);\n"
+            "assert.strictEqual(await second, true);\n"
+            "assert.strictEqual(counts.A, undefined, 'neither response may strand a pending count');\n"
+            "assert.deepStrictEqual(clearCalls, [], 'nothing was ever counted, so nothing was cleared');\n"
+            # A steer submitted after the boundary captured the new epoch and must count.
+            "assert.strictEqual(await _trySteer('post-boundary steer', true), true);\n"
+            "assert.strictEqual(counts.A, 1, 'a request armed after the boundary is still counted');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true, 'the next boundary clears it');\n"
+            "assert.strictEqual(counts.A, undefined);\n"
         )
 
     def test_prearm_steer_consumption_before_accepted_response(self):
@@ -1156,8 +1196,9 @@ class TestFrontendWiring:
         complete_end = self.msgs.find("\n    source.addEventListener('todo_state'", complete_start)
         assert complete_end > complete_start
         complete_listener = self.msgs[complete_start:complete_end]
-        assert "if(typeof _trackSteerToolComplete === 'function') _trackSteerToolComplete(activeSid, streamId, d.tid||d.id)" in complete_listener
-        assert "if(typeof _consumeArmedSteer === 'function') _consumeArmedSteer(activeSid, streamId)" in complete_listener
+        assert "_trackSteerToolComplete(activeSid, streamId, d.tid||d.id)" in complete_listener
+        assert "_steerBatchFinalized" in complete_listener
+        assert "_consumeArmedSteer(activeSid, streamId)" in complete_listener
         assert "_trackSteerToolStart(activeSid, streamId, d.tid||d.id)" in self.msgs[listener_start:complete_start]
         assert "_consumeArmedSteer(activeSid, streamId)" not in self.msgs[listener_start:complete_start]
 

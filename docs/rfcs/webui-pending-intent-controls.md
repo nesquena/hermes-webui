@@ -187,16 +187,46 @@ tool-result boundary. To make that visible, the composer tracks a per-session
 pending-steer count:
 
 - Each accepted Steer delivery increments the owning session's count and the
-  composer status shows `N pending steer` (reusing the `queued_count` i18n
-  key), so the user can tell a second Steer was delivered rather than
-  silently replaced.
+  composer status shows the localized `steer_pending_count` string, so the
+  user can tell a second Steer was delivered rather than silently replaced.
 - The count clears only as an explicit state transition (`clearSteerPending`)
   when the session's pending-steer buffer is consumed, expired, or re-queued:
   at the finalized tool-batch boundary, on `pending_steer_leftover`
   (unconsumed text is queued as a session message for the next turn), on a
   replacement stream or authoritative idle reload, and on turn completion.
-  If the tool boundary races the accepted HTTP response, the response path
-  reconciles the already-consumed boundary instead of counting a stale steer.
+
+**Boundary attribution is per request, not per arm.** The SSE boundary that
+drains the buffer and the HTTP response that confirms delivery are independent
+queues, so a Steer can be consumed before its own response lands. Each
+`(session, stream)` arm therefore carries a monotonic `boundaryEpoch`:
+
+- a Steer captures the epoch immediately before its POST;
+- the epoch advances once per **finalized** tool batch, and only when the
+  tracked tool-call set proves the batch closed (an untracked or ID-less
+  `tool_complete` is not evidence of a boundary);
+- an accepted response whose captured epoch is older than the current one was
+  drained by a boundary that fired mid-flight, so it does not increment.
+
+The arm deliberately survives its boundary so that every response still in
+flight can debit itself, which is what a single shared consumed flag could not
+do: one boundary drains the whole buffer for all requests, but a boolean can
+only be spent once.
+
+Two residual inaccuracies remain, both bounded to the current turn and both
+self-healing at the finalized boundary, `pending_steer_leftover`, or turn
+completion:
+
+- **Over-count:** a response that lands before the boundary which drains it
+  has already incremented, so the badge can briefly show a Steer that is about
+  to be consumed.
+- **Under-count:** the epoch proves a boundary fired after arming, not that
+  this particular payload had reached the Agent buffer before that drain. A
+  request that arrived late is debited anyway and stays hidden until the next
+  boundary or the leftover path.
+
+Closing the under-count case needs backend consumption attribution (the steer
+response reporting whether the payload was drained), which is out of scope for
+the WebUI-only contract described here.
 - Transcript rendering (`renderMessages`) may refresh the indicator but never
   mutates the count; a render while steer still waits at a tool-result boundary
   must continue showing the pending value.

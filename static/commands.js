@@ -1685,7 +1685,12 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_no_msg'));
     return false;
   }
-  if(ownerStreamId&&typeof _armSteerConsumption==='function') _armSteerConsumption(ownerSid,ownerStreamId);
+  // #7434: arm this stream and capture the boundary epoch BEFORE the POST.
+  // `agent.steer()` runs on the server before the response is written, so a
+  // tool-batch boundary can drain this payload while the request is still in
+  // flight; the captured epoch is what lets this one response notice that.
+  const armedAtEpoch = ownerStreamId&&typeof _armSteerConsumption==='function'
+    ? (_armSteerConsumption(ownerSid,ownerStreamId) || 0) : 0;
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
@@ -1716,12 +1721,13 @@ async function _trySteer(msg, explicitSteer){
       }
       _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     }
-    // Re-arm idempotently on acceptance: a sibling steer's failure could have
-    // released the shared arm while this POST was in flight (the failure path
-    // sees count 0 and clears the slot). The accepted steer IS pending
-    // payload from here on, so its arm must exist before the count rises.
+    // #7434: per-request attribution. Re-arm idempotently (a sibling's failure
+    // may have deleted the slot, and an accepted steer still needs one) and
+    // compare epochs: if a boundary has since fired, this payload was drained
+    // with the rest of the buffer, so it must not raise the pending count.
     if(ownerStreamId&&typeof _armSteerConsumption==='function'){
-      if(!_armSteerConsumption(ownerSid,ownerStreamId)){
+      const currentEpoch = _armSteerConsumption(ownerSid,ownerStreamId) || 0;
+      if(armedAtEpoch < currentEpoch){
         showToast(t('cmd_steer_delivered'),2500);
         return true;
       }

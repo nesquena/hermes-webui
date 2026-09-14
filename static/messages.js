@@ -2130,6 +2130,13 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 // once per batch and appends it to the batch's last tool-role result.  Therefore
 // that boundary is an earlier reliable UI boundary than the next `tool` event,
 // which never arrives when the model continues with prose or finishes the turn.
+//
+// #7434: each (session, stream) arm carries a monotonic `boundaryEpoch` that
+// advances once per finalized batch.  A steer captures the epoch before its
+// POST; if the epoch has advanced by the time the accepted response lands, a
+// boundary drained the buffer while the request was in flight and the count is
+// not incremented.  Per-request attribution replaces the earlier shared boolean,
+// which one boundary could only ever debit once.
 const _STEER_CONSUMPTION_ARMED = {};
 const _STEER_TOOL_BATCHES = {};
 function _resetSteerToolBatch(sessionId, streamId, options={}){
@@ -2195,24 +2202,19 @@ function _clearSteerConsumptionForStream(sessionId, streamId){
   }
 }
 function _armSteerConsumption(sessionId, streamId){
-  // TODO(#7434): the boolean `consumed` flag cannot attribute a boundary
-  // drain to individual steer requests when multiple are in flight. Replace
-  // with a `pendingBoundary: streamId` field + response-time reconciliation
-  // once the per-request consumed model lands.
   const sid = String(sessionId || '');
   const activeStreamId = String(streamId || '');
-  if(!sid || !activeStreamId) return;
+  if(!sid || !activeStreamId) return 0;
   const current = _STEER_CONSUMPTION_ARMED[sid];
   if(current && current.streamId === activeStreamId && current.armed){
-    if(current.consumed){
-      delete _STEER_CONSUMPTION_ARMED[sid];
-      if(typeof clearSteerPending === 'function') clearSteerPending(sid);
-      return false;
-    }
-    return true;
+    // Already armed for this stream: idempotent, and returns the live epoch so
+    // the caller can attribute a response to a boundary that fired meanwhile.
+    // Re-arming a missing slot here is what keeps a failed sibling from
+    // stranding an accepted steer's count.
+    return current.boundaryEpoch;
   }
-  _STEER_CONSUMPTION_ARMED[sid] = { streamId: activeStreamId, armed: true, consumed: false };
-  return true;
+  _STEER_CONSUMPTION_ARMED[sid] = { streamId: activeStreamId, armed: true, boundaryEpoch: 0 };
+  return 0;
 }
 function _resetSteerConsumptionArming(sessionId, streamId, options={}){
   const sid = String(sessionId || '');
@@ -2249,18 +2251,18 @@ function _consumeArmedSteer(sessionId, streamId){
   }
   const toolBatch = _STEER_TOOL_BATCHES[sid];
   if(toolBatch && toolBatch.streamId === activeStreamId && toolBatch.ids.size > 0) return false;
+  // #7434: a finalized batch drains the whole pending buffer, so the epoch
+  // advances exactly once here — after the batch gate, never on a mid-batch
+  // completion.  The arm deliberately survives the boundary: responses still
+  // in flight must be able to compare the epoch they captured at submit time.
+  current.boundaryEpoch++;
   if(typeof getSteerPendingCount !== 'function' || getSteerPendingCount(sid) <= 0){
-    // A count-0-but-armed state exists while the
-    // steer POST is in flight (arm installed pre-submit, count incremented
-    // on the accepted response). Mark the boundary so a delayed accepted
-    // response cannot count a steer that was already applied; failed/queued
-    // fallbacks still release the arm via _resetSteerConsumptionArming.
-    current.consumed = true;
+    // Nothing counted has been drained yet, but the advanced epoch above now
+    // debits every request that was in flight when this boundary fired.
     return false;
   }
   if(typeof clearSteerPending !== 'function') return false;
   clearSteerPending(sid);
-  delete _STEER_CONSUMPTION_ARMED[sid];
   return true;
 }
 
@@ -6044,8 +6046,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
-      if(typeof _trackSteerToolComplete === 'function') _trackSteerToolComplete(activeSid, streamId, d.tid||d.id);
-      if(typeof _consumeArmedSteer === 'function') _consumeArmedSteer(activeSid, streamId);
+      // Only a proven finalized batch is a drain boundary: an untracked or
+      // ID-less completion returns false and must not advance the epoch.
+      const _steerBatchFinalized = typeof _trackSteerToolComplete === 'function'
+        && _trackSteerToolComplete(activeSid, streamId, d.tid||d.id);
+      if(_steerBatchFinalized && typeof _consumeArmedSteer === 'function')
+        _consumeArmedSteer(activeSid, streamId);
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const tc=upsertLiveToolCall(d,'complete');
       if(!tc) return;
