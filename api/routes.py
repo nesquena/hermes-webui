@@ -379,7 +379,7 @@ def _latest_cron_session_info_for_jobs(
                 if all(info["session_id"] for info in results.values()):
                     break
             return results
-    except sqlite3.Error:
+    except (OSError, sqlite3.Error):
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
 
 

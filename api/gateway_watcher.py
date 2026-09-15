@@ -154,7 +154,9 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
 
     try:
         sessions = []
-        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+        for row in read_importable_agent_session_rows(
+            db_path, limit=200, log=logger, raise_on_unavailable=True
+        ):
             sessions.append({
                 'session_id': row['id'],
                 'title': row['title'] or 'Agent Session',

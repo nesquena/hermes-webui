@@ -508,6 +508,7 @@ def read_importable_agent_session_rows(
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
     include_sources: tuple[str, ...] | None = None,
+    raise_on_unavailable: bool = False,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -552,6 +553,8 @@ def read_importable_agent_session_rows(
     try:
         conn = open_state_db_readonly(db_path, log=log)
     except (OSError, sqlite3.Error):
+        if raise_on_unavailable:
+            raise
         return []
     with closing(conn):
         conn.row_factory = sqlite3.Row
