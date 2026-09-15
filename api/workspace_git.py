@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from api.subprocess_utils import windows_hide_flags
+from api.subprocess_utils import clean_git_env, windows_hide_flags
 from api.workspace import rmtree_anchored, safe_resolve_ws, unlink_anchored
 
 logger = logging.getLogger(__name__)
@@ -32,19 +32,6 @@ STATUS_FILE_LIMIT = 500
 DIFF_SIZE_LIMIT = 512 * 1024
 COMMIT_MESSAGE_DIFF_LIMIT = 64 * 1024
 WORKSPACE_GIT_DESTRUCTIVE_ENV = "HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE"
-_GIT_ENV_SCRUB_KEYS = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-)
-_GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 _HERMES_BRANCH_SWITCH_STASH_PREFIX = "hermes-webui branch switch"
 _GIT_HARDENED_CONFIG = (
     # Workspace Git operations can run against repositories provided by agents,
@@ -110,16 +97,7 @@ def workspace_git_destructive_enabled() -> bool:
 
 
 def _clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    env = os.environ.copy()
-    if extra:
-        env.update(extra)
-    for key in _GIT_ENV_SCRUB_KEYS:
-        env.pop(key, None)
-    for key in list(env):
-        if key.startswith(_GIT_ENV_SCRUB_PREFIXES):
-            env.pop(key, None)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    return env
+    return clean_git_env(extra)
 
 
 class GitWorkspaceError(RuntimeError):
