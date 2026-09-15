@@ -646,10 +646,12 @@ def test_cron_profile_context_restores_state_on_normal_and_exceptional_exit(
     agent_home_before = agent_constants.get_hermes_home()
 
     import cron.jobs as _cj
-    _cj.HERMES_DIR = base
-    _cj.CRON_DIR = base / "cron"
-    _cj.JOBS_FILE = _cj.CRON_DIR / "jobs.json"
-    _cj.OUTPUT_DIR = _cj.CRON_DIR / "output"
+    # #6912 CR: hand the cron.jobs module globals back with monkeypatch instead
+    # of leaving them bound to this test's disposable tmp_path.
+    monkeypatch.setattr(_cj, "HERMES_DIR", base)
+    monkeypatch.setattr(_cj, "CRON_DIR", base / "cron")
+    monkeypatch.setattr(_cj, "JOBS_FILE", base / "cron" / "jobs.json")
+    monkeypatch.setattr(_cj, "OUTPUT_DIR", base / "cron" / "output")
     assert any(j["id"] == "d1" for j in _cj.list_jobs(include_disabled=True))
 
     if via_explicit_home:
@@ -662,11 +664,35 @@ def test_cron_profile_context_restores_state_on_normal_and_exceptional_exit(
         if raised:
             with pytest.raises(RuntimeError, match="boom"):
                 with ctx:
+                    # #6912 CR: prove IN SCOPE that the Agent home override was
+                    # installed. The post-exit check alone is false-green: the
+                    # cron.jobs pinning is a separate channel, so it also passes
+                    # when the override was never installed.
+                    assert os.environ.get("HERMES_HOME") == str(base), (
+                        "cron scope mirrored its profile home into os.environ: "
+                        f"{os.environ.get('HERMES_HOME')} != {base}"
+                    )
+                    assert agent_constants.get_hermes_home() == named, (
+                        "the Agent home override was not installed in scope: "
+                        f"{agent_constants.get_hermes_home()} != {named}"
+                    )
                     assert any(j["id"] == "n1" for j in _cj.list_jobs(include_disabled=True))
                     assert p._cron_profile_context_depth() == 1
                     raise RuntimeError("boom")
         else:
             with ctx:
+                # #6912 CR: prove IN SCOPE that the Agent home override was
+                # installed. The post-exit check alone is false-green: the
+                # cron.jobs pinning is a separate channel, so it also passes
+                # when the override was never installed.
+                assert os.environ.get("HERMES_HOME") == str(base), (
+                    "cron scope mirrored its profile home into os.environ: "
+                    f"{os.environ.get('HERMES_HOME')} != {base}"
+                )
+                assert agent_constants.get_hermes_home() == named, (
+                    "the Agent home override was not installed in scope: "
+                    f"{agent_constants.get_hermes_home()} != {named}"
+                )
                 assert any(j["id"] == "n1" for j in _cj.list_jobs(include_disabled=True))
                 assert p._cron_profile_context_depth() == 1
     finally:
