@@ -212,6 +212,15 @@ flight can debit itself, which is what a single shared consumed flag could not
 do: one boundary drains the whole buffer for all requests, but a boolean can
 only be spent once.
 
+That slot is shared attribution state, so **no single request may delete it**.
+A submission-scoped release (`_resetSteerConsumptionArming`) is a no-op for the
+stream that owns the slot — including when the pending count is still 0, which
+is exactly the window where two responses are both still in flight. Deleting
+there would erase an advanced epoch and let a later accepted sibling re-create
+the slot at epoch 0, re-stranding the count the model exists to prevent. Only a
+real boundary releases attribution: a stream change on attach/detach, or
+terminal cleanup through `_clearSteerConsumptionForStream`.
+
 Two residual inaccuracies remain, both bounded to the current turn and both
 self-healing at the finalized boundary, `pending_steer_leftover`, or turn
 completion:

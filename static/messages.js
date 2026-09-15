@@ -2222,22 +2222,19 @@ function _resetSteerConsumptionArming(sessionId, streamId, options={}){
   if(!sid || !activeStreamId) return;
   const current = _STEER_CONSUMPTION_ARMED[sid];
   if(options && options.reconnecting && current && current.streamId === activeStreamId && current.armed) return;
-  // Greptile P1 (2026-09-05T04:07): the arm is a per-(session, stream) slot
-  // shared by concurrent steer submissions. A failed/queued fallback used to
-  // delete the whole slot even when a sibling steer had already been
-  // accepted (count > 0) and was still waiting for its tool-result boundary —
-  // stranding the accepted steer's count until turn end. The arm's lifetime
-  // follows the pending count: while count > 0 on this same stream there is
-  // real payload waiting for the boundary, so a submission-scoped release
-  // keeps the arm and only clears bare arms with no pending payload. Full
-  // clears still happen when the stream changes (attach/detach) and at turn
-  // completion via the done handler's clearSteerPending.
-  if(current && current.streamId === activeStreamId && current.armed
-     && typeof getSteerPendingCount === 'function' && getSteerPendingCount(sid) > 0){
-    return;
-  }
+  // #7434 review (2026-09-14): the epoch slot is shared attribution state, so
+  // no single request may delete it. A failed or queued sibling used to drop a
+  // same-stream arm whenever the count was still 0, which erased the advanced
+  // epoch that another response still in flight needed — reintroducing the
+  // stranded count this model exists to prevent. A submission-scoped release is
+  // therefore a no-op for the stream it belongs to; the pending count is left
+  // untouched because nothing was proven consumed.
+  if(current && current.streamId === activeStreamId) return;
+  // A different stream is a real turn boundary: expire the prior attribution.
+  // Terminal cleanup (detach/idle reload/turn end) releases the slot through
+  // _clearSteerConsumptionForStream instead.
   delete _STEER_CONSUMPTION_ARMED[sid];
-  if(current && current.streamId !== activeStreamId) _setSteerPendingCount(sid, 0);
+  if(current) _setSteerPendingCount(sid, 0);
 }
 function _consumeArmedSteer(sessionId, streamId){
   const sid = String(sessionId || '');

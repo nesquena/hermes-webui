@@ -1068,6 +1068,48 @@ class TestFrontendWiring:
             "assert.strictEqual(counts.A, undefined);\n"
         )
 
+    def test_sibling_failure_after_boundary_preserves_epoch_for_accepted_steers(self):
+        """#7434 review (2026-09-14): boundary advances, the first response
+        fails, the second accepts.
+
+        The failed sibling used to delete the shared arm while the count was
+        still 0, so the accepted sibling recreated it at epoch 0, compared 0
+        against 0, and incremented a badge for a steer the boundary had already
+        drained. Shared attribution must outlive any single request.
+        """
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let releaseFirst = null;\n"
+            "let releaseSecond = null;\n"
+            "let calls = 0;\n"
+            "globalThis.api = () => {\n"
+            "  calls++;\n"
+            "  if (calls === 1) return new Promise(r => { releaseFirst = () => r({ accepted: false, fallback: 'busy' }); });\n"
+            "  return new Promise(r => { releaseSecond = () => r({ accepted: true }); });\n"
+            "};\n"
+            "const first = _trySteer('sibling that fails', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "const second = _trySteer('sibling that accepts', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0, 'both in-flight requests captured epoch 0');\n"
+            # The finalized batch drains both payloads while both responses hang.
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'boundary advanced the shared epoch');\n"
+            # First response fails: a submission-scoped release must not erase it.
+            "releaseFirst();\n"
+            "assert.strictEqual(await first, false, 'failed sibling falls back');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'a failed sibling must not erase shared attribution');\n"
+            "assert.strictEqual(counts.A, undefined, 'the failure path must not touch the count');\n"
+            # Second response accepts and must debit itself against the surviving epoch.
+            "releaseSecond();\n"
+            "assert.strictEqual(await second, true, 'accepted sibling delivered');\n"
+            "assert.strictEqual(counts.A, undefined, 'the accepted sibling crossed the boundary, so no stranded count');\n"
+            "assert.deepStrictEqual(clearCalls, [], 'nothing was counted, so nothing was cleared');\n"
+        )
+
     def test_prearm_steer_consumption_before_accepted_response(self):
         """The backend may call agent.steer() before HTTP resolves and reach the
         next tool boundary before response processing resumes. Pre-arm on
@@ -1081,7 +1123,8 @@ class TestFrontendWiring:
             "assert.strictEqual(counts.A, undefined);\n"
             "globalThis.api = async () => ({ accepted: false, fallback: 'busy' });\n"
                         "await _trySteer('rejected steer', true);\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'a rejected steer keeps shared attribution');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'and keeps the epoch that boundary advanced');\n"
         )
 
     def test_network_timeout_releases_prearm(self):
@@ -1101,11 +1144,20 @@ class TestFrontendWiring:
             "delete counts.A;\n"
             "globalThis.api = async () => { throw new Error('timeout'); };\n"
             "assert.strictEqual(await _trySteer('will time out', true), false);\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'timeout must release the pre-arm');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0, 'a lone timeout keeps the shared attribution slot but proves no drain');\n"
             "assert.strictEqual(counts.A, undefined, 'timeout path must not touch the count');\n"
             "assert.deepStrictEqual(clearCalls, [], 'nothing was consumed');\n"
-            # And a boundary arriving on the still-running stream consumes nothing.
+            # A boundary arriving on the still-running stream consumes nothing.
             "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1);\n"
+            # The failed request must not poison a steer armed after that
+            # boundary: it captures epoch 1, counts, and the next boundary
+            # clears it exactly like any other accepted steer.
+            "globalThis.api = async () => ({ accepted: true });\n"
+            "assert.strictEqual(await _trySteer('post-boundary steer', true), true);\n"
+            "assert.strictEqual(counts.A, 1, 'a later post-boundary steer is still counted');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
         )
 
     def test_concurrent_failure_keeps_sibling_accepted_arm(self):
@@ -1167,16 +1219,16 @@ class TestFrontendWiring:
             "assert.strictEqual(counts.A, undefined);\n"
         )
 
-    def test_reset_still_clears_bare_arm_and_stream_change(self):
-        """The count>0 protection only covers arms whose stream still holds
-        pending payload: a bare arm with count 0 is released as before, and a
-        stream change (attach/detach) clears both arm and stale count."""
+    def test_reset_keeps_same_stream_arm_and_clears_stream_change(self):
+        """A submission-scoped release never drops shared attribution; only a
+        real stream boundary (attach/detach) expires the slot and stale count."""
         self._run_steer_consumption_script(
-            # Bare arm, no pending payload → submission release still works.
+            # Bare arm, no pending payload: still no deletion for its own stream.
             "counts.A = 0;\n"
             "globalThis.api = async () => ({ accepted: false, fallback: 'busy' });\n"
             "assert.strictEqual(await _trySteer('fails with count 0', true), false);\n"
-            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'bare arm still released');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'same-stream release keeps the attribution slot');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0);\n"
             # Stream change → full clear (arm + stale count). The arm belongs
             # to stream-9; a reset against a DIFFERENT stream id is the
             # attach/detach path and clears everything, count included.
