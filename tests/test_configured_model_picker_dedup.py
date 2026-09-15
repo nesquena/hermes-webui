@@ -475,3 +475,83 @@ def test_temporary_top_level_option_row_does_not_duplicate_configured_entry(tmp_
     # The temporary/custom option the user picked survives the re-render.
     assert data["selected"] == "@commandcode:deepseek/deepseek-v4-flash"
     assert "@commandcode:deepseek/deepseek-v4-flash" in data["optionValues"]
+
+
+def test_badge_owned_top_level_row_provider_authority_reaches_fast_path(tmp_path):
+    """#7290 (same-normalized fast path): a top-level row whose provider
+    authority only lives on its badge (`@commandcode:model-a`, providerId:'')
+    must not be read as a providerless row by the fast path, otherwise
+    `model-a`, `otherprovider/model-a` and `@otherprovider:model-a` of another
+    provider all normalize to the same key and get suppressed before the routed
+    branches that already compare providers can run."""
+    badge_owned = [
+        {"value": "@commandcode:model-a", "providerId": "", "badge": {"provider": "commandcode"}}
+    ]
+    cases = [
+        # Same provider, bare spelling: equivalent (row already rendered).
+        {"modelId": "model-a", "badge": {"provider": "commandcode"}, "entries": badge_owned},
+        # Other provider, bare spelling: distinct entry, must not be suppressed.
+        {"modelId": "model-a", "badge": {"provider": "otherprovider"}, "entries": badge_owned},
+        # Other provider, slash spelling: distinct entry.
+        {
+            "modelId": "otherprovider/model-a",
+            "badge": {"provider": "otherprovider"},
+            "entries": badge_owned,
+        },
+        # Other provider, at-prefixed routing spelling: distinct entry.
+        {
+            "modelId": "@otherprovider:model-a",
+            "badge": {"provider": "otherprovider"},
+            "entries": badge_owned,
+        },
+        # Compatibility guard: a genuinely providerless row keeps matching.
+        {
+            "modelId": "model-a",
+            "badge": {"provider": "commandcode"},
+            "entries": [{"value": "model-a", "providerId": ""}],
+        },
+    ]
+
+    assert _equivalent_cases(tmp_path, cases) == [True, False, False, False, True]
+
+
+def test_two_providers_same_normalized_model_keep_one_row_each(tmp_path):
+    """#7290 (composed control): a badge-owned top-level OPTION plus configured
+    badges for two providers whose model id normalizes to the same key must leave
+    exactly one surviving picker row per provider."""
+    data = _render_top_level_option(
+        tmp_path,
+        {
+            "groups": [
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "other-model"}],
+                }
+            ],
+            "selectedValue": "@commandcode:model-a",
+            "requested": "@commandcode:model-a",
+            "requestedProvider": "commandcode",
+            "configuredBadges": {
+                "@commandcode:model-a": {
+                    "provider": "commandcode",
+                    "role": "fallback",
+                    "label": "Fallback 1",
+                },
+                "@otherprovider:model-a": {
+                    "provider": "otherprovider",
+                    "role": "primary",
+                    "label": "Primary",
+                },
+            },
+        },
+    )
+
+    # Order-independent: exactly one surviving row per provider (a duplicate
+    # would add a third element here).
+    model_rows = sorted(row_id for row_id in data["rowIds"] if "model-a" in row_id)
+    assert model_rows == ["@commandcode:model-a", "@otherprovider:model-a"]
+    assert data["selected"] == "@commandcode:model-a"
+    # Both configured spellings survive as dropdown rows without the picker
+    # injecting a duplicate bare option for the same normalized key.
+    assert "model-a" not in data["optionValues"]
