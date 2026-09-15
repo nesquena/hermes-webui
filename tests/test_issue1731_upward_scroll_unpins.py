@@ -72,13 +72,15 @@ def test_upward_scroll_unpins_immediately_without_hysteresis():
     """Upward motion sets _scrollPinned=false and resets the counter, no count needed."""
     block = _scroll_listener_block()
     if_idx = block.index("if(movedUp)")
-    else_idx = block.find("else", if_idx)
+    else_idx = block.find("}else if(movedDown", if_idx)
     assert else_idx > if_idx, "upward / downward branches not found (#1731)"
     upward_branch = block[if_idx:else_idx]
 
     assert "_scrollPinned=false" in upward_branch, (
-        "Upward scroll must set _scrollPinned=false immediately so the "
-        "next streaming token does not re-snap to bottom (#1731)."
+        "Upward scroll must set _scrollPinned=false so the next streaming "
+        "token does not re-snap to bottom (#1731). With aggressive follow, "
+        "this fires once the upward move exceeds one viewport height; the "
+        "immediate-unpin path is unchanged when Auto-follow is off."
     )
     assert "_nearBottomCount=0" in upward_branch, (
         "Upward scroll must reset _nearBottomCount so a subsequent "
@@ -112,7 +114,7 @@ def test_wheel_touch_upward_intent_unpins_immediately_inside_messages():
 def test_downward_path_preserves_macos_momentum_hysteresis():
     """Downward motion into the near-bottom zone re-follows with hysteresis (#1360)."""
     block = _scroll_listener_block()
-    assert "elseif(movedDown&&nearBottom)" in block.replace(" ", ""), (
+    assert "elseif(movedDown&&(nearBottom||caughtPrevTail))" in block.replace(" ", ""), (
         "Explicit downward scroll into the near-bottom zone must be the re-follow path "
         "after a sticky manual unpin."
     )

@@ -318,6 +318,22 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ---
 
+## Transcript scrolling
+
+Auto-follow keeps a pinned transcript at the latest content during streaming,
+including when activity collapses or a rebuild changes the transcript height.
+Scrolling upward releases follow, including small wheel, keyboard, and touch
+movements; return to the tail or use the bottom jump button to resume following.
+
+Long-transcript virtualization (over 80 messages) is enabled by default. Existing
+stored `false` values remain disabled; stored `true` values remain enabled without
+requiring the legacy `virtualize_transcript_optin` marker. The old force-off
+migration is retired. In Settings, turn off **Virtualize long transcripts** if
+you encounter rendering/scroll issues or need browser Find (Ctrl+F / Cmd+F) to
+search the whole conversation: virtualization only mounts a window of messages,
+so browser Find cannot match unmounted history. Disabling it renders the full
+loaded transcript; older, not-yet-loaded messages still require loading history.
+
 ## Configuration & access
 
 `start.sh` auto-detects almost everything; the subsections below cover the knobs for when it can't, and how to reach the UI remotely.

@@ -9383,10 +9383,9 @@ async function loadSettingsPanel(){
     }
     const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
     if(virtualizeTranscriptCb){
-      // #4343: EXPERIMENTAL/opt-IN, default OFF. Honor a stored true only when
-      // it came from an explicit post-flip opt-in (===true); a pre-flip true is
-      // already reset to false server-side by the load_settings migration.
-      virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;
+      // Virtualize transcripts is default ON. Honor a stored false as an
+      // explicit opt-out; anything else (undefined, true) = ON.
+      virtualizeTranscriptCb.checked=settings.virtualize_transcript!==false;
       window._virtualizeTranscript=virtualizeTranscriptCb.checked;
       virtualizeTranscriptCb.addEventListener('change',()=>{
         window._virtualizeTranscript=virtualizeTranscriptCb.checked;

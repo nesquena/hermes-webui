@@ -42,7 +42,7 @@ def test_moved_up_ignores_container_growth():
     """`movedUp` must be gated on `!grew` so a clientHeight increase (toolbar
     collapse) can't be misread as an upward user scroll (#4702)."""
     assert "const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;" in UI_JS
-    assert "const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;" in UI_JS
+    assert "const movedUp=!grew&&!shrankNoIntent&&_lastScrollTop!==null&&top<_lastScrollTop-2;" in UI_JS
     # The height must be sampled every scroll event (so the next delta compares fresh).
     assert "_lastMessageClientHeight=el.clientHeight;" in UI_JS
 
