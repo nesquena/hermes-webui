@@ -387,6 +387,34 @@ def test_switch_profile_process_wide_false_does_not_mutate_global():
         p._active_profile = original_global
 
 
+def test_switch_profile_process_wide_true_publishes_hermes_home():
+    """#6857 re-gate: the supported process-wide switch must publish the new
+    home to the process env. After a named→default switch the baseline env can
+    still point at the (possibly deleted) named profile; unscoped readers —
+    gateway lifecycle subprocesses, default-path helpers — would follow it."""
+    import api.profiles as p
+
+    original_global = p._active_profile
+    original_env_home = os.environ.get('HERMES_HOME')
+    stale = Path('/nonexistent') / 'stale-named-profile-home'
+    try:
+        os.environ['HERMES_HOME'] = str(stale)
+        result = p.switch_profile('default', process_wide=True)
+        assert isinstance(result, dict)
+        expected = str(p.get_active_hermes_home())
+        assert expected != str(stale)  # the switch really targets another home
+        assert os.environ.get('HERMES_HOME') == expected, (
+            "process_wide=True must publish the active home to "
+            "os.environ['HERMES_HOME'], not keep the stale value"
+        )
+    finally:
+        p._active_profile = original_global
+        if original_env_home is None:
+            os.environ.pop('HERMES_HOME', None)
+        else:
+            os.environ['HERMES_HOME'] = original_env_home
+
+
 # ── 5. Concurrent threads see independent profile context ────────────────────
 
 def test_concurrent_threads_see_independent_profiles():
