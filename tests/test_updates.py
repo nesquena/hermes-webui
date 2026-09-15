@@ -864,6 +864,78 @@ def test_run_git_never_launches_an_interactive_credential_prompt(tmp_path, monke
     assert ok is False, out
 
 
+@pytest.mark.parametrize(
+    ('config_key', 'config_value'),
+    [
+        ('core.askPass', '{helper}'),
+        ('credential.helper', '!{helper}'),
+    ],
+)
+def test_run_git_disables_repo_configured_credential_helpers(
+    tmp_path, config_key, config_value,
+):
+    """Repository config must not make an unattended update fetch prompt."""
+    if os.name == 'nt':
+        pytest.skip('executable credential helper setup is POSIX-only')
+
+    marker = tmp_path / 'configured-helper-was-invoked'
+    helper = tmp_path / 'configured-helper.sh'
+    helper.write_text(
+        f'#!/bin/sh\ntouch "{marker}"\necho placeholder-credential\n', encoding='utf-8'
+    )
+    helper.chmod(0o755)
+
+    requests_seen = []
+
+    class _AuthRequiredHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler naming
+            requests_seen.append(self.path)
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="git"')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(('127.0.0.1', 0), _AuthRequiredHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        _git(repo, 'init', '-q')
+        _git(
+            repo, 'remote', 'add', 'origin',
+            f'http://127.0.0.1:{server.server_address[1]}/origin.git',
+        )
+        _git(repo, 'config', config_key, config_value.format(helper=helper))
+        out, ok = updates._run_git(['fetch', 'origin'], repo, timeout=30)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert requests_seen, (
+        'the fetch never reached the 401 remote, so this test proves nothing'
+    )
+    assert not marker.exists(), (
+        f'the update check launched configured {config_key}: {out!r}'
+    )
+    assert ok is False, out
+
+
+def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch):
+    """SSH update remotes may use an agent but must never read from /dev/tty."""
+    monkeypatch.setenv('SSH_AUTH_SOCK', '/tmp/legitimate-agent.sock')
+    with patch.object(updates.shutil, 'which', return_value='/usr/bin/git'), \
+         patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='')
+        updates._run_git(['fetch', 'origin'], tmp_path)
+
+    argv = mock_run.call_args.args[0]
+    assert 'core.sshCommand=ssh -oBatchMode=yes' in argv
+    assert mock_run.call_args.kwargs['env']['SSH_AUTH_SOCK'] == '/tmp/legitimate-agent.sock'
+
+
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
     """Git output can contain Unicode even when Windows' active code page cannot."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \

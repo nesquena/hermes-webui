@@ -211,6 +211,44 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## Update check reports a Git authentication or fetch failure
+
+**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
+`could not read Username`. No terminal or desktop credential prompt appears.
+
+**Why.** Update checks run in the background, so their Git commands deliberately fail closed
+instead of waiting for credentials. WebUI removes inherited askpass settings and disables
+Git-configured `core.askPass` and `credential.helper` commands for the check. This applies even if
+the helper is configured in the checkout, global Git config, or system Git config. SSH runs with
+`BatchMode=yes`: agent authentication remains available through the inherited `SSH_AUTH_SOCK`, but
+password, key-passphrase, and host-key questions fail instead of reading from a controlling terminal.
+
+**Diagnostic.** Run these commands in each checkout named by the update status (WebUI and Hermes
+Agent may have different origins):
+
+```bash
+git remote get-url origin
+env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 \
+  git -c core.askPass= -c credential.helper= \
+  -c 'core.sshCommand=ssh -oBatchMode=yes' ls-remote origin
+```
+
+The second command mirrors the update check's credential behavior. If it fails, that checkout's
+origin cannot be fetched unattended with the authentication already available to WebUI.
+
+**Fix.** Use a public origin, or use an SSH origin with a key already loaded in the SSH agent seen
+by the WebUI process. After changing the remote or loading the key, restart WebUI if needed so it
+inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic command and the update check. For a
+private HTTPS origin that depends on a credential helper, update that checkout manually; background
+checks intentionally do not invoke the helper.
+
+**When to file a bug.** File a WebUI bug if the diagnostic command succeeds under the same user and
+environment as WebUI but the update check still reports an authentication failure, or if an update
+check opens a credential prompt. Include sanitized remote hosts and error text; do not include
+credential-bearing URLs, tokens, or private keys.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

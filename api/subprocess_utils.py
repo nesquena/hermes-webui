@@ -37,10 +37,31 @@ GIT_ENV_SCRUB_KEYS = (
     "GIT_SSH_COMMAND",
 )
 GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+GIT_NONINTERACTIVE_CONFIG = (
+    ("core.askPass", ""),
+    ("credential.helper", ""),
+    ("core.sshCommand", "ssh -oBatchMode=yes"),
+)
+
+
+def noninteractive_git_argv(
+    args: list[str], *, executable: str = "git",
+) -> list[str]:
+    """Build Git argv that disables configured interactive credential helpers.
+
+    SSH transports run with ``BatchMode=yes`` so they use an available agent or
+    fail instead of reading a password, key passphrase, or host-key answer from
+    the WebUI process's controlling terminal.
+    """
+    argv = [executable]
+    for key, value in GIT_NONINTERACTIVE_CONFIG:
+        argv.extend(["-c", f"{key}={value}"])
+    argv.extend(args)
+    return argv
 
 
 def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Return an environment for a git child that cannot prompt or be redirected.
+    """Return an environment without inherited Git prompts or redirections.
 
     ``GIT_TERMINAL_PROMPT=0`` makes a command that needs credentials fail instead
     of waiting on a terminal, but git consults ``GIT_ASKPASS``/``SSH_ASKPASS``

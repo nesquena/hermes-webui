@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from api.subprocess_utils import clean_git_env, windows_hide_flags
+from api.subprocess_utils import clean_git_env, noninteractive_git_argv, windows_hide_flags
 from api.workspace import rmtree_anchored, safe_resolve_ws, unlink_anchored
 
 logger = logging.getLogger(__name__)
@@ -38,12 +38,10 @@ _GIT_HARDENED_CONFIG = (
     # restored sessions, or mounted workspaces. Keep repo-local configuration
     # from turning read/status/fetch calls into host command execution.
     ("core.fsmonitor", "false"),
-    # Force the unmodified system ssh binary rather than clearing it — an empty
-    # value would break legitimate ssh fetches, while "ssh" overrides any
-    # repo-local core.sshCommand that points at an attacker helper.
-    ("core.sshCommand", "ssh"),
-    ("core.askPass", ""),
-    ("credential.helper", ""),
+    # Force the system ssh binary in batch mode rather than clearing it — an
+    # empty value would break legitimate agent-backed ssh fetches, while this
+    # overrides repo-local helpers without allowing terminal interaction.
+    ("core.sshCommand", "ssh -oBatchMode=yes"),
     ("protocol.ext.allow", "never"),
     # Neutralize repo-local core.gitProxy, which specifies an external proxy
     # command reachable on `git fetch` against a git:// remote.
@@ -73,7 +71,7 @@ def _hardened_git_argv(
     attributes_file: str | None = None,
     hooks_path: str | None = None,
 ) -> list[str]:
-    argv = ["git"]
+    argv = noninteractive_git_argv([])
     for key, value in _GIT_HARDENED_CONFIG:
         argv.extend(["-c", f"{key}={value}"])
     if destructive:
