@@ -1020,6 +1020,7 @@ def test_agent_session_source_normalization_contract():
         'discord': ('messaging', 'Discord'),
         'slack': ('messaging', 'Slack'),
         'matrix': ('messaging', 'Matrix'),
+        'signal': ('messaging', 'Signal'),
         'cron': ('cron', 'Cron'),
         'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),
@@ -1045,13 +1046,14 @@ def test_sessions_js_treats_email_as_messaging_source():
     raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
     label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
 
-    for raw_source in ("email", "wecom", "wecom_callback", "matrix"):
+    for raw_source in ("email", "wecom", "wecom_callback", "matrix", "signal"):
         assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
 
     assert "email: 'Email'" in label_section
     assert "wecom: 'WeCom'" in label_section
     assert "wecom_callback: 'WeCom Callback'" in label_section
     assert "matrix: 'Matrix'" in label_section
+    assert "signal: 'Signal'" in label_section
 
 
 def test_sessions_js_treats_messaging_sidecars_behaviorally():
@@ -1067,6 +1069,8 @@ const cases = [
   {{ session_source: 'other', raw_source: 'wecom_callback' }},
   {{ session_source: 'other', source_tag: 'wecom' }},
   {{ session_source: 'other', source: 'matrix' }},
+  {{ session_source: 'other', source: 'signal' }},
+  {{ session_source: 'other', raw_source: 'signal' }},
   {{ session_source: 'messaging', source: 'anything' }},
 ];
 for (const c of cases) {{
@@ -1074,6 +1078,47 @@ for (const c of cases) {{
 }}
 if (_isMessagingSession({{ session_source: 'other', source: 'cli' }})) {{
   throw new Error('cli should not be treated as messaging');
+}}
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_sessions_js_treats_signal_sidecar_as_external_session():
+    """A Signal gateway session must be exposed as an external session.
+
+    The sidebar only lists sessions the client classifier reports as external,
+    and _isExternalSession routes messaging sources through _isMessagingSession.
+    A Signal sidecar whose persisted session_source is the legacy 'other' value
+    therefore has to be recognized from its raw source, exactly like the Matrix
+    precedent (#6816). This exercises the real sessions.js classifiers in node
+    rather than asserting on the shape of the allowlists.
+    """
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("const _MESSAGING_RAW_SOURCES")
+    end = src.index("\n}", src.index("function _isExternalSession")) + len("\n}")
+    block = src[start:end]
+    script = f"""
+{block}
+if (!_isMessagingSession({{ session_source: 'other', source: 'signal' }})) {{
+  throw new Error('signal session was not classified as messaging');
+}}
+if (_MESSAGING_SOURCE_LABELS['signal'] !== 'Signal') {{
+  throw new Error('unexpected signal source label: ' + _MESSAGING_SOURCE_LABELS['signal']);
+}}
+for (const c of [
+  {{ session_source: 'other', source: 'signal' }},
+  {{ session_source: 'other', raw_source: 'signal' }},
+  {{ session_source: 'other', source_tag: 'signal' }},
+]) {{
+  if (!_isExternalSession(c)) {{
+    throw new Error('signal sidecar is not exposed as an external session: ' + JSON.stringify(c));
+  }}
+}}
+if (_isExternalSession({{ session_source: 'webui', source: 'signal' }})) {{
+  throw new Error('a WebUI-origin session must not be treated as an external session');
+}}
+if (_isExternalSession({{ session_source: 'other', source: 'some_future_platform' }})) {{
+  throw new Error('an unrecognized source must not be treated as an external session');
 }}
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
