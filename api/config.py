@@ -4757,9 +4757,14 @@ def _model_supports_fast_tier_for_provider(model_id: str | None, provider: str |
 
 
 def _annotate_fast_tier_model_groups(payload: dict | None) -> dict | None:
-    """Add service-tier capability metadata to OpenAI-family model groups."""
+    """Add computed, browser-safe metadata to a model-catalog payload."""
     if not isinstance(payload, dict):
         return payload
+    routes = _public_model_alias_routes()
+    if routes:
+        payload["model_alias_routes"] = routes
+    else:
+        payload.pop("model_alias_routes", None)
     groups = payload.get("groups")
     if not isinstance(groups, list):
         return payload
@@ -5564,13 +5569,13 @@ def _minimal_static_models_catalog() -> dict:
         })
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": None,
             "default_model": "",
             "configured_model_badges": {},
             "groups": [],
             "aliases": {},
-        }
+        })
 
 
 def _static_models_catalog_without_live_probes() -> dict:
@@ -5909,17 +5914,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         groups.sort(key=_group_sort_key)
 
-        model_aliases: dict[str, str] = {}
-        try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
-            if isinstance(raw_aliases, dict):
-                model_aliases = {
-                    str(k).strip(): str(v).strip()
-                    for k, v in raw_aliases.items()
-                    if k and v
-                }
-        except Exception:
-            pass
+        model_aliases = _model_aliases_from_config()
 
         if not groups and default_model:
             return copy.deepcopy(_minimal_static_models_catalog())
@@ -6565,24 +6560,139 @@ def _load_models_cache_from_disk() -> dict | None:
 
 
 def _model_aliases_from_config() -> dict[str, str]:
-    """Build the normalized model-alias map from current config.
-
-    Mirrors the alias construction used by the live and static catalog paths so
-    the `/api/models.aliases` contract is consistent across every catalog source
-    (live, static, and the stale-disk fallback, which can't read aliases from a
-    disk cache that never persisted them).
-    """
+    """Build the legacy string-alias map from current config."""
     try:
         raw_aliases = cfg.get("model", {}).get("aliases", {})
         if isinstance(raw_aliases, dict):
             return {
                 str(k).strip(): str(v).strip()
                 for k, v in raw_aliases.items()
-                if k and v
+                if k and v and isinstance(v, str)
             }
     except Exception:
         pass
     return {}
+
+
+_MODEL_ALIAS_ROUTE_PREFIX = "model-alias-"
+
+
+def _model_alias_route_provider(name: object) -> str:
+    """Return a stable opaque provider lane for one profile-local alias name."""
+    normalized = str(name or "").strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"{_MODEL_ALIAS_ROUTE_PREFIX}{digest}"
+
+
+def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str, dict[str, str]]:
+    """Normalize canonical and legacy aliases with Hermes precedence."""
+    config_data = config_data if isinstance(config_data, dict) else cfg
+    entries: dict[str, dict[str, str]] = {}
+    canonical = config_data.get("model_aliases")
+    if isinstance(canonical, dict):
+        for raw_name, raw_entry in canonical.items():
+            name = str(raw_name or "").strip().lower()
+            if not name or not isinstance(raw_entry, dict):
+                continue
+            model = str(raw_entry.get("model") or "").strip()
+            if not model:
+                continue
+            entries[name] = {
+                "model": model,
+                "provider": str(raw_entry.get("provider") or "custom").strip() or "custom",
+                "base_url": str(raw_entry.get("base_url") or "").strip(),
+                "api_key": str(raw_entry.get("api_key") or "").strip(),
+                "key_env": str(raw_entry.get("key_env") or "").strip(),
+            }
+
+    model_section = config_data.get("model")
+    legacy = model_section.get("aliases") if isinstance(model_section, dict) else None
+    current_provider = str(model_section.get("provider") or "").strip() if isinstance(model_section, dict) else ""
+    if isinstance(legacy, dict):
+        for raw_name, raw_entry in legacy.items():
+            name = str(raw_name or "").strip().lower()
+            if not name or name in entries:
+                continue
+            if isinstance(raw_entry, dict):
+                model = str(raw_entry.get("model") or "").strip()
+                provider = str(raw_entry.get("provider") or current_provider or "custom").strip()
+                base_url = str(raw_entry.get("base_url") or "").strip()
+            elif isinstance(raw_entry, str) and raw_entry.strip():
+                value = raw_entry.strip()
+                provider, model = value.split("/", 1) if "/" in value else (current_provider, value)
+                provider, model, base_url = provider.strip(), model.strip(), ""
+            else:
+                continue
+            if model:
+                entries[name] = {
+                    "model": model,
+                    "provider": provider or current_provider or "custom",
+                    "base_url": base_url,
+                    "api_key": "",
+                    "key_env": "",
+                }
+    return entries
+
+
+def _public_model_alias_routes() -> dict[str, dict[str, str]]:
+    """Return alias routes safe to expose through ``/api/models``.
+
+    Endpoint and credential fields remain server-side. The opaque provider lane
+    preserves exact alias/endpoint identity in session state without exposing a
+    credential-bearing URL or key material.
+    """
+    return {
+        name: {
+            "model": entry["model"],
+            "provider": entry["provider"],
+            "route_provider": _model_alias_route_provider(name),
+        }
+        for name, entry in _configured_model_alias_entries().items()
+    }
+
+
+def resolve_model_alias_runtime(
+    route_provider: str | None,
+    expected_model: str | None = None,
+) -> dict[str, str] | None:
+    """Resolve an opaque alias lane to server-side runtime routing material."""
+    route_provider = str(route_provider or "").strip().lower()
+    if not route_provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
+        return None
+    aliases = _configured_model_alias_entries()
+    name = next(
+        (alias_name for alias_name in aliases if _model_alias_route_provider(alias_name) == route_provider),
+        None,
+    )
+    if name is None:
+        return None
+
+    resolved = dict(aliases[name])
+    try:
+        from hermes_cli.model_switch import _load_direct_aliases, direct_alias_runtime_request
+
+        direct = _load_direct_aliases().get(name)
+        if direct is not None:
+            requested_provider, api_key = direct_alias_runtime_request(direct)
+            resolved = {
+                "model": str(direct.model or "").strip(),
+                "provider": str(requested_provider or direct.provider or "custom").strip(),
+                "base_url": str(direct.base_url or "").strip(),
+                "api_key": str(api_key or "").strip(),
+                "key_env": "",
+            }
+    except Exception:
+        pass
+
+    resolved["alias"] = name
+    if expected_model and str(expected_model).strip() != resolved["model"]:
+        return None
+    raw_api_key = resolved.get("api_key", "")
+    if raw_api_key.startswith("${") and raw_api_key.endswith("}"):
+        resolved["api_key"] = _thread_local_env_value(raw_api_key[2:-1]).strip()
+    elif not raw_api_key and resolved.get("key_env"):
+        resolved["api_key"] = _thread_local_env_value(resolved["key_env"]).strip()
+    return resolved
 
 
 def _load_stale_models_cache_from_disk() -> dict | None:
@@ -8511,21 +8621,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         groups.sort(key=_group_sort_key)
 
         # 12. Include model aliases so the WebUI frontend can resolve them.
-        model_aliases: dict[str, str] = {}
-        try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
-            if isinstance(raw_aliases, dict):
-                model_aliases = {str(k).strip(): str(v).strip() for k, v in raw_aliases.items() if k and v}
-        except Exception:
-            pass
+        model_aliases = _model_aliases_from_config()
 
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _build_configured_model_badges(),
             "groups": groups,
             "aliases": model_aliases,
-        }
+        })
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.

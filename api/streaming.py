@@ -44,6 +44,7 @@ from api.config import (
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
+    resolve_model_alias_runtime,
     resolve_custom_provider_connection,
     model_with_provider_context,
     warm_models_catalog_provenance_if_cold,
@@ -8987,6 +8988,8 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    runtime_base_url=None,
+    runtime_api_key=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -10339,31 +10342,68 @@ def _run_agent_streaming(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
-                resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                    model_with_provider_context(model, provider_context),
-                    explicitly_picked=_explicitly_picked,
-                )
+                _alias_route = resolve_model_alias_runtime(provider_context, expected_model=model)
+                _resolved_before_dispatch = runtime_base_url is not None or runtime_api_key is not None
+                if _resolved_before_dispatch:
+                    resolved_model = model
+                    resolved_provider = provider_context
+                    resolved_base_url = runtime_base_url
+                    resolved_api_key = runtime_api_key
+                elif _alias_route is not None:
+                    resolved_model = _alias_route["model"]
+                    resolved_provider = _alias_route["provider"]
+                    resolved_base_url = _alias_route.get("base_url") or None
+                    resolved_api_key = _alias_route.get("api_key") or None
+                else:
+                    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                        model_with_provider_context(model, provider_context),
+                        explicitly_picked=_explicitly_picked,
+                    )
+                    resolved_api_key = None
                 configured_base_url = resolved_base_url
 
                 # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-                # Pass the resolved provider so non-default providers get their own credentials.
-                resolved_api_key = None
-                try:
-                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                    from hermes_cli.runtime_provider import resolve_runtime_provider
-                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                        resolve_runtime_provider,
-                        requested=resolved_provider,
-                        target_model=resolved_model,
-                    )
-                    resolved_api_key = _rt.get("api_key")
-                    if not resolved_provider:
-                        resolved_provider = _rt.get("provider")
-                    resolved_base_url = _runtime_preferred_base_url(
-                        _rt, resolved_provider, configured_base_url
-                    )
-                except Exception as _e:
-                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                # A URL-bearing alias already resolved its endpoint-owned credential
+                # server-side; never ask the active provider resolver for a key that
+                # could then be sent to that unrelated endpoint.
+                if (_resolved_before_dispatch or _alias_route is not None) and configured_base_url:
+                    resolved_provider = "custom"
+                    try:
+                        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                        _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                            resolve_runtime_provider,
+                            requested="custom",
+                            explicit_api_key=resolved_api_key,
+                            explicit_base_url=configured_base_url,
+                            target_model=resolved_model,
+                        )
+                        resolved_api_key = _rt.get("api_key") or resolved_api_key
+                        resolved_base_url = _rt.get("base_url") or configured_base_url
+                    except Exception:
+                        # Older Agent versions cannot resolve by explicit endpoint.
+                        # Keep the alias URL but never borrow an active-provider key.
+                        if not resolved_api_key:
+                            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
+                else:
+                    try:
+                        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+                        _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                            resolve_runtime_provider,
+                            requested=resolved_provider,
+                            target_model=resolved_model,
+                        )
+                        if not resolved_api_key:
+                            resolved_api_key = _rt.get("api_key")
+                        if not resolved_provider:
+                            resolved_provider = _rt.get("provider")
+                        resolved_base_url = _runtime_preferred_base_url(
+                            _rt, resolved_provider, configured_base_url
+                        )
+                    except Exception as _e:
+                        print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
                 # Named custom providers (custom:slug) may not be resolvable by
                 # hermes_cli.runtime_provider directly. Fall back to config.yaml

@@ -22682,6 +22682,8 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
+    runtime_base_url=None,
+    runtime_api_key=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -22728,6 +22730,9 @@ def _start_regeneration_stream_locked(
         worker_kwargs["regeneration"] = True
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if not backend_is_gateway and (runtime_base_url is not None or runtime_api_key is not None):
+        worker_kwargs["runtime_base_url"] = runtime_base_url
+        worker_kwargs["runtime_api_key"] = runtime_api_key
 
     def _gated_worker():
         release_worker.wait()
@@ -23040,6 +23045,8 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    runtime_base_url=None,
+    runtime_api_key=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -23121,6 +23128,8 @@ def _start_chat_stream_for_session(
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
+                        runtime_base_url=runtime_base_url,
+                        runtime_api_key=runtime_api_key,
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -23187,6 +23196,9 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
+    if not backend_is_gateway and (runtime_base_url is not None or runtime_api_key is not None):
+        worker_kwargs["runtime_base_url"] = runtime_base_url
+        worker_kwargs["runtime_api_key"] = runtime_api_key
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
@@ -23309,6 +23321,8 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
+    alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
+
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
         StartRunRequest,
@@ -23317,8 +23331,24 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
-    if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
-        if regeneration is not None and runtime_adapter_runner_enabled():
+    adapter_enabled = runtime_adapter_enabled()
+    runner_enabled = runtime_adapter_runner_enabled()
+    runtime_base_url = None
+    runtime_api_key = None
+    if alias_route is not None:
+        if gateway_chat_enabled or runner_enabled:
+            # External runtimes own their provider credentials. Their supported
+            # request contract is the model-route alias, not WebUI's opaque lane.
+            model = alias_route["alias"]
+            model_provider = None
+        else:
+            model = alias_route["model"]
+            model_provider = alias_route["provider"]
+            runtime_base_url = alias_route.get("base_url") or None
+            runtime_api_key = alias_route.get("api_key") or None
+
+    if adapter_enabled or runner_enabled:
+        if regeneration is not None and runner_enabled:
             return {"error": "Regeneration is not supported by the runner backend.", "code": "unsupported_regeneration_backend", "_status": 409}
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
@@ -23334,6 +23364,8 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                runtime_base_url=runtime_base_url,
+                runtime_api_key=runtime_api_key,
             )
 
         def _legacy_adapter_factory():
@@ -23376,6 +23408,8 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        runtime_base_url=runtime_base_url,
+        runtime_api_key=runtime_api_key,
     )
 
 
