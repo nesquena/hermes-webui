@@ -10,8 +10,6 @@ Covers:
   6. static/panels.js: loadSettingsPanel() populates both version badges from settings
   7. server.py: server_version is not the old hardcoded string
 """
-import dis
-import importlib
 import math
 import pytest
 import subprocess
@@ -572,23 +570,50 @@ class _GenerationTimestamp(float):
         return float(self) - float(other)
 
 
-def _cache_load_sites(code):
-    """Map ``instruction offset -> source line`` for cache global loads.
+class _ArmedSnapshot:
+    """A cache snapshot that records every consultation and can park a reader.
 
-    Matches ``LOAD_GLOBAL`` and its specialized forms, so the map stays valid
-    after adaptive specialization and is rebuilt from the code object the test
-    is actually about to execute.
+    Production only ever unpacks the snapshot it captured
+    (``cached, cached_at = snapshot``), so recording ``__iter__`` and
+    ``__getitem__`` observes every read of that generation without relying on
+    interpreter tracing hooks: the previous opcode-offset oracle never fired on
+    3.12+, which left the interleaving unexercised there.  ``parked_thread``
+    names the thread whose FIRST consultation calls ``on_park``.
     """
-    name = '_GATEWAY_AGENT_VERSION_CACHE'
-    sites = {}
-    for instr in dis.get_instructions(code):
-        if not instr.opname.startswith('LOAD_GLOBAL'):
-            continue
-        if instr.argval == name or (instr.argval is None and name in instr.argrepr):
-            positions = getattr(instr, 'positions', None)
-            lineno = getattr(positions, 'lineno', None) or instr.starts_line
-            sites[instr.offset] = lineno
-    return sites
+
+    def __init__(self, value, completed_at, parked_thread=None, on_park=None):
+        self._pair = (value, completed_at)
+        self._parked_thread = parked_thread
+        self._on_park = on_park
+        self.parked = False
+        self.accesses = []
+
+    def _consult(self, kind):
+        thread = threading.current_thread().name
+        self.accesses.append((thread, kind))
+        if (self._on_park is not None and not self.parked
+                and thread == self._parked_thread):
+            self.parked = True
+            self._on_park()
+        return self._pair
+
+    def __iter__(self):
+        return iter(self._consult('iter'))
+
+    def __getitem__(self, index):
+        return self._consult('getitem')[index]
+
+    def __len__(self):
+        return len(self._pair)
+
+    def __eq__(self, other):
+        return self._pair == other
+
+    def __hash__(self):
+        return hash(self._pair)
+
+    def __repr__(self):
+        return f'_ArmedSnapshot({self._pair!r})'
 
 
 def _assert_age_relation(label, age, relation, ttl):
@@ -1019,27 +1044,22 @@ class TestCachedAgentVersionFromGateway:
         concurrent reader through ``_cached_agent_version_from_gateway()`` and
         freezes the interleaving with events instead of sleeps:
 
-        * the reader traces its own instructions and counts every global load
-          of ``_GATEWAY_AGENT_VERSION_CACHE`` performed by the lock-free fast
-          path (offsets resolved from the live code object, so a rewritten fast
-          path is measured as written);
-        * the reader parks on the first instruction AFTER its first load — the
-          generation it loaded is already bound on its own frame stack — and
-          resumes only once a writer thread has published a replacement through
-          the production miss path.  That window is exactly where a double-read
+        * the cache global is replaced by ``_ArmedSnapshot``, a snapshot that
+          records every consultation of the generation the reader captured.
+          Production only ever unpacks it, so counting ``__iter__`` /
+          ``__getitem__`` measures the read without depending on interpreter
+          tracing internals (the previous opcode-offset oracle never fired on
+          3.12+);
+        * the reader parks inside that first consultation — the generation it
+          captured is already bound on its own frame stack — and resumes only
+          once a writer thread has published a replacement through the
+          production miss path.  That window is exactly where a double-read
           fast path picks up a second generation;
         * timestamps carry the generation they belong to, so returning one
           generation's value after aging out another's timestamp fails on the
           recorded tag rather than on timing luck.
         """
         import api.updates as upd
-
-        target_code = upd._cached_agent_version_from_gateway.__code__
-        load_sites = _cache_load_sites(target_code)
-        assert load_sites, (
-            "the harness could not find the LOAD_GLOBAL of "
-            "_GATEWAY_AGENT_VERSION_CACHE in the production function"
-        )
 
         reader_name = 'cr6289-reader'
         writer_name = 'cr6289-writer'
@@ -1058,11 +1078,25 @@ class TestCachedAgentVersionFromGateway:
 
         reader_read = threading.Event()
         published = threading.Event()
-        hits = []
         errors = []
         results = {}
-        trace_state = {'loads': 0, 'after_load': False, 'parked': False}
         detector_calls = []
+
+        def park_reader():
+            # Runs on the reader thread while its first consultation of the
+            # captured generation is in flight: the snapshot is already bound
+            # on this frame's stack, so a publication now is visible to a
+            # double read but can never change what a single read decided.
+            reader_read.set()
+            if not published.wait(timeout=5.0):
+                errors.append('writer never published')
+
+        armed_snapshot = _ArmedSnapshot(
+            seeded_value,
+            seeded_at,
+            parked_thread=reader_name,
+            on_park=park_reader,
+        )
 
         def frozen_clock():
             # One exact value per thread; the writer's doubles as the
@@ -1077,43 +1111,10 @@ class TestCachedAgentVersionFromGateway:
             return refreshed_value
 
         def reader():
-            previous_trace = sys.gettrace()
-
-            def local_trace(frame, event, arg):
-                if event == 'opcode':
-                    if frame.f_lasti in load_sites:
-                        trace_state['loads'] += 1
-                        trace_state['after_load'] = True
-                        hits.append((frame.f_lasti, load_sites[frame.f_lasti]))
-                    elif trace_state['after_load'] and not trace_state['parked']:
-                        # First instruction after the fast path loaded the
-                        # generation: it is already on this frame's stack, so a
-                        # publication now is visible to a double read but can
-                        # never change what a single read decided.
-                        trace_state['parked'] = True
-                        reader_read.set()
-                        if not published.wait(timeout=5.0):
-                            errors.append('writer never published')
-                    return local_trace
-                if event == 'call' and frame.f_code is target_code:
-                    frame.f_trace_opcodes = True
-                    frame.f_trace_lines = False
-                return local_trace
-
-            def global_trace(frame, event, arg):
-                if event == 'call' and frame.f_code is target_code:
-                    frame.f_trace_opcodes = True
-                    frame.f_trace_lines = False
-                    return local_trace
-                return None
-
             try:
-                sys.settrace(global_trace)
                 results['reader'] = upd._cached_agent_version_from_gateway()
             except BaseException as exc:  # pragma: no cover - asserted below
                 errors.append(f'reader raised {type(exc).__name__}: {exc}')
-            finally:
-                sys.settrace(previous_trace)
 
         def writer():
             try:
@@ -1131,7 +1132,7 @@ class TestCachedAgentVersionFromGateway:
         with patch.object(upd.time, 'monotonic', frozen_clock), \
                 patch.object(upd, '_detect_agent_version_from_gateway_health',
                              side_effect=counting_detector):
-            upd._GATEWAY_AGENT_VERSION_CACHE = (seeded_value, seeded_at)
+            upd._GATEWAY_AGENT_VERSION_CACHE = armed_snapshot
             seeded_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
 
             threads = [
@@ -1147,20 +1148,25 @@ class TestCachedAgentVersionFromGateway:
         assert not errors, f'thread errors: {errors}'
         assert reader_read.is_set(), 'the reader never reached the fast path'
         assert published.is_set(), 'the writer never published'
-        assert trace_state['parked'], (
-            'the reader was never parked after its first cache load, so the '
-            'interleaving was never exercised'
+        assert armed_snapshot.parked, (
+            'the reader was never parked inside its first consultation of the '
+            'captured generation, so the interleaving was never exercised'
         )
-        assert trace_state['loads'] >= 1, (
-            'instruction tracing observed no cache load, so this test cannot '
-            'certify a single read'
+        reader_consults = [
+            kind for thread, kind in armed_snapshot.accesses
+            if thread == reader_name
+        ]
+        assert reader_consults, (
+            'the reader never consulted the snapshot it captured, so this '
+            'test cannot certify a single read'
         )
-        assert trace_state['loads'] == 1, (
-            f"the lock-free fast path must load _GATEWAY_AGENT_VERSION_CACHE "
-            f"exactly once, but it loaded it {trace_state['loads']} times at "
-            f"{[f'offset {offset} (line {line})' for offset, line in hits]} — a "
-            f"second load lets a reader pair the value of one cache generation "
-            f"with the completed_at of another"
+        assert len(reader_consults) == 1, (
+            f"the lock-free fast path must consult "
+            f"_GATEWAY_AGENT_VERSION_CACHE exactly once, but the captured "
+            f"generation was read {len(reader_consults)} times "
+            f"({reader_consults}) by {reader_name} — a second consult lets a "
+            f"reader pair the value of one cache generation with the "
+            f"completed_at of another"
         )
         assert results.get('reader') == seeded_value, (
             f"the reader must serve the generation it loaded ({seeded_value!r}), "
