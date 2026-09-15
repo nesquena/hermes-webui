@@ -725,12 +725,24 @@ async function cmdModel(args){
     const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
     if(resp.ok){
       modelsData=await resp.json();
-      const aliases=modelsData.model_alias_routes||modelsData.aliases||{};
-      for(const [alias,modelId] of Object.entries(aliases)){
+      let routedAliasMatched=false;
+      const routedAliases=modelsData.model_alias_routes||{};
+      for(const [alias,target] of Object.entries(routedAliases)){
         if(alias.toLowerCase()===q){
-          aliasTarget=modelId;
-          q=String(modelId&&typeof modelId==='object'?modelId.model:modelId).toLowerCase();
+          routedAliasMatched=true;
+          aliasTarget=target;
+          q=String(target&&typeof target==='object'?target.model:target).toLowerCase();
           break;
+        }
+      }
+      if(!routedAliasMatched){
+        const aliases=modelsData.aliases||{};
+        for(const [alias,modelId] of Object.entries(aliases)){
+          if(alias.toLowerCase()===q){
+            aliasTarget=modelId;
+            q=String(modelId||'').toLowerCase();
+            break;
+          }
         }
       }
     }

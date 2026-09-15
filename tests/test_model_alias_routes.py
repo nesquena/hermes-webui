@@ -26,28 +26,52 @@ function extractFunc(src, name){
   return src.slice(start,i);
 }
 for(const name of ['_buildModelCandidates','_resolveModelAliasTarget','_looksLikeVersionedModel','_bestModelMatch','_nearestModelSuggestion']) eval('globalThis.'+name+'='+extractFunc(cmds,name));
-for(const name of ['_providerFromModelValue','_getOptionProviderId','_modelStateForSelect','_ensureModelOptionInDropdown']) eval('globalThis.'+name+'='+extractFunc(ui,name));
+for(const name of ['_providerFromModelValue','_getOptionProviderId','_modelStateForSelect','_ensureModelOptionInDropdown','_findModelInDropdown']) eval('globalThis.'+name+'='+extractFunc(ui,name));
 eval('globalThis.cmdModel=async '+extractFunc(cmds,'cmdModel'));
-function makeOption(value){return {value,textContent:value,dataset:{}};}
+function makeOption(value,provider='',model=''){return {value,textContent:value,dataset:{provider,model}};}
 const result={persisted:null};
-const sel={id:'modelSelect',options:[makeOption('openai/gpt-5.6-sol')],value:'openai/gpt-5.6-sol',appendChild(opt){this.options.push(opt);},onchange:async()=>{const state=_modelStateForSelect(sel,sel.value);result.persisted=state;}};
+const sel={
+  id:'modelSelect',
+  options:[
+    makeOption('openai/gpt-5.6-sol','openrouter','openai/gpt-5.6-sol'),
+    makeOption('@openrouter:gpt-4','openrouter','gpt-4'),
+    makeOption('@anthropic:gpt-4','anthropic','gpt-4'),
+  ],
+  value:'openai/gpt-5.6-sol',
+  appendChild(opt){this.options.push(opt);},
+  onchange:async()=>{const state=_modelStateForSelect(sel,sel.value);result.persisted=state;},
+};
 function $(id){return id==='modelSelect'?sel:null;} function t(k){return k;} function showToast(){}
 function _applyModelToDropdown(){return null;} function _refreshOpenModelDropdown(){} function syncModelChip(){} function getModelLabel(v){return v;}
 const S={session:{session_id:'test',model_provider:'openrouter'}};
 const window={_activeProvider:'openrouter',_configuredModelBadges:{}};
 const document={baseURI:'http://localhost/',createElement(){return makeOption('');}};
 const location={href:'http://localhost/'};
-const payload={
-  aliases:{sol:'openrouter/openai/gpt-5.6-sol'},
-  model_alias_routes:{sol:{model:'gpt-5.6-sol',provider:'openai-codex',route_provider:'model-alias-canonical'}},
-  groups:[{provider_id:'openrouter',models:[{id:'openai/gpt-5.6-sol'}]}],
-};
+const payload=JSON.parse(process.argv[4]);
 async function fetch(){return {ok:true,json:async()=>payload};}
 (async () => {
-  await cmdModel('sol');
+  await cmdModel(process.argv[5]);
   console.log(JSON.stringify(result));
 })();
 """
+
+
+def _run_cmd_model_alias_driver(tmp_path, payload, alias):
+    driver = tmp_path / "alias_driver.js"
+    driver.write_text(_NODE_ALIAS_DRIVER, encoding="utf-8")
+    return subprocess.run(
+        [
+            NODE,
+            str(driver),
+            str(REPO_ROOT / "static/commands.js"),
+            str(REPO_ROOT / "static/ui.js"),
+            json.dumps(payload),
+            alias,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def test_model_catalog_exposes_sanitized_canonical_alias_routes(monkeypatch):
@@ -85,6 +109,49 @@ def test_model_catalog_exposes_sanitized_canonical_alias_routes(monkeypatch):
     assert "canonical-secret" not in serialized
     assert "CANONICAL_KEY" not in serialized
     assert "codex.example.test" not in serialized
+
+
+def test_model_catalog_routes_only_explicit_legacy_identities(monkeypatch):
+    from api import config
+
+    monkeypatch.setattr(config, "cfg", {
+        "model_aliases": {
+            "canonical": {"model": "canonical-model", "provider": "openai"},
+        },
+        "model": {
+            "provider": "openrouter",
+            "aliases": {
+                "plain": "gpt-4",
+                "qualified": "anthropic/claude-sonnet-4.6",
+                "malformed_qualified": "/gpt-4",
+                "implicit_structured": {"model": "gpt-4.1"},
+                "provider_structured": {"model": "gpt-4.1", "provider": "openai"},
+                "endpoint_structured": {
+                    "model": "local-model",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                },
+            },
+        },
+    })
+
+    payload = config._annotate_fast_tier_model_groups({
+        "groups": [],
+        "aliases": config._model_aliases_from_config(),
+    })
+
+    assert payload["aliases"] == {
+        "plain": "gpt-4",
+        "qualified": "anthropic/claude-sonnet-4.6",
+        "malformed_qualified": "/gpt-4",
+    }
+    assert set(payload["model_alias_routes"]) == {
+        "canonical",
+        "qualified",
+        "provider_structured",
+        "endpoint_structured",
+    }
+    assert "plain" not in payload["model_alias_routes"]
+    assert "implicit_structured" not in payload["model_alias_routes"]
 
 
 def test_custom_alias_route_resolves_exact_endpoint_and_credential(monkeypatch):
@@ -168,18 +235,47 @@ def test_alias_runtime_fallback_supports_older_agent_loader(monkeypatch):
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_cmd_model_prefers_canonical_alias_route(tmp_path):
-    driver = tmp_path / "alias_driver.js"
-    driver.write_text(_NODE_ALIAS_DRIVER, encoding="utf-8")
-    result = subprocess.run(
-        [NODE, str(driver), str(REPO_ROOT / "static/commands.js"), str(REPO_ROOT / "static/ui.js")],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    result = _run_cmd_model_alias_driver(tmp_path, {
+        "aliases": {"sol": "openrouter/openai/gpt-5.6-sol"},
+        "model_alias_routes": {
+            "sol": {
+                "model": "gpt-5.6-sol",
+                "provider": "openai-codex",
+                "route_provider": "model-alias-canonical",
+            },
+        },
+        "groups": [{
+            "provider_id": "openrouter",
+            "models": [{"id": "openai/gpt-5.6-sol"}],
+        }],
+    }, "sol")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["persisted"] == {
         "model": "gpt-5.6-sol",
         "model_provider": "model-alias-canonical",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_cmd_model_falls_back_to_unqualified_scalar_alias(tmp_path):
+    result = _run_cmd_model_alias_driver(tmp_path, {
+        "aliases": {"fast": "gpt-4"},
+        "model_alias_routes": {
+            "other": {
+                "model": "other-model",
+                "provider": "anthropic",
+                "route_provider": "model-alias-other",
+            },
+        },
+        "groups": [
+            {"provider_id": "openrouter", "models": [{"id": "@openrouter:gpt-4"}]},
+            {"provider_id": "anthropic", "models": [{"id": "@anthropic:gpt-4"}]},
+        ],
+    }, "fast")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["persisted"] == {
+        "model": "gpt-4",
+        "model_provider": "openrouter",
     }
 
 
