@@ -24,6 +24,36 @@ def _git(cwd: Path, *args: str) -> None:
     )
 
 
+def test_diagnostic_refuses_the_ext_transport(tmp_path: Path) -> None:
+    """An ext:: origin runs a command named by the URL, so the diagnostic must
+    refuse the transport before probing it."""
+    if os.name == "nt":
+        pytest.skip("executable marker setup is POSIX-only")
+
+    marker = tmp_path / "ext-was-invoked"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "protocol.ext.allow", "always")
+    # Bare command form: git executes this with the shell, so it creates the
+    # marker. (A quoted ``sh -c '...'`` here does not run as written, which would
+    # make this test pass without proving anything.)
+    _git(repo, "remote", "add", "origin", f"ext::touch {marker}")
+
+    result = subprocess.run(
+        [sys.executable, str(DIAGNOSTIC), str(repo)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert not marker.exists(), (
+        f"the diagnostic executed an ext:: origin command: {result.stderr!r}"
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("proxy_source", ["environment", "repository"])
 def test_diagnostic_never_launches_external_git_proxy(
     tmp_path: Path, proxy_source: str,

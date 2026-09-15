@@ -42,28 +42,41 @@ GIT_NONINTERACTIVE_CONFIG = (
     ("core.askPass", ""),
     ("credential.helper", ""),
     ("core.sshCommand", "ssh -oBatchMode=yes"),
-    # ``core.gitProxy`` is per-host and multi-valued, and a command-line value
-    # does not mask a lower-scope one: measured with a repository-configured
-    # proxy, both ``-c core.gitProxy=`` and ``-c core.gitProxy=none`` still let
-    # the configured command run. Refuse the unauthenticated git:// transport
-    # outright instead, so Git never reaches proxy-command selection.
+    # Refuse the ext:: transport everywhere: it runs an arbitrary local command
+    # named by the remote URL, which an unattended child must never do.
+    ("protocol.ext.allow", "never"),
+)
+
+# Applied only to the unattended update path. ``core.gitProxy`` is per-host and
+# multi-valued, and a command-line value does not mask a lower-scope one:
+# measured against a repository-configured proxy, both ``-c core.gitProxy=`` and
+# ``-c core.gitProxy=none`` still let the configured command run. Refusing the
+# unauthenticated git:// transport is the only way to stop Git reaching
+# proxy-command selection, but it is a behaviour change for a remote a user
+# configured deliberately, so it stays opt-in rather than applying to workspace
+# Git operations too.
+GIT_UNATTENDED_TRANSPORT_CONFIG = (
     ("protocol.git.allow", "never"),
 )
 
 
 def noninteractive_git_argv(
-    args: list[str], *, executable: str = "git",
+    args: list[str], *, executable: str = "git", unattended: bool = False,
 ) -> list[str]:
     """Build Git argv that disables prompts and external transport helpers.
 
     SSH transports run with ``BatchMode=yes`` so they use an available agent or
     fail instead of reading a password, key passphrase, or host-key answer from
-    the WebUI process's controlling terminal. The unauthenticated ``git://``
-    transport is rejected because lower-scope ``core.gitProxy`` entries cannot
-    otherwise be reliably masked.
+    the WebUI process's controlling terminal.
+
+    ``unattended=True`` additionally refuses ``git://``, for callers that run
+    without a user present (see ``GIT_UNATTENDED_TRANSPORT_CONFIG``).
     """
     argv = [executable]
-    for key, value in GIT_NONINTERACTIVE_CONFIG:
+    config = GIT_NONINTERACTIVE_CONFIG + (
+        GIT_UNATTENDED_TRANSPORT_CONFIG if unattended else ()
+    )
+    for key, value in config:
         argv.extend(["-c", f"{key}={value}"])
     argv.extend(args)
     return argv

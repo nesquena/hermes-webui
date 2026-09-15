@@ -225,7 +225,10 @@ helper is configured in the checkout, global Git config, or system Git config. S
 password, key-passphrase, and host-key questions fail instead of reading from a controlling
 terminal. The unattended path also refuses `git://` origins: Git's `core.gitProxy` is per-host and
 multi-valued, and a command-line value does not mask a repository-configured proxy command, so the
-transport is rejected before Git can select one. Use HTTPS or SSH instead.
+transport is rejected before Git can select one. Use HTTPS or SSH instead. This refusal is scoped to
+unattended update checks: workspace Git operations keep honoring the remote the user configured,
+including `git://`. The `ext::` transport is refused for both, because it runs a local command named
+by the remote URL.
 
 **Diagnostic.** From the WebUI source checkout, run this command for each checkout named by the
 update status (WebUI and Hermes Agent may have different origins):

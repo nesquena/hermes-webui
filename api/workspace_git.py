@@ -42,10 +42,10 @@ _GIT_HARDENED_CONFIG = (
     # empty value would break legitimate agent-backed ssh fetches, while this
     # overrides repo-local helpers without allowing terminal interaction.
     ("core.sshCommand", "ssh -oBatchMode=yes"),
-    ("protocol.ext.allow", "never"),
-    # git:// is refused by noninteractive_git_argv(), which also supplies the
-    # askpass/credential overrides; a command-line core.gitProxy value cannot
-    # mask a repository-configured proxy command.
+    # git:// is deliberately allowed here: workspace operations act on a remote
+    # the user configured, so the unattended transport refusal that
+    # noninteractive_git_argv(unattended=True) applies stays scoped to update
+    # checks. The ext:: transport is refused for both by that same helper.
     # Prevent submodule operations from recursing into nested repos, which
     # could trigger hooks or fetch from attacker-controlled submodule URLs.
     ("submodule.recurse", "false"),

@@ -968,6 +968,32 @@ def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch
     assert 'GIT_SSH_COMMAND' not in mock_run.call_args.kwargs['env']
 
 
+def test_run_git_scopes_the_transport_refusal_to_unattended_checks(tmp_path, monkeypatch):
+    """The update check refuses git://; workspace Git keeps the user's remote.
+
+    The refusal cannot be expressed as a ``core.gitProxy`` override — a
+    command-line value does not mask a repository-configured proxy — so it is a
+    transport restriction, and it is scoped rather than shared with workspace
+    operations that act on a remote the user configured deliberately.
+    """
+    from api.workspace_git import _hardened_git_argv
+
+    with patch.object(updates.shutil, 'which', return_value='/usr/bin/git'), \
+         patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
+        updates._run_git(['fetch', 'origin'], tmp_path)
+
+    update_argv = mock_run.call_args.args[0]
+    workspace_argv = _hardened_git_argv(['fetch', 'origin'])
+
+    assert 'protocol.git.allow=never' in update_argv
+    assert 'protocol.ext.allow=never' in update_argv
+    assert 'protocol.git.allow=never' not in workspace_argv, (
+        'workspace Git must keep honoring a configured git:// remote'
+    )
+    assert 'protocol.ext.allow=never' in workspace_argv
+
+
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
     """Git output can contain Unicode even when Windows' active code page cannot."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
