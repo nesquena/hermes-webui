@@ -10,6 +10,8 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from api.gateway_chat import _gateway_runs_approval_event
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -1106,6 +1108,112 @@ def test_deny_settles_run_producer_so_reconciliation_cannot_resurrect_mirror():
             assert target not in refreshed
             assert same_run_sibling in refreshed
             assert other_run in refreshed
+    finally:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ["reconcile_gateway_pending_mirror_locked", "_approval_sse_notify_locked"],
+)
+def test_exact_run_resolution_settles_before_projection_failure(failure_point):
+    """Projection failures must not strand an already-consumed producer."""
+    from types import SimpleNamespace
+    from api import route_approvals as ra
+
+    sid = f"sess-exact-projection-failure-{failure_point}"
+    run_id = "run-exact-projection-failure"
+    target = SimpleNamespace(
+        data={"run_id": run_id, "approval_id": "approval-target"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    sibling = SimpleNamespace(
+        data={"run_id": run_id, "approval_id": "approval-sibling"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    try:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues[sid] = [target, sibling]
+
+        with patch.object(ra, failure_point, side_effect=RuntimeError("projection failed")):
+            with pytest.raises(RuntimeError, match="projection failed"):
+                ra.resolve_gateway_pending_run(
+                    sid,
+                    approval_id="approval-target",
+                    run_id=run_id,
+                    choice="deny",
+                    reason="user denied",
+                )
+
+        assert target.result == "deny"
+        assert target.reason == "user denied"
+        assert target.event.is_set(), "the consumed producer must be woken before projection work"
+        assert sibling.result is None
+        assert sibling.reason is None
+        assert not sibling.event.is_set()
+        with ra._lock:
+            assert ra._gateway_queues[sid] == [sibling]
+    finally:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues.pop(sid, None)
+
+
+@pytest.mark.parametrize(
+    "terminal_reason",
+    [
+        "Gateway run completed before approval resolution",
+        "Gateway run failed before approval resolution",
+        "Gateway run was cancelled before approval resolution",
+        "Gateway run ended during teardown before approval resolution",
+    ],
+)
+def test_terminal_run_settlement_denies_all_run_producers_and_preserves_other_runs(
+    terminal_reason,
+):
+    """Every terminal exit fails closed without consuming another run's producer."""
+    from types import SimpleNamespace
+    from api import route_approvals as ra
+
+    sid = f"sess-terminal-run-{terminal_reason.split()[2]}"
+    run_id = "run-terminal"
+
+    def producer(entry_run_id, approval_id):
+        return SimpleNamespace(
+            data={"run_id": entry_run_id, "approval_id": approval_id},
+            event=threading.Event(),
+            result=None,
+            reason=None,
+        )
+
+    targets = [producer(run_id, "approval-a"), producer(run_id, "approval-b")]
+    survivor = producer("run-other", "approval-other")
+    try:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues[sid] = [targets[0], survivor, targets[1]]
+
+        settled, _head, _total = ra.settle_gateway_pending_run(
+            sid, run_id, reason=terminal_reason
+        )
+
+        assert settled == 2
+        for target in targets:
+            assert target.result == "deny"
+            assert target.reason == terminal_reason
+            assert target.event.is_set()
+        assert survivor.result is None
+        assert survivor.reason is None
+        assert not survivor.event.is_set()
+        with ra._lock:
+            assert ra._gateway_queues[sid] == [survivor]
     finally:
         with ra._lock:
             ra._pending.pop(sid, None)
