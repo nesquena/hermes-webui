@@ -7022,7 +7022,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     ``force_refresh=True`` is an internal escape hatch for bounded freshness
     checks that need a real live rebuild while preserving the default cache
     contract for every existing caller.
+
+    ``prefer_cache`` and ``force_refresh`` are mutually exclusive: the first
+    forbids live discovery ("never run or wait for the live provider probe"),
+    while the second requires it. The contradictory combination raises
+    ``ValueError`` at entry so the non-blocking contract holds for every
+    accepted input. (No in-tree caller passes both.)
     """
+    if prefer_cache and force_refresh:
+        raise ValueError(
+            "prefer_cache and force_refresh are mutually exclusive: "
+            "prefer_cache forbids live discovery while force_refresh requires it"
+        )
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
@@ -8531,7 +8542,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # Mark that a build may be in progress BEFORE acquiring the lock.
     # If another thread has already started the cold path, we will wait for
     # its result rather than running the cold path concurrently.
-    should_wait = _cache_build_in_progress
+    #
+    # prefer_cache callers must NOT wait: their contract is "serve the warm /
+    # disk cache or a network-free minimal catalog, never run OR wait for the
+    # live provider probe". The wait below is bounded only by the rebuild
+    # budget, so any in-flight rebuild — routine on networks where a provider
+    # probe blackholes (e.g. the botocore IMDS fetch) — hands a multi-second
+    # stall to EVERY concurrent session-switch model resolution (observed:
+    # /api/session t3 stage 4447-4843ms, tracking the rebuild budget exactly).
+    # Every cache tier checked below is safe to serve without the wait; a
+    # cold-miss prefer_cache caller falls through to the minimal catalog as
+    # designed.
+    should_wait = _cache_build_in_progress and not prefer_cache
     force_refresh_started_at = time.monotonic() if force_refresh else None
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
