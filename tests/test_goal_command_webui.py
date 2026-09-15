@@ -671,8 +671,52 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
+    assert "['steer','interrupt','queue','terminal','goal','yolo','btw','background'].includes(_pc.name)" in MESSAGES_JS
     assert "queueSessionMessage" in MESSAGES_JS
+
+
+def test_frontend_busy_branch_intercepts_btw_and_background():
+    """#6597/#7314: /btw and /background must execute immediately while busy.
+
+    The busy branch is shared with compressionRunning. Allowlisted slash
+    commands are intercepted before the default_message_mode routing: the
+    registered handler runs, the composer clears once, and the send returns
+    early so the input never reaches _trySteer, queueSessionMessage,
+    cancelStream, or the below-branch chat start. A registered but
+    non-allowlisted command (/model) must fall through to routing.
+    """
+    busy_entry = "if(S.busy||compressionRunning){"
+    assert busy_entry in MESSAGES_JS, "busy and compressionRunning must share one branch"
+    busy_idx = MESSAGES_JS.find(busy_entry)
+    assert "_clearStaleBusyStateBeforeSend({compressionRunning});" in MESSAGES_JS
+    assert MESSAGES_JS.find("_clearStaleBusyStateBeforeSend({compressionRunning});") < busy_idx
+
+    allowlist = "['steer','interrupt','queue','terminal','goal','yolo','btw','background'].includes(_pc.name)"
+    assert allowlist in MESSAGES_JS
+    allow_idx = MESSAGES_JS.find(allowlist)
+    assert allow_idx > busy_idx, "intercept must live inside the busy branch"
+
+    routing_idx = MESSAGES_JS.find("const defaultMessageMode", allow_idx)
+    assert routing_idx != -1, "default_message_mode routing must follow the intercept"
+
+    # Composer clears exactly once on the intercept path (before routing).
+    clear_snippet = "$('msg').value=''"
+    assert MESSAGES_JS.count(clear_snippet, allow_idx, routing_idx) == 1
+
+    # Registered handler runs, then early return — before any routing sink.
+    fn_idx = MESSAGES_JS.find("await _bc.fn(_pc.args);", allow_idx)
+    assert fn_idx != -1 and fn_idx < routing_idx
+    ret_idx = MESSAGES_JS.find("return;", fn_idx)
+    assert ret_idx != -1 and ret_idx < routing_idx, "intercept must return before routing"
+
+    # Non-intercepted input still reaches every routing sink below the intercept.
+    for sink in ("_trySteer(text", "queueSessionMessage", "cancelStream("):
+        sink_idx = MESSAGES_JS.find(sink, busy_idx)
+        assert sink_idx != -1 and sink_idx > ret_idx, f"{sink} must stay reachable past the intercept"
+
+    # Control: /model is registered but must NOT be busy-intercepted.
+    assert "{name:'model'" in COMMANDS_JS
+    assert "'model'" not in allowlist
 
 
 def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
