@@ -299,6 +299,36 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
+#### Model aliases in `/model`
+
+`/model <alias>` accepts any alias configured for the profile, in either of Hermes's two formats:
+
+```yaml
+model_aliases:                     # canonical
+  sol:
+    model: gpt-5.6-sol
+    provider: openai-codex
+
+model:
+  provider: openrouter
+  aliases:                         # legacy
+    sol: openai-codex/gpt-5.6-sol  # provider-qualified
+    fast: gpt-4                    # unqualified
+```
+
+Alias resolution follows the format of the alias:
+
+- A **canonical `model_aliases` entry** and a **provider-qualified legacy target** name their own
+  route. The target is authoritative, so `/model sol` selects that provider even when a
+  same-named model exists on another provider. A canonical entry also takes precedence over a
+  legacy entry with the same name.
+- An **unqualified legacy target** names only a model, so it keeps the ordinary lookup: the
+  active provider first, then the normal fuzzy match. This is the behavior `/model` had before,
+  and it is unchanged.
+
+Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
+receives the model, the provider id, and an opaque route id, never a base URL or key.
+
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
