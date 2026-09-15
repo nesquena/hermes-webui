@@ -179,6 +179,73 @@ Open questions:
   need a separate scoped affordance later?
 - The current preference is not to change the Stop icon in the first version.
 
+## Steer Pending Visibility
+
+Repeated Steer submits within one active run are all accepted and consumed in
+order — the agent core concatenates pending steer payloads at the next
+tool-result boundary. To make that visible, the composer tracks a per-session
+pending-steer count:
+
+- Each accepted Steer delivery increments the owning session's count and the
+  composer status shows the localized `steer_pending_count` string, so the
+  user can tell a second Steer was delivered rather than silently replaced.
+- The count clears only as an explicit state transition (`clearSteerPending`)
+  when the session's pending-steer buffer is consumed, expired, or re-queued:
+  at the finalized tool-batch boundary, on `pending_steer_leftover`
+  (unconsumed text is queued as a session message for the next turn), on a
+  replacement stream or authoritative idle reload, and on turn completion.
+
+**Boundary attribution is per request, not per arm.** The SSE boundary that
+drains the buffer and the HTTP response that confirms delivery are independent
+queues, so a Steer can be consumed before its own response lands. Each
+`(session, stream)` arm therefore carries a monotonic `boundaryEpoch`:
+
+- a Steer captures the epoch immediately before its POST;
+- the epoch advances once per **finalized** tool batch, and only when the
+  tracked tool-call set proves the batch closed (an untracked or ID-less
+  `tool_complete` is not evidence of a boundary);
+- an accepted response whose captured epoch is older than the current one was
+  drained by a boundary that fired mid-flight, so it does not increment.
+
+The arm deliberately survives its boundary so that every response still in
+flight can debit itself, which is what a single shared consumed flag could not
+do: one boundary drains the whole buffer for all requests, but a boolean can
+only be spent once.
+
+That slot is shared attribution state, so **no single request may delete it**.
+A submission-scoped release (`_resetSteerConsumptionArming`) is a no-op for the
+stream that owns the slot — including when the pending count is still 0, which
+is exactly the window where two responses are both still in flight. Deleting
+there would erase an advanced epoch and let a later accepted sibling re-create
+the slot at epoch 0, re-stranding the count the model exists to prevent. Only a
+real boundary releases attribution: a stream change on attach/detach, or
+terminal cleanup through `_clearSteerConsumptionForStream`.
+
+Two residual inaccuracies remain, both bounded to the current turn and both
+self-healing at the finalized boundary, `pending_steer_leftover`, or turn
+completion:
+
+- **Over-count:** a response that lands before the boundary which drains it
+  has already incremented, so the badge can briefly show a Steer that is about
+  to be consumed.
+- **Under-count:** the epoch proves a boundary fired after arming, not that
+  this particular payload had reached the Agent buffer before that drain. A
+  request that arrived late is debited anyway and stays hidden until the next
+  boundary or the leftover path.
+
+Closing the under-count case needs backend consumption attribution (the steer
+response reporting whether the payload was drained), which is out of scope for
+the WebUI-only contract described here.
+- Transcript rendering (`renderMessages`) may refresh the indicator but never
+  mutates the count; a render while steer still waits at a tool-result boundary
+  must continue showing the pending value.
+- The count is per-owner-session: steering session A then switching to
+  session B shows B's count (likely empty), not A's.
+
+Open question carried from review: should the pending count also render as a
+badge on the session list entry for non-active owner sessions (same treatment
+as the queued-message badge)?
+
 ## Steer Live-to-Final Rendering
 
 Steer is not only a temporary live UI state. It must preserve meaning in both
