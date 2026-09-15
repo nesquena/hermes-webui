@@ -23,10 +23,20 @@ the legacy-facts cache was skipped because `anchor_scene_index` was present.
 request took 48.1 s, the server reached 4.0 GB RSS and the guest OOM killer
 killed it 7 times.
 
-These tests lock the two properties that were missing:
+The fix covers the measured case: the prefix read is linear and STAGED (a 64 KiB
+first stage, doubling to a 1 MiB backstop), so the stop key at offset 76,603 is
+now reached within the second stage instead of failing just short of it. The
+cache-write half deliberately stays legacy-gated — broadening it to modern files
+writes entries neither read site can reach (both are guarded on
+`anchor_scene_index` being absent), so the >1 MiB case below remains an explicit
+gap rather than fixed by accident.
+
+These tests lock:
   * the cheap prefix survives one oversized metadata field,
-  * an unchanged modern sidecar is full-parsed at most once regardless.
+  * the cheap read stops in the first stage for an ordinary small prefix,
+  * an unchanged modern sidecar is full-parsed at most once regardless (xfail).
 """
+import builtins
 import json
 
 import pytest
@@ -78,7 +88,78 @@ def test_sidecar_is_modern_and_overflows_the_budget(session_store):
     mi = raw.find('"messages"')
     si = raw.find('"anchor_activity_scenes"')
     assert -1 < ci < xi < mi < si, "modern layout: summary < scene_index < messages < scenes"
-    assert mi > 65536, f'"messages" at {mi} must exceed the 64 KB budget to reproduce #4633'
+    assert mi > M._METADATA_PREFIX_FIRST_STAGE_BYTES, (
+        f'"messages" at {mi} must exceed the first read stage '
+        f'({M._METADATA_PREFIX_FIRST_STAGE_BYTES}) to reproduce #4633'
+    )
+
+
+def _make_small_prefix_large_body(session_store, sid, n_msgs=40):
+    """A healthy sidecar: tiny metadata prefix, bulky body AFTER ``messages``.
+
+    The shape every ordinary sidebar poll sees — the stop key lands a few KB in,
+    while the file itself is comfortably larger than the first read stage, so a
+    full-budget read is distinguishable from a staged one.
+    """
+    s = M.Session(
+        session_id=sid,
+        title="Ordinary",
+        workspace=str(session_store.parent),
+        model="glm",
+        messages=[{"role": "user", "content": "B" * 4000} for _ in range(n_msgs)],
+    )
+    s.save()
+    return s
+
+
+def test_cheap_read_stops_in_the_first_stage_for_a_normal_sidecar(session_store, monkeypatch):
+    """The polling path must not pull the whole budget for a sidecar whose stop
+    key sits after a few KB.
+
+    This is the read amplification the geometric stages exist to prevent: with a
+    single fixed-budget read, every uncached ordinary metadata lookup consumed
+    ``_METADATA_PREFIX_MAX_BYTES`` even when ``messages`` appeared 2 KB in.
+    Instrumented against the real reader (through the module's ``open``) rather
+    than asserted on constants, so it fails if the staged loop regresses to one
+    full-budget read.
+    """
+    _make_small_prefix_large_body(session_store, "normal")
+    path = session_store / "normal.json"
+    assert path.stat().st_size > M._METADATA_PREFIX_FIRST_STAGE_BYTES, (
+        "the file must be larger than the first stage, otherwise a single "
+        "full-budget read would be indistinguishable from a staged one"
+    )
+    bytes_read = {"n": 0}
+    real_open = builtins.open
+
+    class _CountingFile:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def read(self, n=-1):
+            data = self._fh.read(n)
+            bytes_read["n"] += len(data)
+            return data
+
+        def __enter__(self):
+            self._fh.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._fh.__exit__(*exc)
+
+    def _counting_open(*args, **kwargs):
+        return _CountingFile(real_open(*args, **kwargs))
+
+    monkeypatch.setattr(M, "open", _counting_open, raising=False)
+    prefix = M._read_metadata_json_prefix(path)
+    assert prefix is not None
+    assert json.loads(prefix)["message_count"] == 40
+    assert bytes_read["n"] <= M._METADATA_PREFIX_FIRST_STAGE_BYTES, (
+        f"cheap read consumed {bytes_read['n']} bytes for a prefix whose stop key "
+        f"is inside the first stage ({M._METADATA_PREFIX_FIRST_STAGE_BYTES})"
+    )
+    assert bytes_read["n"] < M._METADATA_PREFIX_MAX_BYTES
 
 
 def test_cheap_prefix_survives_an_oversized_metadata_field(session_store):
@@ -105,9 +186,14 @@ def test_cheap_prefix_survives_an_oversized_metadata_field(session_store):
         "budget still re-parses per read. A failed prefix read yields no metadata at "
         "all, and the facts cache holds only counts (no title/created_at), so no stub "
         "can be built from it. The durable cure is write-side -- serialize the "
-        "unbounded blobs AFTER `messages`, as #5854 did for scene bodies. strict=True "
-        "so this fails loudly once that lands, instead of quietly passing and leaving "
-        "a stale marker behind."
+        "unbounded blobs AFTER `messages`, as #5854 did for scene bodies. Broadening "
+        "the facts-cache WRITE to modern files does NOT close this: both read sites "
+        "reach the cache only when the prefix carried neither message_count nor "
+        "anchor_scene_index (see the guards in load_metadata_only() and the "
+        "eviction-count helper), so a modern entry is never consulted -- the write "
+        "side must stay legacy-gated until the READ side is redesigned to build a "
+        "metadata stub from cached facts. strict=True so this fails loudly once that "
+        "lands, instead of quietly passing and leaving a stale marker behind."
     ),
 )
 def test_modern_oversized_sidecar_not_reparsed_on_every_read(session_store, monkeypatch):
