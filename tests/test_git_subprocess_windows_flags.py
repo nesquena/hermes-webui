@@ -44,7 +44,7 @@ def _git_argv_kind(node: ast.AST) -> str | None:
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "_hardened_git_argv"
+        and node.func.id in {"_hardened_git_argv", "noninteractive_git_argv"}
     ):
         return node.func.id
     return None

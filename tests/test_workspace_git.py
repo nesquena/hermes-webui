@@ -1214,6 +1214,46 @@ def test_git_fetch_blocks_repo_local_ext_transport_execution(tmp_path):
     assert not marker.exists()
 
 
+def test_git_fetch_blocks_repo_local_git_proxy_execution(tmp_path, monkeypatch):
+    """A repository-configured core.gitProxy must not run for a git:// remote.
+
+    ``core.gitProxy`` is per-host and multi-valued, so no command-line value for
+    it masks a repository-configured one; the transport itself is refused
+    instead. A workspace repo can be supplied by an agent or a mount, so this is
+    the same class of repo-controlled command execution as the ext:: helper.
+    """
+    import os
+
+    if os.name == "nt":
+        pytest.skip("executable proxy setup is POSIX-only")
+
+    # Git translates this diagnostic, so the child runs in a pinned locale: the
+    # assertion at the end is about the refusal, not about the language git
+    # reports it in. LC_ALL overrides LANG and LANGUAGE.
+    monkeypatch.setenv("LC_ALL", "C")
+
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "git-proxy-ran"
+    # A single-token command applies to every host. A value containing a space is
+    # parsed as "<host-pattern> <command>", so it would not match this origin and
+    # the test would pass without the proxy ever being offered a chance to run.
+    helper = tmp_path / "proxy_helper.sh"
+    helper.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n', encoding="utf-8")
+    helper.chmod(0o755)
+    _git(repo, "config", "core.gitProxy", str(helper))
+    _git(repo, "remote", "add", "origin", "git://127.0.0.1:1/origin.git")
+
+    with pytest.raises(GitWorkspaceError) as exc:
+        git_fetch(repo)
+
+    assert not marker.exists(), "workspace fetch executed a repo-local git proxy"
+    assert "transport 'git' not allowed" in str(exc.value), str(exc.value)
+
+
 def test_git_fetch_blocks_repo_local_credential_helper_execution(tmp_path):
     import os
     import sys
@@ -2231,6 +2271,7 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     monkeypatch.setenv("SSH_ASKPASS", "/tmp/evil-ssh-askpass")
     monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
     monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/evil-key")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/legitimate-agent.sock")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
 
     env = _clean_git_env({"GIT_INDEX_FILE": "/tmp/hermes-index"})
@@ -2247,6 +2288,7 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     assert "SSH_ASKPASS" not in env
     assert "GIT_SSH" not in env
     assert "GIT_SSH_COMMAND" not in env
+    assert env["SSH_AUTH_SOCK"] == "/tmp/legitimate-agent.sock"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GIT_INDEX_FILE"] == "/tmp/hermes-index"
 
