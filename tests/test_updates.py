@@ -968,27 +968,23 @@ def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch
     assert 'GIT_SSH_COMMAND' not in mock_run.call_args.kwargs['env']
 
 
-def test_run_git_refuses_the_transports_that_run_repo_named_commands(tmp_path):
-    """Every git child refuses ext:: and git://, for updates and workspaces alike.
+def test_run_git_refuses_the_git_transport(tmp_path):
+    """Behavioural: a real git child refuses git:// instead of connecting.
 
-    Neither can be neutralized by an override: git:// reaches a
-    repository-configured ``core.gitProxy`` command, and no command-line value for
-    that key masks a lower-scope one. Refusing the transport is the only
-    expression that holds for both callers.
+    Without the refusal git attempts the connection — or runs a
+    repository-configured ``core.gitProxy`` command — so the observable outcome is
+    git reporting the transport as disallowed before reaching either. Asserting on
+    the argv would pass even if the refusal stopped being applied.
     """
-    from api.workspace_git import _hardened_git_argv
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'remote', 'add', 'origin', 'git://127.0.0.1:1/origin.git')
 
-    with patch.object(updates.shutil, 'which', return_value='/usr/bin/git'), \
-         patch('subprocess.run') as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
-        updates._run_git(['fetch', 'origin'], tmp_path)
+    out, ok = updates._run_git(['fetch', 'origin'], repo, timeout=15)
 
-    for label, argv in (
-        ('update', mock_run.call_args.args[0]),
-        ('workspace', _hardened_git_argv(['fetch', 'origin'])),
-    ):
-        assert 'protocol.git.allow=never' in argv, label
-        assert 'protocol.ext.allow=never' in argv, label
+    assert ok is False, out
+    assert "transport 'git' not allowed" in out, out
 
 
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):

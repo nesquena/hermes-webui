@@ -1243,10 +1243,11 @@ def test_git_fetch_blocks_repo_local_git_proxy_execution(tmp_path):
     _git(repo, "config", "core.gitProxy", str(helper))
     _git(repo, "remote", "add", "origin", "git://127.0.0.1:1/origin.git")
 
-    with pytest.raises(GitWorkspaceError):
+    with pytest.raises(GitWorkspaceError) as exc:
         git_fetch(repo)
 
     assert not marker.exists(), "workspace fetch executed a repo-local git proxy"
+    assert "transport 'git' not allowed" in str(exc.value), str(exc.value)
 
 
 def test_git_fetch_blocks_repo_local_credential_helper_execution(tmp_path):
