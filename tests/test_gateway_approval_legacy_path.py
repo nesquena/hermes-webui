@@ -875,13 +875,13 @@ def test_legacy_approval_without_run_id_retires_locally():
         _STREAM_RUN_IDS.pop(stream_id, None)
 
 
-def test_deny_retires_run_producer_so_reconciliation_cannot_resurrect_mirror():
-    """Deny must consume the producer as well as its WebUI mirror.
+def test_deny_settles_run_producer_so_reconciliation_cannot_resurrect_mirror():
+    """Deny must settle the producer as well as its WebUI mirror.
 
     Selection is the behaviour under test, so the queue carries more than the
-    one entry being retired: a sibling approval for the same run, and a producer
-    belonging to a different run. Retiring one approval must consume exactly
-    that producer and leave both others queued.
+    one entry being resolved: a sibling approval for the same run, and a producer
+    belonging to a different run. Resolving one approval must consume exactly
+    that producer, wake its waiter, and leave both others queued.
     """
     from types import SimpleNamespace
     from api import route_approvals as ra
@@ -925,12 +925,13 @@ def test_deny_retires_run_producer_so_reconciliation_cannot_resurrect_mirror():
         mirror = ra.gateway_pending_mirror(sid, approval_id=approval_id, run_id=run_id)
         assert mirror is not None
 
-        assert ra.retire_gateway_pending_mirror(
+        resolved, _head, _total = ra.resolve_gateway_pending_run(
             sid,
             approval_id=approval_id,
             run_id=run_id,
-            mirror_token=mirror[ra._GATEWAY_MIRROR_TOKEN],
+            choice="deny",
         )
+        assert resolved == 1
 
         assert queued_before == [target, same_run_sibling, other_run], (
             "the queue should have held all three producers before retirement"
@@ -938,6 +939,8 @@ def test_deny_retires_run_producer_so_reconciliation_cannot_resurrect_mirror():
         with ra._lock:
             remaining = list(ra._gateway_queues.get(sid) or [])
         assert target not in remaining, "the denied approval's producer must be consumed"
+        assert target.event.is_set(), "the denied approval's waiter must be woken"
+        assert target.result == "deny"
         assert same_run_sibling in remaining, (
             "a sibling approval on the same run must not be consumed by retiring another approval"
         )
