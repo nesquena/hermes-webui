@@ -114,7 +114,20 @@ LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
 
 # Historical ID-linked transcript hydration row.
 python tests/browser_historical_transcript_hydration.py
+
+# Gateway terminal steer-leftover row (#7440): accepted guidance that the
+# agent did not consume must survive a mid-run session switch, queue for the
+# OWNING session, and be delivered by the real queue drain as that session's
+# next gateway run.
+python tests/browser_gateway_steer_leftover.py
 ```
+
+The steer-leftover gate is red against a tree without the
+`run.completed` `pending_steer` translation (guidance silently lost), and
+green with it — it observes the browser's persisted per-session queue
+(`hermes-queue-<sid>`), the untouched second session's queue, and the drained
+follow-up `POST /v1/runs` request body captured by the localhost-only
+Gateway fixture.
 
 To certify that the gate catches its target failure, the test owns an opt-in
 mutation that drops the browser's Anchor-scene persistence request. This command
@@ -159,6 +172,83 @@ node toolchain aren't blocked, while the release gate (which installs eslint) en
 To widen the guard, fix the pre-existing intentional hits first (as of 2026-05-30:
 `no-dupe-keys` ×92 i18n locale-fallback, `no-func-assign` ×2 panel override,
 `no-redeclare` ×1) then promote the rule into the config.
+
+---
+
+## Gateway steer and workspace parity
+
+Gateway steer relay and workspace propagation have dedicated regression coverage
+plus manual rows. These are **not** covered by the public conversation lifecycle
+gate above; do not treat that script as proof for these behaviors.
+
+Automated coverage:
+
+- `tests/test_gateway_steer_relay.py` — direct steer relay coverage: exact
+  request URL/body and run-id quoting, the bounded startup wait (pending then
+  ready, pending timeout, terminal/no-id states), HTTP 404/405/410 queue mapping
+  versus 409 / other-HTTP / exception draft-failure mapping, the legacy
+  `fallback` phase queue degradation (phase-before-id precedence, no waiter
+  race), config-file base-URL authority, redirect refusal (real loopback 302)
+  and accepted-response validation (followed-redirect landing / unraised
+  non-2xx are never accepted), waiter cleanup, and stream-scoped routing with
+  multiple active runs.
+- `tests/test_gateway_pending_steer_relay.py` — terminal `run.completed`
+  `pending_steer` translation into the existing `pending_steer_leftover`
+  event (session id + text, before terminal completion; suppressed on error
+  completions and cancelled turns), plus exact-once reconnect replay through
+  the real run-journal reader and cursor semantics (`read_run_events`
+  `after_seq` windows — the exact call the SSE replay path makes). The
+  listener-semantics lock (queue-for-owner across a view switch, no picker
+  model leak, view-scoped toast/anchor) executes the real listener source in
+  a Node VM; the application's real stream/switch/drain wiring for the same
+  behavior is proven end-to-end by `tests/browser_gateway_steer_leftover.py`
+  (see the browser gates section below).
+- `tests/test_gateway_workspace_relay.py` — workspace containment matrix
+  (realpath, exact root, sibling-prefix / traversal / symlink rejection, empty
+  input) and per-session `workspace` inclusion or omission in the actual
+  `POST /v1/runs` request body.
+- Existing neighbors that must stay green: `tests/test_real_steer.py`,
+  `tests/test_1062_busy_input_modes.py`, `tests/test_5145_steer_default.py`,
+  `tests/test_issue4749_steer_reason_and_recovery.py`, and the gateway suites
+  `tests/test_gateway_approval_runs_api.py`,
+  `tests/test_webui_gateway_chat_backend.py`,
+  `tests/test_gateway_approval_legacy_path.py`.
+
+```bash
+./scripts/test.sh -q tests/test_gateway_steer_relay.py tests/test_gateway_pending_steer_relay.py \
+  tests/test_gateway_workspace_relay.py \
+  tests/test_real_steer.py tests/test_issue4749_steer_reason_and_recovery.py \
+  tests/test_1062_busy_input_modes.py tests/test_5145_steer_default.py \
+  tests/test_gateway_approval_runs_api.py tests/test_webui_gateway_chat_backend.py \
+  tests/test_gateway_approval_legacy_path.py
+```
+
+Manual verification rows (use isolated `HERMES_HOME` / `HERMES_WEBUI_STATE_DIR`
+and a fake gateway or mocked relay — never a real user's sessions):
+
+| Row | Expect |
+| --- | --- |
+| Steer delivery on an active Runs-API run | Guidance POSTed to `/v1/runs/{run_id}/steer`; delivered indicator; no queue, no draft restore |
+| Run id pending, published within five seconds | Steer waits, then relays exactly once to the published id |
+| Run id pending past the wait budget | Steer reports unavailable; draft kept for retry; no HTTP request |
+| Steer answered 404, 405, or 410 | Text queued exactly once for the owning session's next turn; run not cancelled |
+| Steer on the legacy chat-completions transport (no runs API) | Text queued exactly once for the next turn; run not cancelled; no failure UI |
+| Steer answered 409, auth failure, 500, or network error | Draft and attached files restored with a translated recovery message; no automatic queue |
+| Steer endpoint redirects (302 to a 200 page) | Delivery reported as failed (draft/retry), never as accepted; redirect not followed |
+| Gateway configured via `webui_gateway_base_url` config key | Steer POST targets the configured gateway, not the env/default one |
+| Accepted steer not consumed before the run completes | `pending_steer_leftover` queued exactly once for the next turn (reconnect replays it at most once per cursor) |
+| Session switched away before an accepted steer completes | Leftover still queued for the OWNING session (visible when the user returns); no anchor/toast in the foreign view; no picker-model leak into the owner's queue entry |
+| Session switch with pending files after a failure | Guidance and files stay with the original owning session; the new session's files are untouched |
+| Session workspace at/below `/workspace` | `workspace` present in the `POST /v1/runs` body |
+| Session workspace outside `/workspace` (sibling, `..`, symlink) | `workspace` omitted; gateway default applies |
+| Local (non-gateway) steer happy path, failure, and leftover queue | Unchanged from existing local behavior |
+
+Evidence requirements for changes touching this behavior: before/after UI
+captures at desktop 1440px, narrow 768px, and mobile 390px; English plus one
+translated locale for the recovery copy; and isolated state with a fake gateway
+fixture for all local trials. The agent-side steer endpoint and its consumption
+of the `workspace` field are not verified in this repository; record what was
+validated against mocks only, and list any row not performed.
 
 ---
 

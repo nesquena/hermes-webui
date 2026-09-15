@@ -315,6 +315,15 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // draft may still be sitting there from a cross-session switch).
   if (!text && !files.length) {
     if (current) {
+      // #7440 gate: a server-durable steer-leftover prefill is intentional
+      // composer state for THIS session — an (async) empty-draft restore
+      // landing after the load-time prefill must not wipe the review
+      // surface. The prefill is tracked with its stable run id exactly so
+      // this guard can distinguish it from stale cross-session text.
+      if (typeof _isTrackedLeftoverPrefill === 'function'
+          && _isTrackedLeftoverPrefill(restoreSid, current)) {
+        return;
+      }
       ta.value = '';
       if (typeof autoResize === 'function') autoResize();
       if (typeof updateSendBtn === 'function') updateSendBtn();
@@ -2272,7 +2281,13 @@ async function loadSession(sid){
           const _lastMsg=S.messages.slice().reverse()
             .find(m=>m&&m.role==='assistant');
           const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+          // #7440 gate: a steer leftover is post-assistant user intent BY
+          // CONSTRUCTION — the gateway relay created it from the terminal
+          // run.completed of the assistant turn that finalized under it, so
+          // its client stamp can legitimately precede the settled server
+          // timestamp. Never discard a _leftover_id entry on that ordering;
+          // only ordinary drafts are freshness-filtered.
+          const _fresh=_entries.filter(e=>(e&&e._leftover_id)||!e._queued_at||e._queued_at>_lastAsst);
           if(_fresh.length){
             const _first=_fresh[0];
             const _msg=$&&$('msg');
@@ -2285,6 +2300,46 @@ async function loadSession(sid){
           if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
         }
       }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
+    }
+
+    // #7440 gate: server-durable steer-leftover recovery. The gateway relay
+    // persists an accepted-but-unconsumed terminal steer into the owning
+    // session (owner-scoped, keyed by run id) precisely so recovery does NOT
+    // depend on a live SSE consumer being attached at completion time —
+    // switching to an existing session, closing the tab, or stream
+    // retirement all used to lose the guidance. Recovery RESTORES FOR
+    // REVIEW (prefill + toast), mirroring the persisted-queue restore
+    // policy: after a reload, automatic sending is no longer safe, so the
+    // text is put back in the composer for the user to review and send —
+    // sending it verbatim carries the transactional ack that retires the
+    // server slot (/api/chat/start, matched by run id), and clearing the
+    // prefilled composer is an explicit dismissal. The slot itself — not a
+    // client queue entry — is the durability backstop, so a closed tab or
+    // cleared storage cannot lose the guidance, and re-offering on the next
+    // load is idempotent by construction (single server slot, single
+    // prefill per load; the live SSE path keeps its queue/drain behavior).
+    if(S.session&&S.session.session_id===sid){
+      try{
+        const _ltText=String(S.session.pending_steer_leftover_text||'').trim();
+        const _ltRun=String(S.session.pending_steer_leftover_run_id||'').trim();
+        if(_ltText&&_ltRun){
+          if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+          const _msg=$&&$('msg');
+          if(_msg&&!_msg.value){
+            _msg.value=_ltText;
+            if(typeof autoResize==='function') autoResize();
+            if(typeof updateSendBtn==='function') updateSendBtn();
+            if(typeof showToast==='function') showToast(t('steer_leftover_queued'),3000);
+          }
+          // Track whenever the composer now holds EXACTLY the leftover text
+          // — whether we prefilled it or the persisted-queue restore above
+          // did (same review-and-send semantics) — so the send acks the
+          // server slot transactionally either way.
+          if(_msg&&_msg.value===_ltText&&typeof _trackLeftoverPrefill==='function'){
+            _trackLeftoverPrefill(sid,_ltRun,_ltText);
+          }
+        }
+      }catch(_){}
     }
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.

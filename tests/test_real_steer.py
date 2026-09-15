@@ -148,14 +148,206 @@ class TestHandleChatSteerFallbacks:
 
         sess = MagicMock()
         sess.active_stream_id = stream_id
-        with patch("api.streaming.get_session", return_value=sess):
+        with patch("api.streaming.get_session", return_value=sess), patch(
+            "api.gateway_chat.gateway_steer_run",
+            return_value=(False, "gateway_steer_queued"),
+        ) as relay:
             handler = _make_handler()
             _handle_chat_steer(handler, {"session_id": sid, "text": "preserve this"})
 
+        relay.assert_called_once_with(stream_id, "preserve this")
         body = _captured_response(handler)
         assert body == {
             "accepted": False,
             "fallback": "gateway_steer_queued",
+            "stream_id": stream_id,
+        }
+
+    @pytest.mark.parametrize(
+        "relay_result",
+        [
+            (True, None),
+            (False, "gateway_steer_no_run_id"),
+            (False, "gateway_steer_not_accepting"),
+            (False, "gateway_steer_http_401"),
+            (False, "gateway_steer_http_500"),
+            (False, "gateway_steer_error"),
+        ],
+    )
+    def test_gateway_owned_stream_returns_relay_result(self, _clear_caches, relay_result):
+        """The handler must surface the relay's (accepted, reason) verbatim, 200."""
+        from api.streaming import _handle_chat_steer
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+        import queue as _q
+
+        sid, stream_id = "sid_relay", "stream_relay"
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "gateway"}
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess), patch(
+            "api.gateway_chat.gateway_steer_run", return_value=relay_result
+        ) as relay:
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "  preserve this \n"})
+
+        relay.assert_called_once_with(stream_id, "preserve this")
+        accepted, reason = relay_result
+        assert _captured_status(handler) == 200
+        assert _captured_response(handler) == {
+            "accepted": accepted,
+            "fallback": reason,
+            "stream_id": stream_id,
+        }
+
+    @pytest.mark.parametrize(
+        "relay_outcome,expected",
+        [
+            ("accept", {"accepted": True, "fallback": None}),
+            ("reject", {"accepted": False, "fallback": "gateway_steer_no_run_id"}),
+            ("raise", {"accepted": False, "fallback": "gateway_steer_error"}),
+        ],
+    )
+    def test_gateway_owner_bypasses_stale_cached_agent(self, _clear_caches, relay_outcome, expected):
+        """A gateway-owned stream must never reach a stale cached in-process agent,
+        even when the relay itself raises unexpectedly."""
+        from api.streaming import _handle_chat_steer
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
+        import queue as _q
+
+        sid, stream_id = "sid_stale", "stream_stale_gw"
+        other_sid, other_stream = "sid_other_local", "stream_other_local"
+
+        stale_agent = MagicMock()
+        stale_agent.session_id = sid  # matching identity — would otherwise accept the steer
+        stale_agent.steer = MagicMock(return_value=True)
+        other_agent = MagicMock()
+        other_agent.session_id = other_sid
+        other_agent.steer = MagicMock(return_value=True)
+
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (stale_agent, "sig")
+            SESSION_AGENT_CACHE[other_sid] = (other_agent, "sig")
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+            STREAMS[other_stream] = _q.Queue()
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "gateway"}
+
+        if relay_outcome == "accept":
+            relay_kwargs = {"return_value": (True, None)}
+        elif relay_outcome == "reject":
+            relay_kwargs = {"return_value": (False, "gateway_steer_no_run_id")}
+        else:
+            relay_kwargs = {"side_effect": RuntimeError("gateway relay exploded")}
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess), patch(
+            "api.gateway_chat.gateway_steer_run", **relay_kwargs
+        ) as relay:
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "gateway hint"})
+
+        # The relay is the ONLY steer target: neither cached agent may be steered.
+        relay.assert_called_once_with(stream_id, "gateway hint")
+        stale_agent.steer.assert_not_called()
+        other_agent.steer.assert_not_called()
+        assert _captured_status(handler) == 200
+        assert _captured_response(handler) == {
+            "accepted": expected["accepted"],
+            "fallback": expected["fallback"],
+            "stream_id": stream_id,
+        }
+
+    def test_ownership_lookup_exception_does_not_steer_cached_agent(self, _clear_caches):
+        """If the ACTIVE_RUNS ownership lookup raises, fail closed with steer_error —
+        never fall through to a stale cached in-process agent."""
+        from api import config as _cfg
+        from api.streaming import _handle_chat_steer
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        import queue as _q
+
+        class _ExplodingActiveRuns(dict):
+            def get(self, *args, **kwargs):
+                raise RuntimeError("ownership registry exploded")
+
+        sid, stream_id = "sid_lookup", "stream_lookup"
+        agent = MagicMock()
+        agent.session_id = sid  # matching identity — local steer would succeed if reached
+        agent.steer = MagicMock(return_value=True)
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (agent, "sig")
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess), patch.object(
+            _cfg, "ACTIVE_RUNS", _ExplodingActiveRuns({"seed": True})
+        ), patch("api.gateway_chat.gateway_steer_run") as relay:
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "do not steer locally"})
+
+        relay.assert_not_called()
+        agent.steer.assert_not_called()
+        assert _captured_status(handler) == 200
+        assert _captured_response(handler) == {
+            "accepted": False,
+            "fallback": "steer_error",
+            "stream_id": stream_id,
+        }
+
+    def test_gateway_relay_exception_does_not_steer_cached_agent(self, _clear_caches):
+        """An unexpected relay exception maps to gateway_steer_error and must never
+        fall through to the stale cached local agent (ownership lookup succeeds here)."""
+        from api.streaming import _handle_chat_steer
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
+        import queue as _q
+
+        sid, stream_id = "sid_relay_raise", "stream_relay_raise"
+        agent = MagicMock()
+        agent.session_id = sid  # matching identity — local steer would succeed if reached
+        agent.steer = MagicMock(return_value=True)
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (agent, "sig")
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "gateway"}
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess), patch(
+            "api.gateway_chat.gateway_steer_run",
+            side_effect=RuntimeError("relay exploded"),
+        ) as relay:
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
+
+        relay.assert_called_once_with(stream_id, "hint")
+        agent.steer.assert_not_called()
+        assert _captured_status(handler) == 200
+        assert _captured_response(handler) == {
+            "accepted": False,
+            "fallback": "gateway_steer_error",
             "stream_id": stream_id,
         }
 
@@ -825,6 +1017,73 @@ class TestFrontendWiring:
               assert.strictEqual(retry.textContent, 'steer_recovery_retry');
             }}
 
+            async function runGatewayFailureFallback(fallbackCode, explicitSteer=false, switchDuringAwait=false){{
+              const msg = 'gateway hint';
+              let input = {{value:''}};
+              let clearInflightCalls = [];
+              let updateSendBtnCalls = 0;
+              let queued = [];
+              let draftSaves = [];
+              let apiPayload = null;
+              const submittedFile = {{name:'a.pdf'}};
+              const replacementFile = {{name:'replacement.pdf'}};
+              inner = makeElement('div');
+              globalThis.S = {{
+                session:{{session_id:'A', active_stream_id:'stream-1'}},
+                activeStreamId:'stream-1',
+                busy:true,
+                pendingFiles:[submittedFile],
+              }};
+              globalThis.INFLIGHT = {{A:{{messages:[]}}}};
+              globalThis.$ = id => input;
+              globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
+              globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
+              globalThis.send = async () => {{throw new Error('send must not run for gateway steer failures');}};
+              globalThis.queueSessionMessage = (sid, payload) => queued.push({{sid, payload}});
+              globalThis._saveComposerDraftNow = async (sid, text, files) => draftSaves.push({{sid, text, files}});
+              globalThis.api = async (url, options) => {{
+                assert.strictEqual(url, '/api/chat/steer');
+                apiPayload = JSON.parse(options.body);
+                if(switchDuringAwait){{
+                  S.session={{session_id:'B', active_stream_id:'stream-B'}};
+                  S.activeStreamId='stream-B';
+                  S.pendingFiles=[replacementFile];
+                }}
+                return {{accepted:false, fallback:fallbackCode}};
+              }};
+
+              const delivered = await _trySteer(msg, explicitSteer);
+              assert.strictEqual(delivered, false);
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              // Gateway delivery failure is NOT permission to queue, cancel, or clear busy.
+              assert.strictEqual(S.busy, true);
+              assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
+              assert.deepStrictEqual(clearInflightCalls, []);
+              assert.strictEqual(updateSendBtnCalls, 0);
+              assert.strictEqual(queued.length, 0);
+              if(switchDuringAwait){{
+                // Owner-scoped draft persistence; never touch the newly viewed session.
+                assert.strictEqual(S.session.session_id, 'B');
+                assert.deepStrictEqual(S.pendingFiles, [replacementFile]);
+                assert.strictEqual(input.value, '');
+                assert.strictEqual(inner.children.length, 0);
+                assert.strictEqual(draftSaves.length, 1);
+                assert.strictEqual(draftSaves[0].sid, 'A');
+                assert.strictEqual(draftSaves[0].text, explicitSteer ? `/steer ${{msg}}` : msg);
+                assert.deepStrictEqual(draftSaves[0].files, [submittedFile]);
+              }}else{{
+                assert.strictEqual(input.value, explicitSteer ? `/steer ${{msg}}` : msg);
+                assert.strictEqual(S.pendingFiles.length, 1);
+                assert.deepStrictEqual(draftSaves, []);
+                const recovery = inner.children[inner.children.length - 1];
+                assert.ok(recovery, 'gateway failure must surface the steer recovery bar');
+                assert.strictEqual(recovery.className, 'steer-recovery');
+                const retry = recovery.children[1];
+                assert.strictEqual(retry.textContent, 'steer_recovery_retry');
+              }}
+              delete globalThis._saveComposerDraftNow;
+            }}
+
             (async()=>{{
               await runNoCachedAgentFallback();
               await runNoCachedAgentFallback(true);
@@ -835,6 +1094,12 @@ class TestFrontendWiring:
               await runStreamDeadFallback(true, '/help');
               await runLateDeadFallbackDoesNotClearNewStream();
               await runAdjacentLiveFailure();
+              for(const code of ['gateway_steer_no_run_id','gateway_steer_not_accepting','gateway_steer_http_401','gateway_steer_http_500','gateway_steer_error']){{
+                await runGatewayFailureFallback(code, false);
+                await runGatewayFailureFallback(code, true);
+              }}
+              await runGatewayFailureFallback('gateway_steer_no_run_id', false, true);
+              await runGatewayFailureFallback('gateway_steer_error', true, true);
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
@@ -951,7 +1216,11 @@ class TestFrontendWiring:
         """Frontend must listen for pending_steer_leftover SSE events and queue them."""
         idx = self.msgs.find("addEventListener('pending_steer_leftover'")
         assert idx >= 0, "messages.js must add a listener for pending_steer_leftover"
-        block = self.msgs[idx:idx + 600]
+        # Scan through the handler's closing brace, not a fixed window — the
+        # handler carries an owner-scoping contract comment (greptile P1,
+        # #7440) that legitimately grew the block.
+        end = self.msgs.find("\n    });", idx)
+        block = self.msgs[idx:end if end > idx else idx + 600]
         assert "queueSessionMessage" in block, (
             "pending_steer_leftover handler must queue the leftover text for the next turn"
         )

@@ -247,14 +247,82 @@ function _readPersistedSessionQueue(sid){
   }
   return [];
 }
-function queueSessionMessage(sid, payload){
+function queueSessionMessage(sid, payload, leftoverId){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
+  // #7440 gate: stable-identity idempotency. An entry tagged with a steer
+  // leftover's durable run id is queued AT MOST ONCE per identity, no matter
+  // how many times the live SSE event, the run-journal replay, or the
+  // GET /api/session recovery surface delivers it. Two intentional identical
+  // steers carry different run ids and both queue — never dedupe by text or
+  // a time window (the gate review's exact-once requirement).
+  if(leftoverId){
+    if(q.some(e=>e&&e._leftover_id===leftoverId)) return q.length;
+    payload={...payload,_leftover_id:leftoverId};
+  }
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
   q.push(entry);
   _persistSessionQueueStorage(sid,q);
   return q.length;
+}
+// ── #7440 gate: steer-leftover ack/dismissal bookkeeping ─────────────────────
+// A server-durable leftover restored on session load prefilling the composer
+// is tracked here, tied to its stable run id, so that:
+//   (a) a manual send of the EXACT prefilled text carries the transactional
+//       steer_leftover_ack in /api/chat/start (server retires the slot with
+//       the turn — see _popLeftoverAckForSend below);
+//   (b) the user clearing the prefilled composer without sending is an
+//       EXPLICIT dismissal (POST /api/session/steer_leftover/dismiss) so the
+//       slot stops being re-offered on every load;
+//   (c) the queue-drain path ships leftovers tagged with _leftover_id instead
+//       (see setBusy's drain), which sends its own ack.
+// Editing the prefilled text before sending intentionally does NOT ack (the
+// shipped guidance differs); the server re-offers the original on next load
+// until it is sent verbatim or explicitly dismissed — durability is preferred
+// over convenience per the gate review.
+let _leftoverPrefill=null; // {sid, runId, text, wired}
+function _trackLeftoverPrefill(sid,runId,text){
+  if(!sid||!runId||!text) return;
+  _leftoverPrefill={sid:String(sid),runId:String(runId),text:String(text),wired:false};
+  _wireLeftoverDismissal();
+}
+function _wireLeftoverDismissal(){
+  const st=_leftoverPrefill;
+  const msgEl=(!st||st.wired)?null:$('msg');
+  if(!msgEl) return;
+  st.wired=true;
+  msgEl.addEventListener('input',function _onLeftoverPrefillInput(){
+    const cur=_leftoverPrefill;
+    if(!cur) return;
+    const el=$('msg');
+    // Programmatic .value writes do NOT fire 'input', so this only fires on
+    // real user edits: emptying the prefilled composer = explicit discard.
+    if(el&&!el.value&&cur.sid===(S.session&&S.session.session_id)){
+      _leftoverPrefill=null;
+      // Route through the central api() wrapper (mount-relative for subpath
+      // deployments — never a literal root '/api/...' fetch). Best-effort:
+      // a lost dismissal just means the slot is re-offered on the next load,
+      // which is the safe direction.
+      if(typeof api==='function'){
+        try{
+          api('/api/session/steer_leftover/dismiss',{method:'POST',body:JSON.stringify({session_id:cur.sid,run_id:cur.runId})}).catch(()=>{});
+        }catch(_){}
+      }
+    }
+  });
+}
+function _popLeftoverAckForSend(sid,text){
+  const st=_leftoverPrefill;
+  if(!st||st.sid!==sid) return '';
+  if(String(text||'').trim()!==String(st.text||'').trim()) return '';
+  _leftoverPrefill=null;
+  return st.runId;
+}
+function _isTrackedLeftoverPrefill(sid,text){
+  const st=_leftoverPrefill;
+  return !!(st&&st.sid===String(sid||'')
+    &&String(text||'').trim()===String(st.text||'').trim());
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
@@ -8492,7 +8560,10 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        // #7440 gate: if the drained entry is a steer leftover (tagged with
+        // the durable slot's run id), tag the send so /api/chat/start
+        // retires the server-side slot transactionally with this turn.
+        send({leftoverAck:(next&&next._leftover_id)||''});
       },120);
     }
   }
