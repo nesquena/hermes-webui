@@ -1084,7 +1084,26 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
-def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
+#: Budget for the cheap metadata read. Sized as a BACKSTOP, not a target: the
+#: prefix normally stops at ``messages`` after a few KB, and the write-side field
+#: order keeps it there. The cap only matters for a sidecar already on disk whose
+#: heavy metadata blobs serialize BEFORE ``messages`` — where the old 64 KB cap
+#: turned one oversized field into a full multi-MB parse on EVERY poll (#4633).
+#: Measured case: a 73,192-byte ``compression_anchor_summary`` pushed the
+#: ``messages`` key to offset 76,603, so the read gave up 11 KB short of it.
+_METADATA_PREFIX_MAX_BYTES = 1024 * 1024
+
+#: Size of the FIRST stage of the cheap metadata read. A healthy sidecar carries
+#: its stop key (`messages`) within a few KB — the write-side field order in
+#: ``save()`` guarantees it — so every ordinary poll pays this read and stops
+#: there. The 1 MiB backstop above is only reached by a sidecar already on disk
+#: whose heavy metadata blobs really do precede ``messages`` in bulk. Without a
+#: small first stage the cheap read pulls the whole budget on the polling path
+#: even when the stop key sits at 2 KB.
+_METADATA_PREFIX_FIRST_STAGE_BYTES = 64 * 1024
+
+
+def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES):
     """Read only the metadata portion before the large arrays.
 
     #5854: stop at the top-level ``messages`` key OR the top-level
@@ -1097,24 +1116,58 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     the scenes-stop a legacy large-scene sidecar overflows ``max_prefix_bytes``
     and forces a full multi-MB parse on every poll (the #4633 churn).
     """
+    if max_prefix_bytes <= 0:
+        return None
+    # Geometric staged reads: 64 KiB, 128 KiB, 256 KiB, ... up to the backstop.
+    #
+    # The original loop read 4096 bytes at a time and re-scanned the WHOLE
+    # accumulated buffer after each chunk — two full `_find_top_level_json_key`
+    # passes (a pure-Python char loop) plus a decode per chunk. That is O(n^2) in
+    # the prefix size, and it is why the cap could not simply be raised.
+    # Measured on this function before the change:
+    #     prefix    10 KB ->     19.6 ms
+    #     prefix    60 KB ->     87.3 ms     <- already paid on EVERY poll
+    #     prefix   200 KB ->    768.9 ms
+    #     prefix   500 KB ->  4,634.7 ms
+    #     prefix   900 KB -> 14,957.1 ms     <- slower than the full parse
+    #
+    # A single `f.read(max_prefix_bytes)` fixed that complexity but pulled the
+    # whole 1 MiB backstop on every poll, even when the stop key sat at 2 KB —
+    # read amplification on a path that runs once per sidebar poll. Doubling
+    # stages keep both properties: the COMMON case stops inside the first small
+    # read, and re-scanning each accumulated stage stays linear because the stage
+    # sizes form a bounded geometric series (total work < 2x the bytes actually
+    # read, worst case). `_find_top_level_json_key` returns AT the key, so the
+    # final scan costs O(offset of the stop key), not O(stage).
+    stage = min(_METADATA_PREFIX_FIRST_STAGE_BYTES, max_prefix_bytes)
+    raw = b''
     buf = ''
-    with open(path, 'r', encoding='utf-8') as f:
-        while len(buf.encode('utf-8')) < max_prefix_bytes:
-            chunk = f.read(4096)
+    stop_pos = None
+    with open(path, 'rb') as f:
+        while len(raw) < max_prefix_bytes:
+            chunk = f.read(min(stage, max_prefix_bytes - len(raw)))
             if not chunk:
+                # EOF before the stop key: no metadata prefix to serve, so the
+                # caller falls back to a full parse (same answer as a budget miss).
                 return None
-            buf += chunk
+            raw += chunk
+            # A byte budget can truncate a multi-byte character at the boundary;
+            # dropping it is safe because a stop key straddling the cap is a miss
+            # either way.
+            buf = raw.decode('utf-8', errors='ignore')
             stop_pos = _find_top_level_json_key(buf, 'messages')
             scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
             if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
                 stop_pos = scenes_pos
-            if stop_pos is None:
-                continue
-            prefix = buf[:stop_pos].rstrip()
-            if prefix.endswith(','):
-                prefix = prefix[:-1].rstrip()
-            return f'{prefix}\n}}'
-    return None
+            if stop_pos is not None:
+                break
+            stage *= 2
+    if stop_pos is None:
+        return None
+    prefix = buf[:stop_pos].rstrip()
+    if prefix.endswith(','):
+        prefix = prefix[:-1].rstrip()
+    return f'{prefix}\n}}'
 
 
 def _load_session_from_path(path: Path) -> "Session | None":
@@ -1603,6 +1656,18 @@ class Session:
             # expected_sig guards against an atomic replace during the read.
             # (When _collapsed_partials fired, save() above already rewrote the
             # modern layout, so no legacy caching is needed.)
+            #
+            # WHY STILL GATED, and not "obviously" broadened to modern files: the
+            # cache is only READ from the two sites that reach it when the cheap
+            # prefix carried NEITHER message_count NOR anchor_scene_index — i.e.
+            # legacy layouts (see the `if ... and 'anchor_scene_index' not in
+            # parsed` guards in load_metadata_only() and the eviction-count
+            # helper). A modern sidecar that overflows the budget therefore
+            # never consults an entry written for it, so populating one is dead
+            # work that also stores entries no consumer can use. Making the
+            # modern case benefit needs the READ side redesigned to build a
+            # metadata stub from cached facts — a separate change; until then
+            # this stays legacy-only.
             if 'anchor_scene_index' not in data:
                 try:
                     _legacy_sidecar_facts_put(
