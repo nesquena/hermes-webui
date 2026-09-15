@@ -10644,6 +10644,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
     resolve_gateway_pending_local,
+    resolve_gateway_pending_run,
     resolve_gateway_pending_local_all,
     resolve_gateway_pending_local_no_run_mirror,
     set_session_yolo_enabled,
@@ -25891,7 +25892,6 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     found_target = False
     gateway_keys = []
     local_gateway_approval_id = ""
-    gateway_head_matches_target = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
@@ -25963,9 +25963,6 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 gw_data = getattr(gw_entry, "data", None) or {}
                 gw_approval_id = str(gw_data.get("approval_id") or "").strip()
                 gw_run_id = str(gw_data.get("run_id") or "").strip()
-                gateway_head_matches_target = bool(
-                    run_id and gw_approval_id == approval_id and gw_run_id == run_id
-                )
                 if gw_approval_id == approval_id and (not run_id or gw_run_id == run_id):
                     local_gateway_approval_id = approval_id
                 elif not run_id and found_target and pending:
@@ -26026,8 +26023,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
         local_gateway_resolved, _head, _total = resolve_gateway_pending_local(
             sid, local_gateway_approval_id, choice
         )
-    elif approval_id and found_target and run_id and gateway_head_matches_target:
-        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    elif approval_id and found_target and run_id:
+        gateway_resolved, _head, _total = resolve_gateway_pending_run(
+            sid, approval_id, run_id, choice
+        )
     elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while

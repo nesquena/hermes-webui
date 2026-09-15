@@ -10,15 +10,13 @@ Gateway approvals carry two pieces of state with one lifecycle:
 * the **mirror** entry in ``_pending`` — this module's projection of that
   producer for the UI.
 
-Retirement resolves both together (``retire_gateway_pending_mirror``), and the
-ownership direction matters: reconciliation rebuilds mirrors from live
-producers, so a producer that survives its own resolution resurrects an
-approval the user already dismissed. Retiring a specific ``approval_id``
-therefore consumes that approval's producer, retiring a whole run consumes the
-run's producers, and a same-run producer carrying no ``approval_id`` is retired
-with it — it cannot be attributed to anything else, and leaving it queued is
-what permits the resurrection. Retiring one approval must leave sibling
-approvals and other runs queued.
+A producer is consumed only by an explicit resolution operation, which assigns
+its result and signals its waiter before reconciliation can observe it again.
+``retire_gateway_pending_mirror`` cleans up the UI projection; it must not
+silently delete a producer, because that would strand the agent thread parked
+on the producer's event. For a provider-qualified response,
+``resolve_gateway_pending_run`` matches the exact ``(run_id, approval_id)``
+pair, settles that producer, and preserves same-run siblings and other runs.
 """
 import queue
 import threading
@@ -534,8 +532,6 @@ def retire_gateway_pending_mirror(
         queue = _pending.get(session_key)
         entries = queue if isinstance(queue, list) else [queue] if queue else []
         normalized_run_id = str(run_id or "").strip()
-        gateway_queue = _gateway_queues.get(session_key) or []
-        retained_gateway_queue = gateway_queue
         gateway_queue_changed = False
         if approval_id:
             match = _gateway_pending_mirror_locked(
@@ -560,13 +556,18 @@ def retire_gateway_pending_mirror(
                 and not str(entry.get("run_id") or "").strip()
             ]
             if normalized_run_id:
+                gateway_queue = _gateway_queues.get(session_key) or []
                 retained_gateway_queue = []
                 for entry in gateway_queue:
                     data = getattr(entry, "data", None) or {}
                     if str(data.get("run_id") or "").strip() == normalized_run_id:
-                        gateway_queue_changed = True
                         continue
                     retained_gateway_queue.append(entry)
+                gateway_queue_changed = len(retained_gateway_queue) != len(gateway_queue)
+                if retained_gateway_queue:
+                    _gateway_queues[session_key] = retained_gateway_queue
+                else:
+                    _gateway_queues.pop(session_key, None)
         if not retired and not gateway_queue_changed:
             head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
             _approval_sse_notify_locked(session_key, head, total)
@@ -575,31 +576,6 @@ def retire_gateway_pending_mirror(
             return changed
         for match in retired:
             entries.remove(match)
-        if normalized_run_id:
-            # A successful response may arrive with the exact approval_id. The
-            # mirror and its producer queue are one lifecycle: leaving the
-            # producer behind lets reconciliation recreate the just-retired
-            # mirror on the next poll (the completed-child resurrection bug).
-            # Remove only the matching approval for an active run; when the
-            # caller retires a run without an approval_id, retire the whole run.
-            def _same_retired_run_entry(entry) -> bool:
-                data = getattr(entry, "data", None) or {}
-                if str(data.get("run_id") or "").strip() != normalized_run_id:
-                    return False
-                if not approval_id:
-                    return True
-                queued_approval_id = str(data.get("approval_id") or "").strip()
-                return not queued_approval_id or queued_approval_id == approval_id
-
-            retained_gateway_queue = [
-                entry for entry in gateway_queue
-                if not _same_retired_run_entry(entry)
-            ]
-            gateway_queue_changed = len(retained_gateway_queue) != len(gateway_queue)
-            if retained_gateway_queue:
-                _gateway_queues[session_key] = retained_gateway_queue
-            else:
-                _gateway_queues.pop(session_key, None)
         if entries:
             _pending[session_key] = entries
         else:
@@ -839,6 +815,46 @@ def resolve_gateway_pending_local(
                 break
         if gateway_queue:
             _gateway_queues[session_key] = gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    if target is None:
+        return 0, head, total
+    target.result = choice
+    if reason:
+        target.reason = reason
+    target.event.set()
+    publish_session_list_changed("attention_resolved")
+    return 1, head, total
+
+
+def resolve_gateway_pending_run(
+    session_key: str,
+    approval_id: str,
+    run_id: str,
+    choice: str,
+    reason: str | None = None,
+) -> tuple[int, dict | None, int]:
+    """Resolve one exact run-backed producer and wake its parked waiter."""
+    target = None
+    approval_id = str(approval_id or "").strip()
+    run_id = str(run_id or "").strip()
+    if not approval_id or not run_id:
+        return 0, None, 0
+    with _lock:
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            entry_approval_id = str(data.get("approval_id") or "").strip()
+            entry_run_id = str(data.get("run_id") or "").strip()
+            if target is None and entry_approval_id == approval_id and entry_run_id == run_id:
+                target = entry
+            else:
+                retained_gateway_queue.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
         else:
             _gateway_queues.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
