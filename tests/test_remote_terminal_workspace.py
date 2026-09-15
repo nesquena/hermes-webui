@@ -415,6 +415,7 @@ def test_detached_streaming_worker_preserves_session_profile_workspace(monkeypat
     turn_ws = streaming._resolve_path("/srv/remote-alice", profile=getattr(s, "profile", None))
     assert str(turn_ws) == "/srv/remote-alice"
 
+    pytest.importorskip("agent.runtime_cwd", reason="hermes-agent not installed")
     tokens = streaming._set_turn_session_identity(s.session_id, workspace=str(turn_ws))
     try:
         from agent.runtime_cwd import _SESSION_CWD
