@@ -923,9 +923,40 @@ def test_run_git_disables_repo_configured_credential_helpers(
     assert ok is False, out
 
 
+@pytest.mark.parametrize("proxy_source", ["environment", "repository"])
+def test_run_git_never_launches_external_git_proxy(
+    tmp_path, monkeypatch, proxy_source,
+):
+    """An unattended update fetch must not execute external Git proxies."""
+    if os.name == "nt":
+        pytest.skip("executable proxy marker setup is POSIX-only")
+
+    marker = tmp_path / f"{proxy_source}-proxy-was-invoked"
+    helper = tmp_path / f"{proxy_source}-proxy.sh"
+    helper.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n', encoding="utf-8")
+    helper.chmod(0o755)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", "git://example.invalid/origin.git")
+    if proxy_source == "environment":
+        monkeypatch.setenv("GIT_PROXY_COMMAND", str(helper))
+    else:
+        _git(repo, "config", "core.gitProxy", str(helper))
+
+    out, ok = updates._run_git(["fetch", "origin"], repo, timeout=10)
+
+    assert not marker.exists(), (
+        f"the update check launched the {proxy_source} Git proxy: {out!r}"
+    )
+    assert ok is False, out
+
+
 def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch):
     """SSH update remotes may use an agent but must never read from /dev/tty."""
     monkeypatch.setenv('SSH_AUTH_SOCK', '/tmp/legitimate-agent.sock')
+    monkeypatch.setenv('GIT_SSH_COMMAND', 'ssh -i /tmp/untrusted-key')
     with patch.object(updates.shutil, 'which', return_value='/usr/bin/git'), \
          patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout='', stderr='')
@@ -934,6 +965,7 @@ def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch
     argv = mock_run.call_args.args[0]
     assert 'core.sshCommand=ssh -oBatchMode=yes' in argv
     assert mock_run.call_args.kwargs['env']['SSH_AUTH_SOCK'] == '/tmp/legitimate-agent.sock'
+    assert 'GIT_SSH_COMMAND' not in mock_run.call_args.kwargs['env']
 
 
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):

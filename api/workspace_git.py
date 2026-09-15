@@ -43,9 +43,9 @@ _GIT_HARDENED_CONFIG = (
     # overrides repo-local helpers without allowing terminal interaction.
     ("core.sshCommand", "ssh -oBatchMode=yes"),
     ("protocol.ext.allow", "never"),
-    # Neutralize repo-local core.gitProxy, which specifies an external proxy
-    # command reachable on `git fetch` against a git:// remote.
-    ("core.gitProxy", ""),
+    # git:// is refused by noninteractive_git_argv(), which also supplies the
+    # askpass/credential overrides; a command-line core.gitProxy value cannot
+    # mask a repository-configured proxy command.
     # Prevent submodule operations from recursing into nested repos, which
     # could trigger hooks or fetch from attacker-controlled submodule URLs.
     ("submodule.recurse", "false"),
