@@ -3486,13 +3486,23 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 .preview-path{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;min-width:0;}
 .preview-path #previewPathText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .preview-path #previewBadge{flex-shrink:0;white-space:nowrap;}
-.preview-path #btnCopyPreviewRelPath,.preview-path #btnDownloadFile,.preview-path #btnEditFile,.preview-path #btnRenderMarkdownAnyway{flex-shrink:0;white-space:nowrap;}
+.preview-path #btnCopyPreviewRelPath,.preview-path #btnCopyPreviewContent,.preview-path #btnDownloadFile,.preview-path #btnEditFile,.preview-path #btnRenderMarkdownAnyway{flex-shrink:0;white-space:nowrap;}
 /* #5548: keep the preview-header action buttons from crushing the path / clipping
    Download+Edit on a narrow preview pane (worst with long RU/DE labels). The path
    text keeps priority (ellipsis above); the newest button (Copy relative path) drops
    its text label to icon-only when the RIGHT PANEL (not the viewport) is narrow —
    .rightpanel is a named inline-size container, so this fires on pane resize too,
    staying accessible via the button's title + aria-label. */
+/* Copy file contents is icon-only everywhere (no text label), so there is no
+   label left to fold. On a genuinely narrow pane — the right panel's default
+   width is 300px — the whole control drops out instead of crushing the path and
+   the export cluster (maintainer review PR #6957, blocker 2). `!important`
+   because syncPreviewCopyContentBtn() writes an inline `display:inline-flex`
+   when the content is copyable, and an inline style otherwise wins over this
+   container query. */
+@container rightpanel (max-width:340px){
+  .preview-path #btnCopyPreviewContent{display:none !important;}
+}
 @container rightpanel (max-width:520px){
   .preview-path #btnCopyPreviewRelPath .preview-btn-label{display:none;}
 }
