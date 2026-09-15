@@ -291,6 +291,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
 - Background agent error alerts -- banner when a non-active session encounters an error
+- Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown

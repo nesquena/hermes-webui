@@ -59,6 +59,7 @@ async function cancelStream(reason){
     else setStatus('');
     // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
     // distinguish reasons — keep the toast generic and short.
+    if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
   return respOk;
@@ -91,6 +92,9 @@ async function cancelSessionStream(session){
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
   }
+  if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
+  if(typeof stopApprovalPollingForSession==='function') stopApprovalPollingForSession(sid);
+  if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(sid);
   if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
     stopApprovalPolling();
     hideApprovalCard(true);
