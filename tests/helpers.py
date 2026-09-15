@@ -19,14 +19,14 @@ def git_subcommand_args(cmd: Sequence[str]) -> list[str]:
     """Return the git arguments in an argv built by a production git runner.
 
     ``api.updates._run_git`` builds its argv through
-    ``api.subprocess_utils.noninteractive_git_argv(..., unattended=True)``, which
-    prefixes the executable with ``-c`` overrides: credential helpers, SSH batch
-    mode, and the transport refusals that only an unattended child applies. A
-    stub that dispatches on the subcommand would otherwise have to hard-code that
-    prefix and would break every time it changes, so derive it from the production
-    helper instead — and assert it is present, so a runner that stops hardening
-    its argv fails here rather than silently matching a stub that no longer
-    describes it.
+    ``api.subprocess_utils.noninteractive_git_argv``, which prefixes the executable
+    with ``-c`` overrides: credential helpers, SSH batch mode, and the
+    ``ext::``/``git://`` transport refusals — the same set for every caller, the
+    workspace runner included. A stub that dispatches on the subcommand would
+    otherwise have to hard-code that prefix and would break every time it changes,
+    so derive it from the production helper instead — and assert it is present, so
+    a runner that stops hardening its argv fails here rather than silently matching
+    a stub that no longer describes it.
     """
     prefix = noninteractive_git_argv([], executable=cmd[0])
     assert list(cmd[: len(prefix)]) == prefix, (
