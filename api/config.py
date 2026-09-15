@@ -8073,12 +8073,19 @@ def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str
                 continue
             if isinstance(raw_entry, dict):
                 model = str(raw_entry.get("model") or "").strip()
-                provider = str(raw_entry.get("provider") or current_provider or "custom").strip()
+                explicit_provider = str(raw_entry.get("provider") or "").strip()
                 base_url = str(raw_entry.get("base_url") or "").strip()
+                if not explicit_provider and not base_url:
+                    continue
+                provider = explicit_provider or current_provider or "custom"
             elif isinstance(raw_entry, str) and raw_entry.strip():
                 value = raw_entry.strip()
-                provider, model = value.split("/", 1) if "/" in value else (current_provider, value)
+                if "/" not in value:
+                    continue
+                provider, model = value.split("/", 1)
                 provider, model, base_url = provider.strip(), model.strip(), ""
+                if not provider:
+                    continue
             else:
                 continue
             if model:
