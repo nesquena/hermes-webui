@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-08-22
+- **Updated:** 2026-09-15
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -75,6 +75,7 @@ and 5; it does not mark every run-state boundary implemented.
 | Compression summary / handoff | Gives the agent recovery context after automatic compression | Must remain agent-facing recovery material unless explicitly rendered as history | Pollute the active turn or become implicit current user intent |
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
+| Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges counts/markers across clients and stores clear ordering independently per session | Let one client's stale cache lower a count or resurrect a cleared marker |
 
 ## Core Invariants
 
@@ -153,6 +154,73 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+## Client-side unread persistence (sidebar layer)
+
+The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.
+Both live in `localStorage` under the origin, so every WebUI client on the same
+origin/profile (a PWA window and a browser tab, for example) shares them while each
+client also caches them in module state. They are projections of the sidebar layer
+above; the rules below describe what stays coherent when more than one client
+writes.
+
+| Store | Key | Semantics |
+|---|---|---|
+| Viewed counts | `hermes-session-viewed-counts` | `sid -> N`, meaning "seen at least up to N messages" |
+| Completion markers | `hermes-session-completion-unread` | `sid -> {message_count, completed_at, ...}` behind the visible dot |
+
+- **Viewed counts merge by maximum.** The fact is monotonic per session and
+  additive across clients, so a save reads the store, merges its cache in with a
+  max, and writes only when the store does not already hold the merged result.
+  A deletion records its own key under
+  `hermes-session-viewed-counts:deleted:v1:<encoded-sid>`; merges drop any count
+  whose session has a live deletion record, so a client that still caches the
+  acknowledgement prunes it instead of writing it back. List membership cannot
+  decide this, because the sidebar filters by profile, project, and source, so an
+  absent row is not evidence of deletion. Deletion records expire on the same
+  7-day policy as clear records, so a tab left open longer than that can re-add a
+  count for a session deleted more than seven days earlier. That consequence is
+  bounded and invisible: the session is no longer listed, so the retained entry
+  produces no indicator, and it is re-examined only on the next deletion or clear.
+- **Completion markers are ordered by logical stamps, not wall clock.**
+  Markers are add/remove and cannot be max-ordered, so each clear records a stamp
+  under `hermes-session-completion-unread-cleared:v1:<encoded-sid>:<stamp>`.
+  Independent immutable keys mean clients clearing different sessions—or clearing
+  the same session in an interleaved operation—cannot replace newer ordering
+  facts, and a reader folds the maximum per session. Markers carry
+  `unread_order`: the greatest stamp the marker's creator had observed (its own
+  clear state, its cached and stored markers) plus one. A marker whose stamp does
+  not exceed its session's clear stamp loses, so a clear wins the tie when a
+  marker was prepared before it but written after; a completion that happens after
+  the clear observes it and stamps higher, so it still wins. Milliseconds are not
+  used for ordering: a clear and a genuine later completion can share one tick, and
+  a single observed clock cannot order them.
+- **The previous clear representation is migrated once, then dropped.** The
+  unsuffixed `hermes-session-completion-unread-cleared` whole map is read, its
+  facts are imported as independent records, and the key is removed. Keeping it
+  would retain both of the defects it caused: concurrent clears could replace one
+  another in the shared blob, and the blob grew with every session ever cleared.
+  A client still running the previous revision therefore does not observe clears
+  recorded after the migration; that reload boundary is deliberate, because a
+  dual write cannot make the shared blob concurrency-safe. Versioned records are
+  pruned by age (7 days) and supersession only — never by session existence,
+  because the sidebar list is filtered by profile, project, and source, so an
+  absent row may simply be hidden. They are never part of the marker map
+  consumers read.
+- **Cross-client repair, not cache invalidation.** The `storage` listener routes a
+  changed unread key (including any per-session clear key) back through the same
+  merge instead of only dropping the local cache. A client that still holds an
+  acknowledgement re-asserts it after the other client's write, the loser sees a
+  value it cannot beat and stops, and repair converges instead of ping-ponging
+  storage events.
+- **Whole-map facts converge; clear ordering does not share a map.** Viewed counts
+  and completion markers still use read-modify-write maps, so interleaved writes
+  can transiently lose an entry. Their monotonic cache merge and storage-event
+  repair re-assert held facts. Clear ordering is different: each session has its
+  own atomic `localStorage` write, so concurrent clears of different sessions
+  cannot clobber each other. A viewed-count advance records its clear even when a
+  competing client has prepared but not yet persisted the older completion
+  marker; repeated observations at the same count do not refresh the tombstone.
+
 ## Review Checklist
 
 Use this checklist for PRs that touch run state, streaming, replay, compression,
@@ -175,6 +243,10 @@ context reconstruction, or session metadata:
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
+- Does this change write one of the client-side unread stores
+  (`hermes-session-viewed-counts`, `hermes-session-completion-unread`,
+  `hermes-session-completion-unread-cleared`), and does it keep the merge and
+  tombstone rules in the client-side unread persistence section?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

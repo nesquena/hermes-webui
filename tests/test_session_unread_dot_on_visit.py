@@ -29,10 +29,16 @@ Two invariants flagged in review are protected here and MUST NOT regress:
 """
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+# Sibling harness scaffolding lives beside this file and is not on sys.path by
+# default; import it the same way the other node-harness tests do.
+sys.path.insert(0, str(ROOT / "tests"))
+import _unread_store_helpers as unread_store_helpers  # noqa: E402
 
 
 def _load_session_block() -> str:
@@ -176,6 +182,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -195,6 +204,7 @@ function _forgetObservedStreamingSession() {{}}
 {set_viewed}
 {sync}
 {ack}
+{unread_store_helpers.BLOCK}
 // Seed a stale completion-unread marker for the open session.
 _getSessionCompletionUnread()['open'] = {{message_count: 5, completed_at: 1}};
 _saveSessionCompletionUnread();
@@ -238,6 +248,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -272,6 +285,7 @@ const _sessionListSourceById = new Map();
 {effective}
 {sync}
 {ack}
+{unread_store_helpers.BLOCK}
 function _isSessionActivelyViewedForList(sid) {{
   if (!sid || !S.session || S.session.session_id !== sid) return false;
   if (_loadingSessionId && _loadingSessionId !== sid) return false;
@@ -335,6 +349,9 @@ const _store = {{}};
 const localStorage = {{
   getItem: (k) => (k in _store ? _store[k] : null),
   setItem: (k, v) => {{ _store[k] = String(v); }},
+  removeItem: (k) => {{ delete _store[k]; }},
+  key: (i) => Object.keys(_store)[i] ?? null,
+  get length() {{ return Object.keys(_store).length; }},
 }};
 const SESSION_VIEWED_COUNTS_KEY = 'v';
 const SESSION_COMPLETION_UNREAD_KEY = 'u';
@@ -380,6 +397,7 @@ async function api(url) {{ _apiCalled = true; return _apiResult; }}
 {set_viewed}
 {actively_viewed}
 {ensure}
+{unread_store_helpers.BLOCK}
 
 function _hasMarker() {{
   return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'open');
