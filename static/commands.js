@@ -662,6 +662,14 @@ function _buildModelCandidates(sel,groups){
 // the eventual provider error is visible rather than silently choosing a
 // same-named model from another provider.
 function _resolveModelAliasTarget(options,providerMap,target){
+  if(target&&typeof target==='object'){
+    const model=String(target.model||'').trim();
+    const routeProvider=String(target.route_provider||'').trim();
+    if(model&&routeProvider){
+      return {value:`@${routeProvider}:${model}`,provider:routeProvider};
+    }
+    return null;
+  }
   const raw=String(target||'').trim();
   const slash=raw.indexOf('/');
   if(slash<=0||slash===raw.length-1) return null;
@@ -740,11 +748,11 @@ async function cmdModel(args){
     const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
     if(resp.ok){
       modelsData=await resp.json();
-      const aliases=modelsData.aliases||{};
+      const aliases=modelsData.model_alias_routes||modelsData.aliases||{};
       for(const [alias,modelId] of Object.entries(aliases)){
         if(alias.toLowerCase()===q){
-          aliasTarget=String(modelId);
-          q=aliasTarget.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
+          aliasTarget=modelId;
+          q=String(modelId&&typeof modelId==='object'?modelId.model:modelId).toLowerCase();
           break;
         }
       }

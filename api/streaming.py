@@ -44,14 +44,8 @@ from api.config import (
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
+    resolve_model_alias_runtime,
     resolve_custom_provider_connection,
-    apply_custom_provider_connection_authority,
-    merge_custom_provider_runtime_bundle,
-    CustomProviderRouteError,
-    CUSTOM_ROUTE_NO_CREDENTIAL,
-    CUSTOM_ROUTE_NO_ENDPOINT,
-    custom_provider_route_error,
-    raise_for_custom_provider_route,
     model_with_provider_context,
     warm_models_catalog_provenance_if_cold,
     load_settings,
@@ -278,6 +272,7 @@ def _cancel_event_payload(
 # (api/profiles.py:715).
 _ENV_LOCK = threading.Lock()
 
+_KEYLESS_CUSTOM_API_KEY = "dummy-key"
 _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
 _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -576,121 +571,50 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
 
-def _resolve_custom_provider_connection_authority(
-    resolved_provider: str | None,
-    resolved_api_key: str | None,
-    resolved_base_url: str | None,
-    profile_name: str | None = None,
-    custom_provider_lookup: str | None = None,
-) -> tuple[str | None, str | None, str | None, bool]:
-    """Return ``(provider, api_key, base_url, custom_owned)`` for ``custom:*``.
-
-    Thin profile-scoped wrapper around
-    :func:`api.config.apply_custom_provider_connection_authority`, which holds the
-    atomic-replacement rules (exact ``custom_providers[]`` row owns BOTH the
-    endpoint and the credential; keyed/``model:`` fallbacks only fill gaps, as one
-    same-record bundle).
-
-    ``profile_name`` binds the SESSION's own profile while the connection is
-    resolved. That lookup reads the endpoint AND the credential from ONE
-    ``get_config()``/env snapshot, so binding the profile here keeps them from
-    splitting across profiles: on a detached worker thread (which doesn't inherit
-    the request-profile TLS/env) an unbound call would read the DEFAULT profile
-    and pair a named profile's endpoint with the default profile's API key
-    (finding #3). No-op for the default/root profile; when ``profile_name`` is
-    None the ambient scope (if any) is used.
-
-    ``custom_provider_lookup`` carries the session's pre-canonicalization
-    identity, so a provider already rewritten to plain ``"custom"`` by an earlier
-    resolve still selects its own named record on a retry.
-
-    ``custom_owned`` is True when a config-owned custom record supplied the
-    connection; see :func:`_resolve_runtime_connection_bundle` for why callers
-    must then clear the runtime-owned side fields.
-    """
-    lookup_provider = custom_provider_lookup or resolved_provider
-    if not (isinstance(lookup_provider, str) and lookup_provider.startswith("custom:")):
-        return resolved_provider, resolved_api_key, resolved_base_url, False
-
-    from api import profiles as _profiles_api
-    with _profiles_api.profile_scope_for_detached_worker(
-        profile_name, "custom provider connection", logger_override=logger
-    ):
-        return apply_custom_provider_connection_authority(
-            resolved_provider,
-            resolved_api_key,
-            resolved_base_url,
-            lookup_provider=lookup_provider,
-            # Pass THIS module's binding so tests (and any future shim) that patch
-            # ``streaming.resolve_custom_provider_connection`` still take effect.
-            connection_resolver=resolve_custom_provider_connection,
-        )
-
-
 def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
     profile_name: str | None = None,
-    custom_provider_lookup: str | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return provider/key/base_url overrides for ``custom:*`` endpoints.
 
-    Legacy three-value view of
-    :func:`_resolve_custom_provider_connection_authority`. Prefer
-    :func:`_resolve_runtime_connection_bundle` in agent-construction paths: the
-    three fields alone are NOT a complete constructor bundle, so a caller that
-    keeps the ambient runtime's ``credential_pool`` / ``api_mode`` / ACP
-    command+args beside them still sends a mixed-authority agent to the custom
-    endpoint.
+    Hermes Agent treats named custom providers as routing hints around an
+    OpenAI-compatible base URL.  Local OpenAI-compatible servers often run
+    without authentication, so a missing key should not fail before the first
+    request; pass a harmless placeholder to the SDK and let the endpoint accept
+    it or return its own auth error.
+
+    ``profile_name`` binds the SESSION's own profile while
+    ``resolve_custom_provider_connection`` reads the endpoint AND the credential.
+    That helper resolves both from ONE ``get_config()``/env snapshot, so binding
+    the profile here keeps them from splitting across profiles: on a detached
+    worker thread (which doesn't inherit the request-profile TLS/env) an unbound
+    call would read the DEFAULT profile and pair a named profile's endpoint with
+    the default profile's API key (finding #3). No-op for the default/root
+    profile; when ``profile_name`` is None the ambient scope (if any) is used.
     """
-    return _resolve_custom_provider_connection_authority(
-        resolved_provider,
-        resolved_api_key,
-        resolved_base_url,
-        profile_name=profile_name,
-        custom_provider_lookup=custom_provider_lookup,
-    )[:3]
+    if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
+        return resolved_provider, resolved_api_key, resolved_base_url
 
-
-# The constructor-routing fields AIAgent takes from the resolved runtime
-# provider. They travel together: a bundle that replaces the endpoint/credential
-# but leaves these behind builds an agent whose transport (ACP subprocess),
-# wire protocol (api_mode) or credential source (pool) still points at the
-# previous authority.
-_RUNTIME_BUNDLE_FIELDS = ('api_mode', 'acp_command', 'acp_args', 'credential_pool')
-
-
-def _resolve_runtime_connection_bundle(
-    resolved_provider: str | None,
-    resolved_api_key: str | None,
-    resolved_base_url: str | None,
-    runtime_provider: dict | None,
-    profile_name: str | None = None,
-    custom_provider_lookup: str | None = None,
-) -> dict:
-    """Return the COMPLETE constructor-routing bundle for one send attempt.
-
-    Keys: ``provider``, ``base_url``, ``api_key`` plus every field in
-    :data:`_RUNTIME_BUNDLE_FIELDS`. Callers must apply the whole dict — that is
-    the point: the endpoint/credential and the transport/protocol/pool fields
-    are one authority, and the agent-cache signature must be derived from the
-    same dict so a bundle change always mints a new agent.
-    """
-    lookup_provider = custom_provider_lookup or resolved_provider
     from api import profiles as _profiles_api
-
     with _profiles_api.profile_scope_for_detached_worker(
         profile_name, "custom provider connection", logger_override=logger
     ):
-        return merge_custom_provider_runtime_bundle(
-            resolved_provider,
-            resolved_api_key,
-            resolved_base_url,
-            runtime_provider,
-            lookup_provider=lookup_provider,
-            connection_resolver=resolve_custom_provider_connection,
-        )
+        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    if not resolved_api_key and _cp_key:
+        resolved_api_key = _cp_key
+    if not resolved_base_url and _cp_base:
+        resolved_base_url = _cp_base
+    if resolved_base_url:
+        # Route through the generic custom OpenAI-compatible client once the
+        # named provider has supplied the concrete endpoint. Keeping the
+        # provider as custom:<slug> would make Agent init synthesize invalid
+        # env-var hints like CUSTOM:SOMETHING-8000_API_KEY on keyless setups.
+        resolved_provider = "custom"
+        if not resolved_api_key:
+            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
+    return resolved_provider, resolved_api_key, resolved_base_url
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
@@ -722,7 +646,6 @@ def _runtime_preferred_base_url(
     runtime_provider: dict | None,
     resolved_provider: str | None,
     configured_base_url: str | None,
-    session_requested_provider: str | None = None,
 ) -> str | None:
     """Prefer the runtime-normalized base_url, but never override an explicit
     configured endpoint that points somewhere genuinely different.
@@ -748,8 +671,7 @@ def _runtime_preferred_base_url(
         return runtime_base_url
 
     provider_id = str(
-        session_requested_provider
-        or resolved_provider
+        resolved_provider
         or (runtime_provider or {}).get("provider")
         or ""
     ).strip().lower()
@@ -1508,41 +1430,6 @@ def _result_reports_compression_snapshot_stale(result) -> bool:
     )
 
 
-def _custom_provider_route_classification(error) -> dict:
-    """WebUI apperror classification for a terminal custom-provider route.
-
-    ``error`` is either a :class:`CustomProviderRouteError` or the verdict dict
-    :func:`custom_provider_route_error` read off a bundle — the retry paths hold
-    the verdict without ever raising, so both shapes classify identically.
-    """
-    if isinstance(error, dict):
-        reason = error.get('reason')
-        hint = error.get('hint') or ''
-        message = error.get('message') or ''
-    else:
-        reason = getattr(error, 'reason', None)
-        hint = getattr(error, 'hint', '') or ''
-        message = getattr(error, 'message', None) or str(error)
-    if reason == CUSTOM_ROUTE_NO_CREDENTIAL:
-        label = 'Provider credential unavailable'
-    elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
-        label = 'Provider endpoint unavailable'
-    else:
-        label = 'Provider not configured'
-    return {
-        'label': label,
-        'type': 'provider_unroutable',
-        # The STRUCTURED verdict (``custom_provider_endpoint_unresolved`` /
-        # ``custom_provider_no_credential``) travels beside the prose so the
-        # emitted apperror can carry it too. ``type`` alone says only "this route
-        # is unroutable"; which of the two settings to fix lives here, and the
-        # non-streaming /api/chat refusal already answers it as ``reason``.
-        'reason': reason,
-        'hint': hint,
-        'message': message,
-    }
-
-
 def _classify_provider_error(
     err_str: str,
     exc=None,
@@ -1565,12 +1452,6 @@ def _classify_provider_error(
     err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
-    if isinstance(exc, CustomProviderRouteError):
-        # An unroutable named ``custom:<slug>`` route. Classified BEFORE any text
-        # matching so it can never be read as a 401 — the auth branch would run
-        # credential self-heal, which re-resolves a provider and is exactly the
-        # re-routing this verdict exists to prevent.
-        return _custom_provider_route_classification(exc)
     _result_is_compression_snapshot_stale = (
         _result_reports_compression_snapshot_stale(result)
     )
@@ -2676,7 +2557,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
-from api.workspace import _resolve_path
+from api.workspace import set_last_workspace
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
@@ -2981,10 +2862,7 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
     sid = str(session_id or "")
     tokens: dict = {}
     try:
-        from api.agent_compat import agent_attr
-        set_current_session_key = agent_attr(
-            "tools.approval", "set_current_session_key", "tools.approval_context"
-        )
+        from tools.approval import set_current_session_key
         tokens["approval"] = set_current_session_key(sid)
     except Exception:
         logger.debug("per-turn approval session-key bind failed", exc_info=True)
@@ -3046,10 +2924,7 @@ def _reset_turn_session_identity(tokens) -> None:
     tok = tokens.get("approval")
     if tok is not None:
         try:
-            from api.agent_compat import agent_attr
-            reset_current_session_key = agent_attr(
-                "tools.approval", "reset_current_session_key", "tools.approval_context"
-            )
+            from tools.approval import reset_current_session_key
             reset_current_session_key(tok)
         except Exception:
             logger.debug("per-turn approval session-key reset failed", exc_info=True)
@@ -3511,7 +3386,7 @@ def _resolve_image_input_mode(cfg: dict, active_provider: str = "", active_model
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = "", profile: str | Path | None = None):
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = ""):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -3531,7 +3406,7 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
-    workspace_root = _resolve_path(workspace, profile=profile)
+    workspace_root = Path(workspace).expanduser().resolve()
     # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
     # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
     # design). The pre-existing `path.relative_to(workspace_root)` guard would
@@ -8871,54 +8746,6 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 
 
-def _compute_agent_cache_signature(
-    resolved_model: str | None,
-    resolved_api_key: str | None,
-    resolved_base_url: str | None,
-    resolved_provider: str | None,
-    runtime_bundle: dict | None,
-    max_iterations_cfg=None,
-    max_tokens_cfg=None,
-    fallback_resolved=None,
-    toolsets=None,
-    reasoning_config=None,
-    main_request_overrides=None,
-    _main_request_overrides=None,
-    prefill_context=None,
-    profile_home: str | None = None,
-    safe_profile_runtime_env: dict | None = None,
-) -> str:
-    """Return the SHA256 signature identifying an agent's constructor routing state."""
-    import hashlib as _hashlib
-    import json as _json
-    _bundle = runtime_bundle if isinstance(runtime_bundle, dict) else {}
-    _credential_pool = _bundle.get('credential_pool')
-    _env = safe_profile_runtime_env if isinstance(safe_profile_runtime_env, dict) else {}
-    _main_request_overrides = main_request_overrides if main_request_overrides is not None else _main_request_overrides
-    _sig_blob = _json.dumps([
-        resolved_model or '',
-        _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
-        resolved_base_url or '',
-        resolved_provider or '',
-        _bundle.get('api_mode') or '',
-        _bundle.get('acp_command') or '',
-        _bundle.get('acp_args') or [],
-        bool(_credential_pool),
-        max_iterations_cfg or '',
-        max_tokens_cfg or '',
-        fallback_resolved or {},
-        sorted(toolsets) if toolsets else [],
-        reasoning_config or {},
-        _main_request_overrides or {},
-        _public_prefill_context_status(prefill_context),
-        profile_home or '',
-        _env.get('TERMINAL_ENV', '') or '',
-        _env.get('TERMINAL_SSH_HOST', '') or '',
-        _env.get('TERMINAL_SSH_USER', '') or '',
-    ], sort_keys=True)
-    return _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
-
-
 def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
     from api.session_lifecycle import commit_session_memory
 
@@ -9161,6 +8988,8 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    runtime_base_url=None,
+    runtime_api_key=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -9640,19 +9469,19 @@ def _run_agent_streaming(
         # Resolved the same way as `s.workspace` below so the bound cwd and the
         # session's own record cannot disagree. Guarded: a turn must not die
         # here because a workspace path is malformed.
-        s = get_session(session_id)
         try:
-            _turn_workspace_cwd = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
+            _turn_workspace_cwd = str(Path(workspace).expanduser().resolve())
         except Exception:
             _turn_workspace_cwd = ""
             logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
         _turn_session_identity_tokens = _set_turn_session_identity(
             session_id, workspace=_turn_workspace_cwd
         )
+        s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = _turn_workspace_cwd
+        s.workspace = str(Path(workspace).expanduser().resolve())
         _last_persisted_model = None
         _last_persisted_provider = None
         _turn_owns_persisted_model = False
@@ -9863,8 +9692,7 @@ def _run_agent_streaming(
         # lives outside this WebUI repo.  This change fixes the headline bug
         # for users who run a single non-default profile per WebUI process.
         try:
-            from api.agent_compat import agent_attr
-            discover_mcp_tools = agent_attr("tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery")
+            from tools.mcp_tool import discover_mcp_tools
             discover_mcp_tools()
         except Exception:
             pass  # MCP not available or not configured — non-fatal
@@ -10514,34 +10342,71 @@ def _run_agent_streaming(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
-                resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                    model_with_provider_context(model, provider_context),
-                    explicitly_picked=_explicitly_picked,
-                )
+                _alias_route = resolve_model_alias_runtime(provider_context, expected_model=model)
+                _resolved_before_dispatch = runtime_base_url is not None or runtime_api_key is not None
+                if _resolved_before_dispatch:
+                    resolved_model = model
+                    resolved_provider = provider_context
+                    resolved_base_url = runtime_base_url
+                    resolved_api_key = runtime_api_key
+                elif _alias_route is not None:
+                    resolved_model = _alias_route["model"]
+                    resolved_provider = _alias_route["provider"]
+                    resolved_base_url = _alias_route.get("base_url") or None
+                    resolved_api_key = _alias_route.get("api_key") or None
+                else:
+                    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                        model_with_provider_context(model, provider_context),
+                        explicitly_picked=_explicitly_picked,
+                    )
+                    resolved_api_key = None
                 configured_base_url = resolved_base_url
 
                 # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-                # Pass the resolved provider so non-default providers get their own credentials.
-                resolved_api_key = None
-                # Default to an empty runtime dict so the constructor-routing
-                # bundle below stays buildable when resolution raises.
+                # Keep the downstream constructor-routing bundle defined if either
+                # resolver below raises before returning runtime metadata.
                 _rt = {}
-                try:
-                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                    from hermes_cli.runtime_provider import resolve_runtime_provider
-                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                        resolve_runtime_provider,
-                        requested=resolved_provider,
-                        target_model=resolved_model,
-                    )
-                    resolved_api_key = _rt.get("api_key")
-                    if not resolved_provider:
-                        resolved_provider = _rt.get("provider")
-                    resolved_base_url = _runtime_preferred_base_url(
-                        _rt, resolved_provider, configured_base_url
-                    )
-                except Exception as _e:
-                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                # A URL-bearing alias already resolved its endpoint-owned credential
+                # server-side; never ask the active provider resolver for a key that
+                # could then be sent to that unrelated endpoint.
+                if (_resolved_before_dispatch or _alias_route is not None) and configured_base_url:
+                    resolved_provider = "custom"
+                    try:
+                        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                        _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                            resolve_runtime_provider,
+                            requested="custom",
+                            explicit_api_key=resolved_api_key,
+                            explicit_base_url=configured_base_url,
+                            target_model=resolved_model,
+                        )
+                        resolved_api_key = _rt.get("api_key") or resolved_api_key
+                        resolved_base_url = _rt.get("base_url") or configured_base_url
+                    except Exception:
+                        # Older Agent versions cannot resolve by explicit endpoint.
+                        # Keep the alias URL but never borrow an active-provider key.
+                        if not resolved_api_key:
+                            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
+                else:
+                    try:
+                        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+                        _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                            resolve_runtime_provider,
+                            requested=resolved_provider,
+                            target_model=resolved_model,
+                        )
+                        if not resolved_api_key:
+                            resolved_api_key = _rt.get("api_key")
+                        if not resolved_provider:
+                            resolved_provider = _rt.get("provider")
+                        resolved_base_url = _runtime_preferred_base_url(
+                            _rt, resolved_provider, configured_base_url
+                        )
+                    except Exception as _e:
+                        print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
                 # Named custom providers (custom:slug) may not be resolvable by
                 # hermes_cli.runtime_provider directly. Fall back to config.yaml
@@ -10549,38 +10414,11 @@ def _run_agent_streaming(
                 # Preserve the pre-canonicalization identity so image routing can
                 # still select the exact custom_providers entry after the rewrite
                 # to "custom" below.
-                #
-                # Resolve ONE complete constructor-routing bundle here and let
-                # every downstream field (including the agent-cache signature)
-                # read from it. Resolving only provider/key/base_url left the
-                # runtime-owned credential_pool / api_mode / ACP command+args
-                # beside a replaced custom endpoint, so the agent was built with
-                # a mixed authority: the list row's URL and key, but the ambient
-                # provider's transport, wire protocol and credential source.
                 _session_requested_provider = resolved_provider
-                _runtime_bundle = _resolve_runtime_connection_bundle(
-                    resolved_provider, resolved_api_key, resolved_base_url, _rt,
+                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                    resolved_provider, resolved_api_key, resolved_base_url,
                     profile_name=_resolved_profile_name,
-                    custom_provider_lookup=_session_requested_provider,
                 )
-                # Stop HERE on a terminal route verdict — before the agent
-                # kwargs, before _AIAgent(), before the agent-cache write. A
-                # named custom:<slug> that resolved no complete
-                # (api_key, base_url) pair is not "fail closed" at the
-                # constructor: AIAgent honours an explicit pair only when BOTH
-                # are truthy and otherwise calls _routed_client_kwargs(), which
-                # re-resolves a provider and can land on the ambient endpoint or
-                # the init-time fallback chain. Raising sends this turn to the
-                # outer handler, which classifies it via
-                # _custom_provider_route_classification() and emits a controlled
-                # provider / missing-credential error — and, because we never
-                # reach SESSION_AGENT_CACHE, the cache is never poisoned with an
-                # agent built on an unroutable bundle that later turns would
-                # silently reuse.
-                raise_for_custom_provider_route(_runtime_bundle)
-                resolved_provider = _runtime_bundle['provider']
-                resolved_api_key = _runtime_bundle['api_key']
-                resolved_base_url = _runtime_bundle['base_url']
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
@@ -10787,18 +10625,15 @@ def _run_agent_streaming(
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
             if 'request_overrides' in _agent_params and _main_request_overrides:
                 _agent_kwargs['request_overrides'] = _main_request_overrides
-            # Params added in newer hermes-agent — skip if not supported.
-            # Read from the resolved bundle, NOT from _rt: a custom-provider
-            # override clears these, and taking them straight off the runtime
-            # provider would re-introduce the authority it replaced.
+            # Params added in newer hermes-agent — skip if not supported
             if 'api_mode' in _agent_params:
-                _agent_kwargs['api_mode'] = _runtime_bundle['api_mode']
+                _agent_kwargs['api_mode'] = _rt.get('api_mode')
             if 'acp_command' in _agent_params:
-                _agent_kwargs['acp_command'] = _runtime_bundle['acp_command']
+                _agent_kwargs['acp_command'] = _rt.get('command')
             if 'acp_args' in _agent_params:
-                _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
+                _agent_kwargs['acp_args'] = _rt.get('args')
             if 'credential_pool' in _agent_params:
-                _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
+                _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
             # Pin Honcho memory sessions to the stable WebUI session ID.
             # Without this, 'per-session' Honcho strategy creates a new Honcho
             # session on every streaming request because HonchoSessionManager is
@@ -10813,26 +10648,41 @@ def _run_agent_streaming(
                 agent = _AIAgent(**_agent_kwargs)
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
+                import hashlib as _hashlib
+                import json as _json
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                # Signature fields come from the SAME bundle the constructor
-                # received, so a cleared/overridden field always mints a new
-                # agent instead of reusing one built on the prior authority.
-                _agent_sig = _compute_agent_cache_signature(
-                    resolved_model,
-                    resolved_api_key,
-                    resolved_base_url,
-                    resolved_provider,
-                    _runtime_bundle,
-                    max_iterations_cfg=_max_iterations_cfg,
-                    max_tokens_cfg=_max_tokens_cfg,
-                    fallback_resolved=_fallback_resolved,
-                    toolsets=_toolsets,
-                    reasoning_config=_reasoning_config,
-                    main_request_overrides=_main_request_overrides,
-                    prefill_context=_prefill_context,
-                    profile_home=_profile_home,
-                    safe_profile_runtime_env=_safe_profile_runtime_env,
-                )
+                _credential_pool = _rt.get('credential_pool')
+                _sig_blob = _json.dumps([
+                    resolved_model or '',
+                    _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
+                    resolved_base_url or '',
+                    resolved_provider or '',
+                    _rt.get('api_mode') or '',
+                    _rt.get('command') or '',
+                    _rt.get('args') or [],
+                    bool(_credential_pool),
+                    _max_iterations_cfg or '',
+                    _max_tokens_cfg or '',
+                    _fallback_resolved or {},
+                    sorted(_toolsets) if _toolsets else [],
+                    _reasoning_config or {},
+                    _main_request_overrides or {},
+                    _public_prefill_context_status(_prefill_context),
+                    # #1897: profile_home is part of the agent's identity because
+                    # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
+                    # at construction time, sourced from HERMES_HOME. Same-session
+                    # profile switches keep `session_id` stable, so without this
+                    # field the cached agent silently retains the previous
+                    # profile's SOUL.md (and any other profile-scoped context).
+                    _profile_home or '',
+                    # Terminal backend identity: sessions switching between
+                    # remote (SSH) and local backends must not reuse a cached
+                    # agent that carries stale terminal env vars (#5937).
+                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
+                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
+                ], sort_keys=True)
+                _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
                 agent = None
                 _identity_mismatch_entry = None
@@ -11199,7 +11049,7 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
+            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
@@ -11252,10 +11102,6 @@ def _run_agent_streaming(
                     active_provider=(resolved_provider or ""),
                     active_model=(resolved_model or ""),
                     requested_provider=(_session_requested_provider or ""),
-                    # Legacy fallback wraps the home STRING in Path: string
-                    # profiles are logical ids only (round-5 grammar gate),
-                    # explicit homes must arrive as Path values.
-                    profile=(getattr(s, "profile", None) or Path(_profile_home)),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
@@ -11690,8 +11536,7 @@ def _run_agent_streaming(
                             if not resolved_provider:
                                 resolved_provider = _heal_rt.get('provider')
                             resolved_base_url = _runtime_preferred_base_url(
-                                _heal_rt, resolved_provider, configured_base_url,
-                                session_requested_provider=_session_requested_provider,
+                                _heal_rt, resolved_provider, configured_base_url
                             )
                             # Preserve the session's original pre-canonicalization
                             # provider identity (captured at first resolve) so a
@@ -11700,64 +11545,21 @@ def _run_agent_streaming(
                             # (e.g. the provider was first discovered on this heal).
                             if not _session_requested_provider:
                                 _session_requested_provider = resolved_provider
-                            # Rebuild the COMPLETE bundle, not just the three
-                            # connection fields: the self-heal re-resolve can
-                            # return a different runtime authority, and a
-                            # custom-provider override must clear its
-                            # credential_pool / api_mode / ACP fields here too.
-                            _runtime_bundle = _resolve_runtime_connection_bundle(
-                                resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
+                            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                                resolved_provider, resolved_api_key, resolved_base_url,
                                 profile_name=_resolved_profile_name,
-                                custom_provider_lookup=_session_requested_provider,
                             )
-                            # The re-resolve can turn a previously routable named
-                            # route terminal (the record's key_cmd stopped
-                            # minting, the pool drained, the row was edited
-                            # mid-turn). Abandon the retry BEFORE _AIAgent and
-                            # before the SESSION_AGENT_CACHE write below: healing
-                            # a 401 by handing the constructor an incomplete pair
-                            # is exactly the re-routing this verdict exists to
-                            # stop, and caching that agent would carry it into
-                            # every later turn. Raising reaches the outer handler,
-                            # which emits the controlled provider /
-                            # missing-credential error instead of the 401.
-                            raise_for_custom_provider_route(_runtime_bundle)
-                            resolved_provider = _runtime_bundle['provider']
-                            resolved_api_key = _runtime_bundle['api_key']
-                            resolved_base_url = _runtime_bundle['base_url']
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
                             _agent_kwargs['model'] = resolved_model
                             _agent_kwargs['provider'] = resolved_provider
                             _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
-                            if 'api_mode' in _agent_params:
-                                _agent_kwargs['api_mode'] = _runtime_bundle['api_mode']
-                            if 'acp_command' in _agent_params:
-                                _agent_kwargs['acp_command'] = _runtime_bundle['acp_command']
-                            if 'acp_args' in _agent_params:
-                                _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
                             if 'credential_pool' in _agent_params:
-                                _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
+                                _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
-                            _agent_sig = _compute_agent_cache_signature(
-                                resolved_model,
-                                resolved_api_key,
-                                resolved_base_url,
-                                resolved_provider,
-                                _runtime_bundle,
-                                max_iterations_cfg=_max_iterations_cfg,
-                                max_tokens_cfg=_max_tokens_cfg,
-                                fallback_resolved=_fallback_resolved,
-                                toolsets=_toolsets,
-                                reasoning_config=_reasoning_config,
-                                main_request_overrides=_main_request_overrides,
-                                prefill_context=_prefill_context,
-                                profile_home=_profile_home,
-                                safe_profile_runtime_env=_safe_profile_runtime_env,
-                            )
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
                             with _SAC_L:
                                 _SAC[session_id] = (agent, _agent_sig)
@@ -12984,24 +12786,9 @@ def _run_agent_streaming(
         _exc_is_compression_snapshot_stale = (
             _classification['type'] == 'compression_snapshot_stale'
         )
-        _exc_is_provider_unroutable = _classification['type'] == 'provider_unroutable'
-
-        # The structured terminal reason for an unroutable named custom route,
-        # stamped onto the emitted payload below. Kept separate from _exc_type
-        # because every unroutable route shares one type and differs only here.
-        _exc_route_reason = None
 
         # The user hint still points to Settings / `hermes model` from _classify_provider_error().
-        if _exc_is_provider_unroutable:
-            # Checked FIRST so the terminal route verdict can never be flattened
-            # into the generic 'Error' tail of this chain: its hint names the
-            # exact provider setting to fix, which is the only actionable thing
-            # the user gets on an unroutable custom:<slug>.
-            _exc_label, _exc_type, _exc_hint = (
-                _classification['label'], _classification['type'], _classification['hint'],
-            )
-            _exc_route_reason = _classification.get('reason')
-        elif _exc_is_quota:
+        if _exc_is_quota:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
@@ -13015,15 +12802,6 @@ def _run_agent_streaming(
             )
         elif _exc_is_auth:
             _heal_stale_classification = None
-            # Set when the self-heal re-resolve produces a TERMINAL route
-            # verdict. Unlike the two in-flight sites, this branch runs INSIDE
-            # the outer exception handler, so raising here would escape the
-            # generator with no error event at all. Record the verdict instead
-            # and let the abandoned heal fall through to the emission below,
-            # which prefers this classification over the generic
-            # "Authentication error" — the 401 is a symptom, the unroutable
-            # named provider is the cause the user can actually fix.
-            _heal_route_classification = None
             if not _self_healed:
                 # ── Credential self-heal on 401 (#1401) ──
                 # Bind the session's profile so the self-heal re-resolve AND the
@@ -13047,8 +12825,7 @@ def _run_agent_streaming(
                     if not resolved_provider:
                         resolved_provider = _heal_rt.get('provider')
                     resolved_base_url = _runtime_preferred_base_url(
-                        _heal_rt, resolved_provider, configured_base_url,
-                        session_requested_provider=_session_requested_provider,
+                        _heal_rt, resolved_provider, configured_base_url
                     )
                     # Preserve the session's original pre-canonicalization provider
                     # identity (captured at first resolve) so a named custom:slug
@@ -13056,41 +12833,10 @@ def _run_agent_streaming(
                     # Only initialize when empty.
                     if not _session_requested_provider:
                         _session_requested_provider = resolved_provider
-                    # Rebuild the COMPLETE bundle (see the returned-error retry
-                    # above): replacing only provider/key/base_url would leave
-                    # the pre-heal credential_pool / api_mode / ACP fields on a
-                    # custom endpoint that owns none of them.
-                    _runtime_bundle = _resolve_runtime_connection_bundle(
-                        resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
+                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                        resolved_provider, resolved_api_key, resolved_base_url,
                         profile_name=_resolved_profile_name,
-                        custom_provider_lookup=_session_requested_provider,
                     )
-                    _heal_route_verdict = custom_provider_route_error(_runtime_bundle)
-                    if _heal_route_verdict is not None:
-                        # The refreshed credential did not produce a routable
-                        # named connection. Abandon the heal BEFORE _AIAgent and
-                        # before the SESSION_AGENT_CACHE write below — building
-                        # here would hand the constructor an incomplete pair and
-                        # let _routed_client_kwargs() pick a provider of its own,
-                        # and caching that agent would keep doing so on every
-                        # later turn in this session.
-                        _heal_route_classification = (
-                            _custom_provider_route_classification(_heal_route_verdict)
-                        )
-                        logger.warning(
-                            '[webui] self-heal (except path): abandoning retry — %s',
-                            _heal_route_classification['message'],
-                        )
-                        # Clearing _heal_rt closes the retry block below. We must
-                        # NOT raise from inside the outer exception handler: that
-                        # would escape the generator and the client would get no
-                        # error event at all.
-                        _heal_rt = None
-
-                if _heal_rt is not None:
-                    resolved_provider = _runtime_bundle['provider']
-                    resolved_api_key = _runtime_bundle['api_key']
-                    resolved_base_url = _runtime_bundle['base_url']
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
                     _heal_kwargs['api_key'] = resolved_api_key
@@ -13098,33 +12844,11 @@ def _run_agent_streaming(
                     _heal_kwargs['model'] = resolved_model
                     _heal_kwargs['provider'] = resolved_provider
                     _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
-                    if 'api_mode' in _agent_params:
-                        _heal_kwargs['api_mode'] = _runtime_bundle['api_mode']
-                    if 'acp_command' in _agent_params:
-                        _heal_kwargs['acp_command'] = _runtime_bundle['acp_command']
-                    if 'acp_args' in _agent_params:
-                        _heal_kwargs['acp_args'] = _runtime_bundle['acp_args']
                     if 'credential_pool' in _agent_params:
-                        _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
+                        _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
-                    _agent_sig = _compute_agent_cache_signature(
-                        resolved_model,
-                        resolved_api_key,
-                        resolved_base_url,
-                        resolved_provider,
-                        _runtime_bundle,
-                        max_iterations_cfg=_max_iterations_cfg,
-                        max_tokens_cfg=_max_tokens_cfg,
-                        fallback_resolved=_fallback_resolved,
-                        toolsets=_toolsets,
-                        reasoning_config=_reasoning_config,
-                        main_request_overrides=_main_request_overrides,
-                        prefill_context=_prefill_context,
-                        profile_home=_profile_home,
-                        safe_profile_runtime_env=_safe_profile_runtime_env,
-                    )
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
                     with _SAC2_L:
                         _SAC2[session_id] = (_heal_agent, _agent_sig)
@@ -13240,19 +12964,7 @@ def _run_agent_streaming(
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
                         # Fall through to emit the original error
-            if _heal_route_classification is not None:
-                # The heal was abandoned because the named route is unroutable.
-                # Report THAT, not the 401 that triggered the heal: telling the
-                # user to check credentials when the provider resolves no
-                # endpoint (or declares a credential source that yields nothing)
-                # sends them to the wrong setting.
-                _exc_label = _heal_route_classification['label']
-                _exc_type = _heal_route_classification['type']
-                _exc_hint = _heal_route_classification['hint']
-                _exc_route_reason = _heal_route_classification.get('reason')
-                if _heal_route_classification['message']:
-                    err_str = _heal_route_classification['message']
-            elif _heal_stale_classification is not None:
+            if _heal_stale_classification is not None:
                 _exc_label = _heal_stale_classification['label']
                 _exc_type = _heal_stale_classification['type']
                 _exc_hint = _heal_stale_classification['hint']
@@ -13290,10 +13002,6 @@ def _run_agent_streaming(
                 'The conversation changed while context compression was being prepared.'
             )
         _error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)
-        if _exc_route_reason:
-            # Clients (and regressions) branch on the exact verdict rather than
-            # on the human-readable message, which is free to be reworded.
-            _error_payload['reason'] = _exc_route_reason
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
