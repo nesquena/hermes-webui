@@ -10765,6 +10765,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     gateway_pending_mirrors,
     release_gateway_approval_relay_owner,
     retire_gateway_pending_mirror,
+    settle_gateway_pending_run,
     reconcile_gateway_pending_mirror_locked,
     resolve_gateway_pending_local,
     resolve_gateway_pending_run,
@@ -14479,7 +14480,11 @@ def handle_get(handler, parsed) -> bool:
                 if stop_gateway_run(run_id):
                     owner_sid = stream_owner_session_id(stream_id)
                     if owner_sid:
-                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+                        settle_gateway_pending_run(
+                            owner_sid,
+                            run_id,
+                            reason="Gateway run was cancelled before approval resolution",
+                        )
                 else:
                     gateway_stop_blocked = True
         except Exception:
