@@ -16,6 +16,8 @@ MESSAGES_JS = (ROOT / "static/messages.js").read_text(encoding="utf-8")
 
 def _function_source(source, name):
     marker = f"async function {name}("
+    if marker not in source:
+        marker = f"function {name}("
     start = source.index(marker)
     opening = source.index("{", start)
     depth = 0
@@ -167,7 +169,11 @@ def test_restore_settled_session_projects_through_production_path(browser):
             "catch(_){\n      return returnStatus?'error':false;",
             "catch(error){\n      window.restoreError=String(error);\n      return returnStatus?'error':false;",
         )
-        page.add_script_tag(content=restore_source)
+        page.add_script_tag(content="\n".join([
+            _function_source(MESSAGES_JS, "_ownsActiveStreamOrBackground"),
+            _function_source(MESSAGES_JS, "_bailOutOfTerminalEventsFromStaleStream"),
+            restore_source,
+        ]))
         page.evaluate(
             """
             () => {

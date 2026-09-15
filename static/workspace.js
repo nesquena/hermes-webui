@@ -517,6 +517,87 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
+// Extract artifact candidates from raw transcript rows: text-mined diff/patch
+// fences plus structured tool_calls (OpenAI) / tool_use blocks (Anthropic).
+// Shared by the resident-message scan in collectSessionArtifacts and the
+// dropped-head harvest so both surfaces agree on what counts as an artifact.
+function _harvestArtifactCandidatesFromMessages(messages){
+  const out = [];
+  const seen = new Set();
+  const add = (a, fallbackKind) => {
+    if(!a || !a.path || seen.has(a.path)) return;
+    seen.add(a.path);
+    out.push({path: a.path, kind: a.kind || fallbackKind || 'tool'});
+  };
+  for(const msg of (Array.isArray(messages) ? messages : [])){
+    if(!msg) continue;
+    const text = msg.content || msg.text || msg.message || '';
+    if(typeof text === 'string'){
+      for(const a of _artifactCandidatesFromText(text)) add(a, 'diff');
+    }
+    if(Array.isArray(msg.tool_calls)){
+      for(const tc of msg.tool_calls){
+        if(!tc || typeof tc !== 'object') continue;
+        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
+        const name = fn.name || tc.name || '';
+        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
+        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
+        const fakeTc = {name, args, result: tc.result || tc.output || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) add(a, name || 'tool');
+      }
+    }
+    if(Array.isArray(msg.content)){
+      for(const block of msg.content){
+        if(!block || block.type !== 'tool_use') continue;
+        let inp = block.input || {};
+        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
+        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) add(a, block.name || 'tool');
+      }
+    }
+  }
+  return out;
+}
+
+// The current session object owns the artifact projection. It is rebuilt from
+// authoritative full history, never accumulated in a bare-session page cache.
+// A transcript slice may retain this small derived list, not the dropped rows.
+function _artifactProjectionForSnapshot(session){
+  if(!session) return null;
+  const items=_harvestArtifactCandidatesFromMessages(session.messages||[]);
+  for(const tc of (session.tool_calls||[])){
+    for(const a of _artifactCandidatesFromToolCall(tc)) items.push(a);
+  }
+  return {session_id:session.session_id, profile:session.profile||S.activeProfile||'default',
+    revision:session.regeneration_revision, generation:_loadSessionGeneration, items};
+}
+
+function _artifactProjectionMatches(session, projection){
+  return !!(session&&projection&&projection.session_id===session.session_id&&
+    projection.profile===(session.profile||S.activeProfile||'default')&&
+    projection.revision===session.regeneration_revision&&
+    projection.generation===_loadSessionGeneration);
+}
+
+async function _hydrateSessionArtifactProjection(session, ownsLoad){
+  const profile=S.activeProfile||'default';
+  const generation=_loadSessionGeneration;
+  let full=session;
+  if(session._messages_truncated || session._messages_offset>0){
+    let data;
+    try{
+      data=await api(`/api/session?session_id=${encodeURIComponent(session.session_id)}&messages=1&resolve_model=0`,{timeoutMs:120000});
+    }catch(_){ return null; } // Artifact enrichment must not prevent transcript loading.
+    if(!ownsLoad() || generation!==_loadSessionGeneration || profile!==(S.activeProfile||'default')) return null;
+    full=data&&data.session;
+    if(!full || full.session_id!==session.session_id ||
+      (full.profile||profile)!==(session.profile||profile) ||
+      full.regeneration_revision!==session.regeneration_revision ||
+      full._messages_truncated || full._messages_offset>0) return null;
+  }
+  return _artifactProjectionForSnapshot(full);
+}
+
 function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
@@ -532,38 +613,16 @@ function collectSessionArtifacts(){
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const msg of (S.messages || [])){
-    if(!msg) continue;
-    const text = msg.content || msg.text || msg.message || '';
-    // Text-mined diff/patch fences (existing path).
-    if(typeof text === 'string'){
-      for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
-    }
-    // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
-    if(Array.isArray(msg.tool_calls)){
-      for(const tc of msg.tool_calls){
-        if(!tc || typeof tc !== 'object') continue;
-        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
-        const name = fn.name || tc.name || '';
-        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
-        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
-        const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
-      }
-    }
-    // Structured content array with tool_use blocks (Anthropic format).
-    if(Array.isArray(msg.content)){
-      for(const block of msg.content){
-        if(!block || block.type !== 'tool_use') continue;
-        let inp = block.input || {};
-        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
-        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
-      }
-    }
+  for(const a of _harvestArtifactCandidatesFromMessages(S.messages || [])){
+    push(a.path, a.kind || 'tool');
+  }
+  const projection=S.session&&S.session._artifactProjection;
+  if(_artifactProjectionMatches(S.session,projection)){
+    for(const a of projection.items) push(a.path,a.kind||'tool');
   }
   return items.slice(0, 50);
 }
+
 
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');

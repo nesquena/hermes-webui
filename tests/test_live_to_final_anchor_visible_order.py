@@ -757,7 +757,7 @@ def test_settled_anchor_scene_carries_live_disclosure_state_by_stream():
     key = _function_body(UI_JS, "_worklogDetailBaseKey")
 
     assert "const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');" in settled
-    assert "_copyActivityDisclosureState(`live:${streamId}`, activityKey)" in settled
+    assert "_copyActivityDisclosureState(`live:${streamId}`, disclosureKey)" in settled
     assert "streamId," in settled
     assert "data-anchor-stream-id" in group
     assert "stream:${activity.getAttribute('data-anchor-stream-id')}" in key

@@ -3013,6 +3013,76 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
+def _orphaned_tool_tail_kind(messages) -> str | None:
+    """Return the incomplete tool-tail kind that needs a terminal assistant marker."""
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role == "tool":
+            return "tool output"
+        if role == "assistant":
+            if message.get("_error") or message.get("type") == "interrupted":
+                return None
+            if (
+                message.get("tool_calls")
+                or message.get("_partial_tool_calls")
+                or message.get("finish_reason") == "tool_calls"
+            ):
+                return "a tool-call request"
+            return None
+        if role == "user":
+            return None
+    return None
+
+
+def _append_orphaned_tool_tail_interruption_marker(session, stream_id: str | None) -> bool:
+    """Seal stale transcripts whose tails end mid tool-call turn.
+
+    Server/process exits can occur after a tool result is persisted but before
+    the assistant writes the final post-tool response. Clearing active_stream_id
+    alone makes the next user turn append after ``role=tool``; providers require
+    that a tool result be followed by an assistant message. Append terminal
+    assistant markers so display and provider-facing context both stop at valid
+    boundaries, even if only one transcript copy is orphaned.
+    """
+
+    def _marker(kind: str) -> dict:
+        detail = f"the transcript ended on {kind}"
+        return {
+            "role": "assistant",
+            "content": (
+                "**Response interrupted.**\n\n"
+                "The live response stream stopped before this turn finished. "
+                f"Evidence: {detail}, so the assistant did not write a final "
+                "post-tool response before the WebUI process lost the stream. "
+                "Start a new turn to continue."
+            ),
+            "timestamp": int(time.time()),
+            "_error": True,
+            "type": "interrupted",
+            "interruption_cause": "lost_worker_bookkeeping" if stream_id else "unknown",
+            "_orphaned_tool_tail_repair": True,
+        }
+
+    repaired = False
+    messages = getattr(session, "messages", None)
+    kind = _orphaned_tool_tail_kind(messages)
+    if isinstance(messages, list) and kind:
+        messages.append(_marker(kind))
+        repaired = True
+
+    context_messages = getattr(session, "context_messages", None)
+    context_kind = _orphaned_tool_tail_kind(context_messages)
+    if isinstance(context_messages, list) and context_kind:
+        context_messages.append(_marker(context_kind))
+        repaired = True
+
+    return repaired
+
+
 def _clear_stale_stream_state(session) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
@@ -3178,6 +3248,7 @@ def _clear_stale_stream_state(session) -> bool:
                 return True
             if getattr(session, "active_stream_id", None) != stream_id:
                 return False
+        _append_orphaned_tool_tail_interruption_marker(session, stream_id)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
@@ -12442,6 +12513,7 @@ def _handle_health(handler, parsed):
         "last_run_finished_at": run_check.get("last_run_finished_at"),
         "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "restart_drain_supported": True,
         "accept_loop": _accept_loop_health(handler),
     }
     if "oldest_run_age_seconds" in run_check:
@@ -12715,16 +12787,37 @@ def _handle_shutdown(handler) -> bool:
         _shutdown_log_value(getattr(handler, "path", None), max_len=240),
         _shutdown_log_value(ua, default="no-ua", max_len=240),
     )
-    j(handler, {"status": "shutting_down"})
+    from api.config import enter_restart_drain, exit_restart_drain
+    from api.updates import _wait_until_restart_safe
+
+    try:
+        enter_restart_drain(reason='shutdown')
+    except (OSError, api_config.RunAdmissionDrainingError):
+        return j(handler, {'error': 'Unable to enter shutdown drain', 'code': 'restart_draining'}, status=503)
     import signal
     import threading
 
     def _do_shutdown():
-        import time
-        time.sleep(0.3)
-        os.kill(os.getpid(), signal.SIGINT)
+        signal_sent = False
+        try:
+            state = _wait_until_restart_safe()
+            if state.get('restart_blocked', True):
+                logger.warning('Shutdown aborted: drain remains blocked')
+                return
+            os.kill(os.getpid(), signal.SIGINT)
+            signal_sent = True
+        finally:
+            # A delivered signal unwinds the server asynchronously. Keep
+            # admission shut until exit; only a blocked/failed attempt rolls back.
+            if not signal_sent:
+                exit_restart_drain()
 
-    threading.Thread(target=_do_shutdown, daemon=True).start()
+    try:
+        threading.Thread(target=_do_shutdown, daemon=True).start()
+    except BaseException:
+        exit_restart_drain()
+        raise
+    j(handler, {"status": "shutting_down"})
     return True
 
 
@@ -23025,6 +23118,36 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _run_admission_guard(*, http=False):
+    """Reserve restart occupancy before any request-side session mutation.
+
+    This short-lived registry entry bridges admission to worker registration;
+    synchronous requests retain it through persistence. It has no session_id,
+    so it cannot masquerade as a client-attachable worker or self-block the
+    per-session admission checks. Worker-side drain checks remain mandatory.
+    """
+    from functools import wraps
+
+    def decorate(fn):
+        @wraps(fn)
+        def guarded(*args, **kwargs):
+            reservation = 'admission:' + uuid.uuid4().hex
+            try:
+                api_config.register_active_run(reservation, phase='admitting')
+            except api_config.RunAdmissionDrainingError:
+                payload = {'error': 'WebUI is draining for restart', 'code': 'restart_draining'}
+                if http:
+                    return j(args[0], payload, status=503)
+                return dict(payload, _status=503)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                api_config.unregister_active_run(reservation)
+        return guarded
+    return decorate
+
+
+@_run_admission_guard()
 def _start_chat_stream_for_session(
     s,
     *,
@@ -23196,9 +23319,22 @@ def _start_chat_stream_for_session(
         kwargs=worker_kwargs,
         daemon=True,
     )
+    # Transfer the request-level admission reservation to the concrete stream
+    # before starting the asynchronous worker. The worker upgrades this
+    # starting row when it registers, so restart safety always sees either
+    # the request reservation or the worker itself.
+    api_config.register_active_run(
+        stream_id, session_id=s.session_id, phase="starting"
+    )
     try:
         thr.start()
+        is_alive = getattr(thr, "is_alive", None)
+        if not callable(is_alive) or not is_alive():
+            # Test doubles and workers that completed synchronously own no
+            # post-response lifetime; do not strand their starting row.
+            api_config.unregister_active_run(stream_id)
     except Exception:
+        api_config.unregister_active_run(stream_id)
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
@@ -24028,6 +24164,16 @@ def _handle_chat_start(handler, body, diag=None):
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
             )
+        if api_config.restart_drain_active():
+            return j(
+                handler,
+                {
+                    "status": "restart_draining",
+                    "retryable": True,
+                    "error": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                },
+                status=503,
+            )
         if body.get("regenerate") is True:
             from api.runtime_adapter import runtime_adapter_runner_enabled
 
@@ -24395,6 +24541,7 @@ def _normalize_chat_attachments(raw_attachments):
     return normalized
 
 
+@_run_admission_guard(http=True)
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)

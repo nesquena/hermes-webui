@@ -12726,9 +12726,9 @@ function _materializeDeferredWorklogRows(group){
 }
 function _deferredWorklogRowsFromGroup(group){
   // Recover a settled worklog's rows from S.messages using the group's
-  // disclosure key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
+  // worklog key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
   // where the _deferredWorklogRows JS property was dropped. (#5839)
-  const key=group&&group.getAttribute&&group.getAttribute('data-activity-disclosure-key');
+  const key=group&&group.getAttribute&&(group.getAttribute('data-tool-worklog-key')||group.getAttribute('data-activity-disclosure-key'));
   const m=key&&/^anchor-scene:(\d+)$/.exec(key);
   if(!m) return null;
   const msg=S.messages&&S.messages[Number(m[1])];
@@ -13373,6 +13373,9 @@ function _anchorSceneWorklogGroup(blocks, opts){
       collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
       live,
       activityKey,
+      disclosureKey:opts&&opts.disclosureKey,
+      restoreDisclosure:!!(opts&&opts.restoreDisclosure),
+      forceOpen:!!(opts&&opts.forceOpen),
       beforeAnchor:!!(opts&&opts.beforeAnchor),
       anchor:(opts&&opts.anchor)||null,
       turnDuration:opts&&opts.turnDuration,
@@ -14454,7 +14457,7 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const savedDisclosure=_readActivityDisclosureState(disclosureKey);
   const rows=_deferredWorklogRowsFromGroup(group);
   if(!rows||!rows.length) return false;
-  const match=/^anchor-scene:(\d+)$/.exec(disclosureKey);
+  const match=/^anchor-scene:(\d+)$/.exec(group.getAttribute('data-tool-worklog-key')||disclosureKey);
   const message=match&&S.messages&&S.messages[Number(match[1])];
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
@@ -14522,8 +14525,12 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
   const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
-  if(streamId&&!_readActivityDisclosureState(activityKey)){
-    _copyActivityDisclosureState(`live:${streamId}`, activityKey);
+  // Storage identifies the turn; the worklog key still locates its current row.
+  // Do not migrate old index-keyed choices: pagination can give that index to
+  // another turn. Missing stream identity retains the legacy fallback.
+  const disclosureKey=streamId?`settled-stream:${streamId}`:activityKey;
+  if(streamId&&!_readActivityDisclosureState(disclosureKey)){
+    _copyActivityDisclosureState(`live:${streamId}`, disclosureKey);
   }
   // #5941: an errored turn that produced assistant content (tool calls /
   // reasoning) must not hide that content behind a collapsed header — the user
@@ -14537,7 +14544,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // explicitly collapsed THIS turn's worklog (saved 'closed' disclosure state)
   // is still respected, so the default-open never fights an intentional collapse.
   const erroredWorklogKeepOpen=_anchorSceneHasErroredTerminalState(scene)
-    && _readActivityDisclosureState(activityKey)!=='closed';
+    && _readActivityDisclosureState(disclosureKey)!=='closed';
   // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
   // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
   // followers AND unpinned mid-turn readers. The keep-open is made genuinely
@@ -14550,6 +14557,9 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
     collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen),
+    disclosureKey,
+    restoreDisclosure:true,
+    forceOpen:keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -14665,7 +14675,8 @@ function ensureActivityGroup(inner, opts){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
     if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
-    const savedState=_readActivityDisclosureState(activityKey);
+    const disclosureKey=opts.disclosureKey||activityKey;
+    const savedState=_readActivityDisclosureState(disclosureKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
     // state win across session switches and reloads. Saved closed-state should
@@ -14673,14 +14684,17 @@ function ensureActivityGroup(inner, opts){
     // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
-    if(live && savedState==='open') collapsed=false;
-    else if(live && savedState==='closed') collapsed=true;
+    if((live||opts.restoreDisclosure) && savedState==='open') collapsed=false;
+    else if((live||opts.restoreDisclosure) && savedState==='closed') collapsed=true;
+    // The one-frame settlement height guard outranks persisted closed intent.
+    if(opts.forceOpen) collapsed=false;
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
     group.setAttribute('data-tool-worklog-group','1');
+    // Worklog key addresses the current row; disclosure key stores turn intent.
     group.setAttribute('data-tool-worklog-key',activityKey||'');
-    if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
+    if(disclosureKey) group.setAttribute('data-activity-disclosure-key',disclosureKey);
     if(live){
       group.setAttribute('data-live-tool-worklog-group','1');
       group.setAttribute('data-live-tool-call-group','1');

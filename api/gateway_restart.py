@@ -74,6 +74,13 @@ def _gateway_restart_profile_context(profile: str | None = None) -> tuple[Path, 
     return active_home, raw_profile
 
 
+def _wait_until_restart_safe() -> dict:
+    # Resolve lazily to avoid the updates -> gateway_restart import cycle while
+    # keeping a stable use-site that tests and callers can replace.
+    from api.updates import _wait_until_restart_safe as wait
+    return wait()
+
+
 def restart_active_profile_gateway(
     *,
     profile: str | None = None,
@@ -94,7 +101,32 @@ def restart_active_profile_gateway(
             "message": "Restart already in progress. Please wait a moment and try again.",
         }
 
+    from api.config import enter_restart_drain, exit_restart_drain
+
+    drain_owned = False
+
+    def release():
+        nonlocal drain_owned
+        if drain_owned:
+            exit_restart_drain()
+            drain_owned = False
+        _release_lock()
+
     try:
+        enter_restart_drain(reason='gateway_restart')
+        drain_owned = True
+        try:
+            blockers = _wait_until_restart_safe()
+        except BaseException as exc:
+            # No subprocess exists yet. Cancellation (including interpreter
+            # shutdown) must not strand the process-wide admission owner.
+            # Ordinary exceptions are released by the outer error handler.
+            if not isinstance(exc, Exception):
+                release()
+            raise
+        if blockers.get('restart_blocked', True):
+            release()
+            return {'status': 'failed', 'message': 'Gateway restart aborted: drain remains blocked'}
         active_home, cli_profile = _gateway_restart_profile_context(profile)
         env = os.environ.copy()
         env["HERMES_HOME"] = str(active_home)
@@ -127,7 +159,7 @@ def restart_active_profile_gateway(
 
         try:
             stdout, stderr = proc.communicate(timeout=quick_timeout_seconds)
-            _release_lock()
+            release()
             stdout = (stdout or "").strip()
             stderr = (stderr or "").strip()
             if proc.returncode == 0:
@@ -179,7 +211,7 @@ def restart_active_profile_gateway(
                     except Exception:
                         logger.exception("Failed to terminate timed out gateway restart process.")
                 finally:
-                    _release_lock()
+                    release()
 
             threading.Thread(target=_wait_and_release, daemon=True).start()
             return {
@@ -187,7 +219,7 @@ def restart_active_profile_gateway(
                 "message": "Gateway service restart initiated (in progress)",
             }
     except Exception as exc:
-        _release_lock()
+        release()
         logger.exception("Failed to run gateway restart command")
         return {
             "status": "failed",
