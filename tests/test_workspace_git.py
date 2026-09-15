@@ -1214,7 +1214,7 @@ def test_git_fetch_blocks_repo_local_ext_transport_execution(tmp_path):
     assert not marker.exists()
 
 
-def test_git_fetch_blocks_repo_local_git_proxy_execution(tmp_path):
+def test_git_fetch_blocks_repo_local_git_proxy_execution(tmp_path, monkeypatch):
     """A repository-configured core.gitProxy must not run for a git:// remote.
 
     ``core.gitProxy`` is per-host and multi-valued, so no command-line value for
@@ -1223,10 +1223,14 @@ def test_git_fetch_blocks_repo_local_git_proxy_execution(tmp_path):
     the same class of repo-controlled command execution as the ext:: helper.
     """
     import os
-    import sys
 
     if os.name == "nt":
         pytest.skip("executable proxy setup is POSIX-only")
+
+    # Git translates this diagnostic, so the child runs in a pinned locale: the
+    # assertion at the end is about the refusal, not about the language git
+    # reports it in. LC_ALL overrides LANG and LANGUAGE.
+    monkeypatch.setenv("LC_ALL", "C")
 
     from api.workspace_git import GitWorkspaceError, git_fetch
 

@@ -968,7 +968,7 @@ def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch
     assert 'GIT_SSH_COMMAND' not in mock_run.call_args.kwargs['env']
 
 
-def test_run_git_refuses_the_git_transport(tmp_path):
+def test_run_git_refuses_the_git_transport(tmp_path, monkeypatch):
     """Behavioural: a real git child refuses git:// instead of connecting.
 
     Without the refusal git attempts the connection — or runs a
@@ -976,6 +976,11 @@ def test_run_git_refuses_the_git_transport(tmp_path):
     git reporting the transport as disallowed before reaching either. Asserting on
     the argv would pass even if the refusal stopped being applied.
     """
+    # Git translates this diagnostic, so the child runs in a pinned locale: the
+    # assertion is about why the fetch failed, not about the language git reports
+    # it in. LC_ALL overrides LANG and LANGUAGE, so a localized environment cannot
+    # turn a correctly refused transport into a test failure.
+    monkeypatch.setenv('LC_ALL', 'C')
     repo = tmp_path / 'repo'
     repo.mkdir()
     _git(repo, 'init', '-q')
