@@ -875,6 +875,149 @@ def test_legacy_approval_without_run_id_retires_locally():
         _STREAM_RUN_IDS.pop(stream_id, None)
 
 
+def test_route_deny_settles_exact_non_head_run_producer():
+    """The response route must settle the exact producer whose card was denied.
+
+    The route is the only caller that supplies a target's ``(run_id,
+    approval_id)`` to the legacy resolver, so a regression in that wiring is
+    invisible to helper-level coverage: the producer would be dropped from the
+    queue without its waiter ever being woken, leaving the agent thread parked
+    until the approval timeout.
+
+    Unlike the route-level test in ``test_approval_unblock.py`` (which needs the
+    installed agent's ``tools.approval`` and is skipped without it), this one
+    runs wherever the suite runs.
+    """
+    from types import SimpleNamespace
+    from api import route_approvals as ra
+    from api import routes as r
+
+    sid = "sess-route-non-head-deny"
+    run_id = "run-route-non-head-deny"
+    head_id = "approval-route-head"
+    target_id = "approval-route-target"
+    sibling_id = "approval-route-sibling"
+    other_run_id = "run-route-unrelated"
+    head = {
+        "approval_id": head_id,
+        "run_id": run_id,
+        "command": "echo head",
+        "description": "Head approval on the run",
+        "_gateway_agent_identity_v1": True,
+    }
+    sibling = {
+        "approval_id": sibling_id,
+        "run_id": run_id,
+        "command": "echo sibling",
+        "description": "Non-head sibling approval on the same run",
+        "_gateway_agent_identity_v1": True,
+    }
+    target = {
+        "approval_id": target_id,
+        "run_id": run_id,
+        "command": "echo target",
+        "description": "Non-head approval on the same run",
+        "_gateway_agent_identity_v1": True,
+    }
+    other_run = {
+        "approval_id": "approval-route-other",
+        "run_id": other_run_id,
+        "command": "echo else",
+        "description": "Approval on an unrelated run",
+    }
+
+    def producer(payload):
+        """The agent's real producer entry when installed, an equivalent one otherwise.
+
+        The suite runs without hermes-agent in CI, where
+        ``tools.approval._ApprovalEntry`` does not exist; the stand-in carries the
+        same ``data`` / ``event`` / ``result`` / ``reason`` contract the resolution
+        path touches, so the assertions below mean the same thing in both shapes.
+        """
+        try:
+            from tools.approval import _ApprovalEntry
+        except Exception:
+            _ApprovalEntry = None
+        if _ApprovalEntry is not None:
+            return _ApprovalEntry(dict(payload))
+        return SimpleNamespace(
+            data=dict(payload), event=threading.Event(), result=None, reason=None
+        )
+
+    head_entry = producer(head)
+    sibling_entry = producer(sibling)
+    target_entry = producer(target)
+    other_run_entry = producer(other_run)
+    relayed = []
+    captured = {}
+
+    def fake_j(_handler, data, status=200, extra_headers=None):
+        captured.update(payload=data, status=status)
+        return data
+
+    def fake_respond(_self, got_run_id, got_approval_id, choice):
+        relayed.append((got_run_id, got_approval_id, choice))
+        return {"resolved": 1}
+
+    try:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues[sid] = [head_entry, sibling_entry, target_entry, other_run_entry]
+        ra.submit_gateway_pending_mirror(sid, dict(target_entry.data))
+        mirror = ra.gateway_pending_mirror(sid, approval_id=target_id, run_id=run_id)
+        assert mirror is not None, "the non-head approval must be mirrored before it is answered"
+
+        with patch("api.routes.j", new=fake_j), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval", new=fake_respond), \
+             patch("api.config.gateway_supports_approval_identity_v1", return_value=True):
+            r._handle_approval_respond(
+                object(),
+                {
+                    "session_id": sid,
+                    "choice": "deny",
+                    "approval_id": target_id,
+                    "run_id": run_id,
+                    "mirror_token": mirror[ra._GATEWAY_MIRROR_TOKEN],
+                },
+            )
+
+        assert captured == {
+            "payload": {"ok": True, "choice": "deny", "relayed": True},
+            "status": 200,
+        }
+        assert relayed == [(run_id, target_id, "deny")]
+
+        assert target_entry.event.is_set(), "the denied approval's waiter must be woken"
+        assert target_entry.result == "deny"
+        with ra._lock:
+            remaining = list(ra._gateway_queues.get(sid) or [])
+        assert target_entry not in remaining, "the denied approval's producer must be consumed"
+        assert head_entry in remaining, (
+            "the run's own head approval must not be consumed by answering another approval"
+        )
+        assert not head_entry.event.is_set()
+        assert sibling_entry in remaining, (
+            "a sibling approval on the same run must not be consumed"
+        )
+        assert not sibling_entry.event.is_set()
+        assert other_run_entry in remaining, (
+            "an unrelated run's producer must not be consumed"
+        )
+        assert not other_run_entry.event.is_set()
+
+        # These are the observations made by subsequent HTTP polling.
+        for _ in range(2):
+            with ra._lock:
+                ra.reconcile_gateway_pending_mirror_locked(sid)
+            assert ra.gateway_pending_mirror(
+                sid, approval_id=target_id, run_id=run_id
+            ) is None, "reconciliation must not resurrect the denied approval's mirror"
+    finally:
+        with ra._lock:
+            ra._pending.pop(sid, None)
+            ra._gateway_queues.pop(sid, None)
+
+
 def test_deny_settles_run_producer_so_reconciliation_cannot_resurrect_mirror():
     """Deny must settle the producer as well as its WebUI mirror.
 
