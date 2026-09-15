@@ -3,7 +3,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The chat composer grows natively instead of being resized by JavaScript on every keystroke.** `autoResize()` measured `scrollHeight` and wrote `style.height` on each input event — a forced synchronous reflow on the most-typed-in surface in the app. Browsers that support CSS `field-sizing: content` (Chromium today; also Firefox 152 and Safari 26.2) now own the geometry directly, gated on `CSS.supports()`, and the existing JavaScript path is untouched for every other engine. Measured behaviour is identical across both paths: 44px resting height, no jump when the first character is typed or the last deleted, growth to the 200px ceiling, then internal scrolling. Because `field-sizing` deliberately includes placeholder text in content sizing, `:placeholder-shown` pins fixed sizing while the composer is empty so a long placeholder can't inflate it. Thanks @starship-s. (#6760, #5514)
+
 ### Fixed
+
+- **An empty composer no longer inflates to fit its own placeholder on the JavaScript sizing path.** The fallback resizer measured `scrollHeight` for an empty textarea, which reflects the *placeholder* — so a long busy or compression hint (which wraps to two or three lines) grew the empty composer to roughly 71px, and only after a resize that happened while empty, making the resting height depend on history rather than content. The inline height is now cleared when the value is empty so CSS `min-height` defines the resting size, matching the native path. (#6760)
 
 - **Delegated subagent sessions nest under the conversation that spawned them instead of landing at the top of the sidebar.** The sidebar forces a *cross-surface* child row to top level when its parent row belongs to another surface (a Telegram/messaging parent), so an independent continuation doesn't get stacked under a foreign thread. A delegated subagent is also technically cross-source relative to its WebUI parent, so it was swept up by that rule and surfaced as a bare top-level row with no indication of what spawned it. Delegated subagents are now exempt from that branch and attach to their visible parent, while independent cross-surface continuations still stay top level. The delegated role is resolved in strict precedence order from the first non-blank of `raw_source` → `source_tag` → `source` and additionally requires the backend's child-session flag, so a stale lower-priority field can't promote an independent row into a delegated one. Thanks @lowlandsheperd. (#7263)
 
