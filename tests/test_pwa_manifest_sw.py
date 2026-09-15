@@ -175,9 +175,19 @@ class TestPWARoutes:
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
         block = src[idx:idx + 1200]
-        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
-            "sw.js route must URL-encode the injected cache version so unusual git tags "
-            "cannot break the JavaScript string literal"
+        assert "_assets_cache_bust_token" in block, (
+            "sw.js route must derive the cache version from _assets_cache_bust_token, "
+            "which URL-encodes this version"
+        )
+        helper_idx = src.find("def _assets_cache_bust_token")
+        assert helper_idx != -1, "routes.py must define _assets_cache_bust_token"
+        helper_block = src[helper_idx:helper_idx + 1200]
+        assert 'quote(f"{WEBUI_VERSION}+a{fingerprint.hexdigest()[:10]}", safe="")' in helper_block, (
+            "the helper must URL-encode the cache-busting version token before "
+            "it is injected into the service-worker cache name"
+        )
+        assert 'return quote(WEBUI_VERSION, safe="")' in helper_block, (
+            "the helper must fail soft to the plain URL-encoded version token"
         )
 
     def test_sw_route_sets_service_worker_allowed(self):
@@ -361,9 +371,10 @@ class TestIndexHtmlIntegration:
                 idx = src.find('parsed.path.startswith("/session/")')
             assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
             block = src[idx:idx + 800]
-        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
-            "the app-shell render must URL-encode the cache-busting version token before "
-            "injecting it into script src attributes and service worker registration"
+        assert "_assets_cache_bust_token" in block, (
+            "the app-shell render must derive the cache-busting version token from "
+            "_assets_cache_bust_token (URL-encoded) before injecting it into script src "
+            "attributes and service worker registration"
         )
 
     def test_index_sw_registration_uses_relative_path(self):

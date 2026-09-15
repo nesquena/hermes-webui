@@ -15,19 +15,18 @@ from __future__ import annotations
 import json
 import os
 import time
-from urllib.parse import quote
 
 import api.config as api_config
 import api.routes as routes
-from api.updates import WEBUI_VERSION
 
 
 def _old_inline_render(csrf_token: str) -> str:
     """Reproduce the pre-cache inline render exactly, for equivalence checks."""
     index_path = api_config.get_index_html_path()
+    version_token = routes._assets_cache_bust_token(api_config.get_static_root())
     return (
         index_path.read_text(encoding="utf-8")
-        .replace("__WEBUI_VERSION__", quote(WEBUI_VERSION, safe=""))
+        .replace("__WEBUI_VERSION__", version_token)
         .replace("__MAX_UPLOAD_BYTES__", str(routes.MAX_UPLOAD_BYTES))
         .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
     )
