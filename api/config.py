@@ -4114,8 +4114,10 @@ def _lmstudio_model_reasoning_options(
         )
 
     try:
-        from hermes_cli.models import (
-            lmstudio_model_reasoning_options as _cli_lmstudio_model_reasoning_options,
+        from api.agent_compat import agent_attr
+
+        _cli_lmstudio_model_reasoning_options = agent_attr(
+            "hermes_cli.models", "lmstudio_model_reasoning_options", "hermes_cli.models_local"
         )
     except Exception:
         return _lmstudio_reasoning_probe_options_fallback(
