@@ -4018,10 +4018,16 @@ function syncModelChip(){
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
   const compactText=_compactComposerModelChipLabel(sel.value||'', text);
   const gatewayRouting=_latestGatewayRoutingForSession(S.session);
-  const displayText=_formatGatewayModelLabel(sel.value||'',compactText,gatewayRouting)||compactText;
+  const routeMatches=!S.session||!S.session.model||String(sel.value||'')===String(S.session.model||'');
+  const activeRouting=routeMatches?gatewayRouting:null;
+  const fallbackModel=(routeMatches&&S.session&&S.session.last_used_model)?S.session.last_used_model:(sel.value||'');
+  const fallbackText=(routeMatches&&S.session&&S.session.last_used_model)
+    ? _compactComposerModelChipLabel(S.session.last_used_model, getModelLabel(S.session.last_used_model))
+    : compactText;
+  const displayText=_formatGatewayModelLabel(fallbackModel,fallbackText,activeRouting)||fallbackText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
-  chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
+  chip.title=activeRouting?`${fallbackModel||'Conversation model'} ${_gatewayRoutingLabel(activeRouting)}`:(fallbackModel||'Conversation model');
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
@@ -4885,6 +4891,14 @@ async function selectModelFromDropdown(value){
   const sameModel=String(currentState.model||'')===String(value||'');
   const sameProvider=String(currentState.model_provider||'')===String(provider||'');
   if(sameModel&&sameProvider){ closeModelDropdown(); return; }
+  if(S.session){
+    const sessionModelChanged = String(S.session.model || '') !== String(value || '')
+      || String(S.session.model_provider || '') !== String(provider || '');
+    if(sessionModelChanged){
+      S.session.last_used_model = null;
+      S.session.gateway_routing = null;
+    }
+  }
   // Resolve the provider-specific option so duplicate bare IDs (e.g. gpt-5.5
   // under OpenAI Codex vs OpenRouter) update session model_provider correctly.
   if(typeof _ensureModelOptionInDropdown==='function'){
@@ -7532,9 +7546,19 @@ function _gatewayModelWarningText(routing){
 }
 function _latestGatewayRoutingForSession(session){
   if(!session)return null;
-  if(session.gateway_routing)return session.gateway_routing;
-  const history=Array.isArray(session.gateway_routing_history)?session.gateway_routing_history:[];
-  return history.length?history[history.length-1]:null;
+  const fromHistory=!session.gateway_routing;
+  const routing=session.gateway_routing||(Array.isArray(session.gateway_routing_history)&&session.gateway_routing_history.length?session.gateway_routing_history[session.gateway_routing_history.length-1]:null);
+  if(!routing)return null;
+  if(routing.requested_model&&session.model&&String(routing.requested_model)!==String(session.model)){
+    return null;
+  }
+  // Canonical provider identity matching: case-insensitive, preserves legacy/empty
+  const reqProvider=String(routing.requested_provider||'').trim().toLowerCase();
+  const sessProvider=String(session.model_provider||'').trim().toLowerCase();
+  // Fail closed on provider-less history candidate when active route has an explicit provider
+  if(fromHistory && sessProvider && !reqProvider) return null;
+  if(reqProvider && sessProvider && reqProvider !== sessProvider) return null;
+  return routing;
 }
 
 function _stripXmlToolCallsDisplay(s){
