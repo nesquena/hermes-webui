@@ -23331,7 +23331,9 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
-    adapter_enabled = runtime_adapter_enabled()
+    # The runner flag is read before the alias decision (the gateway/runner backends
+    # take the alias name rather than a resolved provider), and the adapter gate
+    # below keeps its original shape as the seam tests pin it.
     runner_enabled = runtime_adapter_runner_enabled()
     runtime_base_url = None
     runtime_api_key = None
@@ -23347,7 +23349,7 @@ def _start_run(
             runtime_base_url = alias_route.get("base_url") or None
             runtime_api_key = alias_route.get("api_key") or None
 
-    if adapter_enabled or runner_enabled:
+    if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         if regeneration is not None and runner_enabled:
             return {"error": "Regeneration is not supported by the runner backend.", "code": "unsupported_regeneration_backend", "_status": 409}
         def _legacy_start_run(request: StartRunRequest) -> dict:
