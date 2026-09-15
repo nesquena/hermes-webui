@@ -1214,6 +1214,41 @@ def test_git_fetch_blocks_repo_local_ext_transport_execution(tmp_path):
     assert not marker.exists()
 
 
+def test_git_fetch_blocks_repo_local_git_proxy_execution(tmp_path):
+    """A repository-configured core.gitProxy must not run for a git:// remote.
+
+    ``core.gitProxy`` is per-host and multi-valued, so no command-line value for
+    it masks a repository-configured one; the transport itself is refused
+    instead. A workspace repo can be supplied by an agent or a mount, so this is
+    the same class of repo-controlled command execution as the ext:: helper.
+    """
+    import os
+    import sys
+
+    if os.name == "nt":
+        pytest.skip("executable proxy setup is POSIX-only")
+
+    from api.workspace_git import GitWorkspaceError, git_fetch
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    marker = tmp_path / "git-proxy-ran"
+    # A single-token command applies to every host. A value containing a space is
+    # parsed as "<host-pattern> <command>", so it would not match this origin and
+    # the test would pass without the proxy ever being offered a chance to run.
+    helper = tmp_path / "proxy_helper.sh"
+    helper.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n', encoding="utf-8")
+    helper.chmod(0o755)
+    _git(repo, "config", "core.gitProxy", str(helper))
+    _git(repo, "remote", "add", "origin", "git://127.0.0.1:1/origin.git")
+
+    with pytest.raises(GitWorkspaceError):
+        git_fetch(repo)
+
+    assert not marker.exists(), "workspace fetch executed a repo-local git proxy"
+
+
 def test_git_fetch_blocks_repo_local_credential_helper_execution(tmp_path):
     import os
     import sys

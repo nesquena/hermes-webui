@@ -28,7 +28,7 @@ def git_subcommand_args(cmd: Sequence[str]) -> list[str]:
     its argv fails here rather than silently matching a stub that no longer
     describes it.
     """
-    prefix = noninteractive_git_argv([], executable=cmd[0], unattended=True)
+    prefix = noninteractive_git_argv([], executable=cmd[0])
     assert list(cmd[: len(prefix)]) == prefix, (
         f'git argv is missing the noninteractive hardening prefix: {list(cmd)!r}'
     )

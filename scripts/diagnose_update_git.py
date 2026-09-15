@@ -22,7 +22,7 @@ from api.subprocess_utils import (  # noqa: E402
 
 def _run(args: list[str], checkout: Path, git: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        noninteractive_git_argv(args, executable=git, unattended=True),
+        noninteractive_git_argv(args, executable=git),
         cwd=str(checkout),
         capture_output=True,
         text=True,

@@ -245,7 +245,7 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            noninteractive_git_argv(args, executable=git_executable, unattended=True),
+            noninteractive_git_argv(args, executable=git_executable),
             cwd=str(cwd),
             capture_output=True,
             text=True,

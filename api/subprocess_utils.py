@@ -42,41 +42,36 @@ GIT_NONINTERACTIVE_CONFIG = (
     ("core.askPass", ""),
     ("credential.helper", ""),
     ("core.sshCommand", "ssh -oBatchMode=yes"),
-    # Refuse the ext:: transport everywhere: it runs an arbitrary local command
-    # named by the remote URL, which an unattended child must never do.
+    # Refuse the two transports that run a command named by repository data: the
+    # ext:: transport runs a local command named by the URL, and a git:// remote
+    # can select a repository-configured ``core.gitProxy`` command.
+    #
+    # The git:// refusal is a transport restriction rather than a proxy override
+    # because no command-line value can neutralize that key: ``core.gitProxy`` is
+    # per-host and multi-valued, and measured against a repository-configured
+    # proxy, both ``-c core.gitProxy=`` and ``-c core.gitProxy=none`` still let the
+    # configured command run. It applies to every Git child, including workspace
+    # fetch/pull/push, because a workspace repository is just as likely to be
+    # supplied by an agent, a restored session, or a mount as the checkout is.
+    # The cost is that a deliberately configured git:// workspace remote no longer
+    # resolves; HTTPS and SSH remotes are unaffected.
     ("protocol.ext.allow", "never"),
-)
-
-# Applied only to the unattended update path. ``core.gitProxy`` is per-host and
-# multi-valued, and a command-line value does not mask a lower-scope one:
-# measured against a repository-configured proxy, both ``-c core.gitProxy=`` and
-# ``-c core.gitProxy=none`` still let the configured command run. Refusing the
-# unauthenticated git:// transport is the only way to stop Git reaching
-# proxy-command selection, but it is a behaviour change for a remote a user
-# configured deliberately, so it stays opt-in rather than applying to workspace
-# Git operations too.
-GIT_UNATTENDED_TRANSPORT_CONFIG = (
     ("protocol.git.allow", "never"),
 )
 
 
 def noninteractive_git_argv(
-    args: list[str], *, executable: str = "git", unattended: bool = False,
+    args: list[str], *, executable: str = "git",
 ) -> list[str]:
     """Build Git argv that disables prompts and external transport helpers.
 
     SSH transports run with ``BatchMode=yes`` so they use an available agent or
     fail instead of reading a password, key passphrase, or host-key answer from
-    the WebUI process's controlling terminal.
-
-    ``unattended=True`` additionally refuses ``git://``, for callers that run
-    without a user present (see ``GIT_UNATTENDED_TRANSPORT_CONFIG``).
+    the WebUI process's controlling terminal. The ``ext::`` and ``git://``
+    transports are refused; see ``GIT_NONINTERACTIVE_CONFIG``.
     """
     argv = [executable]
-    config = GIT_NONINTERACTIVE_CONFIG + (
-        GIT_UNATTENDED_TRANSPORT_CONFIG if unattended else ()
-    )
-    for key, value in config:
+    for key, value in GIT_NONINTERACTIVE_CONFIG:
         argv.extend(["-c", f"{key}={value}"])
     argv.extend(args)
     return argv

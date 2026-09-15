@@ -968,13 +968,13 @@ def test_run_git_forces_ssh_batch_mode_and_preserves_agent(tmp_path, monkeypatch
     assert 'GIT_SSH_COMMAND' not in mock_run.call_args.kwargs['env']
 
 
-def test_run_git_scopes_the_transport_refusal_to_unattended_checks(tmp_path, monkeypatch):
-    """The update check refuses git://; workspace Git keeps the user's remote.
+def test_run_git_refuses_the_transports_that_run_repo_named_commands(tmp_path):
+    """Every git child refuses ext:: and git://, for updates and workspaces alike.
 
-    The refusal cannot be expressed as a ``core.gitProxy`` override — a
-    command-line value does not mask a repository-configured proxy — so it is a
-    transport restriction, and it is scoped rather than shared with workspace
-    operations that act on a remote the user configured deliberately.
+    Neither can be neutralized by an override: git:// reaches a
+    repository-configured ``core.gitProxy`` command, and no command-line value for
+    that key masks a lower-scope one. Refusing the transport is the only
+    expression that holds for both callers.
     """
     from api.workspace_git import _hardened_git_argv
 
@@ -983,15 +983,12 @@ def test_run_git_scopes_the_transport_refusal_to_unattended_checks(tmp_path, mon
         mock_run.return_value = MagicMock(returncode=0, stdout='', stderr='')
         updates._run_git(['fetch', 'origin'], tmp_path)
 
-    update_argv = mock_run.call_args.args[0]
-    workspace_argv = _hardened_git_argv(['fetch', 'origin'])
-
-    assert 'protocol.git.allow=never' in update_argv
-    assert 'protocol.ext.allow=never' in update_argv
-    assert 'protocol.git.allow=never' not in workspace_argv, (
-        'workspace Git must keep honoring a configured git:// remote'
-    )
-    assert 'protocol.ext.allow=never' in workspace_argv
+    for label, argv in (
+        ('update', mock_run.call_args.args[0]),
+        ('workspace', _hardened_git_argv(['fetch', 'origin'])),
+    ):
+        assert 'protocol.git.allow=never' in argv, label
+        assert 'protocol.ext.allow=never' in argv, label
 
 
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
