@@ -152,8 +152,8 @@ class TestLatestExchangeSnippets:
         msgs = [_user_msg('q'), _asst_msg('real answer'),
                 _user_msg('q2'), _tool_only_asst()]
         u, a = _latest_exchange_snippets(msgs)
-        # _tool_only_asst should be skipped; fall back to previous real assistant
-        assert a == 'real answer'
+        # Do not pair q2 with an answer from the previous user turn.
+        assert (u, a) == ('q2', '')
         assert u == 'q2'
 
     def test_truncates_long_content(self):
