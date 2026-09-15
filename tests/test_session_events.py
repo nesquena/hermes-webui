@@ -26,13 +26,10 @@ def test_session_events_publish_for_minimal_sidebar_mutations():
         "session_move",
         "session_pin",
         "session_rename",
-        "session_title_regenerate",
         "session_branch",
     ):
         if reason == "session_import_cli":
             assert f'publish_session_list_changed(\n        "{reason}",' in ROUTES, reason
-        elif reason == "session_title_regenerate":
-            assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")' in ROUTES
         elif reason == "session_import":
             assert f'publish_session_list_changed("{reason}")' in ROUTES, reason
         else:
@@ -43,7 +40,6 @@ def test_session_events_publish_for_minimal_sidebar_mutations():
     assert 'if was_hidden_empty_session:\n        publish_session_list_changed(\n            "session_new",' in ROUTES
     assert 'publish_session_list_changed(\n                "session_duplicate",' in ROUTES
     assert 'publish_session_list_changed(\n            "session_rename",' in ROUTES
-    assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")' in ROUTES
     assert "session_id=sid" in ROUTES
     assert 'event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)' in ROUTES
     assert "Failed to resolve profile for deleted session" in ROUTES

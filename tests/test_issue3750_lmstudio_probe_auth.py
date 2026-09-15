@@ -624,3 +624,98 @@ display:
     assert "target" not in hosts_hit, "credentialed redirect must not be followed"
     # The credential only ever touched the configured (redirector) endpoint.
     assert all(c["host"] == "redirector" for c in captured)
+
+
+def test_reasoning_status_prefers_selected_model_override(tmp_path, monkeypatch):
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        """
+model:
+  provider: lmstudio
+  default: other-model
+providers:
+  lmstudio:
+    models:
+      qwen/qwen3.8-27b:
+        reasoning_efforts: [low, medium, xhigh]
+agent:
+  reasoning_effort: low
+  reasoning_overrides:
+    qwen/qwen3.8-27b: xhigh
+""",
+    )
+
+    status = config.get_reasoning_status(
+        model_id="qwen/qwen3.8-27b",
+        provider_id="lmstudio",
+    )
+
+    assert status["reasoning_effort"] == "xhigh"
+    assert status["supported_efforts"] == ["low", "medium", "xhigh"]
+
+
+def test_model_aware_reasoning_write_does_not_mutate_global_default(tmp_path, monkeypatch):
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        """
+model:
+  provider: openai-codex
+  default: gpt-5.6-sol
+providers:
+  lmstudio:
+    models:
+      qwen/qwen3.8-27b:
+        reasoning_efforts: [low, medium, xhigh]
+agent:
+  reasoning_effort: low
+  reasoning_overrides:
+    qwen/qwen3.8-27b: xhigh
+""",
+    )
+
+    status = config.set_reasoning_effort(
+        "medium",
+        model_id="qwen/qwen3.8-27b",
+        provider_id="lmstudio",
+    )
+    saved = config._load_yaml_config_file(config._get_config_path())
+
+    assert saved["agent"]["reasoning_effort"] == "low"
+    assert saved["agent"]["reasoning_overrides"]["@lmstudio:qwen/qwen3.8-27b"] == "medium"
+    assert status["reasoning_effort"] == "medium"
+
+
+def test_effective_reasoning_resolver_scopes_models_and_falls_back(monkeypatch):
+    data = {
+        "agent": {
+            "reasoning_effort": "low",
+            "reasoning_overrides": {
+                "@lmstudio:model-a": "high",
+                "@lmstudio:model-b": "medium",
+            },
+        }
+    }
+    monkeypatch.setattr(config, "coerce_reasoning_effort_for_model", lambda value, *a, **k: value)
+    assert config.effective_reasoning_effort(data, "model-a", provider_id="lmstudio") == "high"
+    assert config.effective_reasoning_effort(data, "model-b", provider_id="lmstudio") == "medium"
+    assert config.effective_reasoning_effort(data, "model-c", provider_id="lmstudio") == "low"
+    assert config.effective_reasoning_effort(data, "@lmstudio:model-a", provider_id="lmstudio") == "high"
+
+
+def test_gateway_reasoning_uses_shared_effective_resolver(monkeypatch):
+    from api import gateway_chat
+    observed = {}
+    def resolve(data, model, **kwargs):
+        observed.update(data=data, model=model, kwargs=kwargs)
+        return "xhigh"
+    monkeypatch.setattr(gateway_chat, "effective_reasoning_effort", resolve)
+    result = gateway_chat._gateway_reasoning_effort_for_request(
+        {"agent": {"reasoning_effort": "low"}},
+        model="@openai-codex:gpt-5.6-sol",
+        model_provider="openai-codex",
+    )
+    assert result == "xhigh"
+    assert observed["model"] == "@openai-codex:gpt-5.6-sol"
+    assert observed["kwargs"]["provider_id"] == "openai-codex"
