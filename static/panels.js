@@ -12615,7 +12615,51 @@ function _auxProvidersFromModelGroups(groups){
  }));
 }
 
+async function _loadVisionCapabilityFirst(){
+ const cb=$('settingsVisionCapabilityFirst');
+ if(!cb) return;
+ // One owner for reads and writes: reopening Settings cannot race a save.
+ if(cb._vcfPending) return cb._vcfPending;
+ cb.disabled=true;
+ if(!cb._vcfBound){
+  cb._vcfBound=true;
+  cb.addEventListener('change',()=>{
+   if(cb.disabled){cb.checked=cb._vcfConfirmed===true;return;}
+   const desired=cb.checked;
+   cb.disabled=true;
+   cb._vcfPending=(async()=>{
+    try{
+     const result=await api('/api/vision-capability-first',{method:'POST',body:JSON.stringify({enabled:desired})});
+     if(!result||typeof result.vision_capability_first!=='boolean') throw new Error('Invalid vision setting');
+     cb._vcfConfirmed=result.vision_capability_first;
+     cb.checked=cb._vcfConfirmed;
+     showToast(t(cb.checked?'settings_vcf_on':'settings_vcf_off'));
+    }catch(err){
+     cb.checked=cb._vcfConfirmed;
+     showToast(t('settings_aux_save_failed')||'Failed to save setting');
+    }finally{
+     cb.disabled=false;
+     cb._vcfPending=null;
+    }
+   })();
+  });
+ }
+ cb._vcfPending=(async()=>{
+  try{
+   const result=await api('/api/vision-capability-first');
+   if(!result||typeof result.vision_capability_first!=='boolean') throw new Error('Invalid vision setting');
+   cb.checked=cb._vcfConfirmed=result.vision_capability_first;
+   cb.disabled=false;
+  }catch(err){
+   cb.checked=false;
+   showToast(t('settings_vcf_load_failed'));
+  }finally{cb._vcfPending=null;}
+ })();
+ return cb._vcfPending;
+}
+
 async function _loadAuxiliaryModels(){
+ _loadVisionCapabilityFirst();
  const container=$('auxModelsContainer');
  if(!container) return;
  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';

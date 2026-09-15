@@ -320,6 +320,26 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ## Configuration & access
 
+### Vision routing preference
+
+In Settings, beneath **Auxiliary Models**, **Send images directly to
+vision-capable models** saves `agent.vision_capability_first` in the active
+profile's `config.yaml` (not WebUI `settings.json`). The default is `false`:
+a configured auxiliary vision model handles images. With `true` and
+`agent.image_input_mode: auto`, vision-capable primary models receive native
+images; auxiliary vision remains the fallback for text-only models. Explicit
+image-input modes are not overridden.
+
+The control is disabled until its value loads and while saving. A failed load
+leaves it disabled; reopen Settings to retry. A failed save restores the last
+server-confirmed value and displays an error.
+
+**Release dependency:** this preference requires a Hermes Agent release whose
+image router consumes `agent.vision_capability_first` (the paired
+`fix/vision-capability-beats-aux-declared` change). On older agents, saving the
+key has no routing effect. Deploy the routing consumer with this WebUI change.
+
+
 `start.sh` auto-detects almost everything; the subsections below cover the knobs for when it can't, and how to reach the UI remotely.
 
 ### What start.sh discovers automatically
