@@ -1346,8 +1346,42 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 
   return restoredVisible;
 }
-
+// Merge a one-shot display override (e.g. a /learn invocation) into a
+// queued-message payload so a turn queued while busy keeps its
+// payload/display separation through the queue drain. Queue entries are
+// JSON-persisted and displayText is a plain string, so it survives the
+// round-trip. Blank/missing override → payload unchanged.
+function _withDisplayOverride(payload, displayText){
+  if(!payload) return payload;
+  return (typeof displayText==='string'&&displayText.trim())?{...payload,displayText}:payload;
+}
+// Queued-payload constructor for the /api/chat/start active-stream conflict
+// retry: the attempted turn is kept for after the current run. Applies the
+// same one-shot display override as the busy-queue branches (via
+// _withDisplayOverride) so a /learn, /moa, or bundle turn retried here keeps
+// its payload/display separation through the drain. Blank/missing override →
+// plain payload, identical to the pre-fix shape.
+function _conflictRetryQueueEntry(msgText, modelState, profile, displayOverride){
+  return _withDisplayOverride({text:msgText,files:[],model:modelState.model,model_provider:modelState.model_provider,profile:profile||'default'},displayOverride);
+}
 async function send(){
+  // One-shot display override from the send() options argument (e.g. cmdLearn
+  // submits a generated prompt as the wire payload while displaying the
+  // original /learn invocation — the same separation the /moa + bundle paths
+  // get by rewriting text below). Captured BEFORE the concurrent/busy queue
+  // branches so a queued turn carries it into the queued-message state via
+  // _withDisplayOverride. Scoped to this send() invocation via the options
+  // object, never a shared global, so an action interleaved during an await
+  // cannot steal or inherit it.
+  const _sendOptions=arguments[0]||{};
+  const _sendDisplayText=(_sendOptions&&typeof _sendOptions.displayText==='string'&&_sendOptions.displayText.trim())?_sendOptions.displayText:null;
+  // Function-scope holder for the resolved one-shot display override (the
+  // send() option above, later possibly replaced by the /moa + bundle
+  // rewrites). Hoisted out of the try block so the /api/chat/start
+  // conflict-retry catch below queues with the same override via
+  // _conflictRetryQueueEntry. Single assignment point is just below, next
+  // to the normal-path comment.
+  let _slashDisplayTextOverride=null;
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1361,12 +1395,13 @@ async function send(){
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
-      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+      queueSessionMessage(_targetSid,_withDisplayOverride({text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'},_sendDisplayText));
       _clearComposerAfterQueuedSelectionSend();
       if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
-      showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
+      const _queuedToastLabelConcurrent=String(_sendDisplayText||_text);
+      showToast(`Queued: "${_queuedToastLabelConcurrent.slice(0,40)}${_queuedToastLabelConcurrent.length>40?'…':''}"`,2000);
     }
     return;
   }
@@ -1441,7 +1476,7 @@ async function send(){
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        queueSessionMessage(S.session.session_id,_withDisplayOverride({text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'},_sendDisplayText));
         updateQueueBadge(S.session.session_id);
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
@@ -1449,17 +1484,19 @@ async function send(){
           if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
           else showToast(t('cancel_failed'),null,'error');
         } else {
-          showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+          const _queuedToastLabelInterrupt=String(_sendDisplayText||text);
+          showToast(`Queued: "${_queuedToastLabelInterrupt.slice(0,40)}${_queuedToastLabelInterrupt.length>40?'…':''}"`,2000);
         }
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
         const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        queueSessionMessage(S.session.session_id,_withDisplayOverride({text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'},_sendDisplayText));
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
-        showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+        const _queuedToastLabel=String(_sendDisplayText||text);
+        showToast(`Queued: "${_queuedToastLabel.slice(0,40)}${_queuedToastLabel.length>40?'…':''}"`,2000);
       }
     }
     return;
@@ -1468,7 +1505,9 @@ async function send(){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
-  let _slashDisplayTextOverride=null;
+  // Display override captured above (before the queue branches) now takes
+  // effect on the normal send path.
+  _slashDisplayTextOverride=_sendDisplayText;
   let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
@@ -1847,7 +1886,7 @@ async function send(){
       stopClarifyPolling();
       // Keep the user's attempted turn by queueing it for after the current run.
       const _retryModelState=_chatPayloadModelState();
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
+      queueSessionMessage(activeSid,_conflictRetryQueueEntry(msgText,_retryModelState,S.activeProfile,_slashDisplayTextOverride));
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{

@@ -1990,6 +1990,7 @@ same `HERMES_HOME` (when applicable) and verify identical effect.
 - [ ] `/skills [query]` — lists matching skills.
 - [ ] `/theme <name>` — switches webui theme.
 - [ ] `/workspace <name>` — switches workspace.
+- [ ] `/learn [request]` — builds prompt via POST /api/learn, runs through chat pipeline; empty request learns from conversation.
 
 Unknown / deferred:
 

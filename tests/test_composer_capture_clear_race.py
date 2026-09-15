@@ -121,6 +121,10 @@ def _run_reentrant_guard_in_node(composer_value: str):
 
     helper = _function_body(MESSAGES_JS, "_composerTextWithPendingSelections")
     guard = _extract_reentrancy_guard()
+    # The guard now merges the hoisted display option into the queue payload
+    # via the REAL helper; this scenario is a plain-text re-entrant send
+    # (no display option), so the hoisted value is null.
+    override = _function_body(MESSAGES_JS, "_withDisplayOverride")
 
     harness = textwrap.dedent(
         """
@@ -142,6 +146,9 @@ def _run_reentrant_guard_in_node(composer_value: str):
         // Stubs the guard branch touches.
         function _chatPayloadModelState(){ return { model: 'm', model_provider: 'p' }; }
         function queueSessionMessage(sid, payload){ queued.push({ sid, payload }); }
+        // Real display-override merge the guard applies to the queue payload.
+        function _withDisplayOverride(payload, displayText){%(override)s}
+        const _sendDisplayText = null;
         function _clearComposerAfterQueuedSelectionSend(){ state.input.value = ''; }
         function _clearComposerDraft(){}
         function updateQueueBadge(){}
@@ -159,6 +166,7 @@ def _run_reentrant_guard_in_node(composer_value: str):
         "composer_value": json.dumps(composer_value),
         "helper": helper,
         "guard": guard,
+        "override": override,
     }
 
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)

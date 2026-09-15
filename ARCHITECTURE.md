@@ -181,7 +181,8 @@ thread. The Handler class subclasses BaseHTTPRequestHandler with two methods:
                       /api/session/worktree/status
     do_POST   Routes: /api/upload, /api/session/new, /api/session/update,
                       /api/session/delete, /api/chat/start, /api/chat,
-                      /api/approval/respond, /api/session/worktree/remove
+                      /api/approval/respond, /api/session/worktree/remove,
+                      /api/learn
 
 Routing is a flat if/elif chain inside each method. No routing framework.
 

@@ -16536,6 +16536,20 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
 
+    # ── Learn (POST) ──
+    # Build the /learn prompt and return it; the client sends the prompt through
+    # the normal chat pipeline, so the agent runs it in the live conversation
+    # (same builder used by the CLI, gateway and TUI /learn paths).
+    if parsed.path == "/api/learn":
+        try:
+            from agent.learn_prompt import build_learn_prompt
+
+            request = str(body.get("request", "") or "").strip()
+            prompt = build_learn_prompt(request)
+            return j(handler, {"prompt": prompt})
+        except Exception as e:
+            return bad(handler, _sanitize_error(e), 500)
+
     if parsed.path == "/api/commands/exec":
         from api.commands import execute_agent_command, execute_plugin_command
 

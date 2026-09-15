@@ -271,6 +271,29 @@ function shiftQueuedSessionMessage(sid){
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
 }
+// Visible label for a queued entry: prefer the one-shot display override
+// (e.g. a /learn invocation) over the wire payload, matching what the drain
+// will render in the transcript. Blank/missing override falls back to the
+// payload, so plain queued text is unchanged. Used by the chip fingerprint +
+// row below; the Combine merge intentionally keeps using the raw payload
+// (it builds a NEW payload, so display==payload there).
+function _queuedEntryDisplayText(entry){
+  if(!entry) return '';
+  // Same blank==absent contract as _withDisplayOverride: only a non-blank
+  // stored override wins, otherwise fall back to the wire payload.
+  if(typeof entry.displayText==='string'&&entry.displayText.trim()) return entry.displayText;
+  return entry.text||entry.message||entry.content||'';
+}
+// Apply an in-place chip edit: the edited text becomes the new payload and a
+// stale display override is dropped — the edited turn is user-authored, so
+// display==payload like any plain queued message. Preserves the drain
+// invariant (the transcript shows what will actually be sent).
+function _applyQueuedEntryEdit(entry, newText){
+  if(!entry) return entry;
+  const next={...entry,text:newText};
+  delete next.displayText;
+  return next;
+}
 function _compressionSessionLock(){
   return window._compressionLockSid||null;
 }
@@ -8492,7 +8515,11 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        // A queued turn may carry a one-shot display override (e.g. /learn:
+        // wire payload is the generated prompt, transcript shows the
+        // invocation). Pass it through so the drained turn keeps the
+        // payload/display separation; plain queued text sends unchanged.
+        send((next&&typeof next.displayText==='string'&&next.displayText.trim())?{displayText:next.displayText}:undefined);
       },120);
     }
   }
@@ -8533,7 +8560,7 @@ function _renderQueueChips(sid){
   const inner=document.getElementById('queueChips');
   if(!card||!inner) return;
   const q=_getSessionQueue(sid,false);
-  const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
+  const key=q.map(e=>{const t=_queuedEntryDisplayText(e);const r=String((e&&(e.text||''))||'');return(e&&e._queued_at||0)+':'+String(t).length+':'+String(t).slice(0,20)+':'+r.length+':'+r.slice(0,20);}).join('|');
   if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
   // Skip re-render if user is actively editing inside the queue panel
   if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
@@ -8637,7 +8664,7 @@ function _renderQueueChips(sid){
   let _dragTs=null;  // use _queued_at timestamp — survives re-renders, not an index
   q.forEach((entry,i)=>{
     const _entryTs=entry&&entry._queued_at;
-    const entryText=entry&&(entry.text||entry.message||entry.content||'');
+    const entryText=_queuedEntryDisplayText(entry);
     const _files=entry&&Array.isArray(entry.files)?entry.files.filter(Boolean):[];
     const row=document.createElement('div');
     row.className='queue-card-row';
@@ -8677,7 +8704,7 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
-          liveQ[idx]={...liveQ[idx],text:newText};
+          liveQ[idx]=_applyQueuedEntryEdit(liveQ[idx],newText);
           _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
