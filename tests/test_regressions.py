@@ -790,14 +790,20 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     renderMessages() must keep the existing 'Loading conversation...' placeholder
     instead of clearing #msgInner to an empty transcript.
     """
-    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    ui_src = (REPO_ROOT / "static/ui.js").read_text(encoding="utf-8")
     fn_start = ui_src.find("function renderMessages")
     assert fn_start >= 0, "renderMessages() not found in ui.js"
-    fn_body = ui_src[fn_start:fn_start + 1400]
+    fn_body = ui_src[fn_start:fn_start + 2500]
 
     compact = re.sub(r"\s+", "", fn_body)
+    # The guard was reworked from a bare `_loadingSessionId===sid` latch to a
+    # timestamped `_sessionLoadInFlightFor(sid)` indirection so a load that
+    # bailed without clearing the latch cannot freeze the pane on the
+    # placeholder forever. Accept either form.
+    old_guard = "if(_loadingSessionId===sid&&msgCount===0&&inner)return;"
+    new_guard = "if(loadInFlight&&msgCount===0&&inner)return;"
     assert (
-        "if(_loadingSessionId===sid&&msgCount===0&&inner)return;" in compact
+        old_guard in compact or (new_guard in compact and "_sessionLoadInFlightFor" in compact)
     ), (
         "renderMessages() must return early when loadSession is active for"
         " the current sid and S.messages is still empty."
@@ -805,7 +811,9 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
 
     # Guard must live before render-window reset and message-filter pass.
     reset_pos = compact.find("if(sid!==_messageRenderWindowSid)_resetMessageRenderWindow(sid);")
-    guard_pos = compact.find("if(_loadingSessionId===sid&&msgCount===0&&inner)return;")
+    guard_pos = compact.find(old_guard)
+    if guard_pos < 0:
+        guard_pos = compact.find(new_guard)
     assert (
         0 <= guard_pos < reset_pos
     ), "Session-load empty-state guard must run before render-window/state resets."

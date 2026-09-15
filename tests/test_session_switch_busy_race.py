@@ -53,10 +53,10 @@ def test_loadSession_snapshots_live_turn_before_wiping_message_pane():
     body = _function_body(SESSIONS_SRC, "async function loadSession(")
 
     snap_pos = body.find("snapshotLiveTurnHtmlForSession(currentSid)")
-    # Anchor on the actual loading-placeholder marker (unique), not the
-    # whitespace-sensitive innerHTML literal which also matches the
-    # "Session not available" error handler. (Maintainer review.)
-    wipe_pos = body.find("Loading conversation...")
+    # Anchor on the actual loading-placeholder write: search forward from the
+    # snapshot, since the cancel-path comment above quotes the placeholder
+    # text and would otherwise win a first-occurrence find. (Maintainer review.)
+    wipe_pos = body.find("Loading conversation...", snap_pos)
     assert snap_pos != -1, "loadSession must snapshot the outgoing live turn before switching"
     assert wipe_pos != -1, "loadSession must still show the loading placeholder on switch"
     assert snap_pos < wipe_pos, "snapshot must run before msgInner is replaced with the loading placeholder"

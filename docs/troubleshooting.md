@@ -211,6 +211,18 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## "Couldn't load this conversation." with a Retry button
+
+**Symptom.** The chat pane shows a centered message — "Couldn't load this conversation." with a `Retry` button — instead of the conversation transcript or a loading spinner. Clicking Retry reloads the session.
+
+**Why.** A `loadSession()` that started with a visible "Loading conversation..." placeholder ended before it rendered any transcript — a cancelled pre-open hook, a superseded load that never painted, a rejected/404 session, or a zero-message transcript. Without that terminal render, the placeholder has nothing to clear and would otherwise stay frozen forever. The timeout settles it into this explicit retryable state instead of an endless pseudo-spinner.
+
+**What Retry does.** It calls `loadSession` again for the same session with `{force: true}` — a full reload from metadata through message render, bypassing the same-session no-op guard that would otherwise short-circuit a click into the already-open session.
+
+**When to escalate.** A single Retry that lands you back in the session is normal recovery. If clicking Retry loops back to the error — or every session you open shows it — check connectivity and confirm the session still exists (open it from the sidebar list, or check `~/.hermes/webui/sessions/`). If that checks out and the problem reproduces in a clean browser tab with no proxy or extension involved, file a bug with console output and the session id.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

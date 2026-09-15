@@ -19,6 +19,108 @@ const ICONS={
 // responses from in-flight requests when the user switches sessions again
 // before the first request completes (#1060).
 let _loadingSessionId = null;
+// How long a "still loading" latch may suppress the empty-transcript render.
+// The latch is otherwise unbounded: a load that bails before its clear leaves
+// _loadingSessionId pointing at the session, and renderMessages()' "keep the
+// existing loading placeholder" guard then suppresses every later render for it
+// (msgCount===0), freezing the pane on "Loading conversation..." forever.
+// The stamp lives on the placeholder element itself (see loadSession) rather
+// than in module state, so the extracted-function test harnesses that evaluate
+// loadSession in isolation stay valid.
+const _SESSION_LOAD_IN_FLIGHT_MAX_MS = 20000;
+const _RETRY_ESCAPES = {amp:'&amp;',lt:'&lt;',gt:'&gt;'};
+function _conversationLoadingAgeMs(){
+  const el = $('msgInner');
+  const stamp = (el && el.dataset) ? Number(el.dataset.conversationLoadingSince || 0) : 0;
+  return stamp > 0 ? (Date.now() - stamp) : null;
+}
+function _sessionLoadInFlightFor(sid){
+  if (_loadingSessionId !== sid) return false;
+  const ageMs = _conversationLoadingAgeMs();
+  // No stamp (e.g. a same-session force reload that never drew the placeholder):
+  // treat the latch as live and keep the existing behaviour.
+  return ageMs === null ? true : ageMs < _SESSION_LOAD_IN_FLIGHT_MAX_MS;
+}
+// The "Loading conversation..." placeholder is only cleared by renderMessages().
+// Any load that ends without rendering — a cancelled pre-open hook, a superseded
+// generation, a rejected/404 session, a zero-message transcript — used to leave
+// that text on screen with no way out: clicking the session again hit the same
+// bail, so the pane stayed stuck until the page was thrown away. Settle it with
+// an explicit, retryable state instead of an endless pseudo-spinner.
+function _settleStrandedConversationLoading(settleSid, expectedStamp, expectedGeneration){
+  try {
+    const inner = $('msgInner');
+    if (!inner || typeof inner.textContent !== 'string') return;
+    if (inner.textContent.indexOf('Loading conversation') === -1) return; // already rendered/replaced
+    // Ownership first: a captured generation that no longer matches the
+    // live generation belongs to a superseded attempt — stand down even
+    // before consulting the latch, so a newer same-session reload that
+    // inherited a stale DOM stamp is never settled by its predecessor.
+    // Skipped for the immediate cancel-path call (no generation captured).
+    if (expectedGeneration !== undefined && expectedGeneration !== null) {
+      try {
+        if (typeof _loadSessionGeneration !== 'undefined' && _loadSessionGeneration !== expectedGeneration) return;
+      } catch (_) { /* module-scope generation unavailable in harness: fall through */ }
+    }
+    // Timer path: if a newer load re-stamped the placeholder since this
+    // timer was scheduled, the newer load owns the pane — leave it alone
+    // (its own timer or render will settle it). Skip for the immediate
+    // cancel-path call (no expectedStamp) where this guard is N/A.
+    if (expectedStamp !== undefined && expectedStamp !== null) {
+      const currentStamp = inner.dataset && inner.dataset.conversationLoadingSince
+        ? Number(inner.dataset.conversationLoadingSince) : null;
+      if (currentStamp !== expectedStamp) return;
+    }
+    // A live latch means its owning attempt has not finished the messages
+    // phase yet (loadSession clears _loadingSessionId only after the final
+    // render): the messages fetch may still resolve — or land an empty but
+    // VALID transcript whose empty-state render also runs before the clear
+    // — so the timer must stand down. Only a latch that expired (or was
+    // cleared because the owning attempt ended without rendering) settles.
+    // Belt-and-suspenders: a different session's live load also owns the pane.
+    if (_loadingSessionId !== settleSid && _sessionLoadInFlightFor(_loadingSessionId)) return;
+    if (_sessionLoadInFlightFor(settleSid)) return;                       // owning load still running
+    const _retryMsg = (typeof t === 'function') ? t('conversation_load_failed') : 'Couldn\u2019t load this conversation.';
+    const _retryLabel = (typeof t === 'function') ? t('conversation_load_retry') : 'Retry';
+    const _escRetry = (s) => String(s).replace(/&/g, _RETRY_ESCAPES.amp).replace(/</g, _RETRY_ESCAPES.lt).replace(/>/g, _RETRY_ESCAPES.gt);
+    inner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">' + _escRetry(_retryMsg) + '<button type="button" id="conversationLoadRetry" style="margin-left:10px;font:inherit;color:inherit;cursor:pointer;background:none;border:1px solid currentColor;border-radius:4px;padding:2px 10px;">' + _escRetry(_retryLabel) + '</button></div>';
+    const retry = (typeof inner.querySelector === 'function') ? inner.querySelector('#conversationLoadRetry') : null;
+    if (retry && typeof retry.addEventListener === 'function') {
+      retry.addEventListener('click', () => loadSession(settleSid, {force: true}));
+    }
+  } catch (_) {
+    // UI polish only: never let the escape hatch itself break a load path.
+  }
+}
+// One coherent lifecycle (#7553 review): the expiry timer is armed at the
+// actual expiration deadline, so the callback can only run once the latch
+// above has expired. The captured stamp+generation must still own the
+// placeholder when it fires (see _settleStrandedConversationLoading).
+function _armStrandedConversationLoadingTimer(sid, loadingStamp, loadGeneration){
+  setTimeout(() => _settleStrandedConversationLoading(sid, loadingStamp, loadGeneration), _SESSION_LOAD_IN_FLIGHT_MAX_MS);
+}
+// Same-session force-reload re-arm for the stranded placeholder (Retry-click
+// force path over a still-visible Loading placeholder). Extracted from
+// loadSession's preamble so the Node harness drives the REAL production
+// branch behaviorally under a fake clock: it re-stamps the placeholder and
+// arms a new expiry timer with the new generation, transferring ownership
+// to the new attempt. Returns true only when the re-stamp + re-arm ran.
+// Attempt-scoped age authority: a reload over a RENDERED pane refreshes the
+// stamp even though no Loading text is visible, so a stale DOM timestamp
+// inherited from an older attempt can never make the new fetch look expired
+// (the latch would read false mid-fetch and an unrelated render could wipe
+// the retained transcript). Rendered/Retry panes still arm no timer.
+function _restampStrandedPlaceholderForReload(sid, loadGeneration, sameSessionForceReload){
+  if (!sameSessionForceReload) return false;
+  const _msgInner = $('msgInner');
+  if (!_msgInner || !_msgInner.dataset) return false;
+  const loadingStamp = Date.now();
+  _msgInner.dataset.conversationLoadingSince = String(loadingStamp);
+  if (typeof _msgInner.textContent !== 'string' ||
+      _msgInner.textContent.indexOf('Loading conversation') === -1) return false;
+  _armStrandedConversationLoadingTimer(sid, loadingStamp, loadGeneration);
+  return true;
+}
 // Each loadSession() invocation gets a monotonically increasing generation.
 // `_loadingSessionId` only tracks destination session_id, so same-session
 // concurrent loads can still race and overwrite each other unless we compare
@@ -1687,6 +1789,7 @@ async function _switchProfileForSessionLoad(profile){
 }
 
 async function loadSession(sid){
+
   const opts = arguments[1] || {};
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
@@ -1701,6 +1804,10 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
+      // A cancelled pre-open must still release a placeholder an earlier
+      // attempt left behind, otherwise the pane shows "Loading conversation..."
+      // forever with no fetch pending.
+      _settleStrandedConversationLoading(sid);
       return;
     }
   }
@@ -1844,7 +1951,47 @@ async function loadSession(sid){
     }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
-    if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    if (_msgInner && currentSid !== sid) {
+      _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+      // Stamp the placeholder so a load that bails without clearing its latch
+      // stops suppressing the empty-transcript render after the in-flight
+      // window instead of freezing the pane forever (see _sessionLoadInFlightFor).
+      // The dataset guard also keeps this inert for the extracted-function test
+      // harnesses, whose msgInner is a plain stub.
+      if (_msgInner.dataset) {
+        const loadingStamp = Date.now();
+        _msgInner.dataset.conversationLoadingSince = String(loadingStamp);
+        // Escape hatch: the placeholder is otherwise only cleared by
+        // renderMessages(), so any terminal path that never renders (this is the
+        // last synchronous point before the metadata fetch) strands it. The
+        // helper no-ops when a render or a newer load already took over.
+        // One coherent lifecycle: arm at the actual expiration deadline, so
+        // the callback can only run once the latch above has expired (#7553).
+        _armStrandedConversationLoadingTimer(sid, loadingStamp, _loadGeneration);
+      }
+    }
+    // Same-session force-reload branch: the arm block above is gated on
+    // `currentSid !== sid`, so a forced reload of the active session (Retry click
+    // → loadSession(sid,{force:true})) never re-stamps the placeholder or
+    // re-arms the timer. The original timer fires with the old generation, sees
+    // the bumped _loadSessionGeneration, and stands down. If the forced attempt
+    // also strands (no render), no timer remains → permanent "Loading
+    // conversation...". Re-stamp + re-arm here with the NEW generation so the
+    // 20s window restarts for the new attempt and ownership transfers to it.
+    // Do NOT arm a timer when the placeholder is absent/already rendered or
+    // settled to Retry (text check) — but ALWAYS refresh the stamp on a
+    // same-session force reload so the new attempt's age is attempt-scoped:
+    // without this, a reload over a rendered pane inherits the older
+    // attempt's DOM timestamp, the latch reads expired mid-fetch, and an
+    // unrelated renderMessages() could wipe the retained transcript. The
+    // check is on the visible text, not on keep-stale-until-loaded: a
+    // keep-stale reload arriving on top of a prior strand still shows
+    // "Loading conversation" and correctly re-arms here (the pane is still
+    // Loading, so it still needs a timer); a keep-stale reload with the old
+    // transcript visible refreshes the stamp and correctly skips the timer.
+    // Routed through _restampStrandedPlaceholderForReload so the regression
+    // harness drives this exact production branch.
+    _restampStrandedPlaceholderForReload(sid, _loadGeneration, sameSessionForceReload);
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
   // resolution out of the first-paint path; old provider-shaped model IDs are
