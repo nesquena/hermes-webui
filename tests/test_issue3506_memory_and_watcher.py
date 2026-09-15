@@ -445,6 +445,74 @@ def test_projection_failure_preserves_populated_state_and_parity_retry(
     assert watcher._last_full_projection_at == at_deadline + 1.0
 
 
+def test_projection_open_failure_after_fingerprint_preserves_state_and_retries(
+    tmp_path, monkeypatch
+):
+    """A second read-only open failure must not publish an empty projection."""
+    gw = importlib.import_module("api.gateway_watcher")
+    agent_sessions = importlib.import_module("api.agent_sessions")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "tg1", "telegram", mc=2)
+    conn.close()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    subscriber.get_nowait()
+    initial_sessions = watcher._last_sessions
+    initial_hash = watcher._last_hash
+    initial_fingerprint = watcher._last_cheap_fp
+
+    real_open = agent_sessions.open_state_db_readonly
+    opens = []
+
+    def fail_projection_open_once(path, *args, **kwargs):
+        opens.append(path)
+        if len(opens) == 1:
+            raise sqlite3.OperationalError("projection database temporarily unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(gw, "_cheap_change_fingerprint", lambda _path: "new-fp")
+    monkeypatch.setattr(agent_sessions, "open_state_db_readonly", fail_projection_open_once)
+
+    assert watcher._poll_once(now=2.0) is False
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+    assert watcher._last_full_projection_at == 1.0
+
+    assert watcher._poll_once(now=3.0) is True
+    assert len(opens) == 2
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == "new-fp"
+    assert watcher._last_full_projection_at == 3.0
+
+
+def test_fingerprint_failure_preserves_populated_state(tmp_path, monkeypatch):
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "tg1", "telegram", mc=2)
+    conn.close()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    subscriber.get_nowait()
+    initial_sessions = watcher._last_sessions
+    initial_hash = watcher._last_hash
+    initial_fingerprint = watcher._last_cheap_fp
+
+    monkeypatch.setattr(gw, "_cheap_change_fingerprint", lambda _path: None)
+    assert watcher._poll_once(now=2.0) is False
+    assert subscriber.empty()
+    assert watcher._last_sessions is initial_sessions
+    assert watcher._last_hash == initial_hash
+    assert watcher._last_cheap_fp == initial_fingerprint
+
+
 def test_cheap_fingerprint_detects_lineage_only_change(tmp_path):
     """Lineage/visibility fields the projection uses for collapse (parent_session_id,
     end_reason, ended_at) must be part of the fingerprint."""

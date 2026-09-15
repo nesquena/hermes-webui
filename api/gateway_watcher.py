@@ -154,7 +154,9 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
 
     try:
         sessions = []
-        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+        for row in read_importable_agent_session_rows(
+            db_path, limit=200, log=logger, raise_on_unavailable=True
+        ):
             sessions.append({
                 'session_id': row['id'],
                 'title': row['title'] or 'Agent Session',
@@ -331,7 +333,13 @@ class GatewayWatcher:
 
         cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
         current_time = time.monotonic() if now is None else now
-        fingerprint_changed = cheap_fp is None or cheap_fp != self._last_cheap_fp
+        # A missing fingerprint means the read-only probe could not establish a
+        # trustworthy view of state.db. Do not run the projection and publish an
+        # empty snapshot: preserve the last known-good sidebar until a later poll
+        # can read the database again.
+        if cheap_fp is None:
+            return False
+        fingerprint_changed = cheap_fp != self._last_cheap_fp
         parity_due = (
             self._last_full_projection_at is None
             or current_time - self._last_full_projection_at

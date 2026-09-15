@@ -6,11 +6,10 @@ re-run a defensive ``CREATE INDEX`` self-heal on every sidebar build. Holding a
 write-capable handle while the agent streams into the same DB adds needless
 checkpoint/lock surface.
 
-The listing path now opens the DB read-only (``file:...?mode=ro``) and only
-self-heals a missing ``idx_messages_session`` through a SEPARATE short-lived
-writable connection. With the index present (the normal case) the read path
-performs zero writes; when the index is missing the self-heal still runs and
-rows still come back.
+The listing path now opens the DB read-only (``file:...?mode=ro``). It never
+falls back to a writable connection and never self-heals a missing index;
+when the index is missing, rows still come back through the read-only fallback
+query.
 """
 import logging
 import sqlite3
@@ -95,19 +94,17 @@ def test_listing_read_only_uri_encodes_special_path_chars(tmp_path, monkeypatch)
 def test_read_only_open_fallback_is_logged(tmp_path, monkeypatch, caplog):
     db = tmp_path / "state.db"
     _make_db(db, with_index=True)
-    real_connect = sqlite3.connect
-
     def fail_read_only(target, *args, **kwargs):
         if kwargs.get("uri"):
             raise sqlite3.OperationalError("synthetic read-only URI failure")
-        return real_connect(target, *args, **kwargs)
+        raise AssertionError("read-only failure must not open a writable connection")
 
     monkeypatch.setattr(agent_sessions.sqlite3, "connect", fail_read_only)
 
     with caplog.at_level(logging.WARNING, logger="api.agent_sessions"):
         out = read_importable_agent_session_rows(db, exclude_sources=None)
 
-    assert "cli-1" in {r["id"] for r in out}
+    assert out == []
     assert "read-only open failed" in caplog.text
     assert "synthetic read-only URI failure" in caplog.text
 
@@ -124,7 +121,7 @@ def test_index_present_performs_no_writable_connection(tmp_path, monkeypatch):
     assert all(c["uri"] and "mode=ro" in c["target"] for c in calls), calls
 
 
-def test_missing_index_self_heals_via_separate_connection(tmp_path, monkeypatch):
+def test_missing_index_uses_read_only_query(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     _make_db(db, with_index=False)
     calls = _record_connects(monkeypatch)
@@ -133,12 +130,11 @@ def test_missing_index_self_heals_via_separate_connection(tmp_path, monkeypatch)
 
     # Rows still come back...
     assert "cli-1" in {r["id"] for r in out}
-    # ...and the self-heal ran through a separate writable (non-ro) connection.
-    assert any((not c["uri"]) and "mode=ro" not in c["target"] for c in calls), calls
-    # The index now exists on disk.
+    # Every connection remains read-only; the missing index is not created.
+    assert all(c["uri"] and "mode=ro" in c["target"] for c in calls), calls
     verify = sqlite3.connect(str(db))
     try:
         names = {row[1] for row in verify.execute("PRAGMA index_list(messages)")}
     finally:
         verify.close()
-    assert "idx_messages_session" in names
+    assert "idx_messages_session" not in names
