@@ -1373,6 +1373,13 @@ class Session:
         # fall back to reading keys/updated_at off anchor_activity_scenes.
         _raw_scene_index = kwargs.get('anchor_scene_index')
         self._anchor_scene_index = _raw_scene_index if isinstance(_raw_scene_index, dict) else None
+        # What this object knows about the sidecar on disk: the _disk_identity of
+        # the version it last read or wrote, and that version's message count.
+        # save() uses them to skip the full read the #1558 shrink check otherwise
+        # needs. None until a load() or save() sets them; a metadata-only stub
+        # never sets them and so always takes the full-parse path.
+        self._disk_identity_seen = None
+        self._disk_msg_count = None
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -1478,12 +1485,28 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
+                # The on-disk count. When this object wrote (or fully read) the
+                # version on disk and nothing has touched the file since, the
+                # count is already known and no read is needed. Measured before
+                # this: a 203,439,398-byte sidecar cost 20,377 ms (17,453 in
+                # read_text, 2,924 in json.loads) to yield ONE integer, on EVERY
+                # save -- including the grow-saves that never back anything up.
+                # See _disk_identity for why a stat identity is trusted here and
+                # the prefix's message_count is not.
+                existing_text = None
+                _disk_now = _disk_identity(self.path)
+                _disk_seen = getattr(self, '_disk_identity_seen', None)
+                _disk_count = getattr(self, '_disk_msg_count', None)
+                if _disk_now is not None and _disk_now == _disk_seen and _disk_count is not None:
+                    existing_msg_count = _disk_count
+                else:
+                    # Unknown, or changed under us: exactly the pre-existing path.
+                    existing_text = self.path.read_text(encoding='utf-8')
+                    try:
+                        existing = json.loads(existing_text)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except (json.JSONDecodeError, ValueError):
+                        existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
                 if (
                     existing_msg_count > 0
@@ -1501,6 +1524,10 @@ class Session:
                     return
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
+                    if existing_text is None:
+                        # The .bak body is the one thing that needs the full text,
+                        # and a shrink is the one time it is needed.
+                        existing_text = self.path.read_text(encoding='utf-8')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
                     # mirroring the main save() pattern below. Prevents a
                     # torn .bak from a crash mid-write or a concurrent
@@ -1533,7 +1560,14 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+            # Identity of what WE wrote, stamped on tmp BEFORE the rename: rename
+            # keeps inode, size and mtime, so this equals stat(self.path) after
+            # it unless someone else has written since. Stamping after the rename
+            # would leave a window in which their write reads as ours.
+            _written_identity = _disk_identity(tmp)
             _safe_replace(tmp, self.path)
+            self._disk_identity_seen = _written_identity
+            self._disk_msg_count = len(self.messages or [])
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -1581,9 +1615,20 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
+        _pre_read_identity = _disk_identity(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        # The ON-DISK length, taken before the collapse below shortens the object.
+        # It is what save() must compare against, so the #2592 self-heal save
+        # still sees a shrink and writes its .bak. Same expression save() uses.
+        _on_disk_len = len(data.get('messages') or [])
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # Same TOCTOU stance as _pre_read_sig: if the file was replaced between
+        # the stat and the read, this identity describes the OLD file, the next
+        # save sees a mismatch, and it falls back to the full parse. Safe side.
+        if _pre_read_identity is not None:
+            session._disk_identity_seen = _pre_read_identity
+            session._disk_msg_count = _on_disk_len
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -4166,6 +4211,31 @@ def _sidecar_stat_signature(path):
         return None
     return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+
+
+def _disk_identity(path):
+    """(inode, size, mtime_ns) of a path, or None if it cannot be stat'd.
+
+    Deliberately not _sidecar_stat_signature: that one keys a cache and includes
+    the path string and ctime_ns, both of which change across the tmp->final
+    rename in save(). This one has to SURVIVE that rename, so it is exactly the
+    three fields rename preserves. That is what lets save() stamp the identity
+    of the bytes it wrote before they land, leaving no window in which someone
+    else's write could be mistaken for ours.
+
+    Why an identity and not the persisted ``message_count`` in the metadata
+    prefix: three comments in this file anticipate "external sidecar appends".
+    A writer that appends to the array without bumping the count would make a
+    prefix-based shrink check miss a real shrink and skip the #1558 backup. Any
+    external write changes the identity, and the code falls back to the full
+    parse. Fail-open by construction.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (int(st.st_ino), int(st.st_size),
+            int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))))
 
 
 def _legacy_sidecar_facts_get(sid):
