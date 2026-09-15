@@ -34,19 +34,53 @@ The Hermes Web UI is fully responsive with a mobile-optimized layout
 (hamburger sidebar, sidebar top tabs in the drawer, touch-friendly controls),
 so it works well as a daily-driver agent interface from your phone.
 
-**Setup:**
+**Preferred setup: Tailscale Serve**
 
 1. Install [Tailscale](https://tailscale.com/download) on your server and
    your iPhone/Android.
-2. Start the WebUI listening on all interfaces with password auth enabled:
+2. Keep the WebUI bound to localhost and enable password auth:
+
+```bash
+HERMES_WEBUI_PASSWORD=your-secret ./start.sh
+```
+
+3. Publish the local WebUI port through Tailscale Serve:
+
+```bash
+tailscale serve --bg 8787
+```
+
+4. Open the HTTPS MagicDNS URL that Tailscale prints in your phone's browser.
+
+Tailscale Serve keeps WebUI on loopback while giving your tailnet an HTTPS
+MagicDNS hostname. On Linux, changing Serve configuration may require elevated
+permissions. If `tailscale serve --bg 8787` reports `Access denied: serve
+config denied`, either run it with sudo:
+
+```bash
+sudo -S -p '' tailscale serve --bg 8787
+```
+
+Or allow the supervised non-root WebUI/Hermes user to manage Tailscale:
+
+```bash
+sudo -S -p '' tailscale set --operator=$USER
+tailscale serve --bg 8787
+```
+
+**Fallback: direct tailnet IP**
+
+Use direct tailnet access when Tailscale Serve is unavailable, disabled, or not
+permitted. Because this binds WebUI beyond loopback, always enable password
+auth:
 
 ```bash
 HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=your-secret ./start.sh
 ```
 
-3. Open `http://<server-tailscale-ip>:8787` in your phone's browser
-   (find your server's Tailscale IP in the Tailscale app or with
-   `tailscale ip -4` on the server).
+Then open `http://<server-tailscale-ip>:8787` in your phone's browser (find
+your server's Tailscale IP in the Tailscale app or with `tailscale ip -4` on
+the server).
 
 That's it. Traffic is encrypted end-to-end by WireGuard, and password auth
 protects the UI at the application level. You can add it to your home screen

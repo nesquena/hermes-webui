@@ -8,6 +8,11 @@ at 1, producing "1. 1. 1." instead of "1. 2. 3.".
 
 Fix: emit value="N" on every <li> so the correct ordinal is preserved even when
 items end up in separate <ol> containers after the paragraph split.
+
+The list stage was rewritten for #6700 into a single-pass, mixed-marker parser
+(a stack keyed by indentation + marker kind). These static assertions pin the
+parts of that implementation that keep #886 working: the ordered-marker digit
+capture and the value="N" emission on <li>.
 """
 import os
 import re
@@ -21,15 +26,15 @@ def get_ui_js():
 
 class TestOrderedListNumbering:
     def _ordered_list_block(self, src: str) -> str:
-        start = src.find("function _renderListBlock(lines, ordered){")
+        start = src.find("function _renderListBlock(lines){")
         assert start != -1, "_renderListBlock helper not found in ui.js"
-        end = src.find("function _renderLists(src, ordered){", start)
+        end = src.find("function _renderLists(src){", start)
         assert end != -1, "_renderLists helper not found after _renderListBlock"
         return src[start:end]
 
     def _ordered_list_dispatch_block(self, src: str) -> str:
-        start = src.find("s=_renderLists(s,true);")
-        assert start != -1, "ordered-list dispatch not found in ui.js"
+        start = src.find("s=_renderLists(s);")
+        assert start != -1, "list dispatch not found in ui.js"
         return src[max(0, start - 260):start + 80]
 
     def test_li_value_attr_present_in_ordered_list_block(self):
@@ -42,18 +47,18 @@ class TestOrderedListNumbering:
         )
 
     def test_li_value_uses_parsed_number(self):
-        """The value= must be derived from parseInt of the captured digit, not hardcoded."""
+        """The value= must be derived from parseInt of the captured digits, not hardcoded."""
         src = get_ui_js()
         ol_block = self._ordered_list_block(src)
         assert 'parseInt' in ol_block, (
             "Ordered-list block should use parseInt() to parse the list number (#886)"
         )
 
-    def test_numMatch_variable_present(self):
-        """The ordered-list branch must still capture digits from the markdown marker."""
+    def test_marker_digit_capture_present(self):
+        """The ordered branch must still capture digits from the markdown marker."""
         src = get_ui_js()
         ol_block = self._ordered_list_block(src)
-        assert "const marker=ordered?'\\\\d+\\\\. ':'[-*+] ';" in ol_block, (
+        assert "\\d+\\." in ol_block or re.search(r"\(\\d\+\)\\\.", ol_block), (
             "Ordered-list block should keep a digit marker pattern for numbered items (#886)"
         )
 
@@ -68,18 +73,18 @@ class TestOrderedListNumbering:
         )
 
     def test_ordered_list_comment_references_issue(self):
-        """A comment near the OL fix should reference the issue (#886) or the symptom."""
+        """A comment near the list dispatch should reference #886 or the symptom."""
         src = get_ui_js()
         context = self._ordered_list_dispatch_block(src)
         has_comment = '#886' in context or '1. 1. 1.' in context or 'blank lines' in context.lower()
         assert has_comment, (
-            "Expected a comment near the OL fix explaining the blank-line issue (#886)"
+            "Expected a comment near the list dispatch explaining the blank-line issue (#886)"
         )
 
-    def test_list_without_blank_lines_unaffected(self):
-        """A compact list should still flow through the ordered-list helper."""
+    def test_lists_route_through_single_shared_helper(self):
+        """All list rendering must flow through the single-pass shared helper."""
         src = get_ui_js()
-        ol_block = self._ordered_list_dispatch_block(src)
-        assert "s=_renderLists(s,true);" in ol_block, (
-            "Ordered-list rendering should still route through the shared helper"
+        dispatch = self._ordered_list_dispatch_block(src)
+        assert "s=_renderLists(s);" in dispatch, (
+            "List rendering should route through the single-pass _renderLists helper"
         )
