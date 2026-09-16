@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1258,6 +1259,7 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 
 
 _SIDEBAR_HEAVY_METADATA_FIELDS = (
+    'skill_provenance',
     'compression_anchor_summary',
     'compression_anchor_details',
     'context_engine_state',
@@ -1274,6 +1276,24 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     for key in _SIDEBAR_HEAVY_METADATA_FIELDS:
         row.pop(key, None)
     return row
+
+
+def _normalize_skill_provenance(value) -> dict[str, int]:
+    """Keep only the persisted skill-name to positive-count mapping shape."""
+    if not isinstance(value, Mapping):
+        return {}
+    normalized = {}
+    for name, count in value.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+        ):
+            continue
+        normalized[name] = count
+    return normalized
 
 
 class Session:
@@ -1327,6 +1347,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 skill_provenance=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1432,6 +1453,7 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        self.skill_provenance = _normalize_skill_provenance(skill_provenance)
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1504,6 +1526,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
+            'skill_provenance',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1956,6 +1979,7 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
+            'skill_provenance': dict(self.skill_provenance),
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
@@ -1963,6 +1987,26 @@ class Session:
         if sidebar_metadata_only:
             _strip_sidebar_heavy_metadata(compact)
         return compact
+
+    def record_skill_usage(self, names) -> bool:
+        """Increment counts for already-resolved, nonempty skill names."""
+        current = _normalize_skill_provenance(self.skill_provenance)
+        if isinstance(names, str):
+            names = (names,)
+        try:
+            iterator = iter(names)
+        except TypeError:
+            return False
+        for name in iterator:
+            if isinstance(name, str) and name:
+                current[name] = current.get(name, 0) + 1
+        if current == self.skill_provenance:
+            return False
+        self.skill_provenance = current
+        return True
+
+    def clear_skill_usage(self) -> None:
+        self.skill_provenance = {}
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
