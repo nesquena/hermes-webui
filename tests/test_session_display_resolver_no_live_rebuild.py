@@ -118,6 +118,31 @@ def _has_prefer_cached_catalog_true_call(fn) -> bool:
     return False
 
 
+def _has_display_no_wait_flag(fn) -> bool:
+    """Static guard: display resolvers must pass wait_for_inflight_rebuild=False.
+
+    Pure display resolution is NOT routing-authoritative (its result never
+    starts a run), so it must skip the rebuild wait AND the rebuild lock
+    entirely. This pins the explicit call-site flag so a refactor cannot
+    silently hand the hot GET /api/session path back a multi-second stall
+    during an in-flight rebuild (re-review #7568, CORE 2).
+    """
+    tree = ast.parse(inspect.getsource(fn))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "_resolve_compatible_session_model_state":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "wait_for_inflight_rebuild" and isinstance(
+                keyword.value, ast.Constant
+            ):
+                return keyword.value.value is False
+    return False
+
+
 def test_resolver_signature_passes_prefer_cached_catalog():
     """Static guard: both resolvers must opt into the cache-only catalog.
 
@@ -131,3 +156,45 @@ def test_resolver_signature_passes_prefer_cached_catalog():
     assert _has_prefer_cached_catalog_true_call(
         routes._resolve_effective_session_model_provider_for_display
     )
+    # Pure-display call sites must also explicitly skip the rebuild
+    # wait/lock (routing-authoritative paths like the wakeup keep the
+    # default True — see test_prefer_cache_no_wait / repair tests).
+    assert _has_display_no_wait_flag(
+        routes._resolve_effective_session_model_for_display
+    )
+    assert _has_display_no_wait_flag(
+        routes._resolve_effective_session_model_provider_for_display
+    )
+
+
+def _has_wakeup_keeps_wait_flag(fn) -> bool:
+    """Static guard: the server-initiated wakeup must NOT opt out of the
+    rebuild wait.
+
+    ``_start_process_wakeup_turn`` resolves a model/provider that flows into
+    ``_start_chat_stream_for_session`` and starts a REAL agent run — it is
+    routing-authoritative. Unlike the pure-display resolvers it must keep
+    the default wait_for_inflight_rebuild=True (no explicit False anywhere
+    at its call site, and no wait_for_inflight_rebuild=False keyword).
+    """
+    tree = ast.parse(inspect.getsource(fn))
+    found_call = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "_resolve_compatible_session_model_state":
+            continue
+        found_call = True
+        for keyword in node.keywords:
+            if keyword.arg == "wait_for_inflight_rebuild":
+                # Any explicit value is a regression: the wakeup must keep
+                # the default True (never pass False).
+                return False
+    return found_call
+
+
+def test_wakeup_resolution_keeps_rebuild_wait():
+    """The wakeup resolver must not adopt the display no-wait contract."""
+    assert _has_wakeup_keeps_wait_flag(routes.start_session_turn)
