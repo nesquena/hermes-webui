@@ -65,7 +65,22 @@ def test_markdown_table_filter_is_gated_to_multi_row_tables_and_preserves_rows()
     messages = _read_static("messages.js")
     helper = messages[messages.index("function enhanceMarkdownTables(root)"):messages.index("function _markdownTableText")]
 
-    assert "if(bodyRows.length>=4&&table.parentElement)" in helper
+    # The gate must still require 4+ body rows AND an insertion target. The
+    # second operand widened from `table.parentElement` to
+    # `(scrollWrap||table.parentElement)` when the table gained its scroll
+    # wrapper (the filter is inserted before the wrapper, so `table.parentElement`
+    # is now the wrapper and the anchor moved). Assert the *intent* — a
+    # multi-row gate plus a destination check — instead of one exact spelling,
+    # so a legitimate change to where the filter is anchored does not read as a
+    # regression.
+    gate = re.search(
+        r"if\(bodyRows\.length>=4&&\(?\s*(?:scrollWrap\|\|)?table\.parentElement\s*\)?\)",
+        helper,
+    )
+    assert gate, (
+        "the filter must stay gated on 4+ body rows and an available insertion "
+        "target — no matching gate found in enhanceMarkdownTables"
+    )
     assert "filter.type='search'" in helper
     assert "filter.placeholder=filterLabel" in helper
     assert "filter.setAttribute('aria-label',filterLabel)" in helper
