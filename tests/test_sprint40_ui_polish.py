@@ -22,6 +22,30 @@ STYLE_CSS  = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 PANELS_JS   = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
+
+def _balanced_block(js: str, start: int) -> str:
+    """Return the brace-balanced block beginning at/after `start`.
+
+    Fixed character windows silently stop reaching their target once comments
+    are added above it — the block is still there, but the assertion is measured
+    against a byte budget instead of the code. Extract by brace matching so the
+    check follows the branch, not the prose.
+    """
+    brace = js.find("{", start)
+    assert brace != -1, "opening brace not found"
+    depth = 0
+    i = brace
+    while i < len(js):
+        ch = js[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : i + 1]
+        i += 1
+    raise AssertionError("unbalanced braces while extracting block")
+
 try:
     from api import config as _api_config
     _config_available = True
@@ -283,9 +307,13 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()
         so the chips are correct when the UI re-renders."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
-        self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        # Extract the whole `else if (sessionInProgress)` branch by brace
+        # matching instead of a fixed 1000-char window: added comments above the
+        # render call pushed it past the old cutoff, so the window was measuring
+        # prose length rather than the ordering it claims to assert.
+        idx = PANELS_JS.find('} else if (sessionInProgress) {')
+        self.assertGreater(idx, -1, "sessionInProgress branch not found")
+        block = _balanced_block(PANELS_JS, idx)
 
         pos_sync = block.find('syncTopbar()')
         pos_render = block.find('await renderSessionList()')
