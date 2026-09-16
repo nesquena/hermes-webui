@@ -812,6 +812,49 @@ def test_model_config_branch_identity_is_fail_closed_on_hostile_payloads():
     )
 
 
+def test_model_config_lineage_identity_fails_closed_on_pathologically_deep_json():
+    """A valid-but-too-deep ``model_config`` JSON payload is a boundary, not a crash.
+
+    ``json.loads`` raises ``RecursionError`` (not ``ValueError``) when the
+    nesting depth exceeds the interpreter recursion limit. Left uncaught, that
+    escaped every lineage reader (session projection, lineage metadata, and
+    stitched transcript reads) and blanked them. It must degrade to the same
+    ``'unknown'`` fail-closed state as any other untrusted payload.
+    """
+    from api.agent_sessions import (
+        _is_continuation_session,
+        _model_config_lineage_markers,
+    )
+
+    depth = 12_000
+    deep_payload = '[' * depth + ']' * depth
+    # Non-vacuous: this payload really overflows the decoder.
+    with pytest.raises(RecursionError):
+        json.loads(deep_payload)
+
+    assert _model_config_lineage_markers({'id': 'deep', 'model_config': deep_payload}) == (
+        'unknown',
+        {},
+    )
+
+    parent = {
+        'id': 'deep_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    assert not _is_continuation_session(
+        parent,
+        {
+            'id': 'deep_child',
+            'source': 'webui',
+            'started_at': 250.0,
+            'parent_session_id': 'deep_parent',
+            'model_config': deep_payload,
+        },
+    )
+
+
 def test_model_config_fork_child_stays_separate_without_session_source():
     """The review vector: fork identity only in model_config stays separate.
 

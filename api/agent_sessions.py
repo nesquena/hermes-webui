@@ -355,7 +355,10 @@ def _model_config_lineage_markers(
     if isinstance(raw, (str, bytes, bytearray)):
         try:
             parsed = json.loads(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
+            # RecursionError: a valid but pathologically deep payload exceeds
+            # the decoder's recursion limit; it is untrusted identity evidence
+            # like any other undecodable payload, never an escaping crash.
             return ('unknown', {})
     else:
         parsed = raw
