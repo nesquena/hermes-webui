@@ -11,6 +11,7 @@ import pytest
 
 import api.models as models
 import api.routes as routes
+import api.streaming as streaming
 from api.models import Session
 
 
@@ -277,6 +278,69 @@ def test_compressed_and_compressed_fork_continuations_keep_skill_usage(isolated_
     assert fork_continuation.skill_provenance == {"review": 2}
     continuation.session_id = "issue6593-compress-rotated"
     assert continuation.skill_provenance == {"review": 2}
+
+
+@pytest.mark.parametrize("is_fork", [False, True])
+def test_automatic_compression_rotation_preserves_skill_usage_and_lineage(tmp_path, monkeypatch, is_fork):
+    import api.profiles as profiles
+    from tests.test_compression_snapshot_revision import _install_streaming_session
+
+    old_sid = f"issue6593-auto-{'fork' if is_fork else 'direct'}"
+    new_sid = f"{old_sid}-continued"
+    stream_id = f"stream-{old_sid}"
+    session, _events = _install_streaming_session(
+        monkeypatch,
+        tmp_path,
+        sid=old_sid,
+        stream_id=stream_id,
+        messages=[{"role": "user", "content": "before compression", "timestamp": 1.0}],
+        context_messages=[],
+    )
+    session.profile = "test-profile"
+    session.session_source = "fork" if is_fork else "webui"
+    session.parent_session_id = "fork-parent" if is_fork else None
+    session.skill_provenance = {"review": 2}
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
+
+    class CompressingAgent:
+        def __init__(self, session_id=None, **_kwargs):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            self.session_id = new_sid
+            return {
+                "completed": True,
+                "final_response": "continued",
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "continued"},
+                ],
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: CompressingAgent)
+    streaming._run_agent_streaming(
+        session_id=old_sid,
+        msg_text="continue after compression",
+        model="test-model",
+        workspace=str(tmp_path),
+        stream_id=stream_id,
+        attachments=[],
+    )
+
+    snapshot = Session.load(old_sid)
+    continuation = Session.load(new_sid)
+    assert snapshot is not None and snapshot.pre_compression_snapshot is True
+    assert snapshot.skill_provenance == {"review": 2}
+    assert continuation is not None and continuation.pre_compression_snapshot is False
+    assert continuation.parent_session_id == old_sid
+    assert continuation.skill_provenance == {"review": 2}
+    assert streaming.SESSIONS.get(new_sid) is session
+    assert streaming.SESSIONS.get(old_sid) is not session
 
 
 def test_clear_resets_skill_usage_without_recovery_resurrection(isolated_sessions, monkeypatch):
