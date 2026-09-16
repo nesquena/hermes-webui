@@ -1292,7 +1292,17 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 }
 
 let _newSessionInFlight=null;
+// Profile-switch generation that owns the current _newSessionInFlight promise
+// (null = no switch context). Used to stop a caller under a different generation
+// from adopting a session created for an older profile.
+let _newSessionInFlightGen=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
+// Sids whose message body failed to load during the most recent loadSession().
+// Cleared when a load for that sid starts, set when its message fetch fails, and
+// read by loadSession()'s return value so a partially-loaded conversation is not
+// reported as a successful load.
+const _loadMessagesFailedSids=new Set();
+function _loadMessagesFailedForSid(sid){ return _loadMessagesFailedSids.has(sid); }
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
 function _rememberEmptyComposerModelOverride(model, modelProvider){
@@ -1393,11 +1403,30 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // A shared in-flight promise must not be handed to a caller working under a
+  // different profile generation. During a profile switch the cookie and the
+  // active profile have already changed while an earlier newSession() may still
+  // be running for the PREVIOUS profile; returning that promise would let the
+  // caller treat a session created for the old profile as its own result (the
+  // "rapid switches retain a session created for an older profile" case).
+  // Callers may pass the generation they belong to; the cached promise is reused
+  // only when it belongs to the same one.
+  const callerGen = (options && typeof options.profileSwitchGen === 'number')
+    ? options.profileSwitchGen
+    : null;
   if(_newSessionInFlight){
-    if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
-    return _newSessionInFlight;
+    const _inFlightGen = (typeof _newSessionInFlightGen === 'number') ? _newSessionInFlightGen : null;
+    const _sameOwner = (callerGen === null && _inFlightGen === null) || callerGen === _inFlightGen;
+    if(_sameOwner){
+      if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
+      return _newSessionInFlight;
+    }
+    // Different owner: await the previous run so it cannot interleave with the
+    // one we are about to start, then fall through and create ours.
+    try{ await _newSessionInFlight; }catch(_){}
   }
   _setNewSessionPending(true);
+  _newSessionInFlightGen = callerGen;
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
@@ -1585,6 +1614,7 @@ async function newSession(flash, options={}){
     return await _newSessionInFlight;
   }finally{
     _newSessionInFlight=null;
+    _newSessionInFlightGen=null;
     _setNewSessionPending(false);
   }
 }
@@ -1743,6 +1773,9 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
+  // This load owns the outcome for `sid`: drop any failure recorded by a
+  // previous attempt so a now-successful load is not reported as failed.
+  if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.delete(sid);
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
@@ -2172,6 +2205,7 @@ async function loadSession(sid){
         return;
       }
       S.messages=inflightMessages;
+      if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     }
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
@@ -2286,6 +2320,7 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
@@ -2447,13 +2482,14 @@ async function loadSession(sid){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
   // Callers that need to distinguish a real load from a swallowed failure (e.g.
-  // the profile-switch resume path) rely on this result. Reaching this tail with
-  // S.session pointing at the requested session is the success condition —
-  // every failure/abort branch above returns earlier without it, and those
-  // paths intentionally stay falsy (undefined) rather than growing a return
-  // value each. Verified against the shipped failure paths: metadata failures,
-  // auth/stale exits, and message-load failures all `return;` before here.
-  return !!(S.session && S.session.session_id === sid);
+  // the profile-switch resume path) rely on this result. S.session pointing at
+  // the requested session is necessary but NOT sufficient: the message body can
+  // still have failed to load (network error, server failure, SSE drop), and
+  // both message paths above keep a usable fallback (inflight projection, or the
+  // "Failed to load messages" notice) so the load continues to the tail. Report
+  // that as a failure so the caller can run its fresh-session rollback instead
+  // of treating a half-loaded conversation as a successful resume.
+  return !!(S.session && S.session.session_id === sid) && !_loadMessagesFailedForSid(sid);
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────

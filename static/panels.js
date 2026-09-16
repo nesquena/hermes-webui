@@ -7278,7 +7278,9 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       const resumed = await _resumeRecentSessionForProfileSwitch(_switchGen, workspaceVisible);
       if (!resumed) {
-        await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+        // Pass the switch generation so a newSession() still in flight for an
+        // older profile cannot be adopted as this switch's result.
+        await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, profileSwitchGen: _switchGen});
       }
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
