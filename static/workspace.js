@@ -839,7 +839,10 @@ function navigateUp(){
 
 // File extension sets for preview routing (must match server-side sets)
 const IMAGE_EXTS  = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
-const MD_EXTS     = new Set(['.md','.markdown','.mdown']);
+// Same compatibility set as api/config.py (MD_EXTS + MIME_MAP) and static/ui.js
+// (_MD_EXTS): the /api/media session-token authorization is MIME-typed, so a
+// suffix the server does not map is refused even when it is previewed here.
+const MD_EXTS     = new Set(['.md','.markdown','.mdown','.mkd','.mkdn']);
 const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);

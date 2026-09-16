@@ -2620,6 +2620,12 @@ const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 const _CSV_EXTS=/\.csv$/i;
+// One deliberate Markdown compatibility set, kept in step with api/config.py
+// (MD_EXTS + MIME_MAP) and the workspace preview router (static/workspace.js
+// MD_EXTS). The session-token authorization for /api/media is MIME-typed, so a
+// suffix only one of these layers knows about is either refused or never
+// previewed.
+const _MD_EXTS=/\.(md|mkd|mkdn|markdown|mdown)$/i;
 const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 // ── Media playback speed controls ─────────────────────────────────────────
 const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
@@ -2812,6 +2818,9 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   }
   if(_HTML_EXTS.test(ref)){
     return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
+  }
+  if(_MD_EXTS.test(ref)){
+    return `<div class="md-inline-load" data-path="${esc(ref)}"><span class="md-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('md_loading'):'Loading')}...</div>`;
   }
   const fname=esc(ref.split('/').pop()||ref);
   if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
@@ -19622,6 +19631,7 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  loadMarkdownInline(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
@@ -20201,6 +20211,93 @@ function loadHtmlInline(container){
         const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
+  });
+}
+
+const MD_MAX_SIZE = 256 * 1024;
+// A preview can reference another .md, and the post-fetch pass below re-runs
+// the enhancement pipeline on the inserted subtree — so the chain needs a base
+// case: render the referenced file once, then collapse anything nested deeper
+// into a download link instead of following it again.
+const MD_INLINE_MAX_DEPTH = 1;
+
+function _mdInlineDepth(el){
+  let node = el && el.parentNode;
+  while (node) {
+    if (typeof node.getAttribute === 'function') {
+      const depth = node.getAttribute('data-md-depth');
+      if (depth != null && depth !== '') return (parseInt(depth, 10) || 0) + 1;
+    }
+    node = node.parentNode;
+  }
+  return 0;
+}
+
+// A pending markdown fetch must not paint into a subtree another render now
+// owns: a re-render wipes #msgInner (the loader node is detached) and a session
+// switch swaps the transcript. Writing outerHTML in either case leaks the old
+// session's artifact into the DOM the new one renders into. Nodes that were
+// already detached when the fetch started (batch build, then insert) are not
+// treated as stale — only a target that LOST its connection is.
+function _mdInlineStale(el, mediaSessionId, connectedAtDispatch){
+  if (!el) return true;
+  if (connectedAtDispatch && (el.isConnected === false || el.parentNode === null)) return true;
+  const current = (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+  return current !== mediaSessionId;
+}
+
+// Depth cap: rewrite the nested markdown references as plain download links so
+// the enhancement pass has nothing left to follow.
+function _mdInlineDropNestedLoaders(node){
+  if (!node || typeof node.querySelectorAll !== 'function') return;
+  node.querySelectorAll('.md-inline-load').forEach(nested => {
+    const nestedPath = (nested && nested.dataset) ? nested.dataset.path : '';
+    const name = (nestedPath || '').split('/').pop() || nestedPath;
+    const url = 'api/media?path=' + encodeURIComponent(nestedPath) + _mediaSessionQuery() + _mediaSnapQuery(nested) + '&download=1';
+    nested.outerHTML = `<a class="msg-media-link" href="${esc(url)}" download="${esc(name)}">📎 ${esc(name)}</a>`;
+  });
+}
+
+function loadMarkdownInline(container){
+  const root = container || document;
+  root.querySelectorAll('.md-inline-load:not([data-loaded])').forEach(el => {
+    el.setAttribute('data-loaded', '1');
+    const path = el.dataset.path;
+    const fname = path.split('/').pop() || path;
+    const mediaSessionId = (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+    const connectedAtDispatch = el.isConnected !== false;
+    // Historical previews carry the digest of the bytes the message emitted
+    // (_stampMediaSnapshots); passing it through keeps an in-place overwrite of
+    // the file from rewriting an old preview.
+    const snapQuery = _mediaSnapQuery(el);
+    const publicMediaUrl = 'api/media?path=' + encodeURIComponent(path);
+    const sessionQuery = mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '';
+    const mediaUrl = publicMediaUrl + sessionQuery + snapQuery;
+    const downloadUrl = publicMediaUrl + sessionQuery + '&download=1' + snapQuery;
+    const depth = _mdInlineDepth(el);
+    const fallback = (key, literal) => {
+      if (_mdInlineStale(el, mediaSessionId, connectedAtDispatch)) return;
+      el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t(key) : literal)}</span></div>`;
+    };
+    fetch(mediaUrl)
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(text => {
+        if (text.length > MD_MAX_SIZE) { fallback('md_too_large', 'File too large for preview'); return; }
+        if (_mdInlineStale(el, mediaSessionId, connectedAtDispatch)) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'md-inline-wrap';
+        wrap.setAttribute('data-md-depth', String(depth));
+        wrap.innerHTML = `<div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(typeof t === 'function' ? t('md_download') : 'Download')}</a></div><div class="md-inline-content">${renderMd(text)}</div>`;
+        // Insert the resolved preview as a node and keep the reference: the
+        // synchronous postProcessRenderedMessages() pass that owns this subtree
+        // already finished before the fetch settled, so without re-running the
+        // pipeline against the new node the preview keeps inert code blocks, no
+        // copy buttons and un-hydrated nested media/mermaid/katex/tree views.
+        el.replaceWith(wrap);
+        if (depth >= MD_INLINE_MAX_DEPTH) _mdInlineDropNestedLoaders(wrap);
+        postProcessRenderedMessages(wrap);
+      })
+      .catch(() => { fallback('md_error', 'Error loading markdown'); });
   });
 }
 

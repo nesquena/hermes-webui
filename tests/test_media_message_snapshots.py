@@ -22,6 +22,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.js_source_extract import extract_function
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -662,6 +664,7 @@ def _run_stamp(html, snaps):
         result = subprocess.run(
             ["node", tfname, html, json.dumps(snaps)],
             capture_output=True, text=True, timeout=30,
+            env=_node_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(f"node error: {result.stderr}")
@@ -753,8 +756,8 @@ def test_frontend_stamp_handles_file_url_forms():
 
 def test_frontend_stamp_source_invariants():
     """Non-vacuous source checks: the helper must be called at BOTH settled
-    render sites with the message's _media_snapshots, and lazy loaders must
-    consume data-snap."""
+    render sites with the message's _media_snapshots, and EVERY lazy loader
+    must consume the digest it was stamped with."""
     src = open(ROOT / "static" / "ui.js", encoding="utf-8").read()
     # Main transcript path and transparent ordered segments must stamp.
     assert "_stampMediaSnapshots(bodyHtml, m._media_snapshots)" in src
@@ -766,6 +769,30 @@ def test_frontend_stamp_source_invariants():
     # scene render chain is exercised by harness-extracted tests that would
     # break on new helper references — snapshot support covers the main
     # transcript + transparent segments, which are the comparison surface).
-    # Lazy loaders must read the stamped digest.
-    assert "_mediaSnapQuery(el)" in src
+    # Lazy loaders must read the stamped digest — checked per loader, inside the
+    # loader's OWN body. The file-wide form of this check ("_mediaSnapQuery(el)"
+    # appears somewhere in ui.js) stayed green while loadMarkdownInline()
+    # dropped the snapshot, because the sibling loaders satisfied it.
+    for loader in (
+        "loadDiffInline",
+        "loadCsvInline",
+        "loadExcalidrawInline",
+        "loadPdfInline",
+        "loadHtmlInline",
+        "loadMarkdownInline",
+    ):
+        body = extract_function(src, loader)
+        assert "_mediaSnapQuery(el)" in body, (
+            f"{loader}() must consume the data-snap digest stamped on its node"
+        )
     assert "el.dataset.snap" in src
+
+
+def _node_env():
+    """Minimal explicit environment for the node harness.
+
+    Copying the whole process environment would hand ambient credentials to
+    PR-authored node code, which the mandatory sandbox gate refuses to run.
+    """
+    import os
+    return {key: os.environ[key] for key in ("PATH", "NODE_PATH") if key in os.environ}
