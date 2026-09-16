@@ -996,7 +996,14 @@ MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
-MD_EXTS = {".md", ".markdown", ".mdown"}
+# One deliberate Markdown compatibility set, shared by every layer that has to
+# agree on what counts as Markdown: this declaration, MIME_MAP below (which the
+# /api/media session-token authorization matches against), the workspace
+# preview router (static/workspace.js MD_EXTS) and the chat inline detector
+# (static/ui.js _MD_EXTS). The previous split — .md/.markdown/.mdown here and
+# .md/.mkd/.mkdn in the chat/MIME layers — meant a `.markdown` file the
+# workspace route offered to preview was refused by the authorization path.
+MD_EXTS = {".md", ".markdown", ".mdown", ".mkd", ".mkdn"}
 CODE_EXTS = {
     ".py",
     ".js",
@@ -1037,7 +1044,12 @@ MIME_MAP = {
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",
+    # Every suffix in MD_EXTS above: the session-token media authorization is
+    # MIME-typed, so a Markdown extension missing here is silently denied even
+    # though the frontend would preview it.
     ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".mdown": "text/markdown",
     ".mkd": "text/markdown",
     ".mkdn": "text/markdown",
     ".xls": "application/vnd.ms-excel",
