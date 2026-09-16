@@ -962,7 +962,9 @@ async function main() {
 
 def test_node_dismiss_409_run_unavailable_different_head_renders_successor():
     """A different queue head returned by an authoritative re-fetch must be
-    rendered and usable, while the dismissed tuple keeps its own marker."""
+    rendered and usable. The captured tuple's marker is cleared first: seeing a
+    different head never proves the captured tuple settled, so it must not stay
+    suppressed if the queue later rotates it back to the head."""
     out = _run_node_scenario(r'''
 async function main() {
   showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
@@ -980,7 +982,7 @@ async function main() {
   assertTrue(cardVisible(), "the live successor head is rendered");
   assertEq(els.approvalDesc.textContent, "cmd B", "the successor head owns the card");
   assertEq(els.approvalBtnAlways.disabled, false, "successor controls enabled");
-  assertTrue(_isApprovalDismissed("sidA", "a1"), "the dismissed tuple keeps its marker");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "the captured marker is cleared before rendering the successor");
   assertTrue(!_isApprovalDismissed("sidA", "b2"), "the successor is never suppressed");
   assertEq(_approvalResponding, null, "response owner released");
   apiImpl = async () => ({ ok: true });
@@ -1027,3 +1029,107 @@ async function main() {
 }
 ''')
     assert out["calls"] == 3
+
+
+ROTATION_SCENARIO = r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: { approval_id: "b2", description: "cmd B" }, pending_count: 2 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "successor B is rendered");
+  assertEq(els.approvalDesc.textContent, "cmd B", "B owns the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "the rotation cleared A's marker");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls[2].body.approval_id, "b2", "B is denied by its own id");
+  assertTrue(!cardVisible(), "B settles hidden");
+  showApprovalForSession("sidA", { approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, 1);
+  assertTrue(cardVisible(), "A rotates back into view instead of being suppressed");
+  assertEq(els.approvalDesc.textContent, "cmd A", "A owns the card again");
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.approvalId, "a1", "A is the displayed owner");
+  assertEq(els.approvalBtnDeny.disabled, false, "A is actionable again");
+  apiImpl = async () => ({ ok: true });
+  const before = apiCalls.length;
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, before + 1, "exactly one deny emitted for A");
+  assertEq(apiCalls[before].body.approval_id, "a1", "A is denied by its own id");
+  assertEq(apiCalls[before].body.run_id, "r1", "A is denied with its original run");
+  assertEq(apiCalls[before].body.mirror_token, "t1", "A is denied with its original mirror");
+  assertTrue(!cardVisible(), "A settles hidden once its deny is accepted");
+  return { calls: apiCalls.length };
+}
+'''
+
+
+def test_node_dismiss_409_run_unavailable_queue_rotation_keeps_captured_actionable():
+    """Queue rotation regression: a successor head B with pending_count 2 is
+    rendered and settled, then A rotates back to the head. Seeing B never
+    proved A settled, so A must come back visible, enabled and deniable with
+    its own original run/mirror tuple."""
+    out = _run_node_scenario(ROTATION_SCENARIO)
+    assert out["calls"] == 4
+
+
+MALFORMED_SCENARIO = r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: __PAYLOAD__, pending_count: 2 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "a malformed pending restores the captured card");
+  assertEq(els.approvalDesc.textContent, "cmd A", "the captured card owns the display again");
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.approvalId, "a1", "the captured owner is restored");
+  assertEq(els.approvalBtnDeny.disabled, false, "the restored card stays actionable");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "the captured tuple is not left settled or suppressed");
+  assertEq(_approvalResponding, null, "response owner released");
+  assertEq(apiCalls.length, 2, "deny POST + pending re-fetch only");
+  assertTrue(toasts.length >= 1, "restore toast with retry shown");
+  return { visible: cardVisible(), desc: els.approvalDesc.textContent };
+}
+'''
+
+MALFORMED_PENDING_SHAPES = [
+    ("false", "false"),
+    ("string", '"cmd B"'),
+    ("empty_array", "[]"),
+    ("array_with_head", '[{ "approval_id": "b2", "description": "cmd B" }]'),
+    ("empty_object", "{}"),
+    ("blank_approval_id", '{ "approval_id": "", "description": "cmd B" }'),
+    ("null_approval_id", '{ "approval_id": null, "description": "cmd B" }'),
+]
+
+
+def test_node_dismiss_409_run_unavailable_malformed_pending_restores_card():
+    """Any 200 whose `pending` is neither an explicit null nor a non-array
+    object with an actionable approval identity is not authoritative: it must
+    restore the captured card instead of being read as "settled" (keeping it
+    hidden) or rendered as a head that cannot be denied."""
+    failures = []
+    for label, payload in MALFORMED_PENDING_SHAPES:
+        try:
+            out = _run_node_scenario(MALFORMED_SCENARIO.replace("__PAYLOAD__", payload))
+        except AssertionError as exc:  # noqa: PERF203 - small fixed list
+            failures.append(f"{label} ({payload}): {exc}")
+            continue
+        if out["visible"] is not True or out["desc"] != "cmd A":
+            failures.append(f"{label} ({payload}): restored state {out!r}")
+    assert not failures, "malformed `pending` shapes not handled fail-closed:\n" + "\n".join(failures)
