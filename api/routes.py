@@ -6697,7 +6697,16 @@ def _repair_foreign_session_model_provider(
         return resolved_provider
 
     try:
-        catalog = get_available_models(prefer_cache=True)
+        # ROUTING-AUTHORITATIVE: this catalog lookup decides which backend a
+        # chat turn is sent to. It MUST NOT skip an in-flight rebuild
+        # (wait_for_inflight_rebuild stays True): during a rebuild the
+        # authoritative owner may not be published yet, and serving a stale
+        # snapshot here can silently route a poisoned session to the wrong
+        # provider. Display-only callers opt out via
+        # wait_for_inflight_rebuild=False; this one must not.
+        catalog = get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=True
+        )
     except Exception:
         return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
@@ -7551,15 +7560,29 @@ def _resolve_compatible_session_model_state(
         import inspect as _inspect
 
         try:
-            _gam_accepts_prefer_cache = (
-                "prefer_cache" in _inspect.signature(get_available_models).parameters
-            )
+            _gam_params = _inspect.signature(get_available_models).parameters
+            _gam_accepts_prefer_cache = "prefer_cache" in _gam_params
+            _gam_accepts_rebuild_wait = "wait_for_inflight_rebuild" in _gam_params
         except (TypeError, ValueError):
             # Builtins / C-callables can refuse introspection; assume the
             # zero-arg stub shape in that case.
             _gam_accepts_prefer_cache = False
+            _gam_accepts_rebuild_wait = False
         if _gam_accepts_prefer_cache:
-            catalog = get_available_models(prefer_cache=True)
+            # Display/wakeup-only resolution: never wait for an in-flight
+            # rebuild — the display contract is "warm/disk cache or minimal
+            # catalog, immediately". (Routing-authoritative callers keep the
+            # default wait_for_inflight_rebuild=True; see
+            # get_available_models docstring.)
+            if _gam_accepts_rebuild_wait:
+                catalog = get_available_models(
+                    prefer_cache=True, wait_for_inflight_rebuild=False
+                )
+            else:
+                # Stub/monkeypatched get_available_models without the new
+                # parameter (test doubles): fall back to the prefer_cache
+                # contract it does know.
+                catalog = get_available_models(prefer_cache=True)
         else:
             catalog = get_available_models()
     else:
