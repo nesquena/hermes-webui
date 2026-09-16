@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._composer_metrics import CONFIG_LARGE
+
 ROOT = Path(__file__).parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
@@ -410,43 +412,42 @@ def test_resize_observer_installed_on_composer():
 
 
 def _run_composer_single_row_fixture(*, value: str, previous_value: str,
-                                     offset_height: int, content_height: int = 48):
+                                     offset_height: int, content_height: int | None = None,
+                                     config=None):
     """Run the REAL autoResize() body against a faithful textarea stub whose
-    ``getComputedStyle`` returns the composer's actual computed styles, and report
-    the observable resize behaviour (height writes, settled height, repins).
+    ``getComputedStyle`` returns a real composer's computed styles, and report the
+    observable resize behaviour (height writes, settled height, repins).
 
-    ``content_height`` is the height the content WANTS (one row = 48px); a real
+    The configuration (and therefore every dimension) is derived from
+    ``static/style.css`` by ``tests/_composer_metrics.py`` instead of being typed
+    in here: the composer's box depends on the appearance font-size setting, and
+    hardcoding one configuration is exactly how the first revision of this test
+    encoded the 18px ``data-font-size=large`` composer as "stock".
+
+    ``content_height`` is the height the content WANTS (default: one row); a real
     textarea reports its box height in scrollHeight while the box is taller than
     the content and the content height once the box collapses to ``height:'auto'``.
     """
     node = shutil.which("node")
     if not node:  # pragma: no cover
         pytest.skip("node not available")
+    config = CONFIG_LARGE if config is None else config
+    if content_height is None:
+        content_height = config.offset_height
     body = _autoresize_body()
-    # The composer's real computed styles (textarea#msg in static/style.css):
-    # line-height 1.65 -> 29.7px, padding 12px/6px, no border, min-height 44px. The
-    # natural ONE-ROW border box is therefore 29.7+12+6 = 47.7 -> 48px, i.e. taller
-    # than the 44px CSS min-height.
-    computed = {
-        "minHeight": "44px",
-        "lineHeight": "29.7px",
-        "paddingTop": "12px",
-        "paddingBottom": "6px",
-        "borderTopWidth": "0px",
-        "borderBottomWidth": "0px",
-    }
     harness = textwrap.dedent(
         """
         let _composerAutoResizeRaf = 0;
         let _composerLastResizeValue = %(previous_value)r;
         let writes = 0, height = %(offset_height)s, repins = 0;
+        const NATURAL_ROW = %(natural_row)s;
         const CONTENT_H = %(content_height)s;
         const msg = {
           value: %(value)r,
           get offsetHeight() { return height; },
-          get scrollHeight() { return height > 48 ? height : CONTENT_H; },
+          get scrollHeight() { return height > NATURAL_ROW ? height : CONTENT_H; },
           style: {
-            set height(value) { writes += 1; height = value === 'auto' ? 48 : parseInt(value, 10); },
+            set height(value) { writes += 1; height = value === 'auto' ? NATURAL_ROW : parseInt(value, 10); },
             get height() { return height + 'px'; },
           },
         };
@@ -464,8 +465,9 @@ def _run_composer_single_row_fixture(*, value: str, previous_value: str,
         "previous_value": previous_value,
         "offset_height": offset_height,
         "content_height": content_height,
+        "natural_row": config.offset_height,
         "value": value,
-        "computed": json.dumps(computed),
+        "computed": json.dumps(config.computed),
         "autoresize": body,
     }
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
@@ -474,19 +476,23 @@ def _run_composer_single_row_fixture(*, value: str, previous_value: str,
 
 
 def test_single_line_growth_skips_the_height_round_trip():
-    # The one-row fast path must actually be REACHABLE. It gates on el.offsetHeight
-    # against the min-height ceiling, and the composer's natural one-row height
-    # (line-height + vertical padding + borders = 48px) is taller than the 44px CSS
-    # min-height - so under the min-height-only ceiling every append at rest missed
-    # the skip and paid the height:'auto' round trip, whose scrollHeight read forces
-    # a synchronous full-document reflow (typing lag that grows with the rendered
+    # The one-row fast path must be REACHABLE. It gates on el.offsetHeight against
+    # the min-height ceiling, and the composer's natural one-row height
+    # (line-height + vertical padding + borders) is 47.7px in the reported
+    # configuration (the 18px `data-font-size=large` composer) against a pre-fix
+    # ceiling of ceil(44px)+1 = 45px - so every append at rest missed the skip and
+    # paid the height:'auto' round trip, whose scrollHeight read forces a
+    # synchronous full-document reflow (typing lag that grows with the rendered
     # transcript). Behaviour, not source: the fixture runs the real autoResize().
-    out = _run_composer_single_row_fixture(value="a", previous_value="", offset_height=48)
-    assert out == {"writes": 0, "height": 48, "lastValue": "a", "repins": 0}, out
+    one_row = CONFIG_LARGE.offset_height
+    out = _run_composer_single_row_fixture(value="a", previous_value="", offset_height=one_row)
+    assert out == {"writes": 0, "height": one_row, "lastValue": "a", "repins": 0}, out
     # ...and the widened ceiling stays BOUNDED: an oversized composer is far above
     # one row, so it still remeasures back down (the #5514 shrink-back invariant).
-    oversized = _run_composer_single_row_fixture(value="a", previous_value="", offset_height=176)
-    assert oversized == {"writes": 2, "height": 48, "lastValue": "a", "repins": 0}, oversized
+    oversized = _run_composer_single_row_fixture(
+        value="a", previous_value="", offset_height=CONFIG_LARGE.oversized_box
+    )
+    assert oversized == {"writes": 2, "height": one_row, "lastValue": "a", "repins": 0}, oversized
 # ---------------------------------------------------------------------------
 
 def _run(scenario):
