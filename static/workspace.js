@@ -1150,7 +1150,17 @@ function _applyPreviewFontSize(px){
   // into a stored user preference: doing so pinned the global setting to
   // whatever the mapping resolved to at that moment, so a later change of the
   // app-wide font size no longer reached previews.
-  document.documentElement.style.setProperty('--preview-font-size', px + 'px');
+  //
+  // Writing the variable inline has the same pinning effect even without
+  // storage: an inline custom property on <html> outranks the
+  // `:root[data-font-size="…"]{--preview-font-size:…}` rule, so the first
+  // preview open froze the inherited size and later app-font changes stopped
+  // reaching previews. Only an explicit user zoom (a stored value) may override
+  // the stylesheet; otherwise drop the inline property and let the
+  // data-font-size mapping keep driving the variable.
+  const root = document.documentElement;
+  if (_readPreviewFontSize() !== null) root.style.setProperty('--preview-font-size', px + 'px');
+  else root.style.removeProperty('--preview-font-size');
   const label = document.getElementById('previewFontSizeLabel');
   if(label) label.textContent = String(px);
 }
