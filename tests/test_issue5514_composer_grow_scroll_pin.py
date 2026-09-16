@@ -409,27 +409,84 @@ def test_resize_observer_installed_on_composer():
     assert "can't strand" in BOOT_JS
 
 
-def test_single_line_growth_skips_the_height_round_trip():
+def _run_composer_single_row_fixture(*, value: str, previous_value: str,
+                                     offset_height: int, content_height: int = 48):
+    """Run the REAL autoResize() body against a faithful textarea stub whose
+    ``getComputedStyle`` returns the composer's actual computed styles, and report
+    the observable resize behaviour (height writes, settled height, repins).
+
+    ``content_height`` is the height the content WANTS (one row = 48px); a real
+    textarea reports its box height in scrollHeight while the box is taller than
+    the content and the content height once the box collapses to ``height:'auto'``.
+    """
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
     body = _autoresize_body()
-    assert "let _composerLastResizeValue='';" in MESSAGES_JS
-    assert "const _isAppendOnly=_nextValue.length>_composerLastResizeValue.length&&_nextValue.startsWith(_composerLastResizeValue);" in body
-    assert "const _fitsCurrentHeight=el.scrollHeight<=el.offsetHeight;" in body
-    assert "const _minHeightRaw=_composerStyle?_composerStyle.minHeight:'';" in body
-    assert "const _minHeight=_composerPx(_minHeightRaw);" in body
-    # The strict finite-pixel guard rejects a percentage/auto/calc min-height so a
-    # bogus parseFloat("50%")===50 can't wrongly enable the fast path (Codex #6349 re-gate).
-    assert "parseFloat(getComputedStyle(el).minHeight)" not in body  # old lax parse is gone
-    # The single-row ceiling ALSO accepts the composer's natural one-row height
-    # (line-height + vertical padding + borders ~48px). Comparing offsetHeight
-    # against the 44px CSS min-height alone was unreachable in a real browser,
-    # which left this skip dead and made every append keystroke pay the height
-    # round trip (a synchronous full-document layout => typing lag that grows with
-    # the rendered transcript). See
-    # tests/test_long_session_composer_typing_latency.py.
-    assert "const _rowCeiling=Number.isFinite(_naturalRowHeight)&&Number.isFinite(_minHeight)?Math.max(_minHeight,_naturalRowHeight):_minHeight;" in body
-    assert "const _isAtMinimumHeight=Number.isFinite(_rowCeiling)&&el.offsetHeight<=Math.ceil(_rowCeiling)+1;" in body
-    assert "if(_isAppendOnly&&_fitsCurrentHeight&&_isAtMinimumHeight){" in body
-    assert "el.style.height='auto'" in body
+    # The composer's real computed styles (textarea#msg in static/style.css):
+    # line-height 1.65 -> 29.7px, padding 12px/6px, no border, min-height 44px. The
+    # natural ONE-ROW border box is therefore 29.7+12+6 = 47.7 -> 48px, i.e. taller
+    # than the 44px CSS min-height.
+    computed = {
+        "minHeight": "44px",
+        "lineHeight": "29.7px",
+        "paddingTop": "12px",
+        "paddingBottom": "6px",
+        "borderTopWidth": "0px",
+        "borderBottomWidth": "0px",
+    }
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = %(previous_value)r;
+        let writes = 0, height = %(offset_height)s, repins = 0;
+        const CONTENT_H = %(content_height)s;
+        const msg = {
+          value: %(value)r,
+          get offsetHeight() { return height; },
+          get scrollHeight() { return height > 48 ? height : CONTENT_H; },
+          style: {
+            set height(value) { writes += 1; height = value === 'auto' ? 48 : parseInt(value, 10); },
+            get height() { return height + 'px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        const COMPUTED = %(computed)s;
+        function getComputedStyle() { return COMPUTED; }
+        function updateSendBtn() {}
+        function _repinMessagesAfterComposerResize() { repins += 1; }
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, height, lastValue: _composerLastResizeValue, repins }));
+        """
+    ) % {
+        "previous_value": previous_value,
+        "offset_height": offset_height,
+        "content_height": content_height,
+        "value": value,
+        "computed": json.dumps(computed),
+        "autoresize": body,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+def test_single_line_growth_skips_the_height_round_trip():
+    # The one-row fast path must actually be REACHABLE. It gates on el.offsetHeight
+    # against the min-height ceiling, and the composer's natural one-row height
+    # (line-height + vertical padding + borders = 48px) is taller than the 44px CSS
+    # min-height - so under the min-height-only ceiling every append at rest missed
+    # the skip and paid the height:'auto' round trip, whose scrollHeight read forces
+    # a synchronous full-document reflow (typing lag that grows with the rendered
+    # transcript). Behaviour, not source: the fixture runs the real autoResize().
+    out = _run_composer_single_row_fixture(value="a", previous_value="", offset_height=48)
+    assert out == {"writes": 0, "height": 48, "lastValue": "a", "repins": 0}, out
+    # ...and the widened ceiling stays BOUNDED: an oversized composer is far above
+    # one row, so it still remeasures back down (the #5514 shrink-back invariant).
+    oversized = _run_composer_single_row_fixture(value="a", previous_value="", offset_height=176)
+    assert oversized == {"writes": 2, "height": 48, "lastValue": "a", "repins": 0}, oversized
 # ---------------------------------------------------------------------------
 
 def _run(scenario):

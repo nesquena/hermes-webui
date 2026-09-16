@@ -190,16 +190,20 @@ def test_percentage_line_height_fails_closed():
     assert out["writes"] == 2, f"percentage line-height must fail closed; got {out}"
 
 
-def test_fix_is_pinned_in_source():
-    """Pin the guard shape so a refactor cannot silently drop the natural-row
-    ceiling (and with it the typing fix) again."""
-    body = _autoresize_body()
-    assert "const _composerPx=(raw)=>" in body
-    assert "const _minHeightRaw=_composerStyle?_composerStyle.minHeight:'';" in body
-    assert "const _minHeight=_composerPx(_minHeightRaw);" in body
-    assert "_lineHeight+(_composerPx(_composerStyle.paddingTop)||0)" in body
-    assert "const _rowCeiling=Number.isFinite(_naturalRowHeight)&&Number.isFinite(_minHeight)?Math.max(_minHeight,_naturalRowHeight):_minHeight;" in body
-    assert "const _isAtMinimumHeight=Number.isFinite(_rowCeiling)&&el.offsetHeight<=Math.ceil(_rowCeiling)+1;" in body
-    assert "if(_isAppendOnly&&_fitsCurrentHeight&&_isAtMinimumHeight){" in body
-    # The strict px gate is still in force (no lax parseFloat of a percentage).
-    assert "parseFloat(getComputedStyle(el).minHeight)" not in body
+def test_natural_row_skip_survives_every_append_of_a_typed_word():
+    """The skip must hold for EVERY append keystroke, not just the first, and must
+    keep holding as the value grows (the real typing loop: '' -> 'h' -> 'he' ...).
+
+    This is the regression the harness above exists for: pre-fix the ceiling was
+    the 44px CSS min-height, so a 48px box remeasured on all 5 keystrokes.
+    """
+    previous = ""
+    for letter in "hello":
+        value = previous + letter
+        out = _run_autoresize(
+            value=value, previous_value=previous, box_height=NATURAL_ROW,
+            content_height=NATURAL_ROW,
+        )
+        assert out["writes"] == 0, f"append {value!r} must skip; got {out}"
+        assert out["lastValue"] == value, out
+        previous = value
