@@ -235,9 +235,9 @@ def _run_git(args, cwd, timeout=10):
     surface actionable git error messages instead of empty strings.
 
     The child gets a scrubbed environment (``clean_git_env``). Update checks run
-    unattended, and on a desktop session ``SSH_ASKPASS`` is a GUI helper, so a
-    remote that demands credentials must fail closed instead of opening a
-    credential dialog the user never asked for.
+    unattended, so inherited desktop askpass helpers must not turn a remote 401
+    into a credential dialog the user never asked for. Explicitly configured Git
+    credential helpers remain available.
     """
     git_executable = _resolve_git_executable()
     if not git_executable:

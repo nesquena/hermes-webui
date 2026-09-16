@@ -40,14 +40,14 @@ GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
 def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Return an environment for a git child that cannot prompt or be redirected.
+    """Return a git environment without inherited prompts or redirections.
 
-    ``GIT_TERMINAL_PROMPT=0`` makes a command that needs credentials fail instead
-    of waiting on a terminal, but git consults ``GIT_ASKPASS``/``SSH_ASKPASS``
-    *before* it honours that, so the askpass entries have to be removed as well.
-    Otherwise a desktop session's askpass helper (`ksshaskpass`, say) opens a
-    modal credential dialog when a background check fetches a remote that answers
-    401, and the caller blocks until the fetch times out.
+    ``GIT_TERMINAL_PROMPT=0`` prevents Git's built-in terminal prompt, but Git
+    consults inherited ``GIT_ASKPASS``/``SSH_ASKPASS`` first, so those entries
+    have to be removed as well. Otherwise a desktop session's askpass helper
+    (`ksshaskpass`, say) opens a modal credential dialog when a background check
+    fetches a remote that answers 401, and the caller blocks until the fetch
+    times out. Explicit Git configuration remains operator-controlled.
     """
     env = os.environ.copy()
     if extra:
