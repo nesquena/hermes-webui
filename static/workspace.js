@@ -1144,13 +1144,21 @@ function _getPreviewFontSize(){
   }catch(_){}
   return 13;
 }
+function _applyPreviewFontSize(px){
+  // Apply without persisting. Opening a preview must not turn an inherited
+  // value (the app-level --preview-font-size from the data-font-size mapping)
+  // into a stored user preference: doing so pinned the global setting to
+  // whatever the mapping resolved to at that moment, so a later change of the
+  // app-wide font size no longer reached previews.
+  document.documentElement.style.setProperty('--preview-font-size', px + 'px');
+  const label = document.getElementById('previewFontSizeLabel');
+  if(label) label.textContent = String(px);
+}
 function _setPreviewFontSize(px){
   const clamped = _clampPreviewFontSize(px);
   if (clamped === null) return;   // never persist or apply NaN
   try{ localStorage.setItem('hermes-preview-font-size', String(clamped)); }catch(_){}
-  document.documentElement.style.setProperty('--preview-font-size', clamped + 'px');
-  const label = document.getElementById('previewFontSizeLabel');
-  if(label) label.textContent = String(clamped);
+  _applyPreviewFontSize(clamped);
 }
 function _applyPreviewFontSizeToEditArea(){
   const ta = document.getElementById('previewEditArea');
@@ -1175,7 +1183,10 @@ function _showPreviewZoomControls(showZoom, showFullscreen){
       label.style.display = 'inline';
       label.textContent = String(_getPreviewFontSize());
     }
-    _setPreviewFontSize(_getPreviewFontSize()); // apply persisted
+    // Apply the resolved size WITHOUT persisting it. The user's A−/A+ choice is
+    // written by the button handlers; opening a preview is not a choice, so it
+    // must not stamp the inherited (data-font-size) value into storage.
+    _applyPreviewFontSize(_getPreviewFontSize());
     _applyPreviewFontSizeToEditArea();
   }
 }

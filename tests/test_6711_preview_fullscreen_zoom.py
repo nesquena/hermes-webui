@@ -351,6 +351,91 @@ def test_fullscreen_exit_restores_focus():
     )
 
 
+# ── Greptile review (a): opening a preview must not persist an inherited size ─
+#
+# `_showPreviewZoomControls()` used to call `_setPreviewFontSize(_getPreviewFontSize())`,
+# i.e. it wrote the resolved value into localStorage on every preview open. When
+# no explicit zoom was stored, that resolved value came from the app-level
+# `data-font-size` mapping — so merely opening a file pinned the global setting
+# as a per-preview override, and a later change of the app font size no longer
+# reached previews.
+
+
+def test_opening_a_preview_does_not_persist_the_inherited_font_size():
+    src = _read(WORKSPACE_JS_PATH)
+    idx = src.find("function _showPreviewZoomControls(")
+    assert idx != -1, "_showPreviewZoomControls not found"
+    body = extract_function(src, "_showPreviewZoomControls")
+    assert "_setPreviewFontSize(" not in body, (
+        "_showPreviewZoomControls must not call the persisting setter: opening a "
+        "preview would stamp the inherited data-font-size value into storage"
+    )
+    assert "_applyPreviewFontSize(" in body, (
+        "_showPreviewZoomControls must apply the resolved size without persisting it"
+    )
+
+
+def test_persisting_and_applying_are_separate_functions():
+    """The A−/A+ buttons must still persist; the open path must not."""
+    apply_body = _function("_applyPreviewFontSize")
+    assert "localStorage" not in apply_body, (
+        "_applyPreviewFontSize must not touch storage"
+    )
+    assert "--preview-font-size" in apply_body, (
+        "_applyPreviewFontSize must still set the CSS variable"
+    )
+    set_body = _function("_setPreviewFontSize")
+    assert "localStorage" in set_body, (
+        "_setPreviewFontSize (used by the A−/A+ buttons) must still persist"
+    )
+    assert "_applyPreviewFontSize(" in set_body, (
+        "_setPreviewFontSize should delegate the application to the apply helper"
+    )
+
+
+def test_zoom_button_handler_still_persists():
+    """Removing persistence from the open path must not remove it from the buttons."""
+    src = _read(WORKSPACE_JS_PATH)
+    idx = src.find("_setPreviewFontSize(cur + delta)")
+    assert idx != -1, (
+        "the A−/A+ adjustment must call _setPreviewFontSize so the user's choice "
+        "is persisted"
+    )
+    assert "_applyPreviewFontSizeToEditArea()" in src[idx : idx + 200], (
+        "the zoom handler must also update the edit textarea size"
+    )
+
+
+# ── Greptile review (b): breakpoint reconciliation must refresh the controls ──
+
+
+def test_breakpoint_reconciliation_resyncs_panel_ui_when_state_changes():
+    body = _function("_reconcileWorkspacePanelBreakpoint", prefix="function")
+    assert "syncWorkspacePanelUI()" in body, (
+        "changing .mobile-open without re-syncing left the toggle label and "
+        "aria-pressed/aria-expanded describing the previous viewport (Greptile)"
+    )
+    # It must only re-sync when the class actually changed, so an ordinary
+    # resize that does not cross the breakpoint stays cheap.
+    assert "before" in body and "after" in body, (
+        "the reconciliation should compare the class before/after and only "
+        "re-sync on a real change"
+    )
+
+
+def test_sync_workspace_panel_ui_reads_the_compact_class():
+    """Guards why the re-sync is needed: the UI sync derives isOpen from
+    `.mobile-open` on compact viewports."""
+    body = extract_function(_read(BOOT_JS_PATH), "syncWorkspacePanelUI")
+    assert "mobile-open" in body, (
+        "syncWorkspacePanelUI no longer reads .mobile-open; if that changed, the "
+        "breakpoint re-sync rationale needs revisiting"
+    )
+    assert "isCompact" in body, (
+        "syncWorkspacePanelUI should branch on the compact viewport"
+    )
+
+
 # ── F5: breakpoint reconciliation ────────────────────────────────────────────
 
 

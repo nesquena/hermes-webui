@@ -259,6 +259,7 @@ function _reconcileWorkspacePanelBreakpoint(){
   if(!panel) return;
   const open=_workspacePanelMode!=='closed';
   const hasPreview=_hasWorkspacePreviewVisible();
+  const before=panel.classList.contains('mobile-open');
   if(_isCompactWorkspaceViewport()){
     // Mirror _setWorkspacePanelMode(): a compact panel is only shown when the
     // mode is open AND there is something to show (live preview or a session).
@@ -267,6 +268,15 @@ function _reconcileWorkspacePanelBreakpoint(){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // The compact class drives toggle labels + aria state (see
+  // syncWorkspacePanelUI, which reads `mobileOpen` on compact viewports).
+  // Changing it without re-syncing left the buttons describing the previous
+  // viewport — e.g. resizing desktop→compact with the panel open showed an
+  // "Show workspace panel" label and aria-pressed="false" next to a visible
+  // panel. Only re-sync when the class actually changed, so the common
+  // resize-without-breakpoint-change path stays cheap.
+  const after=panel.classList.contains('mobile-open');
+  if(after!==before && typeof syncWorkspacePanelUI==='function') syncWorkspacePanelUI();
 }
 
 function _setWorkspacePanelMode(mode){
