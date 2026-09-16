@@ -26,7 +26,7 @@ class _Session:
 
 
 def _record(*args, **kwargs):
-    recorder = getattr(streaming, "_record_streaming_skill_usage")
+    recorder = streaming._record_streaming_skill_usage
     return recorder(*args, **kwargs)
 
 
