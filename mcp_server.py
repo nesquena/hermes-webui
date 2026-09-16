@@ -55,7 +55,7 @@ import api.config as _cfg
 from api.config import (
     STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
 )
-from api.models import load_projects, save_projects
+from api.models import load_projects, mutate_projects
 from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match
 
 # ── Apply --profile override before any module uses get_active_profile_name
@@ -263,14 +263,6 @@ async def handle_create_project(arguments: dict) -> list[TextContent]:
             {"error": color_err}, ensure_ascii=False))]
 
     active = _active_profile()
-    projects = load_projects()
-
-    # Title collision: exact match (consistent with ensure_cron_project)
-    if any(p.get("name") == name and _profiles_match(p.get("profile"), active)
-           for p in projects):
-        return [TextContent(type="text", text=json.dumps(
-            {"error": f"Project '{name}' already exists"}, ensure_ascii=False))]
-
     proj = {
         "project_id": uuid.uuid4().hex[:12],
         "name": name,
@@ -278,8 +270,18 @@ async def handle_create_project(arguments: dict) -> list[TextContent]:
         "profile": active,
         "created_at": time.time(),
     }
-    projects.append(proj)
-    save_projects(projects)
+
+    def _create(projects):
+        if any(p.get("name") == name and _profiles_match(p.get("profile"), active)
+               for p in projects):
+            return None, False
+        projects.append(proj)
+        return proj, True
+
+    proj = mutate_projects(_create)
+    if proj is None:
+        return [TextContent(type="text", text=json.dumps(
+            {"error": f"Project '{name}' already exists"}, ensure_ascii=False))]
 
     proj["session_count"] = 0
     return [TextContent(type="text", text=json.dumps(proj, ensure_ascii=False, indent=2))]
@@ -300,21 +302,20 @@ async def handle_rename_project(arguments: dict) -> list[TextContent]:
             {"error": color_err}, ensure_ascii=False))]
 
     active = _active_profile()
-    projects = load_projects()
-    proj = next((p for p in projects if p["project_id"] == project_id), None)
+
+    def _rename(projects):
+        proj = next((p for p in projects if p["project_id"] == project_id), None)
+        if not proj or not _profiles_match(proj.get("profile"), active):
+            return None, False
+        proj["name"] = name
+        if color is not None:
+            proj["color"] = color
+        return proj, True
+
+    proj = mutate_projects(_rename)
     if not proj:
         return [TextContent(type="text", text=json.dumps(
             {"error": "Project not found"}, ensure_ascii=False))]
-
-    # #1614: profile ownership check
-    if not _profiles_match(proj.get("profile"), active):
-        return [TextContent(type="text", text=json.dumps(
-            {"error": "Project not found"}, ensure_ascii=False))]
-
-    proj["name"] = name
-    if color is not None:
-        proj["color"] = color
-    save_projects(projects)
     return [TextContent(type="text", text=json.dumps(proj, ensure_ascii=False, indent=2))]
 
 
@@ -326,19 +327,21 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
             {"error": "project_id is required"}, ensure_ascii=False))]
 
     active = _active_profile()
-    projects = load_projects()
-    proj = next((p for p in projects if p["project_id"] == project_id), None)
+
+    def _delete(projects):
+        for index, project in enumerate(projects):
+            if project.get("project_id") != project_id:
+                continue
+            if not _profiles_match(project.get("profile"), active):
+                return None, False
+            removed = projects.pop(index)
+            return removed, True
+        return None, False
+
+    proj = mutate_projects(_delete)
     if not proj:
         return [TextContent(type="text", text=json.dumps(
             {"error": "Project not found"}, ensure_ascii=False))]
-
-    # #1614: profile ownership check
-    if not _profiles_match(proj.get("profile"), active):
-        return [TextContent(type="text", text=json.dumps(
-            {"error": "Project not found"}, ensure_ascii=False))]
-
-    projects = [p for p in projects if p["project_id"] != project_id]
-    save_projects(projects)
 
     # Unassign sessions only when we can do it cache-safely via the HTTP API.
     # The previous filesystem fallback wrote session_data directly with
