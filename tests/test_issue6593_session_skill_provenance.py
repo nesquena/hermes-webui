@@ -2,7 +2,6 @@
 
 import copy
 import io
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -61,7 +60,7 @@ def _route_get(monkeypatch, name, session_id=None):
 
 
 def _call_writer(session_id, handler, names):
-    writer = getattr(routes, "_record_session_skill_usage")
+    writer = routes._record_session_skill_usage
     return writer(session_id, handler, names)
 
 
@@ -70,7 +69,7 @@ def test_session_skill_usage_persists_canonical_names_without_invented_caps(isol
         session_id="issue6593-persist",
         skill_provenance={"exact name": 2, "ignored": 0, "boolean": True},
     )
-    assert callable(getattr(session, "record_skill_usage"))
+    assert callable(session.record_skill_usage)
     assert session.record_skill_usage(["exact name", "new name"]) is True
     many = [f"skill-{index}" for index in range(80)]
     assert session.record_skill_usage(many) is True
