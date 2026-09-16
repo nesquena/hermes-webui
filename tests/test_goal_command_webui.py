@@ -1018,9 +1018,10 @@ def test_frontend_goal_consumes_pending_model_marker():
     goal_fn = COMMANDS_JS[goal_idx : COMMANDS_JS.find("\n}", goal_idx)]
     assert "_clearPendingSessionModel(activeSid)" in goal_fn
     assert "_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'" in goal_fn
-    # The consume-clear must come AFTER the kickoff guard: a control command
-    # (no stream_id) returns before reaching it.
-    assert goal_fn.index("_clearPendingSessionModel(activeSid)") > goal_fn.index("if(!r||!r.stream_id)return;")
+    # The consume-clear must come AFTER the set-kickoff guard: a control command
+    # returns before reaching it, and set still requires a non-empty stream id.
+    kickoff_guard = "if(_goalAction!=='set'||!_goalStreamId)return false;"
+    assert goal_fn.index("_clearPendingSessionModel(activeSid)") > goal_fn.index(kickoff_guard)
     # Re-check: the marker is re-read and only cleared while it still matches
     # the captured model/provider.
     assert "_stillPending.model===_goalModel" in goal_fn
@@ -1050,11 +1051,12 @@ def test_frontend_goal_control_command_keeps_pending_marker():
         "clear would drop the pick without using it (#6705)"
     )
 
-    # 2) The consume-clear sits after the kickoff guard (r.stream_id present).
+    # 2) The consume-clear sits after the set + non-empty stream kickoff guard.
     post_request = goal_fn.split("const r=await api('/api/goal'")[1]
-    assert "if(!r||!r.stream_id)return;" in post_request
+    kickoff_guard = "if(_goalAction!=='set'||!_goalStreamId)return false;"
+    assert kickoff_guard in post_request
     assert "_clearPendingSessionModel(activeSid)" in post_request
-    assert post_request.index("if(!r||!r.stream_id)return;") < post_request.index("_clearPendingSessionModel(activeSid)")
+    assert post_request.index(kickoff_guard) < post_request.index("_clearPendingSessionModel(activeSid)")
 
     # 3) The marker is re-read and only cleared while it still matches the
     #    captured model/provider.
