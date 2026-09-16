@@ -450,3 +450,181 @@ def test_partial_load_failure_reported_to_the_resume_path():
         "the resume must bail out when loadSession reports a failure, which now "
         "includes a partially-loaded conversation"
     )
+
+
+# ── Greptile re-review: a superseded switch must not create a session ────────
+#
+# The generation guard sat *after* `newSession()`, so a switch that lost
+# ownership while the resume helper awaited still called it. `newSession()`
+# mints and installs a session from the shared state of whatever profile the
+# cookie now points at, so reaching it overwrites the session, URL, transcript
+# and stream owned by the newer switch. The guard must come first.
+#
+# This drives the real `switchToProfile()` through a Node VM: a newer switch
+# takes ownership exactly while the resume helper is in flight, which is the
+# only ordering where the old code reached `newSession()`.
+
+
+def _run_stale_switch() -> dict:
+    """Run the shipped switch path with a newer switch claiming ownership mid-flight."""
+    payload = {
+        "switch": _switch_to_profile_body(),
+    }
+    js = r"""
+const params = __PARAMS__;
+const calls = { newSession: 0, resume: 0, setEmbargo: [], renderList: 0, toasts: [],
+                chipWrites: [], titleWrites: [], openBrowser: 0, loadDir: 0 };
+
+// The branch under test only runs when a conversation is in progress.
+var S = { session: { session_id: 'old', workspace: 'ws', profile: 'old' }, messages: [{}],
+          activeProfile: 'old' };
+var _sessionInProgress = true;
+
+// Ownership: this switch owns generation 1. While the resume helper awaits, a
+// newer switch advances the generation to 2 — the exact interleaving the guard
+// must survive.
+let _profileSwitchGeneration = 1;
+const _switchGen = 1;
+
+async function _resumeRecentSessionForProfileSwitch(switchGen, workspaceVisible){
+  calls.resume += 1;
+  // A newer switch takes over while this helper is in flight. Advance PAST this
+  // switch's own generation (switchToProfile pre-incremented it, so this call's
+  // _switchGen is already the current value) — otherwise the guard would see the
+  // switch as still owning and the harness would model nothing.
+  _profileSwitchGeneration += 1;
+  return false;   // nothing to resume -> the caller's fresh-session path
+}
+async function newSession(flash, options){
+  calls.newSession += 1;
+  // Model the real damage: newSession() mints and installs a session from the
+  // shared state of whatever profile the cookie now points at, replacing the one
+  // the newer switch owns.
+  S.session = { session_id: 'created-by-stale-switch', profile: 'target' };
+  return S.session;
+}
+async function api(){ return {}; }
+async function renderSessionList(){ calls.renderList += 1; }
+async function loadDir(){ calls.loadDir += 1; }
+function syncTopbar(){}
+function _setProfileSwitchListEmbargo(v){ calls.setEmbargo.push(v); }
+function _openProfileSwitchSessionBrowser(){ calls.openBrowser += 1; }
+function clearWorkspaceTreeSkeleton(){}
+function animateNextSessionListRefresh(){}
+// switchToProfile() touches chrome that does not exist in a bare VM. The
+// production code guards every one of these with `if (el)`, so null is the
+// faithful stub: it disables the chrome work without changing control flow.
+function $(id){ return null; }
+var __store = {};
+var localStorage = {
+  getItem: (k) => (k in __store ? __store[k] : null),
+  setItem: (k, v) => { __store[k] = String(v); },
+  removeItem: (k) => { delete __store[k]; },
+};
+function showToast(m){ calls.toasts.push(String(m)); }
+function t(k){ return k; }
+async function _profileSwitchPanelLoad(){}
+function _refreshProfileSwitchBackground(){}
+
+// Minimal stand-ins for the function's DOM touch points.
+const _chipLabel = { textContent: '' };
+const _titlebarLabel = { textContent: '' };
+let _prevProfileName = 'old';
+let _openingExistingSidebarSession = false;
+const _workspacePanelMode = 'closed';
+function _isCompactWorkspaceViewport(){ return false; }
+function _syncWorkspacePanelForProfileSwitch(){}
+async function loadSettingsPanel(){}
+function _workspacePanelEls(){ return { layout: null, panel: null }; }
+
+var window = { _profileSwitchResumeSession: false };
+
+eval(params.switch);
+
+switchToProfile('target').then(function(result){
+  console.log(JSON.stringify({
+    returned: result,
+    newSession: calls.newSession,
+    resume: calls.resume,
+    setEmbargo: calls.setEmbargo,
+    renderList: calls.renderList,
+    toasts: calls.toasts,
+    openBrowser: calls.openBrowser,
+    sessionId: S.session && S.session.session_id,
+  }));
+}).catch(function(e){
+  console.log(JSON.stringify({ error: String(e && e.message || e) }));
+});
+"""
+    js = js.replace("__PARAMS__", json.dumps(payload))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_superseded_switch_does_not_create_a_session():
+    """A switch that lost ownership mid-flight must not reach newSession()."""
+    result = _run_stale_switch()
+    assert "error" not in result, f"the switch path threw: {result['error']}"
+    assert result["resume"] == 1, (
+        f"the resume helper must have been attempted first: {result}"
+    )
+    assert result["newSession"] == 0, (
+        "a switch that lost its generation while the resume helper awaited still "
+        "called newSession(); that call mints and installs a session under the "
+        "cookie of the NEWER profile, overwriting the newer switch's session, "
+        "URL, transcript and stream (Greptile review)"
+    )
+    assert result["returned"] is False, (
+        f"a superseded switch must report that it did not complete: {result}"
+    )
+
+
+def test_a_superseded_switch_does_not_overwrite_the_newer_session():
+    """The damage the review describes, measured: the active session must survive.
+
+    `newSession()` installs a session built from the shared state of whatever
+    profile the cookie now points at. If a superseded switch reaches it, the
+    session the newer switch owns is replaced — the user's conversation, URL,
+    transcript and stream all move to a session that belongs to the wrong switch.
+    """
+    result = _run_stale_switch()
+    assert result["sessionId"] == "old", (
+        "a superseded switch replaced the active session: newSession() installed "
+        f"{result['sessionId']!r} over the one the newer switch owns "
+        "(Greptile review)"
+    )
+    # Belt and braces: it must not have progressed to the switch-owned UI work
+    # under the newer switch's ownership either.
+    assert result["renderList"] == 0, (
+        f"a superseded switch re-rendered the session list: {result}"
+    )
+    assert False not in result["setEmbargo"], (
+        f"a superseded switch lifted the list embargo, unfreezing the session "
+        f"list under the newer switch: {result}"
+    )
+    assert result["toasts"] == [] and result["openBrowser"] == 0, (
+        f"a superseded switch popped a toast / opened the session browser: {result}"
+    )
+
+
+def test_the_generation_guard_precedes_session_creation():
+    """Pin the ordering in the shipped source, so the guard cannot drift back.
+
+    Scoped to the resume→create seam: `switchToProfile()` has other generation
+    checks earlier in the function, so a bare `find()` would match one of those
+    and pass even with this guard removed — the test would not bite.
+    """
+    body = _switch_to_profile_body()
+    resume = body.find("const resumed = await _resumeRecentSessionForProfileSwitch(")
+    create = body.find("await newSession(false, {awaitWorkspaceLoad")
+    assert resume != -1, "the resume call site is missing"
+    assert create != -1, "the fresh-session fallback is missing"
+    assert resume < create, "the resume must be attempted before creating a session"
+    seam = body[resume:create]
+    assert "if (_switchGen !== _profileSwitchGeneration) return false;" in seam, (
+        "the generation guard must run in the window between the resume and "
+        "newSession(); with the guard only after the call, a superseded switch "
+        "still creates a session under the newer profile's cookie and overwrites "
+        "its session/URL/transcript/stream (Greptile review)"
+    )

@@ -288,7 +288,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """newSession(false) should apply the pending profile workspace itself."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        # Brace-match the branch rather than slicing a fixed 1000-char window:
+        # the guard comment above `newSession()` pushed the call past the old
+        # cutoff, so the window measured prose length instead of the call site.
+        block = _balanced_block(PANELS_JS, idx)
 
         self.assertIn('await newSession(false', block)
         self.assertNotIn('/api/session/update', block,
@@ -299,7 +302,8 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """The profile switch path should avoid duplicate workspace persistence."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        # Same reason as above: follow the branch by brace matching, not a byte budget.
+        block = _balanced_block(PANELS_JS, idx)
 
         self.assertNotIn('/api/session/update', block,
                          "newSession(false) receives S._profileSwitchWorkspace, so "
