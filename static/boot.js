@@ -243,6 +243,32 @@ function _hasWorkspacePreviewVisible(){
   return !!(preview&&preview.classList.contains('visible'));
 }
 
+/**
+ * Reconcile the compact-viewport panel class with the runtime panel mode.
+ *
+ * `.mobile-open` is only ever written by `_setWorkspacePanelMode()`, so a
+ * breakpoint change while the panel is open leaves the two out of step: enter
+ * fullscreen on desktop (>900px) -> resize to phone width -> exit fullscreen.
+ * `_workspacePanelMode` still says 'preview' but `.mobile-open` was never
+ * added, so the restored mobile panel sits off-screen while every piece of
+ * runtime/persisted state claims it is open. Re-derive the class from the mode
+ * on every viewport change so the two can no longer drift.
+ */
+function _reconcileWorkspacePanelBreakpoint(){
+  const {panel}= _workspacePanelEls();
+  if(!panel) return;
+  const open=_workspacePanelMode!=='closed';
+  const hasPreview=_hasWorkspacePreviewVisible();
+  if(_isCompactWorkspaceViewport()){
+    // Mirror _setWorkspacePanelMode(): a compact panel is only shown when the
+    // mode is open AND there is something to show (live preview or a session).
+    const shouldShow=open&&(hasPreview||!!S.session);
+    panel.classList.toggle('mobile-open',shouldShow);
+  }else{
+    panel.classList.remove('mobile-open');
+  }
+}
+
 function _setWorkspacePanelMode(mode){
   const {layout,panel}= _workspacePanelEls();
   if(!layout||!panel)return;
@@ -2627,6 +2653,10 @@ function applyEmptyStatePanelPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  // A breakpoint change while the panel is open must re-derive the compact
+  // class from the runtime mode, otherwise the two drift apart (see
+  // _reconcileWorkspacePanelBreakpoint) and the panel comes back off-screen.
+  if(typeof _reconcileWorkspacePanelBreakpoint==='function') _reconcileWorkspacePanelBreakpoint();
   if(!window.visualViewport) _forceMobileViewportReflow();
 });
 

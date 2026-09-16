@@ -975,6 +975,88 @@ function _setPreviewFullscreenButtonState(active){
   btn.setAttribute('aria-label', active ? 'Exit fullscreen' : 'Fullscreen');
   btn.innerHTML = active ? _PREVIEW_FS_EXIT_ICON : _PREVIEW_FS_ENTER_ICON;
 }
+// ── Preview fullscreen focus/aria lifecycle ────────────────────────────────
+// The fullscreen panel is pseudo-fullscreen (fixed overlay), not native
+// Fullscreen and not a <dialog>, so nothing manages focus for us. Without
+// this, background app chrome stayed reachable and focus could be left on a
+// control that clearPreview() then hides. Snapshot the previously focused
+// element, make the covered app chrome inert, and move focus into the panel.
+let _previewFsPrevFocus = null;
+
+const _PREVIEW_FS_CHROME_SELECTORS = ['.app-titlebar', '.sidebar', '.rail', '.main-wrapper', '.main'];
+
+function _previewFullscreenEnter(panel){
+  _previewFsPrevFocus = (document.activeElement && document.activeElement !== document.body)
+    ? document.activeElement
+    : null;
+  // aria-modal + role=region: announce the covering region and tell AT the
+  // rest of the page is not the active context.
+  panel.setAttribute('role', 'region');
+  panel.setAttribute('aria-modal', 'true');
+  const label = _previewFsRegionLabel();
+  if(label) panel.setAttribute('aria-label', label);
+  // inert is the correct primitive for "reachable by Tab but must not be":
+  // it removes the subtree from the tab order and the accessibility tree.
+  for(const selector of _PREVIEW_FS_CHROME_SELECTORS){
+    document.querySelectorAll(selector).forEach(el=>{
+      if(el === panel || el.contains(panel)) return;
+      el.setAttribute('inert', '');
+      el.setAttribute('aria-hidden', 'true');
+    });
+  }
+  _focusPreviewFullscreenRegion(panel);
+}
+
+function _previewFullscreenExit(panel){
+  panel.removeAttribute('aria-modal');
+  panel.removeAttribute('role');
+  panel.removeAttribute('aria-label');
+  for(const selector of _PREVIEW_FS_CHROME_SELECTORS){
+    document.querySelectorAll(selector).forEach(el=>{
+      el.removeAttribute('inert');
+      el.removeAttribute('aria-hidden');
+    });
+  }
+  // Return focus to where the user was, unless that element is now hidden or
+  // gone — then fall back to the fullscreen toggle so focus is never dropped
+  // onto <body>.
+  const prev = _previewFsPrevFocus;
+  _previewFsPrevFocus = null;
+  if(prev && document.contains(prev) && _isFocusablePreviewTarget(prev)){
+    try{ prev.focus(); return; }catch(_){}
+  }
+  const btn = document.getElementById('btnPreviewFullscreen');
+  if(btn && _isFocusablePreviewTarget(btn)){ try{ btn.focus(); }catch(_){} }
+}
+
+function _isFocusablePreviewTarget(el){
+  if(!el || el === document.body) return false;
+  // offsetParent is null for display:none subtrees (and for fixed-position
+  // elements, which is why the fullscreen panel itself is checked separately).
+  if(el.closest && el.closest('[hidden]')) return false;
+  if(el.offsetParent === null && !el.closest('.preview-fullscreen')) return false;
+  return true;
+}
+
+function _focusPreviewFullscreenRegion(panel){
+  const preferred = panel.querySelector('.preview-area.visible')
+    || panel.querySelector('#previewArea')
+    || panel.querySelector('button:not([disabled])');
+  if(preferred && !preferred.hasAttribute('tabindex') && !/^(BUTTON|A|INPUT|TEXTAREA|SELECT)$/.test(preferred.tagName || '')){
+    preferred.setAttribute('tabindex', '-1');
+  }
+  if(preferred){
+    try{ preferred.focus(); return; }catch(_){}
+  }
+  try{ panel.focus(); }catch(_){}
+}
+
+function _previewFsRegionLabel(){
+  const pathEl = document.getElementById('previewPathText');
+  const path = pathEl && pathEl.textContent ? pathEl.textContent : '';
+  return path ? `Fullscreen preview: ${path}` : 'Fullscreen preview';
+}
+
 /**
  * Single entry/exit point for preview fullscreen. Every lifecycle path —
  * the toolbar button, the document Escape handler, and clearPreview() —
@@ -985,6 +1067,13 @@ function setPreviewFullscreen(active){
   const panel = document.querySelector('.rightpanel');
   if(!panel) return;
   const isFullscreen = !!active;
+  if(isFullscreen === panel.classList.contains('preview-fullscreen')){
+    // Re-entering the same state must still reconcile presentation (the button
+    // label/icon can have been reset by a re-render) but must not steal focus
+    // again or snapshot the wrong "previous" element on a repeat call.
+    _setPreviewFullscreenButtonState(isFullscreen);
+    return;
+  }
   panel.classList.toggle('preview-fullscreen', isFullscreen);
   document.documentElement.classList.toggle('preview-fullscreen-active', isFullscreen);
   _setPreviewFullscreenButtonState(isFullscreen);
@@ -999,6 +1088,7 @@ function setPreviewFullscreen(active){
       window.addEventListener('resize', _previewFsResizeHandler);
       window.addEventListener('orientationchange', _previewFsResizeHandler);
     }
+    _previewFullscreenEnter(panel);
   } else {
     panel.style.height = '';
     panel.style.maxHeight = '';
@@ -1007,6 +1097,11 @@ function setPreviewFullscreen(active){
       window.removeEventListener('orientationchange', _previewFsResizeHandler);
       _previewFsResizeHandler = null;
     }
+    _previewFullscreenExit(panel);
+    // Exiting fullscreen can land on a different breakpoint than the one we
+    // entered on (desktop fullscreen -> phone width). Re-derive the compact
+    // class from the restored mode so the panel is not left off-screen.
+    if(typeof _reconcileWorkspacePanelBreakpoint==='function') _reconcileWorkspacePanelBreakpoint();
   }
 }
 function togglePreviewFullscreen(){
@@ -1016,15 +1111,46 @@ function togglePreviewFullscreen(){
 }
 
 // ── Preview font-size zoom ──────────────────────────────────────────────────
+// Font sizes are clamped to the supported range; a malformed stored value must
+// never propagate. parseInt('bad') is NaN, and Math.min/Math.max both return NaN
+// when given NaN — so without the isFinite guard a single bad localStorage entry
+// wrote `--preview-font-size: NaNpx` and every later A−/A+ stayed NaN until the
+// key was cleared by hand.
+const _PREVIEW_FS_MIN = 8;
+const _PREVIEW_FS_MAX = 36;
+function _clampPreviewFontSize(value){
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(_PREVIEW_FS_MIN, Math.min(_PREVIEW_FS_MAX, n));
+}
+function _readPreviewFontSize(){
+  try{ return _clampPreviewFontSize(localStorage.getItem('hermes-preview-font-size')); }catch(_){ return null; }
+}
+/**
+ * Resolve the size to display when a preview opens.
+ *
+ * Precedence: the user's own A−/A+ choice, else whatever the app-level
+ * data-font-size preference resolves `--preview-font-size` to, else 13px.
+ * Returning the computed value (instead of a bare 12) is what stops an
+ * explicit write from pinning the inline style and silently defeating the
+ * global small/large/xlarge mapping.
+ */
 function _getPreviewFontSize(){
-  try{ return parseInt(localStorage.getItem('hermes-preview-font-size') || '12', 10); }catch(_){ return 12; }
+  const stored = _readPreviewFontSize();
+  if (stored !== null) return stored;
+  try{
+    const computed = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--preview-font-size'));
+    if (Number.isFinite(computed) && computed > 0) return Math.round(computed);
+  }catch(_){}
+  return 13;
 }
 function _setPreviewFontSize(px){
-  px = Math.max(8, Math.min(36, px));
-  try{ localStorage.setItem('hermes-preview-font-size', String(px)); }catch(_){}
-  document.documentElement.style.setProperty('--preview-font-size', px + 'px');
+  const clamped = _clampPreviewFontSize(px);
+  if (clamped === null) return;   // never persist or apply NaN
+  try{ localStorage.setItem('hermes-preview-font-size', String(clamped)); }catch(_){}
+  document.documentElement.style.setProperty('--preview-font-size', clamped + 'px');
   const label = document.getElementById('previewFontSizeLabel');
-  if(label) label.textContent = String(px);
+  if(label) label.textContent = String(clamped);
 }
 function _applyPreviewFontSizeToEditArea(){
   const ta = document.getElementById('previewEditArea');
@@ -1143,9 +1269,13 @@ async function toggleEditMode(){
     $('previewEditArea').style.display='';
     if(_previewCurrentMode==='code') $('previewCode').style.display='none';
     else $('previewMd').style.display='none';
-    // Escape cancels the edit without saving
+    // Escape cancels the edit without saving. stopPropagation is required:
+    // the document-level Escape handler exits fullscreen, so without it a
+    // single Escape while editing in fullscreen both discarded the edit view
+    // and left fullscreen. The editor owns the first Escape; the next one
+    // (now handled by the document) exits fullscreen.
     $('previewEditArea').onkeydown=e=>{
-      if(e.key==='Escape'){e.preventDefault();cancelEditMode();}
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();cancelEditMode();}
     };
   }
   updateEditBtn();
