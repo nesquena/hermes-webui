@@ -21,7 +21,6 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import api.updates as updates
-from tests.helpers import git_subcommand_args
 
 # Deterministic install root used by the winreg stub. Kept as a forward-slash
 # string so the expected git path is identical regardless of the host's
@@ -138,12 +137,11 @@ def test_detect_webui_version_recovers_via_windows_registry_fallback(tmp_path):
 
     def fake_run(cmd, **kwargs):
         assert cmd[0] == FAKE_GIT_EXE
-        git_args = git_subcommand_args(cmd)
-        if git_args == ['describe', '--tags', '--always']:
+        if cmd[1:] == ['describe', '--tags', '--always']:
             return MagicMock(returncode=0, stdout='v0.51.999\n', stderr='')
-        if git_args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if cmd[1:] == ['diff-index', '--quiet', 'HEAD', '--']:
             return MagicMock(returncode=0, stdout='', stderr='')
-        raise AssertionError(f'unexpected git args: {git_args!r}')
+        raise AssertionError(f'unexpected git args: {cmd[1:]!r}')
 
     with patch.object(updates.shutil, 'which', return_value=None), \
          patch.object(sys, 'platform', 'win32'), \

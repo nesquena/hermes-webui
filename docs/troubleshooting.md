@@ -211,52 +211,6 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
-## Update check reports a Git authentication or fetch failure
-
-**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
-`could not read Username`. No terminal or desktop credential prompt appears.
-
-**Why.** Update checks run in the background, so their Git commands deliberately fail closed
-instead of waiting for credentials or executing external transport helpers. WebUI removes inherited
-askpass, SSH-command, Git-proxy, repository-redirection, and config-injection settings, and disables
-Git-configured `core.askPass` and `credential.helper` commands for the check. This applies even if a
-helper is configured in the checkout, global Git config, or system Git config. SSH runs with
-`BatchMode=yes`: agent authentication remains available through the inherited `SSH_AUTH_SOCK`, but
-password, key-passphrase, and host-key questions fail instead of reading from a controlling
-terminal. WebUI also refuses `git://` origins: Git's `core.gitProxy` is per-host and multi-valued, and a
-command-line value does not mask a repository-configured proxy command, so the
-transport is rejected before Git can select one. Use HTTPS or SSH instead. The same refusal applies to
-workspace Git operations, not only update checks: a workspace repository can be supplied by an agent,
-a restored session, or a mount, so a repository-configured `core.gitProxy` must not be executable
-there either. The `ext::` transport is refused for the same reason — it runs a local command named by
-the remote URL.
-
-**Diagnostic.** From the WebUI source checkout, run this command for each checkout named by the
-update status (WebUI and Hermes Agent may have different origins):
-
-```bash
-python3 scripts/diagnose_update_git.py /path/to/checkout
-```
-
-The project diagnostic imports the same environment scrubber and non-interactive Git argv builder
-as the production update check, including dynamic `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`
-injection removal. If it fails, that checkout's origin cannot be fetched unattended with the
-authentication already available to WebUI.
-
-**Fix.** Use a public origin, or use an SSH origin with a key already loaded in the SSH agent seen
-by the WebUI process. A `git://` origin must be changed to HTTPS or SSH: the unattended path refuses
-that transport. After changing the remote or loading the key, restart WebUI if needed so it inherits
-the correct `SSH_AUTH_SOCK`, then rerun the diagnostic command and the update check. For a private
-HTTPS origin that depends on a credential helper, update that checkout manually; background checks
-intentionally do not invoke the helper.
-
-**When to file a bug.** File a WebUI bug if the diagnostic command succeeds under the same user and
-environment as WebUI but the update check still reports an authentication failure, or if an update
-check opens a credential prompt. Include sanitized remote hosts and error text; do not include
-credential-bearing URLs, tokens, or private keys.
-
----
-
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

@@ -2,7 +2,6 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import api.updates as updates
-from tests.helpers import git_subcommand_args
 
 
 def test_run_git_uses_which_result_when_available(tmp_path):
@@ -73,12 +72,11 @@ def test_run_git_returns_not_found_when_usr_bin_git_absent_on_darwin(tmp_path):
 def test_detect_webui_version_recovers_via_launchd_fallback(tmp_path):
     def fake_run(cmd, **kwargs):
         assert cmd[0] == '/usr/bin/git'
-        git_args = git_subcommand_args(cmd)
-        if git_args == ['describe', '--tags', '--always']:
+        if cmd[1:] == ['describe', '--tags', '--always']:
             return MagicMock(returncode=0, stdout='v0.51.999\n', stderr='')
-        if git_args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if cmd[1:] == ['diff-index', '--quiet', 'HEAD', '--']:
             return MagicMock(returncode=0, stdout='', stderr='')
-        raise AssertionError(f'unexpected git args: {git_args!r}')
+        raise AssertionError(f'unexpected git args: {cmd[1:]!r}')
 
     with patch.object(updates.shutil, 'which', return_value=None), \
          patch.object(sys, 'platform', 'darwin'), \
@@ -95,7 +93,7 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
 
     def fake_run(cmd, **kwargs):
         assert cmd[0] == '/usr/bin/git'
-        git_args = git_subcommand_args(cmd)
+        git_args = cmd[1:]
         if git_args == ['fetch', 'origin', '--tags', '--force']:
             return MagicMock(returncode=0, stdout='', stderr='')
         if git_args == ['tag', '--list', 'v*', '--sort=-v:refname']:

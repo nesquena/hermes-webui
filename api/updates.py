@@ -28,7 +28,7 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
-from api.subprocess_utils import clean_git_env, noninteractive_git_argv, windows_hide_flags
+from api.subprocess_utils import clean_git_env, windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -234,18 +234,17 @@ def _run_git(args, cwd, timeout=10):
     On failure, returns stderr (or stdout as fallback) so callers can
     surface actionable git error messages instead of empty strings.
 
-    The child gets a scrubbed environment (``clean_git_env``) and configured
-    credential helpers are disabled in its argv. Update checks run unattended,
-    and on a desktop session ``SSH_ASKPASS`` is a GUI helper, so a remote that
-    demands credentials must fail closed instead of opening a credential dialog
-    the user never asked for.
+    The child gets a scrubbed environment (``clean_git_env``). Update checks run
+    unattended, and on a desktop session ``SSH_ASKPASS`` is a GUI helper, so a
+    remote that demands credentials must fail closed instead of opening a
+    credential dialog the user never asked for.
     """
     git_executable = _resolve_git_executable()
     if not git_executable:
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            noninteractive_git_argv(args, executable=git_executable),
+            [git_executable] + args,
             cwd=str(cwd),
             capture_output=True,
             text=True,

@@ -20,10 +20,10 @@ def windows_hide_flags() -> int:
 
 
 # Environment variables git honours that let a WebUI-spawned child do something
-# other than what the caller asked: askpass and proxy entries turn a fail-closed
-# error into an interactive prompt or arbitrary helper command, and the
-# GIT_DIR/GIT_WORK_TREE/config entries point git at a different repository,
-# index, or config than the one the caller passed as cwd.
+# other than what the caller asked: the askpass entries turn a fail-closed error
+# into an interactive prompt (or an arbitrary helper command), and the
+# GIT_DIR/GIT_WORK_TREE/config entries point git at a different repository, index,
+# or config than the one the caller passed as cwd.
 GIT_ENV_SCRUB_KEYS = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -35,50 +35,12 @@ GIT_ENV_SCRUB_KEYS = (
     "SSH_ASKPASS",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
-    "GIT_PROXY_COMMAND",
 )
 GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
-GIT_NONINTERACTIVE_CONFIG = (
-    ("core.askPass", ""),
-    ("credential.helper", ""),
-    ("core.sshCommand", "ssh -oBatchMode=yes"),
-    # Refuse the two transports that run a command named by repository data: the
-    # ext:: transport runs a local command named by the URL, and a git:// remote
-    # can select a repository-configured ``core.gitProxy`` command.
-    #
-    # The git:// refusal is a transport restriction rather than a proxy override
-    # because no command-line value can neutralize that key: ``core.gitProxy`` is
-    # per-host and multi-valued, and measured against a repository-configured
-    # proxy, both ``-c core.gitProxy=`` and ``-c core.gitProxy=none`` still let the
-    # configured command run. It applies to every Git child, including workspace
-    # fetch/pull/push, because a workspace repository is just as likely to be
-    # supplied by an agent, a restored session, or a mount as the checkout is.
-    # The cost is that a deliberately configured git:// workspace remote no longer
-    # resolves; HTTPS and SSH remotes are unaffected.
-    ("protocol.ext.allow", "never"),
-    ("protocol.git.allow", "never"),
-)
-
-
-def noninteractive_git_argv(
-    args: list[str], *, executable: str = "git",
-) -> list[str]:
-    """Build Git argv that disables prompts and external transport helpers.
-
-    SSH transports run with ``BatchMode=yes`` so they use an available agent or
-    fail instead of reading a password, key passphrase, or host-key answer from
-    the WebUI process's controlling terminal. The ``ext::`` and ``git://``
-    transports are refused; see ``GIT_NONINTERACTIVE_CONFIG``.
-    """
-    argv = [executable]
-    for key, value in GIT_NONINTERACTIVE_CONFIG:
-        argv.extend(["-c", f"{key}={value}"])
-    argv.extend(args)
-    return argv
 
 
 def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Return an environment without inherited Git prompts, proxies, or redirections.
+    """Return an environment for a git child that cannot prompt or be redirected.
 
     ``GIT_TERMINAL_PROMPT=0`` makes a command that needs credentials fail instead
     of waiting on a terminal, but git consults ``GIT_ASKPASS``/``SSH_ASKPASS``
