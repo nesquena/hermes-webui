@@ -154,6 +154,14 @@ def test_restorable_candidate_rejects_in_flight_worktree_and_cross_profile_sessi
 
 
 def test_clear_composer_draft_forgets_same_new_chat_candidate():
+    suppress_start = SESSIONS_JS.find("function _suppressComposerDraftRestoreAfterSubmit(")
+    suppress_end = SESSIONS_JS.find("function _clearComposerDraftRestoreSuppression", suppress_start)
+    assert suppress_start != -1 and suppress_end != -1, "submit suppression helper not found"
+    suppress_body = SESSIONS_JS[suppress_start:suppress_end]
+    assert "_rememberComposerDraftPayloadState(sid, '', []);" in suppress_body, (
+        "submit suppression must immediately clear local draft-payload tracking before the async POST"
+    )
+
     start = SESSIONS_JS.find("function _clearComposerDraft(")
     end = SESSIONS_JS.find("const SESSION_VIEWED_COUNTS_KEY", start)
     assert start != -1 and end != -1, "_clearComposerDraft block not found"
@@ -164,8 +172,17 @@ def test_clear_composer_draft_forgets_same_new_chat_candidate():
     assert "return api('/api/session/draft'" in body, (
         "clear path should return its POST promise for callers/tests that need to await it"
     )
-    assert "_rememberComposerDraftPayloadState(sid, '', []);" in body, (
-        "clear path must also clear local draft-payload tracking so send-then-switch can skip redundant empty flushes"
+    suppress_idx = body.find("_suppressComposerDraftRestoreAfterSubmit(sid, text, files);")
+    post_idx = body.find("return api('/api/session/draft'")
+    confirmed_idx = body.find("const confirmed = result && result.draft;")
+    remember_idx = body.find("_rememberComposerDraftPayloadState(", confirmed_idx)
+    assert -1 not in (suppress_idx, post_idx, confirmed_idx, remember_idx)
+    assert suppress_idx < post_idx < confirmed_idx < remember_idx, (
+        "clear must reset local tracking before POST, then remember the server-confirmed draft"
+    )
+    assert "confirmed && typeof confirmed.text === 'string' ? confirmed.text : ''" in body
+    assert "confirmed && Array.isArray(confirmed.files) ? confirmed.files : []" in body, (
+        "a newer draft preserved by the server must replace the optimistic empty local state"
     )
 
 
