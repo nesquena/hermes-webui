@@ -52,6 +52,24 @@ NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
+def _top_level_function_body(js: str, declaration: str) -> str:
+    """Slice from `declaration` to the next top-level declaration.
+
+    `extract_function` brace-matches from the first `{`, which is wrong for
+    signatures that contain a brace inside the parameter list (e.g.
+    `newSession(flash, options={})`) — it stops at the default-value brace.
+    These files declare top-level functions at column 0, so anchoring on the
+    next such declaration is exact and grows with the function.
+    """
+    start = js.index(declaration)
+    offset = start + len(declaration)
+    for line in js[offset:].split("\n"):
+        if line.startswith(("async function ", "function ", "const ", "let ", "var ")):
+            return js[start:offset]
+        offset += len(line) + 1
+    return js[start:]
+
+
 HELPER = "_resumeRecentSessionForProfileSwitch"
 
 
@@ -163,9 +181,16 @@ def test_failed_load_falls_back_to_a_fresh_session():
     assert re.search(r"const resumed = await " + HELPER, body), (
         "switchToProfile must delegate the resume to the gen-aware helper (F2/F3)"
     )
-    assert re.search(r"if \(!resumed\) \{?\s*await newSession\(", body), (
+    assert re.search(r"if \(!resumed\) \{.*?await newSession\(", body, re.S), (
         "switchToProfile must create a fresh session when the resume fails, "
         "otherwise a failed load strands the previous profile's conversation (F2)"
+    )
+    # The fresh-session call must carry the switch generation (Greptile review:
+    # an in-flight newSession() from an older profile must not be adopted).
+    assert re.search(r"await newSession\([^)]*profileSwitchGen", body, re.S), (
+        "the fresh-session fallback must pass profileSwitchGen so a newSession() "
+        "still in flight for an older profile cannot be adopted as this switch's "
+        "result"
     )
 
 
@@ -353,4 +378,75 @@ def test_profile_mismatch_recovery_respects_switch_ownership():
     )
     assert "_profileSwitchGeneration" in block, (
         "the recovery must compare against the live switch generation (F3)"
+    )
+
+
+# ── Greptile review: in-flight newSession() must be generation-scoped ────────
+#
+# `newSession()` caches its work in a single module-level promise and reused it
+# for ANY caller. During a profile switch the cookie/profile have already moved
+# while an earlier run may still be in flight for the previous profile, so a
+# caller could adopt a session created for the old profile.
+
+
+def test_new_session_promise_is_owner_scoped():
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function newSession(")
+    assert "profileSwitchGen" in body, (
+        "newSession must accept the caller's profile-switch generation so it can "
+        "tell whether the cached in-flight promise belongs to this owner"
+    )
+    assert "_newSessionInFlightGen" in body, (
+        "newSession must record which generation owns the cached promise"
+    )
+    # Same owner → reuse; different owner → do not return the stale promise.
+    assert re.search(r"if\(_sameOwner\)\s*\{", body), (
+        "the cached promise may only be reused when the owner matches"
+    )
+    assert "await _newSessionInFlight;" in body, (
+        "a different owner must wait for the previous run before starting its own"
+    )
+
+
+def test_new_session_owner_is_cleared_when_the_run_finishes():
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function newSession(")
+    assert re.search(r"finally\s*\{[^}]*_newSessionInFlightGen=null", body, re.S), (
+        "the owner generation must be cleared in the finally block together with "
+        "the promise, or a later caller inherits a stale owner"
+    )
+
+
+# ── Greptile review: a partially-loaded conversation is not a success ────────
+#
+# Both message-load paths keep a usable fallback (inflight projection, or the
+# "Failed to load messages" notice) and continue to the tail of loadSession, so
+# "S.session is the requested sid" alone was not enough to call the load a
+# success — a half-loaded conversation was reported as a successful resume and
+# the fresh-session rollback was skipped.
+
+
+def test_message_load_failure_makes_load_session_report_failure():
+    src = _read(SESSIONS_JS_PATH)
+    body = _top_level_function_body(src, "async function loadSession(")
+    # The success return must consult the message-load outcome.
+    assert "_loadMessagesFailedForSid(sid)" in body, (
+        "loadSession must not report success when its message body failed to load"
+    )
+    # Both failing paths must record it.
+    assert body.count("_loadMessagesFailedSids.add(sid)") >= 2, (
+        "both message-load failure paths (inflight catch and idle catch) must "
+        "record the failure, otherwise one of them still reports success"
+    )
+    # And a new load must clear the previous outcome.
+    assert "_loadMessagesFailedSids.delete(sid)" in body, (
+        "a fresh load for the same sid must clear a previous failure, otherwise a "
+        "now-successful load is reported as failed"
+    )
+
+
+def test_partial_load_failure_reported_to_the_resume_path():
+    """End-to-end intent: the resume must not treat a partial load as success."""
+    helper = _helper_body()
+    assert re.search(r"if\s*\(!loaded\)\s*return false", helper), (
+        "the resume must bail out when loadSession reports a failure, which now "
+        "includes a partially-loaded conversation"
     )
