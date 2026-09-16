@@ -434,6 +434,12 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
     conversation; otherwise the tip inherits the root's title/source metadata and
     can disappear under messaging/sidebar policies.
+
+    A ``source="tool"`` child is never a continuation. Hermes Agent's
+    authoritative child/lineage predicate carries
+    ``COALESCE(child.source, '') != 'tool'`` (hermes_state_sessions.py), so
+    the WebUI fails closed on the same boundary before the durable compression
+    edge is accepted.
     """
     if not parent or not child:
         return False
@@ -447,6 +453,10 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
+    # Match the Agent's `COALESCE(child.source, '') != 'tool'` lineage rule:
+    # a tool child is a boundary regardless of the parent's source/end_reason.
+    if child_source == 'tool':
+        return False
     if parent_source and child_source and parent_source != child_source:
         return False
     end_reason = parent.get('end_reason')

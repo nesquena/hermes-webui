@@ -1139,6 +1139,151 @@ def test_stitch_continuations_keeps_inherited_marker_compression_child(tmp_path,
     assert [m['content'] for m in fork_msgs] == ['fork msg']
 
 
+def test_same_source_tool_child_is_never_a_compression_continuation():
+    """A ``source="tool"`` child is a lineage boundary, matching the Agent.
+
+    Hermes Agent's authoritative child/lineage predicate carries
+    ``COALESCE(child.source, '') != 'tool'`` (hermes_state_sessions.py), so a
+    tool child is never a continuation of its parent — even when the parent
+    ended by compression and both rows share the ``tool`` source. The
+    cross-source guard alone lets a same-source tool child through, and the
+    unconditional compression acceptance would then merge it.
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    tool_parent = {
+        'id': 'tool_parent',
+        'source': 'tool',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    # Pre-closure child (origin/master kept it separate via its timestamp
+    # check) and post-closure child: both are boundaries for a tool child.
+    for started_at in (199.7, 250.0):
+        assert not _is_continuation_session(
+            tool_parent,
+            {'id': 'tool_child', 'source': 'tool', 'started_at': started_at},
+        )
+    # The source is normalized once (case/whitespace) before the tool check.
+    for raw_source in ('Tool', ' TOOL ', 'tool '):
+        assert not _is_continuation_session(
+            tool_parent,
+            {'id': 'tool_child_raw', 'source': raw_source, 'started_at': 250.0},
+        )
+    # cli_close parents are covered by the same rule.
+    assert not _is_continuation_session(
+        {**tool_parent, 'end_reason': 'cli_close'},
+        {'id': 'tool_child_close', 'source': 'tool', 'started_at': 250.0},
+    )
+    # Containment: the same shape with a non-tool source still collapses.
+    assert _is_continuation_session(
+        {**tool_parent, 'source': 'cli'},
+        {'id': 'cli_child', 'source': 'cli', 'started_at': 199.7},
+    )
+
+
+def test_same_source_tool_child_stays_independent_across_readers(tmp_path, monkeypatch):
+    """Projection, lineage metadata/report, and stitching keep a tool child separate."""
+    import api.models as models
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+    from api.models import get_state_db_session_messages
+
+    parent_id = 'tool_compression_parent'
+    child_id = 'tool_compression_child'
+    db_path = tmp_path / 'state.db'
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            timestamp REAL NOT NULL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count, "
+        "parent_session_id, ended_at, end_reason) "
+        "VALUES (?, 'tool', 'Tool parent run', 'test-model', 100.0, 2, NULL, 200.0, 'compression')",
+        (parent_id,),
+    )
+    # Reproduce the pre-closure tool child: started before the parent closed.
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count, "
+        "parent_session_id, ended_at, end_reason) "
+        "VALUES (?, 'tool', 'Tool child run', 'test-model', 199.7, 2, ?, NULL, NULL)",
+        (child_id, parent_id),
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            (parent_id, 'user', 'tool parent request', 150.0),
+            (parent_id, 'assistant', 'tool parent answer', 160.0),
+            (child_id, 'user', 'tool child request', 199.8),
+            (child_id, 'assistant', 'tool child answer', 199.9),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    # (a) Sidebar projection: both rows stay visible; the child is a plain
+    # child_session, not a hidden continuation of the parent.
+    projected = read_importable_agent_session_rows(db_path, limit=None, exclude_sources=None)
+    projected_by_id = {row['id']: row for row in projected}
+    assert set(projected_by_id) == {parent_id, child_id}
+    child_row = projected_by_id[child_id]
+    assert child_row['relationship_type'] == 'child_session'
+    assert child_row['parent_session_id'] == parent_id
+    assert '_lineage_root_id' not in child_row
+    parent_row = projected_by_id[parent_id]
+    assert parent_row['title'] == 'Tool parent run'
+    assert '_lineage_tip_id' not in parent_row
+    assert '_compression_segment_count' not in parent_row
+
+    # (b) Lineage metadata: the child is reported as a child_session with no
+    # lineage root, and not as a cross-surface child (same source).
+    metadata = read_session_lineage_metadata(db_path, {parent_id, child_id})
+    assert metadata[child_id]['relationship_type'] == 'child_session'
+    assert metadata[child_id]['parent_session_id'] == parent_id
+    assert '_lineage_root_id' not in metadata[child_id]
+    assert '_cross_surface_child_session' not in metadata[child_id]
+    assert '_lineage_tip_id' not in metadata.get(parent_id, {})
+
+    # (b') Lineage report: single-segment lineages on both sides.
+    child_report = read_session_lineage_report(db_path, child_id)
+    assert child_report['lineage_key'] == child_id
+    assert child_report['tip_session_id'] == child_id
+    assert child_report['total_segments'] == 1
+    parent_report = read_session_lineage_report(db_path, parent_id)
+    assert parent_report['total_segments'] == 1
+    assert [child['session_id'] for child in parent_report['children']] == [child_id]
+    assert parent_report['children'][0]['role'] == 'child_session'
+    assert parent_report['manual_review'] is False
+
+    # (c) Transcript stitching never prepends the tool parent.
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db_path)
+    stitched = get_state_db_session_messages(child_id, stitch_continuations=True)
+    assert [message['content'] for message in stitched] == [
+        'tool child request',
+        'tool child answer',
+    ]
+
+
 def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
     """A later-started stale sibling must not hide a deeper active branch."""
     conn = _ensure_state_db()
