@@ -1020,7 +1020,7 @@ def test_frontend_goal_consumes_pending_model_marker():
     assert "_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'" in goal_fn
     # The consume-clear must come AFTER the kickoff guard: a control command
     # (no stream_id) returns before reaching it.
-    assert goal_fn.index("_clearPendingSessionModel(activeSid)") > goal_fn.index("if(!r||!r.stream_id)return;")
+    assert goal_fn.index("_clearPendingSessionModel(activeSid)") > goal_fn.index("if(!r||!r.stream_id)return false;")
     # Re-check: the marker is re-read and only cleared while it still matches
     # the captured model/provider.
     assert "_stillPending.model===_goalModel" in goal_fn
@@ -1052,9 +1052,9 @@ def test_frontend_goal_control_command_keeps_pending_marker():
 
     # 2) The consume-clear sits after the kickoff guard (r.stream_id present).
     post_request = goal_fn.split("const r=await api('/api/goal'")[1]
-    assert "if(!r||!r.stream_id)return;" in post_request
+    assert "if(!r||!r.stream_id)return false;" in post_request
     assert "_clearPendingSessionModel(activeSid)" in post_request
-    assert post_request.index("if(!r||!r.stream_id)return;") < post_request.index("_clearPendingSessionModel(activeSid)")
+    assert post_request.index("if(!r||!r.stream_id)return false;") < post_request.index("_clearPendingSessionModel(activeSid)")
 
     # 3) The marker is re-read and only cleared while it still matches the
     #    captured model/provider.
