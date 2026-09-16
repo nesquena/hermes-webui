@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for the batch of fixes from PRs #506-#521 (v0.50.47).
 
 Covers:
@@ -214,13 +215,13 @@ class TestSystemTheme:
         )
 
     def test_i18n_cmd_theme_includes_system_english(self):
-        src = read("static/i18n.js")
+        src = locale_source_text()
         assert "system/dark/light" in src, (
             "English cmd_theme i18n key must include 'system' in the theme list"
         )
 
     def test_i18n_cmd_theme_all_locales(self):
-        src = read("static/i18n.js")
+        src = locale_source_text()
         count = src.count("system/dark/light")
         assert count >= 5, (
             f"cmd_theme description should mention 'system' in all 5 locales; "

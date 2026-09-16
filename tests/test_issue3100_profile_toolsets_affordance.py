@@ -1,10 +1,11 @@
+from tests.i18n_locale_loader import locale_source_text
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 
 
@@ -51,7 +52,7 @@ def test_null_state_is_labeled_as_active_profile_defaults():
     assert "session_toolsets_profile_defaults" in apply_chip
     assert "session_toolsets_global" not in apply_chip
     assert "session_toolsets_profile_defaults" in render_sections
-    assert "Global (default)" not in I18N_JS
+    assert "Global (default)" not in I18N_SOURCE
 
 
 def test_profile_default_action_saves_null_override():
@@ -90,9 +91,9 @@ def test_toolsets_affordance_i18n_keys_exist_in_locale_blocks():
         "session_toolsets_no_configured_servers",
     ]
     for key in keys:
-        assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"
-    assert "session_toolsets_custom:'Custom override'" in I18N_JS
-    assert "session_toolsets_desc:'Use active profile defaults or choose a custom toolset list for this session'" in I18N_JS
+        assert I18N_SOURCE.count(f"{key}:") >= 8, f"missing locale entries for {key}"
+    assert "session_toolsets_custom:'Custom override'" in I18N_SOURCE
+    assert "session_toolsets_desc:'Use active profile defaults or choose a custom toolset list for this session'" in I18N_SOURCE
 
 
 def test_toolsets_dropdown_distinguishes_failed_catalog_loads_from_loading():

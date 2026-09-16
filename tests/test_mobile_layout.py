@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Mobile layout regression tests — run on every QA pass.
 
@@ -1474,10 +1475,10 @@ def test_mobile_config_kickers_have_i18n_fallbacks():
     panel_start = HTML.index('id="composerMobileConfigPanel"')
     panel_end = HTML.index('<div class="profile-dropdown"', panel_start)
     panel_html = HTML[panel_start:panel_end]
-    i18n_js = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
-    en_start = i18n_js.index("  en: {")
-    en_end = i18n_js.index("\n  ru: {", en_start)
-    english = i18n_js[en_start:en_end]
+    I18N_SOURCE = locale_source_text()
+    en_start = I18N_SOURCE.index("  en: {")
+    en_end = I18N_SOURCE.index("\n  ru: {", en_start)
+    english = I18N_SOURCE[en_start:en_end]
     for key, label in (
         ("composer_mobile_workspace", "Workspace"),
         ("composer_mobile_model", "Model"),

@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import io
 import json
 import pathlib
@@ -250,11 +251,11 @@ def test_session_sidebar_renders_attention_badge_and_semantic_classes():
     assert "s.attention" in sessions_js
     assert "_sessionAttentionState(s) ||" in sessions_js
 
-    i18n_js = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    assert "session_attention_approval" in i18n_js
-    assert "session_attention_clarify" in i18n_js
-    assert "session_attention_approval_title" in i18n_js
-    assert "session_attention_clarify_title" in i18n_js
+    I18N_SOURCE = locale_source_text()
+    assert "session_attention_approval" in I18N_SOURCE
+    assert "session_attention_clarify" in I18N_SOURCE
+    assert "session_attention_approval_title" in I18N_SOURCE
+    assert "session_attention_clarify_title" in I18N_SOURCE
 
     assert ".session-item.needs-attention" in style_css
     assert ".session-item.attention-approval" in style_css

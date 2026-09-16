@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for #1793 — workspace file-tree cruft filter.
 
 Original v0.51.21 work added an inline "Show hidden files" toggle that sat
@@ -18,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 # ── Original filtering behavior (must stay green) ────────────────────────
@@ -34,7 +35,7 @@ def test_workspace_panel_has_show_hidden_files_toggle():
     """
     assert "toggleWorkspaceHiddenFiles" in UI_JS
     assert 'id="workspaceShowHiddenFiles"' in UI_JS  # built dynamically; id preserved
-    assert "workspace_show_hidden_files" in I18N_JS
+    assert "workspace_show_hidden_files" in I18N_SOURCE
 
 
 def test_file_tree_filters_common_cruft_by_default():
@@ -158,7 +159,7 @@ def test_new_i18n_keys_present_in_all_locales():
     sessions.
     """
     # Total locale blocks today: 9 (en, ja, ru, es, de, zh, zh-Hant, pt, ko)
-    n_locales = I18N_JS.count("workspace_show_hidden_files:")
+    n_locales = I18N_SOURCE.count("workspace_show_hidden_files:")
     assert n_locales >= 8, f"unexpected locale count: {n_locales}"
     for key in (
         "workspace_show_hidden_files_desc:",
@@ -166,9 +167,9 @@ def test_new_i18n_keys_present_in_all_locales():
         "workspace_hidden_files_visible_title:",
         "workspace_options:",
     ):
-        assert I18N_JS.count(key) == n_locales, (
+        assert I18N_SOURCE.count(key) == n_locales, (
             f"key {key!r} missing in some locales (expected {n_locales}, "
-            f"got {I18N_JS.count(key)})"
+            f"got {I18N_SOURCE.count(key)})"
         )
 
 
@@ -198,7 +199,7 @@ def test_workspace_show_hidden_files_translations_are_not_english_fallback():
         # Matching the full assignment avoids false positives from
         # unrelated strings that happen to contain the same words.
         needle = f"workspace_show_hidden_files: '{translation}'"
-        assert needle in I18N_JS, (
+        assert needle in I18N_SOURCE, (
             f"locale {locale!r}: expected translation needle {needle!r} "
-            f"not found in i18n.js — likely fell back to English"
+            f"not found in split locale bundles — likely fell back to English"
         )

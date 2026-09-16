@@ -1,8 +1,9 @@
+from tests.i18n_locale_loader import locale_source_text
 import re
 from pathlib import Path
 
 
-I18N_PATH = Path(__file__).resolve().parent.parent / "static" / "i18n.js"
+LOCALE_SOURCE = locale_source_text()
 
 
 LOGS_FILTER_KEYS = {
@@ -66,7 +67,7 @@ LOGS_FILTER_KEYS = {
 
 
 def _i18n_locale_block(locale: str) -> str:
-    src = I18N_PATH.read_text(encoding="utf-8")
+    src = LOCALE_SOURCE
     if "-" in locale:
         head = re.compile(rf"^  '{re.escape(locale)}':\s*\{{", re.M)
     else:

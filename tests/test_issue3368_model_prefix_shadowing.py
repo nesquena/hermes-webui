@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Regression tests for #3368 — /model <name> prefix-shadowing.
 
@@ -328,7 +329,7 @@ class TestDidYouMeanToastAssembly:
     def test_model_did_you_mean_is_arg_template_in_en_locale(self):
         import pathlib
         root = pathlib.Path(__file__).resolve().parents[1]
-        i18n = (root / "static" / "i18n.js").read_text(encoding="utf-8")
+        i18n = locale_source_text()
         # The en template must accept and interpolate an argument.
         assert "model_did_you_mean: (m) =>" in i18n
         assert "${m}" in i18n[i18n.index("model_did_you_mean: (m) =>"):i18n.index("model_did_you_mean: (m) =>") + 120]

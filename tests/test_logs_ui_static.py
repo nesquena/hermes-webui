@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 import pathlib
 import re
 
@@ -5,7 +6,7 @@ REPO = pathlib.Path(__file__).parent.parent
 INDEX = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-I18N = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N = locale_source_text()
 
 
 def _function_body(src: str, name: str) -> str:

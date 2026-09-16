@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Sprint 36 Tests: cancelStream cleanup no longer depends on SSE event (PR #309 / issue #299).
 
@@ -202,13 +203,13 @@ def test_sse_cancel_handler_calls_set_busy():
 # ── 7. i18n key preserved ─────────────────────────────────────────────────────
 
 def test_cancel_failed_i18n_key_exists_in_all_locales():
-    """cancel_failed key must still exist in i18n.js for all locales."""
-    src = read("static/i18n.js")
+    """cancel_failed key must still exist in split locale bundles for all locales."""
+    src = locale_source_text()
     # Should appear once per locale (en, es, de, ru, zh, zh-Hant)
     locale_count = _locale_count(src)
     count = src.count("cancel_failed:")
     assert count >= locale_count, (
-        f"cancel_failed key only found {count} times in i18n.js — "
+        f"cancel_failed key only found {count} times in split locale bundles — "
         f"expected at least {locale_count} (one per locale)"
     )
 
