@@ -452,9 +452,14 @@ async function _runAgentCommandTransport(text,_meta){
 async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  if(!S.session&&typeof newSession==='function'){
+    await newSession();
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }
+  const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||S&&S.session&&S.session.session_id||'').trim();
   return api('/api/commands/bundles/resolve',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
   });
 }
 
@@ -1145,17 +1150,22 @@ async function cmdSkills(args){
 }
 
 async function cmdUse(args){
-  if(!args){
-    S.messages.push({role:'assistant',content:'Usage: `/use <skill-name>` — forces the agent to consult that skill before its next response.'});
-    renderMessages();
-    return;
-  }
   let resolve;
   const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
   pending.promise = new Promise(r => { resolve = r; });
   _forcedSkillDirectivePending = pending;
   const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
   try{
+    if(!S.session&&typeof newSession==='function'){
+      await newSession();
+      pending.sessionId=S.session&&S.session.session_id||null;
+      if(typeof renderSessionList==='function') await renderSessionList();
+    }
+    if(!args){
+      S.messages.push({role:'assistant',content:'Usage: `/use <skill-name>` — forces the agent to consult that skill before its next response.'});
+      renderMessages();
+      return;
+    }
     const data = await api('/api/skills');
     const skills = data.skills || [];
     const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
@@ -1168,7 +1178,8 @@ async function cmdUse(args){
       }
       return;
     }
-    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    // Existing canonical request shape: api(`/api/skills/content?name=${encodeURIComponent(match.name)}`)
+    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}${pending.sessionId?`&session_id=${encodeURIComponent(pending.sessionId)}`:''}`);
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
