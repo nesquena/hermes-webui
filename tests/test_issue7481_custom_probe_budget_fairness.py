@@ -579,6 +579,134 @@ def test_late_out_of_band_result_cannot_overwrite_a_newer_rebuild(
     )
 
 
+def _run_two_in_flight_rebuilds(monkeypatch, *, newer_builder):
+    """Drive an invalidated rebuild N and a newer rebuild N+1, both in flight.
+
+    ``invalidate_models_cache`` clears ``_cache_build_in_progress`` without
+    cancelling a running worker, so a newer rebuild can be allocated while an
+    older one is still running. Both workers here are blocked inside the mocked
+    rebuild so the caller controls which one finishes first; the worker thread
+    objects are captured from inside the builder (the builder runs on the
+    worker), which lets the caller ``join`` a specific worker rather than sleep
+    and hope.
+
+    Returns ``(workers, release_older, release_newer, saves, older)`` where
+    ``workers[0]`` is rebuild N (returns the ``older`` catalog when released) and
+    ``workers[1]`` is N+1 (runs ``newer_builder``).
+    """
+    _configure(monkeypatch, active_base_url=None)
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+
+    older = _catalog("older")
+    release_older = threading.Event()
+    release_newer = threading.Event()
+    older_started = threading.Event()
+    newer_started = threading.Event()
+    saves: list = []
+    monkeypatch.setattr(
+        cfg,
+        "_save_models_cache_to_disk",
+        lambda result, *_a, **_k: saves.append(result),
+    )
+
+    workers: list = []
+    calls = {"n": 0}
+
+    def _builder(_builder):
+        workers.append(threading.current_thread())
+        calls["n"] += 1
+        if calls["n"] == 1:
+            older_started.set()
+            release_older.wait(5.0)
+            return copy.deepcopy(older)
+        newer_started.set()
+        release_newer.wait(5.0)
+        return newer_builder()
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _builder)
+
+    # Rebuild N: the foreground gives up at the budget, leaving its worker
+    # blocked inside the builder — the invalidated-in-flight state.
+    cfg.get_available_models()
+    assert older_started.wait(2.0), "the first rebuild worker never started"
+
+    # A config edit invalidates the cache; a newer rebuild N+1 is allocated while
+    # N is still running.
+    cfg.invalidate_models_cache()
+    cfg.get_available_models()
+    assert newer_started.wait(2.0), "the second rebuild worker never started"
+
+    return workers, release_older, release_newer, saves, older
+
+
+def test_invalidated_worker_cannot_publish_over_a_newer_in_flight_rebuild(
+    monkeypatch, isolate_models_catalog_state
+):
+    """Invalidation must fence out an in-flight worker, not just lose the race.
+
+    Maintainer review, 2026-09-11: ``invalidate_models_cache`` clears
+    ``_cache_build_in_progress`` without cancelling a running worker, so a newer
+    rebuild can be allocated while an older one is still in flight. If the older
+    worker finishes first, comparing against the last *published* sequence lets
+    it publish the invalidated catalog and release the build flag that now
+    belongs to the newer rebuild. The fence has to be the latest *allocated*
+    generation (``_models_rebuild_seq``).
+    """
+    newer = _catalog("newer")
+    workers, release_older, release_newer, saves, older = _run_two_in_flight_rebuilds(
+        monkeypatch, newer_builder=lambda: copy.deepcopy(newer)
+    )
+
+    # Release the OLDER worker first. It must not publish, must not touch the
+    # disk cache, and must not release the flag now owned by N+1.
+    release_older.set()
+    workers[0].join(timeout=5.0)
+    assert not workers[0].is_alive()
+    assert cfg._available_models_cache is None
+    assert older not in saves
+    assert cfg._cache_build_in_progress is True
+
+    # Release N+1: it alone publishes, and the disk cache records only it.
+    release_newer.set()
+    workers[1].join(timeout=5.0)
+    assert not workers[1].is_alive()
+    assert cfg._available_models_cache == newer
+    assert saves == [newer]
+    assert cfg._cache_build_in_progress is False
+    assert cfg._models_published_seq == cfg._models_rebuild_seq
+
+
+def test_superseded_worker_error_does_not_resurrect_its_catalog(
+    monkeypatch, isolate_models_catalog_state
+):
+    """When the newer rebuild fails, the invalidated catalog stays gone.
+
+    Companion to the previous test (maintainer review, 2026-09-11): N has to be
+    rejected on allocation order, not merely overwritten by N+1. If N+1 raises,
+    the invalidated N catalog must not be resurrected from the worker that was
+    still running, and N+1 still owns (and releases) the build flag.
+    """
+
+    def _fail():
+        raise RuntimeError("newer rebuild failed")
+
+    workers, release_older, release_newer, saves, older = _run_two_in_flight_rebuilds(
+        monkeypatch, newer_builder=_fail
+    )
+
+    release_older.set()
+    workers[0].join(timeout=5.0)
+    assert cfg._available_models_cache is None
+    assert older not in saves
+
+    release_newer.set()
+    workers[1].join(timeout=5.0)
+    assert not workers[1].is_alive()
+    assert cfg._available_models_cache is None
+    assert older not in saves
+    assert cfg._cache_build_in_progress is False
+
+
 def test_older_publish_does_not_cost_a_newer_rebuild_its_result(
     monkeypatch, isolate_models_catalog_state
 ):

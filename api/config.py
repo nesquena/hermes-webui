@@ -5187,6 +5187,26 @@ def _allocate_models_rebuild_seq() -> int:
     return _models_rebuild_seq
 
 
+def _models_rebuild_superseded(rebuild_seq: int) -> bool:
+    """True when a newer rebuild has been allocated since ``rebuild_seq``.
+
+    The caller must hold ``_cache_build_cv`` (which shares its RLock with
+    ``_available_models_cache_lock``) so this reads ``_models_rebuild_seq``
+    atomically with respect to ``_allocate_models_rebuild_seq``.
+
+    A build is superseded by the newest *allocated* generation, not merely by the
+    newest *published* one. ``invalidate_models_cache()`` clears
+    ``_cache_build_in_progress`` without cancelling an in-flight worker (#7481
+    review), so a newer rebuild can be allocated while an older one is still
+    running. Comparing against the last published sequence would let that older
+    worker publish an invalidated catalog before the newer build publishes, and
+    then release the build flag that already belongs to the newer rebuild — the
+    invalidation has to fence against the latest allocated generation to be a
+    real freshness boundary.
+    """
+    return rebuild_seq < _models_rebuild_seq
+
+
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
 # to answer "did this endpoint actually advertise this exact id?" in O(1) per
@@ -8855,19 +8875,34 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 with _sync_scope:
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
-                # Always reset the flag so waiting threads don't block for 60s
+                # Always reset the flag so waiting threads don't block for 60s —
+                # unless a newer rebuild has been allocated in the meantime, in
+                # which case the flag now belongs to it (#7481 review).
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                    if not _models_rebuild_superseded(rebuild_seq):
+                        _cache_build_in_progress = False
+                        _cache_build_cv.notify_all()
                 raise
             with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _models_published_seq = rebuild_seq
-                _sync_models_cache_provenance()
+                _superseded = _models_rebuild_superseded(rebuild_seq)
+                if not _superseded:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _models_published_seq = rebuild_seq
+                    _sync_models_cache_provenance()
+            if _superseded:
+                # An invalidated/older generation must not overwrite the disk
+                # cache either, and must leave the build flag to the newer build.
+                logger.debug(
+                    "discarding superseded models-catalog rebuild result "
+                    "(rebuild #%d, latest allocated rebuild #%d)",
+                    rebuild_seq,
+                    _models_rebuild_seq,
+                )
+                return copy.deepcopy(result)
             try:
                 _save_models_cache_to_disk(result)
             finally:
@@ -8910,23 +8945,24 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint, _models_published_seq
             with _cache_build_cv:
-                if rebuild_seq < _models_published_seq:
-                    # #7481 failure isolation: the cache already holds a catalog
-                    # from a newer rebuild, so this one is superseded and must
-                    # not overwrite it. Only the out-of-band publisher can reach
-                    # this — it outlives the foreground caller that gave up on
-                    # it. Ordered by rebuild sequence, not by wall clock: an
-                    # older build can publish *after* a newer build started, and
-                    # a timestamp comparison would misread that as newer and drop
-                    # the newer result instead. The newer publish already
-                    # released _cache_build_in_progress, so the flag is
-                    # deliberately left alone rather than released for a build
-                    # that may not be ours.
+                if _models_rebuild_superseded(rebuild_seq):
+                    # #7481 failure isolation: a newer rebuild has been allocated
+                    # since this one started, so this result is superseded and
+                    # must not overwrite the cache or the disk. Invalidation
+                    # clears _cache_build_in_progress without cancelling an
+                    # in-flight worker, which is how a newer build can be
+                    # allocated while this one is still running; the flag now
+                    # belongs to that newer build, so it is deliberately left set
+                    # rather than released for a build that is not ours. Ordered
+                    # by allocated generation, not by wall clock: an older build
+                    # can publish *after* a newer one started, and a timestamp
+                    # comparison would misread that as newer and drop the newer
+                    # result instead.
                     logger.debug(
                         "discarding superseded models-catalog rebuild result "
-                        "(rebuild #%d, catalog published by rebuild #%d)",
+                        "(rebuild #%d, latest allocated rebuild #%d)",
                         rebuild_seq,
-                        _models_published_seq,
+                        _models_rebuild_seq,
                     )
                     return
                 published_at = time.monotonic()
@@ -8947,9 +8983,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cache_build_in_progress = False
                     _cache_build_cv.notify_all()
 
-        def _clear_build_in_progress():
+        def _clear_build_in_progress(rebuild_seq: int):
             global _cache_build_in_progress
             with _cache_build_cv:
+                if _models_rebuild_superseded(rebuild_seq):
+                    # A newer rebuild owns the flag now; releasing it here would
+                    # wake waiters to an empty cache and let another cold rebuild
+                    # start concurrently with the newer one (#7481 review).
+                    return
                 _cache_build_in_progress = False
                 _cache_build_cv.notify_all()
 
@@ -8991,7 +9032,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 box["result"], rebuild_seq=rebuild_seq
                             )
                         else:
-                            _clear_build_in_progress()
+                            _clear_build_in_progress(rebuild_seq)
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -9004,7 +9045,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # Build finished within budget — foreground publishes
             # synchronously, exactly like the legacy path.
             if "error" in box:
-                _clear_build_in_progress()
+                _clear_build_in_progress(rebuild_seq)
                 raise box["error"]
             if _claim_publish():
                 _publish_models_result(box["result"], rebuild_seq=rebuild_seq)

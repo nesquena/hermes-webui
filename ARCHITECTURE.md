@@ -476,12 +476,23 @@ in-band probe at all (#7481).
   preserved.
 
 Publication is ordered by **generation, not by wall clock**. Each cold rebuild takes the
-next sequence number (`_allocate_models_rebuild_seq`), the published catalog records the
-sequence it came from (`_models_published_seq`), and a result is dropped if it is older
-than what is already published. This matters for the out-of-band publisher, which outlives
-the foreground caller: without the guard it could resurrect a superseded catalog over a
-newer one. A timestamp comparison cannot express the ordering, because an older build can
-publish *after* a newer build has already started.
+next sequence number (`_allocate_models_rebuild_seq`), and a result is dropped when it is
+older than the newest *allocated* generation (`_models_rebuild_seq`) — in which case it also
+leaves the build flag alone rather than clearing it, because that flag now belongs to the
+newer rebuild. The published catalog records the sequence it came from
+(`_models_published_seq`) for observability. This matters for the out-of-band publisher,
+which outlives the foreground caller: without the guard it could resurrect a superseded
+catalog over a newer one. A timestamp comparison cannot express the ordering, because an
+older build can publish *after* a newer build has already started.
+
+The fence is the latest **allocated** generation rather than the latest *published* one
+because `invalidate_models_cache()` clears `_cache_build_in_progress` without cancelling an
+in-flight worker: a newer rebuild can be allocated while an older one is still running. If
+the older worker finishes first, a published-sequence comparison would let it publish the
+invalidated catalog and release the flag that now belongs to the newer rebuild. Comparing
+against the allocated generation rejects it, so invalidation is a real freshness boundary,
+and a newer rebuild that then fails leaves the cache empty instead of resurrecting the
+invalidated catalog.
 
 ---
 
