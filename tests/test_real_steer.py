@@ -1110,6 +1110,104 @@ class TestFrontendWiring:
             "assert.deepStrictEqual(clearCalls, [], 'nothing was counted, so nothing was cleared');\n"
         )
 
+    # ── #7434 acceptance proof: multi in-flight steers must neither lose nor
+    # over-retain the session count (maintainer 2026-09-15). ────────────────
+
+    def test_three_in_flight_steers_one_boundary_lose_no_count_and_overretains_nothing(self):
+        """Three accepted steers drained by one boundary all debit to zero."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "const releases = [];\n"
+            "globalThis.api = () => new Promise(r => releases.push(() => r({ accepted: true })));\n"
+            "const pend = [_trySteer('s1', true), _trySteer('s2', true), _trySteer('s3', true)];\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "assert.strictEqual(releases.length, 3, 'all three requests are in flight');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0);\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'count 0: epoch advances, nothing cleared');\n"
+            "for (const release of releases) release();\n"
+            "const results = await Promise.all(pend);\n"
+            "assert.deepStrictEqual(results, [true, true, true], 'every steer reports delivered');\n"
+            "assert.strictEqual(counts.A, undefined, 'drained steers leave no residual count');\n"
+        )
+
+    def test_two_boundaries_interleaved_with_two_steers_attribute_each_request_separately(self):
+        """A steer armed between two boundaries is debited by the second, not the first."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let releaseA = null;\n"
+            "let releaseB = null;\n"
+            "let calls = 0;\n"
+            "globalThis.api = () => {\n"
+            "  calls++;\n"
+            "  if (calls === 1) return new Promise(r => { releaseA = () => r({ accepted: true }); });\n"
+            "  return new Promise(r => { releaseB = () => r({ accepted: true }); });\n"
+            "};\n"
+            "const a = _trySteer('armed before boundary 1', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'boundary 1');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1);\n"
+            # B is armed after boundary 1, so boundary 1 must not debit it.
+            "const b = _trySteer('armed after boundary 1', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "releaseA();\n"
+            "assert.strictEqual(await a, true, 'A crossed boundary 1 and is debited');\n"
+            "assert.strictEqual(counts.A, undefined, 'B is still pending and must not be counted yet');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'boundary 2 drains B while its response is in flight');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 2);\n"
+            "releaseB();\n"
+            "assert.strictEqual(await b, true);\n"
+            "assert.strictEqual(counts.A, undefined, 'B was drained by boundary 2');\n"
+        )
+
+    def test_accepted_steer_with_no_boundary_is_never_suppressed(self):
+        """No lost count: without a proven finalized batch the epoch is flat."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "assert.strictEqual(await _trySteer('solo steer', true), true);\n"
+            "assert.strictEqual(counts.A, 1, 'an accepted steer with no boundary must count');\n"
+            "assert.strictEqual(await _trySteer('second steer', true), true);\n"
+            "assert.strictEqual(counts.A, 2, 'a second accepted steer adds, not replaces');\n"
+        )
+
+    def test_terminal_cleanup_releases_attribution_so_nothing_is_retained_across_turns(self):
+        """Over-retention guard: turn end clears the count and frees the slot."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "assert.strictEqual(await _trySteer('turn 1 steer', true), true);\n"
+            "assert.strictEqual(counts.A, 1);\n"
+            # The done handler zeroes the owner count; stream teardown frees the slot.
+            "clearSteerPending('A');\n"
+            "_clearSteerConsumptionForStream('A', 'stream-1');\n"
+            "assert.strictEqual(counts.A, undefined, 'no count may survive turn end');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'no attribution may be retained into the next turn');\n"
+            # Turn 2 on a new stream starts from a clean epoch and counts normally.
+            "S.activeStreamId = 'stream-2';\n"
+            "assert.strictEqual(await _trySteer('turn 2 steer', true), true);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0, 'fresh attribution for the new turn');\n"
+            "assert.strictEqual(counts.A, 1, 'turn 2 steer is counted, not suppressed by stale attribution');\n"
+        )
+
+    def test_stream_replacement_during_in_flight_responses_cannot_forge_a_debit(self):
+        """A stream swap must not make an old request look boundary-drained."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let releaseA = null;\n"
+            "globalThis.api = () => new Promise(r => { releaseA = () => r({ accepted: true }); });\n"
+            "const a = _trySteer('armed on stream-1', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            # New stream is a real turn boundary: prior attribution is expired, not consumed.
+            "_clearSteerConsumptionForStream('A', 'stream-2');\n"
+            "S.activeStreamId = 'stream-2';\n"
+            "releaseA();\n"
+            "assert.strictEqual(await a, true);\n"
+            "assert.strictEqual(counts.A, 1, 'an expired stream must not silently debit an accepted steer');\n"
+        )
+
     def test_prearm_steer_consumption_before_accepted_response(self):
         """The backend may call agent.steer() before HTTP resolves and reach the
         next tool boundary before response processing resumes. Pre-arm on
