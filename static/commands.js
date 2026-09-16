@@ -1927,6 +1927,25 @@ function cmdReasoning(args){
     // composer and hides the command dropdown, and send() is async and called
     // unawaited (ui.js:8418) so the throw would surface only as an unhandled
     // rejection. Report it as a toast and mutate nothing.
+    //
+    // RESOLVE AND VALIDATE EVERY DEPENDENCY BEFORE MUTATING ANYTHING.
+    // `_reasoningFetchSeq` is a SHARED dispatch generation: fetchReasoningChip()
+    // and syncReasoningChip() in ui.js compare their captured sequence against
+    // it. Advancing it and then failing supersedes a cold in-flight chip fetch
+    // that captured the old value. That fetch then returns early at its
+    // stale-generation check while `_lastReasoningFetchKey` stays set, so a
+    // same-key syncReasoningChip() short-circuits instead of retrying and chip
+    // hydration is stranded until something else invalidates the key. Merely
+    // invoking an unavailable command must not be able to do that.
+    //
+    // So: read the context and the query, require a CALLABLE predicate and a
+    // FINITE SAFE-INTEGER counter, and only then increment and bind. A
+    // present-but-undefined or non-callable helper is as unusable as an absent
+    // one — assignment alone succeeding is not evidence the helper works, and
+    // the old code discovered that only inside .then(), after the POST had
+    // already changed server state. A counter holding `undefined` is worse than
+    // absent: prefix increment yields NaN, which throws nothing and makes every
+    // later generation comparison false.
     let payload,key,seq,current;
     try{
       const ctx=_reasoningEffortContext();
@@ -1937,7 +1956,6 @@ function cmdReasoning(args){
       // sequence number now, then discard a superseded response silently — no
       // chip write, no toast.
       key=_reasoningEffortQuery();
-      seq=++_reasoningFetchSeq;
       // Bind the predicate EAGERLY rather than referencing it inside current().
       // A lazy reference resolves only when the response settles, which is
       // AFTER the POST has already gone out: the ReferenceError would then fire
@@ -1945,6 +1963,17 @@ function cmdReasoning(args){
       // server state. Capturing it here moves the failure ahead of dispatch, so
       // an unavailable predicate sends nothing at all.
       const isCurrent=_reasoningDispatchIsCurrent;
+      if(typeof isCurrent!=='function'){
+        throw new TypeError('_reasoningDispatchIsCurrent is not callable');
+      }
+      // Read the counter BEFORE writing it, so an unusable value fails closed
+      // with the generation untouched.
+      const prevSeq=_reasoningFetchSeq;
+      if(!Number.isSafeInteger(prevSeq)){
+        throw new TypeError('_reasoningFetchSeq is not a safe integer');
+      }
+      // Every dependency is now validated: this is the first mutation.
+      seq=++_reasoningFetchSeq;
       current=function(){return isCurrent(seq,key);};
     }catch(e){
       // Fail closed: no /api/reasoning POST, no chip write, and no toast that
