@@ -98,13 +98,17 @@ function t(k){ return k; }
 function switchWorkspacePanelTab(){}
 const S = { session: { session_id: 's1', workspace: '/ws' } };
 
-// openFile: mirrors the shipped reveal contract — it flips the preview DOM
-// visible. `params.openFileResolves` controls whether it settles immediately.
+// openFile: mirrors the shipped reveal contract. On success it flips the
+// preview DOM visible and returns true; on a failed read it returns false and
+// leaves the preview hidden (the real function swallows read errors and
+// reports them via its return value).
 let openFileCalls = [];
 async function openFile(path){
   openFileCalls.push(path);
   if(params.openFileSettles === 'never'){ return new Promise(()=>{}); }
+  if(params.openFileReadFails){ return false; }
   previewVisible = true;
+  return true;
 }
 
 // _workspacePathExists: async gate the harness controls.
@@ -178,12 +182,14 @@ eval(fn.openArtifactPath);
 
 
 def _run_scenario(*, exists_mode: str, open_file_settles: str = "immediately",
-                  preview_visible_initially: bool = True) -> dict:
+                  preview_visible_initially: bool = True,
+                  open_file_read_fails: bool = False) -> dict:
     payload = {
         "functions": _shipped_functions(),
         "existsMode": exists_mode,
         "openFileSettles": open_file_settles,
         "previewVisibleInitially": preview_visible_initially,
+        "openFileReadFails": open_file_read_fails,
     }
     js = _HARNESS.replace("__PARAMS__", json.dumps(payload))
     proc = subprocess.run(
@@ -294,4 +300,46 @@ def test_successful_open_while_panel_was_never_dismissed():
 
     assert settled["mode"] == "preview", (
         "artifact open from a never-opened panel must end in preview mode"
+    )
+
+
+# ── Greptile review: a failed READ must not resurrect the dismissed panel ────
+#
+# The existence check passing does not mean the file could be read: the read can
+# still fail (403 grant expired, oversized, binary→download, network error), and
+# openFile() swallows those errors. Promoting the panel unconditionally after
+# the await therefore treated a failed read as a successful open and cleared the
+# user's dismissal, force-opening the panel onto stale or empty preview content.
+
+
+def test_failed_read_preserves_dismissal():
+    """A read failure after the existence check passed must not clear the
+    dismissal flag — that is the state the flag exists to protect."""
+    result = _run_scenario(exists_mode="ok", open_file_read_fails=True)
+    settled = _step(result, "after open settled")
+
+    assert result["openFileCalls"] == ["dir/valid.md"], (
+        f"openFile should still be attempted, got {result['openFileCalls']}"
+    )
+    assert settled["dismissed"] is True, (
+        "a failed read cleared the dismissal flag, so the next viewport change "
+        "force-opens the panel onto stale or empty preview content"
+    )
+    assert settled["mode"] == "closed", (
+        "a failed read promoted the panel to preview mode"
+    )
+
+
+def test_failed_read_does_not_reopen_after_viewport_churn():
+    """The end-to-end consequence: dismiss → artifact link whose read fails →
+    keyboard/rotation resize must leave the panel closed."""
+    result = _run_scenario(exists_mode="ok", open_file_read_fails=True)
+    after_link = _step(result, "after open settled")
+    assert after_link["mode"] == "closed", (
+        f"precondition: panel should still be closed after the failed read, got "
+        f"{after_link}"
+    )
+    # A subsequent resize must not find a cleared flag to act on.
+    assert after_link["dismissed"] is True, (
+        "the dismissal guard was consumed by a failed read"
     )
