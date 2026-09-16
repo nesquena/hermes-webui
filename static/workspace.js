@@ -628,9 +628,6 @@ async function _workspacePathExists(path){
 
 async function openArtifactPath(path){
   if(!path) return;
-  // User-initiated file open from chat (workspace:// link or artifact click):
-  // clear any prior dismissal so the panel auto-opens to show this file.
-  if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
   switchWorkspacePanelTab('files');
   // Normalize backslash separators to '/' first — Windows absolute paths
   // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
@@ -653,7 +650,21 @@ async function openArtifactPath(path){
     setStatus(t('file_open_failed'));
     return;
   }
-  openFile(rel);
+  // User-initiated file open from chat (workspace:// link or artifact click):
+  // clear any prior dismissal so the panel auto-opens to show this file.
+  // This must happen only AFTER the async existence check resolves and only on
+  // the success path: clearing it up-front let a keyboard/rotation/URL-bar
+  // sync reopen the stale preview while the request was still pending, and a
+  // failed open (missing file / request error) then stripped the dismissal
+  // guard for good. Both are fixed by writing the flag only here.
+  if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
+  // Await the open so the panel transition belongs to THIS user action: openFile
+  // reveals the preview DOM (#previewArea.visible) and only then do we promote
+  // the panel to preview mode. Previously the call was fire-and-forget and the
+  // mode flip was left to some later unrelated sync, so the panel could stay
+  // closed even though a valid file was opened.
+  await openFile(rel);
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
