@@ -6704,9 +6704,27 @@ def _repair_foreign_session_model_provider(
         # snapshot here can silently route a poisoned session to the wrong
         # provider. Display-only callers opt out via
         # wait_for_inflight_rebuild=False; this one must not.
-        catalog = get_available_models(
-            prefer_cache=True, wait_for_inflight_rebuild=True
-        )
+        import inspect as _inspect
+
+        try:
+            _gam_accepts_rebuild_wait = (
+                "wait_for_inflight_rebuild"
+                in _inspect.signature(get_available_models).parameters
+            )
+        except (TypeError, ValueError):
+            # Builtins / C-callables can refuse introspection; assume the
+            # signature shape that predates wait_for_inflight_rebuild.
+            _gam_accepts_rebuild_wait = False
+        if _gam_accepts_rebuild_wait:
+            catalog = get_available_models(
+                prefer_cache=True, wait_for_inflight_rebuild=True
+            )
+        else:
+            # Stub/monkeypatched get_available_models without the new
+            # parameter (test doubles): the prefer_cache contract it does
+            # know is still cache-only, which keeps the repair semantically
+            # intact for those doubles.
+            catalog = get_available_models(prefer_cache=True)
     except Exception:
         return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
