@@ -116,7 +116,10 @@ def _run(cmd="sessions", opener="ok", render="ok", sidebar="ok") -> dict:
     branch = _extract_branch(MESSAGES_JS.read_text(encoding="utf-8"))
     assert branch.rstrip().endswith("}"), "extracted branch looks truncated"
     source = _HARNESS.replace("/*__BRANCH__*/", branch)
-    env = dict(os.environ)
+    # Minimal explicit environment: the harness only needs an interpreter
+    # lookup path plus its scenario payload. Passing the ambient environment
+    # would hand the child every secret the parent process happens to hold.
+    env = {key: os.environ[key] for key in ("PATH", "NODE_PATH") if key in os.environ}
     env["SCENARIO_6224"] = json.dumps(
         {"cmd": cmd, "opener": opener, "render": render, "sidebar": sidebar}
     )
