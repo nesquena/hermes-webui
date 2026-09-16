@@ -111,6 +111,57 @@ _NESTED_LOCAL_MARKERS: tuple[str, ...] = tuple(
 # because it is already an unconditional marker above.
 _NESTED_CANDIDATE_RE = re.compile(r"""(?i)https?://[^\s<>"']*""")
 
+# A nested SCHEME-RELATIVE candidate: `//host/path`. A browser resolves this
+# against the containing document's scheme, so `?next=//127.0.0.1/x.png` reaches
+# loopback exactly as `http://127.0.0.1/x.png` does. It carries no scheme token,
+# so _NESTED_CANDIDATE_RE never matched it and no marker in
+# _NESTED_LOCAL_MARKERS appears in it either — the value reached the preserve arm
+# and published a live private reference.
+#
+# The leading `//` must not be preceded by a `:` (that would be the absolute form
+# _NESTED_CANDIDATE_RE already owns) and the authority must look like a host:
+# at least one character that is not a slash, backslash, or another delimiter.
+_NESTED_SCHEME_RELATIVE_RE = re.compile(r"""(?<!:)//([^\s<>"'/\\?#]+)([^\s<>"']*)""")
+
+# Characters a browser treats as a path separator even though they are not `/`.
+# A target such as `\api\media?path=…` or `\\127.0.0.1\x.png` normalizes to the
+# forward-slash spelling before the request goes out, so the classifier must
+# normalize first or it compares the wrong string.
+_BACKSLASH_RE = re.compile(r"\\")
+
+
+def _browser_normalize(probe: str) -> str:
+    """Return *probe* as a browser would resolve its separators and dot segments.
+
+    Two normalizations, both of which a real URL parser performs before the
+    request leaves the page, and neither of which a raw substring check sees:
+
+    * backslashes become forward slashes, so ``\\api\\media?path=`` is compared
+      as ``/api/media?path=``;
+    * ``foo/../api/media`` collapses to ``/api/media``, so a dot segment cannot
+      hide an authenticated route from a prefix match.
+
+    Collapsing happens on the path portion only. A ``..`` inside a query value is
+    not a path segment, and rewriting it would change the bytes a preserved
+    public URL is compared against.
+    """
+    normalized = _BACKSLASH_RE.sub("/", probe)
+    head, sep, tail = normalized.partition("?")
+    if not sep:
+        head, sep, tail = normalized.partition("#")
+    segments: list[str] = []
+    for segment in head.split("/"):
+        if segment == ".":
+            continue
+        if segment == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(segment)
+    collapsed = "/".join(segments)
+    return collapsed + sep + tail
+
+
 # How many levels of nesting get classified before the value is refused. Each
 # recursion step judges a STRICT substring of its parent's probe, so recursion
 # terminates on the value alone; this bound is the second, explicit guarantee
@@ -184,13 +235,45 @@ def public_reference_hides_local_target(value: str, *, _depth: int = 0) -> bool:
     decoded, still_changing = decode_probe_bounded(probe)
     if still_changing:
         return True
+    # Compare what a BROWSER would request, not the raw bytes. `\api\media?…`
+    # and `foo/../api/media?…` both resolve to the authenticated route, and a raw
+    # substring check sees neither.
+    decoded = _browser_normalize(decoded)
     lowered = decoded.lower()
     if any(marker in lowered for marker in _NESTED_LOCAL_MARKERS):
         return True
-    return any(
+    if any(
         _nested_candidate_hides_local_target(candidate, depth=_depth)
         for candidate in _NESTED_CANDIDATE_RE.findall(decoded)
+    ):
+        return True
+    # Scheme-relative descendants: `//host/path` resolves against the containing
+    # scheme, so it reaches the same host an absolute URL would. Resolve each one
+    # with this value's scheme and classify it exactly like an absolute
+    # candidate, so a private or authenticated descendant is refused however it
+    # is spelled.
+    scheme = (parts.scheme or "https").lower()
+    return any(
+        _nested_candidate_hides_local_target(f"{scheme}:{candidate}", depth=_depth)
+        for candidate in _scheme_relative_candidates(decoded)
     )
+
+
+def _scheme_relative_candidates(decoded: str) -> list[str]:
+    """Return every ``//host/...`` run in *decoded*, longest match per position.
+
+    Each returned value keeps its leading ``//`` so a caller can prefix a scheme
+    and hand the result to a normal absolute-URL classifier. An authority that
+    parses to nothing is skipped rather than turned into a bogus URL: a bare
+    ``//`` carries no host and cannot reach one.
+    """
+    out: list[str] = []
+    for match in _NESTED_SCHEME_RELATIVE_RE.finditer(decoded):
+        authority = match.group(1)
+        if not authority:
+            continue
+        out.append("//" + authority + (match.group(2) or ""))
+    return out
 
 
 def _nested_candidate_hides_local_target(candidate: str, *, depth: int) -> bool:

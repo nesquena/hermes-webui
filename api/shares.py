@@ -13,6 +13,7 @@ import html
 import io
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -48,6 +49,17 @@ logger = logging.getLogger(__name__)
 
 SHARES_DIR = STATE_DIR / "shares"
 _SHARE_LOCK = threading.Lock()
+
+# The only roles a public share may publish. Declared once so the WRITE path
+# (_sanitize_message) and the READ path (_guarded_public_message) cannot drift:
+# a read that accepted a wider set than the write would let a legacy snapshot
+# serve system or tool rows that a fresh snapshot can never contain.
+_PUBLIC_SHARE_ROLES = frozenset({"user", "assistant"})
+
+# Keys a public message row may carry. Anything else a stored snapshot holds
+# (provider_details, tool_calls, raw_result, workspace, ...) is dropped rather
+# than republished.
+_PUBLIC_MESSAGE_KEYS = frozenset({"role", "content", "timestamp"})
 
 
 def _ensure_share_dir() -> None:
@@ -495,7 +507,7 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "").strip().lower()
-    if role not in {"user", "assistant"}:
+    if role not in _PUBLIC_SHARE_ROLES:
         return None
     text = _share_message_text(message)
     if not text:
@@ -522,20 +534,46 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
 
 
 def _guarded_public_message(message) -> dict | None:
-    """Return *message* with its stored content re-decided for publication.
+    """Rebuild *message* as a public row, or return ``None`` to drop it.
 
-    A stored snapshot's ``content`` is untrusted text: it may predate the
-    public-reference guard entirely. Every message therefore passes through
-    :func:`guard_public_share_references` on the way out, and a message whose
-    shape is not ``{role, content: str}`` is dropped rather than published.
+    Stored snapshot JSON is UNTRUSTED. It may predate the public-reference guard,
+    and it may carry fields an older writer persisted. So this REBUILDS the row
+    from approved keys rather than spreading the stored dict: a spread
+    republishes every stored field and every stored role, which let a legacy
+    snapshot serve ``system`` and ``tool`` rows plus siblings such as
+    ``provider_details``, ``tool_calls``, ``raw_result``, and workspace paths
+    through the anonymous ``/api/share/<token>`` response.
+    ``static/share.js::_shareRenderMessages()`` renders every returned row, so a
+    republished field is a published field.
+
+    The contract enforced here is the one
+    ``tests/test_session_public_share.py::test_public_share_payload_is_sanitized_and_read_only``
+    already states for freshly built snapshots: user and assistant rows only, no
+    provider details. A read of an OLD snapshot must satisfy the same contract as
+    a write of a new one.
+
+    Returned keys are exactly ``role``, ``content``, and an optional numeric
+    ``timestamp``. Content passes through :func:`guard_public_share_references`,
+    which performs no filesystem access.
     """
     if not isinstance(message, dict):
         return None
-    content = message.get("content")
-    if not isinstance(content, str):
+    role = message.get("role")
+    if role not in _PUBLIC_SHARE_ROLES:
         return None
-    guarded = guard_public_share_references(content)
-    return {**message, "content": guarded}
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    public: dict = {
+        "role": role,
+        "content": guard_public_share_references(content),
+    }
+    # Only a finite number survives. A stored string or NaN would render as a
+    # bogus time, and callers treat this field as numeric.
+    ts = message.get("timestamp")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts):
+        public["timestamp"] = ts
+    return public
 
 
 def _public_share_payload(payload: dict) -> dict:
@@ -547,10 +585,16 @@ def _public_share_payload(payload: dict) -> dict:
     # reference to an anonymous viewer. No filesystem access happens here — see
     # guard_public_share_references().
     guarded = [m for m in map(_guarded_public_message, messages) if m is not None]
+    # Accept only a string title. A structured title would otherwise be
+    # stringified into its repr, publishing dict syntax and any nested fields.
+    stored_title = payload.get("title")
+    title = stored_title.strip() if isinstance(stored_title, str) else ""
     public = {
-        "title": str(payload.get("title") or "Untitled"),
+        "title": title or "Untitled",
         "messages": guarded,
-        "message_count": int(payload.get("message_count") or len(guarded)),
+        # RECOMPUTED, never trusted. A stored count survives row drops and would
+        # tell the viewer that messages are missing rather than filtered.
+        "message_count": len(guarded),
     }
     created_at = payload.get("created_at")
     updated_at = payload.get("updated_at")
