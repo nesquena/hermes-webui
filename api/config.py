@@ -1008,7 +1008,11 @@ MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
-MD_EXTS = {".md", ".markdown", ".mdown"}
+# Single inline-Markdown suffix authority. The server MIME map, the workspace
+# preview router (static/workspace.js:MD_EXTS) and the chat preview router
+# (static/ui.js:_MD_EXTS) must agree on this exact set — parity is asserted in
+# tests/test_media_inline.py.
+MD_EXTS = {".md", ".markdown", ".mdown", ".mkd", ".mkdn"}
 CODE_EXTS = {
     ".py",
     ".js",
@@ -1049,6 +1053,9 @@ MIME_MAP = {
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",
+    # Markdown aliases are derived from the single suffix authority above so the
+    # MIME map cannot drift from MD_EXTS / workspace.js / ui.js again.
+    **{ext: "text/markdown" for ext in sorted(MD_EXTS)},
     ".xls": "application/vnd.ms-excel",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".doc": "application/msword",
