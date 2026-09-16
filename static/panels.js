@@ -7315,6 +7315,13 @@ async function switchToProfile(name) {
       // enabled, auto-resume the new profile's most recent session instead.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       const resumed = await _resumeRecentSessionForProfileSwitch(_switchGen, workspaceVisible);
+      // A newer switch can take ownership while the resume helper awaits. Bail
+      // out BEFORE creating anything: newSession() mints and installs a session
+      // from the shared state of whatever profile the cookie now points at, so a
+      // superseded switch reaching it would overwrite the session, URL,
+      // transcript and stream owned by the newer switch. Checking only after the
+      // call (as before) still let the stale session be created and adopted.
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (!resumed) {
         // Pass the switch generation so a newSession() still in flight for an
         // older profile cannot be adopted as this switch's result.
