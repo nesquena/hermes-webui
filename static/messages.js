@@ -7267,9 +7267,28 @@ function autoResize(){
   // read as a bogus pixel number (parseFloat("50%")===50), which would wrongly
   // enable the fast path and leave the composer stuck tall. Reject anything that
   // is not exactly "<number>px" so those cases fail closed to the full resize.
-  const _minHeightRaw=_isAppendOnly&&_fitsCurrentHeight?getComputedStyle(el).minHeight:'';
-  const _minHeight=/^(?:\d+(?:\.\d+)?|\.\d+)px$/.test(_minHeightRaw)?parseFloat(_minHeightRaw):NaN;
-  const _isAtMinimumHeight=Number.isFinite(_minHeight)&&el.offsetHeight<=Math.ceil(_minHeight)+1;
+  const _composerStyle=_isAppendOnly&&_fitsCurrentHeight?getComputedStyle(el):null;
+  const _composerPx=(raw)=>/^(?:\d+(?:\.\d+)?|\.\d+)px$/.test(raw==null?'':String(raw))?parseFloat(raw):NaN;
+  const _minHeightRaw=_composerStyle?_composerStyle.minHeight:'';
+  const _minHeight=_composerPx(_minHeightRaw);
+  // The ONE-ROW height the composer naturally settles at is line-height +
+  // vertical padding + borders (~48px at the stock font), which is TALLER than
+  // the CSS min-height (44px). Comparing el.offsetHeight against min-height
+  // alone therefore never matched in a real browser, so this skip was dead code
+  // and EVERY append keystroke paid the height:'auto' round trip below — and
+  // that scrollHeight read forces a synchronous layout of the whole document,
+  // transcript included. The cost grows with the rendered transcript: on a
+  // 758-message transcript (31k DOM nodes) a keystroke measured ~168ms median
+  // echo latency at 6x CPU throttle vs 72ms with the transcript detached.
+  // Accept the natural one-row height too; an oversized composer still takes the
+  // full resize because its offsetHeight exceeds that ceiling by far.
+  const _lineHeight=_composerStyle?_composerPx(_composerStyle.lineHeight):NaN;
+  const _naturalRowHeight=Number.isFinite(_lineHeight)
+    ?_lineHeight+(_composerPx(_composerStyle.paddingTop)||0)+(_composerPx(_composerStyle.paddingBottom)||0)
+      +(_composerPx(_composerStyle.borderTopWidth)||0)+(_composerPx(_composerStyle.borderBottomWidth)||0)
+    :NaN;
+  const _rowCeiling=Number.isFinite(_naturalRowHeight)&&Number.isFinite(_minHeight)?Math.max(_minHeight,_naturalRowHeight):_minHeight;
+  const _isAtMinimumHeight=Number.isFinite(_rowCeiling)&&el.offsetHeight<=Math.ceil(_rowCeiling)+1;
   if(_isAppendOnly&&_fitsCurrentHeight&&_isAtMinimumHeight){
     _composerLastResizeValue=_nextValue;
     updateSendBtn();

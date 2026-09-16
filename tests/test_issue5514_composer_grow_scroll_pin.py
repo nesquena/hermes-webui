@@ -414,12 +414,20 @@ def test_single_line_growth_skips_the_height_round_trip():
     assert "let _composerLastResizeValue='';" in MESSAGES_JS
     assert "const _isAppendOnly=_nextValue.length>_composerLastResizeValue.length&&_nextValue.startsWith(_composerLastResizeValue);" in body
     assert "const _fitsCurrentHeight=el.scrollHeight<=el.offsetHeight;" in body
-    assert "const _minHeightRaw=_isAppendOnly&&_fitsCurrentHeight?getComputedStyle(el).minHeight:'';" in body
-    assert "const _minHeight=/^(?:\\d+(?:\\.\\d+)?|\\.\\d+)px$/.test(_minHeightRaw)?parseFloat(_minHeightRaw):NaN;" in body
+    assert "const _minHeightRaw=_composerStyle?_composerStyle.minHeight:'';" in body
+    assert "const _minHeight=_composerPx(_minHeightRaw);" in body
     # The strict finite-pixel guard rejects a percentage/auto/calc min-height so a
     # bogus parseFloat("50%")===50 can't wrongly enable the fast path (Codex #6349 re-gate).
     assert "parseFloat(getComputedStyle(el).minHeight)" not in body  # old lax parse is gone
-    assert "const _isAtMinimumHeight=Number.isFinite(_minHeight)&&el.offsetHeight<=Math.ceil(_minHeight)+1;" in body
+    # The single-row ceiling ALSO accepts the composer's natural one-row height
+    # (line-height + vertical padding + borders ~48px). Comparing offsetHeight
+    # against the 44px CSS min-height alone was unreachable in a real browser,
+    # which left this skip dead and made every append keystroke pay the height
+    # round trip (a synchronous full-document layout => typing lag that grows with
+    # the rendered transcript). See
+    # tests/test_long_session_composer_typing_latency.py.
+    assert "const _rowCeiling=Number.isFinite(_naturalRowHeight)&&Number.isFinite(_minHeight)?Math.max(_minHeight,_naturalRowHeight):_minHeight;" in body
+    assert "const _isAtMinimumHeight=Number.isFinite(_rowCeiling)&&el.offsetHeight<=Math.ceil(_rowCeiling)+1;" in body
     assert "if(_isAppendOnly&&_fitsCurrentHeight&&_isAtMinimumHeight){" in body
     assert "el.style.height='auto'" in body
 # ---------------------------------------------------------------------------
