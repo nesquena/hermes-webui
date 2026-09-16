@@ -1116,6 +1116,13 @@ async function openFile(path, opts={}){
 
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
+  // #6709: snapshot the tree's reading position before hiding it — a hidden
+  // container reports scrollTop=0, so the preview lifecycle (background refresh
+  // and the preview-close render) must restore from this snapshot instead of
+  // re-reading the DOM. Only a visible tree can lend its position: a file-to-file
+  // preview switch re-enters with the tree already hidden and must not clobber it.
+  const _browseTree=$('fileTree');
+  if(_browseTree&&_browseTree.style.display!=='none') S._wsBrowseScrollTop=_browseTree.scrollTop;
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
