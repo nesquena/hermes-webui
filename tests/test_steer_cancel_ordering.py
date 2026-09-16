@@ -19,8 +19,13 @@ class ObservedLock:
         self.lock = threading.Lock()
         self.owner = None
         self.contender = threading.Event()
+        # Optional unlocked hooks: before acquisition and after release.
+        self.before_acquire = None
+        self.after_release = None
 
     def __enter__(self):
+        if self.before_acquire is not None:
+            self.before_acquire()
         if self.owner is not None and self.owner != threading.get_ident():
             self.contender.set()
         assert self.lock.acquire(timeout=5), "stream lock acquisition timed out"
@@ -30,6 +35,8 @@ class ObservedLock:
     def __exit__(self, *args):
         self.owner = None
         self.lock.release()
+        if self.after_release is not None:
+            self.after_release()
 
 
 @pytest.fixture
@@ -115,8 +122,11 @@ def test_cancel_snapshot_claims_stream_before_later_steer(scene, monkeypatch, re
     assert config.STREAM_LIVE_TOOL_CALLS["run"] == [{"name": "example"}]
 
 
-def test_steer_claimed_first_enqueues_before_cancel(scene):
+@pytest.mark.parametrize("registered", [True, False])
+def test_steer_claimed_first_enqueues_before_cancel(scene, registered):
     lock, agent = scene
+    if not registered:
+        config.AGENT_INSTANCES.clear()  # Matching-cache compatibility path.
     reached = threading.Event()
     release = threading.Event()
     order = []
@@ -149,3 +159,89 @@ def test_steer_claimed_first_enqueues_before_cancel(scene):
         assert guidance.result(timeout=5)["accepted"] is True
         assert cancel.result(timeout=5) is True
     assert order == ["steer", "cancel"]
+
+
+@pytest.mark.parametrize("gap", ["before_acquire", "after_release"])
+def test_cache_only_steer_is_atomic_with_stop(scene, monkeypatch, gap):
+    """Cache-only Steer (no AGENT_INSTANCES entry) must never enqueue after Stop claims.
+
+    Steer selects the matching cached worker, then pauses at an unlocked gap
+    around its next stream-lock edge while Stop runs to completion. Exactly one
+    complete outcome is allowed: Steer already queued under the stream lock
+    before Stop claimed, or Stop claimed first and Steer reports ``stream_dead``
+    without ever calling ``agent.steer()`` on the cached worker.
+    """
+    lock, agent = scene
+    config.AGENT_INSTANCES.clear()
+    decoy = Mock(session_id="other-session")
+    config.SESSION_AGENT_CACHE["other-session"] = (decoy, "sig")
+    reached = threading.Event()
+    release = threading.Event()
+    state = {"steer_ident": None, "selected": None, "paused": False, "enqueue": None}
+    order = []
+
+    matches = streaming._cached_agent_matches_session
+
+    def select(candidate, sid):
+        result = matches(candidate, sid)
+        if threading.get_ident() == state["steer_ident"] and result:
+            state["selected"] = candidate
+        return result
+
+    def gate(edge):
+        # Pause the Steer thread once, at the requested unlocked edge, only
+        # after it has selected its cache candidate.
+        if (threading.get_ident() != state["steer_ident"]
+                or state["selected"] is None or state["paused"] or edge != gap):
+            return
+        state["paused"] = True
+        reached.set()
+        assert release.wait(5), "cache-only steer barrier timed out"
+
+    def enqueue(text):
+        state["enqueue"] = {
+            "held": lock.owner == threading.get_ident(),
+            "alive": "run" in config.STREAMS,
+            "phase": config.ACTIVE_RUNS["run"]["phase"],
+        }
+        order.append("steer")
+        return True
+
+    def interrupt(reason):
+        assert lock.owner != threading.get_ident(), "interrupt must be outside registry lock"
+        order.append("cancel")
+
+    def cache_only_steer():
+        state["steer_ident"] = threading.get_ident()
+        return steer()
+
+    agent.steer.side_effect = enqueue
+    agent.interrupt.side_effect = interrupt
+    monkeypatch.setattr(streaming, "_cached_agent_matches_session", select)
+    lock.before_acquire = lambda: gate("before_acquire")
+    lock.after_release = lambda: gate("after_release")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        guidance = pool.submit(cache_only_steer)
+        try:
+            assert reached.wait(5), "steer never reached the requested gap"
+            assert lock.owner is None, "steer must not pause while holding the stream lock"
+            assert streaming.cancel_stream("run") is True
+        finally:
+            release.set()
+        result = guidance.result(timeout=5)
+    assert state["selected"] is agent, "the selected cache object must be the intended worker"
+    decoy.steer.assert_not_called()
+    assert config.ACTIVE_RUNS["run"]["phase"] == "cancelling"
+    assert "run" not in config.STREAMS
+    assert "run" not in config.AGENT_INSTANCES
+    agent.interrupt.assert_called_once()
+    if order == ["steer", "cancel"]:
+        # Steer queued before Stop claimed cancellation, under the stream lock.
+        assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+        agent.steer.assert_called_once_with("guidance")
+        assert state["enqueue"] == {"held": True, "alive": True, "phase": "running"}
+    else:
+        # Stop claimed first: the cached worker must not be steered afterwards.
+        assert order == ["cancel"]
+        assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+        agent.steer.assert_not_called()
