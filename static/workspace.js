@@ -828,7 +828,7 @@ function navigateUp(){
 
 // File extension sets for preview routing (must match server-side sets)
 const IMAGE_EXTS  = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
-const MD_EXTS     = new Set(['.md','.markdown','.mdown']);
+const MD_EXTS     = new Set(['.md','.markdown','.mdown','.mkd','.mkdn']); // parity with api/config.py:MD_EXTS
 const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);

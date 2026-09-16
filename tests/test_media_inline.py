@@ -317,9 +317,19 @@ class TestMediaEndpointUnit(unittest.TestCase):
                          "text/markdown must NOT enter the browser-inline MIME whitelist")
 
     def test_markdown_mime_map_serves_text_markdown(self):
-        """MIME_MAP must map the supported Markdown extensions to text/markdown."""
-        from api.config import MIME_MAP
-        for ext in (".md", ".mkd", ".mkdn"):
+        """MIME_MAP must map every Markdown alias to text/markdown.
+
+        Asserts parity with the other suffix authorities (``api/config.py:MD_EXTS``,
+        ``static/workspace.js:MD_EXTS``, ``static/ui.js:_MD_EXTS``) instead of the
+        narrower new-only set.
+        """
+        from api.config import MD_EXTS, MIME_MAP
+        self.assertEqual(
+            {ext.lower() for ext in MD_EXTS},
+            {".md", ".markdown", ".mdown", ".mkd", ".mkdn"},
+            "api/config.py:MD_EXTS must be the canonical suffix set",
+        )
+        for ext in (".md", ".markdown", ".mdown", ".mkd", ".mkdn"):
             self.assertEqual(
                 MIME_MAP.get(ext), "text/markdown",
                 f"{ext} must map to text/markdown",
