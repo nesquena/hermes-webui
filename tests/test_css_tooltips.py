@@ -9,9 +9,11 @@ Run:
     ./scripts/test.sh tests/test_css_tooltips.py -v
 """
 
+from pathlib import Path
 import os
 import re
 import unittest
+from tests._i18n_bundles import read_i18n_bundles
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -19,7 +21,7 @@ import unittest
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_HTML = os.path.join(BASE_DIR, "static", "index.html")
 STYLE_CSS = os.path.join(BASE_DIR, "static", "style.css")
-I18N_JS = os.path.join(BASE_DIR, "static", "i18n.js")
+I18N_JS = read_i18n_bundles(Path(BASE_DIR))
 
 
 def _read(path):
@@ -268,7 +270,7 @@ class TestI18NTooltipSync(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.js = _read(I18N_JS)
+        cls.js = I18N_JS
 
     def test_data_tooltip_synced_in_i18n_title_handler(self):
         """The data-i18n-title handler must also sync data-tooltip attribute."""

@@ -1,9 +1,10 @@
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = ROOT / "static" / "ui.js"
-I18N_JS = ROOT / "static" / "i18n.js"
+I18N_JS = read_i18n_bundles(ROOT)
 CONFIG_PY = ROOT / "api" / "config.py"
 UPLOAD_PY = ROOT / "api" / "upload.py"
 
@@ -61,7 +62,7 @@ def test_pending_uploads_skip_fetch_for_oversize_files():
 
 def test_upload_too_large_has_user_facing_message():
     """The status toast should explain the upload limit instead of a network reset."""
-    i18n = I18N_JS.read_text(encoding="utf-8")
+    i18n = I18N_JS
     ui = UI_JS.read_text(encoding="utf-8")
 
     assert "upload_too_large" in i18n

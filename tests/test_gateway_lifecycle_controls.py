@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from urllib.parse import urlparse
+from tests._i18n_bundles import read_i18n_bundles
 
 
 class _FakeHandler:
@@ -253,7 +254,7 @@ def test_gateway_lifecycle_frontend_renders_valid_actions():
 def test_gateway_lifecycle_i18n_keys_exist():
     from pathlib import Path
 
-    i18n = (Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = read_i18n_bundles(Path(__file__).resolve().parents[1])
     for key in (
         "gateway_start",
         "gateway_stop",

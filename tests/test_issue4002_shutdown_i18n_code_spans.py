@@ -1,4 +1,5 @@
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -37,7 +38,7 @@ def test_shutdown_description_uses_split_i18n_spans_in_index_html():
 
 
 def test_shutdown_locale_strings_no_longer_embed_code_tags():
-    src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    src = read_i18n_bundles(REPO)
     locale_count = src.count("settings_label_shutdown:")
     assert locale_count > 0
     for key in (
@@ -53,7 +54,7 @@ def test_shutdown_locale_strings_no_longer_embed_code_tags():
 
 
 def test_apply_locale_to_dom_stays_on_text_content():
-    src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    src = read_i18n_bundles(REPO)
     apply_locale_body = _extract_function(src, "applyLocaleToDOM")
     assert "el.textContent = val;" in apply_locale_body
     assert "innerHTML = val" not in apply_locale_body

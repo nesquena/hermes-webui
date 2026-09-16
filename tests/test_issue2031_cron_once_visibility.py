@@ -6,12 +6,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parent.parent
 PANELS_JS = ROOT / "static" / "panels.js"
 STYLE_CSS = ROOT / "static" / "style.css"
-I18N_JS = ROOT / "static" / "i18n.js"
+I18N_JS = read_i18n_bundles(ROOT)
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -475,7 +476,7 @@ console.log(JSON.stringify({
 def test_cron_form_surfaces_one_shot_warning_copy_markers_and_preset_markup():
     panels = PANELS_JS.read_text(encoding="utf-8")
     style = STYLE_CSS.read_text(encoding="utf-8")
-    i18n = I18N_JS.read_text(encoding="utf-8")
+    i18n = I18N_JS
 
     assert "id=\"cronFormScheduleOnceWarning\"" in panels
     assert "id=\"cronFormSchedulePreset\"" in panels
@@ -530,7 +531,7 @@ def test_cron_form_save_payload_still_uses_visible_raw_schedule_only():
 
 
 def test_cron_form_i18n_has_preset_keys():
-    i18n = I18N_JS.read_text(encoding="utf-8")
+    i18n = I18N_JS
     required_keys = [
         "cron_schedule_preset_label",
         "cron_schedule_preset_hourly",

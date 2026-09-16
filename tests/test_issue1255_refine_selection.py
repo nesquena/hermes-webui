@@ -9,12 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from tests._i18n_bundles import read_i18n_bundles
 from tests.test_selected_context_user_render_runtime import _run_user_renderer
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = Path(os.environ.get("HERMES_ISSUE1255_MESSAGES_JS") or (ROOT / "static" / "messages.js"))
-I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N = read_i18n_bundles(ROOT)
 NODE = shutil.which("node")
 
 

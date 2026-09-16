@@ -1,4 +1,5 @@
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +11,7 @@ def read(path):
 
 def test_delete_confirmation_mentions_retained_worktree():
     src = read("static/sessions.js")
-    i18n = read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
     assert "function _sessionSnapshotById(sid)" in src
     assert "session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path)" in src
     assert "session_delete_worktree_confirm" in i18n
@@ -22,7 +23,7 @@ def test_delete_confirmation_mentions_retained_worktree():
 
 def test_batch_archive_delete_confirmations_count_worktree_sessions():
     src = read("static/sessions.js")
-    i18n = read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
     assert "function _worktreeSessionCount(ids)" in src
     assert "function _worktreeResponseCount(results)" in src
     assert "session_batch_delete_worktree_confirm" in src
@@ -33,7 +34,7 @@ def test_batch_archive_delete_confirmations_count_worktree_sessions():
 
 def test_archive_and_delete_action_descriptions_are_worktree_specific():
     src = read("static/sessions.js")
-    i18n = read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
     assert "function _sessionArchiveDescription(session)" in src
     assert "function _sessionDeleteDescription(session)" in src
     assert "session&&session.worktree_path?t('session_archive_worktree_desc')" in src
@@ -79,7 +80,7 @@ def test_worktree_archive_delete_api_responses_are_explicit():
 
 def test_remove_worktree_ui_does_not_force_unsafe_status_by_default():
     src = read("static/sessions.js")
-    i18n = read("static/i18n.js")
+    i18n = read_i18n_bundles(ROOT)
     assert "async function removeWorktree(session)" in src
     assert "status.dirty||status.untracked_count>0||(status.ahead_behind&&status.ahead_behind.ahead>0)" in src
     assert "session_worktree_remove_unsafe_blocked" in src
