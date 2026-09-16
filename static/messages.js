@@ -2190,11 +2190,22 @@ function _trackSteerToolComplete(sessionId, streamId, toolCallId){
   }
   return false;
 }
-function _clearSteerConsumptionForStream(sessionId, streamId){
+function _clearSteerConsumptionForStream(sessionId, streamId, options={}){
   const sid = String(sessionId || '');
   const activeStreamId = String(streamId || '');
   if(!sid) return;
   const current = _STEER_CONSUMPTION_ARMED[sid];
+  if(options && options.reconnecting && activeStreamId){
+    // loadSession runs this while re-attaching a stream the server still
+    // reports as active. That stream is not gone, so its boundary epoch and the
+    // steers already counted for it have to survive; an arm left by a DIFFERENT
+    // stream is a real turn boundary and is released. Mirrors the
+    // options.reconnecting guard in _resetSteerToolBatch.
+    if(!current || current.streamId === activeStreamId) return;
+    delete _STEER_CONSUMPTION_ARMED[sid];
+    if(typeof _setSteerPendingCount === 'function') _setSteerPendingCount(sid, 0);
+    return;
+  }
   const shouldClear = !activeStreamId || (current && current.streamId === activeStreamId);
   if(shouldClear){
     delete _STEER_CONSUMPTION_ARMED[sid];
@@ -2234,7 +2245,10 @@ function _resetSteerConsumptionArming(sessionId, streamId, options={}){
   // Terminal cleanup (detach/idle reload/turn end) releases the slot through
   // _clearSteerConsumptionForStream instead.
   delete _STEER_CONSUMPTION_ARMED[sid];
-  if(current) _setSteerPendingCount(sid, 0);
+  // The count lives in commands.js; classic scripts share only the global
+  // object, so a page that loads messages.js without commands.js must not
+  // throw here. Same guard as the other cross-file calls in this file.
+  if(current && typeof _setSteerPendingCount === 'function') _setSteerPendingCount(sid, 0);
 }
 function _consumeArmedSteer(sessionId, streamId){
   const sid = String(sessionId || '');

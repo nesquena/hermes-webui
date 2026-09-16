@@ -8763,24 +8763,6 @@ function _updateQueuePill(sid,count){
   }
 }
 
-function updateSteerPendingBadge(sessionId){
-  // Display refresh only: never mutate pending count from rendering.
-  const sid=sessionId||_currentSteerSessionId();
-  if(!sid)return;
-  const count=getSteerPendingCount(sid);
-  if(_steerOwnerIsCurrent(sid)&&typeof setComposerStatus==='function'){
-    _updateSteerPendingIndicatorStatus(count);
-  }
-}
-
-function clearSteerPending(sessionId){
-  // Explicit state transition: the buffer was consumed or re-queued.
-  const sid=sessionId||_currentSteerSessionId();
-  if(!sid)return;
-  _setSteerPendingCount(sid,0);
-  updateSteerPendingBadge(sid);
-}
-
 function updateQueueBadge(sessionId){
   const sid=sessionId||(S.session&&S.session.session_id);
   const count=sid?getQueuedSessionCount(sid):0;

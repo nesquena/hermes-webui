@@ -1597,6 +1597,24 @@ function _updateSteerPendingIndicatorStatus(count){
   _steerComposerStatusText='';
 }
 
+function updateSteerPendingBadge(sessionId){
+  // Display refresh only: never mutate pending count from rendering.
+  const sid=sessionId||_currentSteerSessionId();
+  if(!sid)return;
+  const count=getSteerPendingCount(sid);
+  if(_steerOwnerIsCurrent(sid)&&typeof setComposerStatus==='function'){
+    _updateSteerPendingIndicatorStatus(count);
+  }
+}
+
+function clearSteerPending(sessionId){
+  // Explicit state transition: the buffer was consumed or re-queued.
+  const sid=sessionId||_currentSteerSessionId();
+  if(!sid)return;
+  _setSteerPendingCount(sid,0);
+  updateSteerPendingBadge(sid);
+}
+
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
   if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
   await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);

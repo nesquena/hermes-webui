@@ -890,10 +890,11 @@ class TestFrontendWiring:
             print(exc.stderr, file=sys.stderr)
             raise
 
-    def test_idle_session_reload_clears_stale_pending_for_stream(self):
-        """Reopening a session after its detached stream completed must expire
-        the owner's stale pending count, even though the old EventSource never
-        delivered done."""
+    def test_loadSession_reattach_releases_attribution_reconnect_scoped(self):
+        """Reopening a session whose stream is still live must NOT take the
+        blanket idle expiry: both releases carry the reconnect flag, so the
+        pending count and boundary epoch survive the reload (the stale-arm
+        release itself is proven at the helper level)."""
         import json
         import shutil
         import subprocess
@@ -920,7 +921,7 @@ class TestFrontendWiring:
         globalThis._ensureInflightLiveAssistantMessage=()=>{}; globalThis._projectInflightMessagesForActivityBursts=()=>[];
         globalThis._mergePendingSessionMessage=()=>{};
         globalThis.appendThinking=()=>{};
-        globalThis._clearSteerConsumptionForStream=(sid,streamId)=>cleared.push([sid,streamId]);
+        globalThis._clearSteerConsumptionForStream=(sid,streamId,options)=>cleared.push([sid,streamId,options]);
         globalThis.clearLiveToolCards=()=>{}; globalThis._syncToolCallsForLoadedMessages=()=>{};
         globalThis._ensureMessagesLoaded=async()=>{}; globalThis._rearmActiveSessionStream=()=>{};
         globalThis._isCurrentLoad=()=>true; globalThis.setBusy=()=>{};
@@ -938,7 +939,7 @@ class TestFrontendWiring:
           var S={activeStreamId:'stream-2',session:{session_id:'B'}};
         """
         suffix = """
-        assert.deepStrictEqual(cleared,[["A",null],["A","stream-1"]]);
+        assert.deepStrictEqual(cleared,[["A","stream-1",{"reconnecting":true}],["A","stream-1",{"reconnecting":true}]]);
         assert.strictEqual(counts.A,2);
         })().catch(err=>{console.error(err);process.exit(1);});
         """
@@ -1383,6 +1384,73 @@ class TestFrontendWiring:
             "assert.deepStrictEqual(clearCalls, ['A']);\n"
         )
 
+    def test_same_stream_reconnect_clear_keeps_boundary_epoch_and_count(self):
+        """Re-attaching the SAME stream must not release its attribution.
+
+        loadSession runs the stream clear right before it re-attaches a session
+        the server still reports as active. That stream is not gone, so the
+        shared boundary epoch and the steers already counted for it have to
+        survive the reload; only a stream change proves the old turn is over.
+        """
+        self._run_steer_consumption_script(
+            "counts.A = 0;\n"
+            "_armSteerConsumption('A', 'stream-1');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1);\n"
+            "_setSteerPendingCount('A', 2);\n"
+            "_clearSteerConsumptionForStream('A', 'stream-1', { reconnecting: true });\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1,\n"
+            "  'a same-stream reconnect must not reset the boundary epoch');\n"
+            "assert.strictEqual(counts.A, 2,\n"
+            "  'a same-stream reconnect must not hide the pending count');\n"
+        )
+
+    def test_reconnect_clear_still_expires_a_stale_stream_arm(self):
+        """The reconnect guard may only protect the stream being re-attached."""
+        self._run_steer_consumption_script(
+            "counts.A = 0;\n"
+            "_armSteerConsumption('A', 'stream-1');\n"
+            "_setSteerPendingCount('A', 2);\n"
+            "_clearSteerConsumptionForStream('A', 'stream-2', { reconnecting: true });\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined,\n"
+            "  'a different stream must still expire the prior attribution');\n"
+            "assert.strictEqual(counts.A, undefined,\n"
+            "  'expiring a stale stream must release its pending count');\n"
+        )
+
+    def test_empty_stream_clear_still_releases_everything(self):
+        """A snapshot with no stream at all is the agreed idle expiry: the arm
+        and the count both go, so a detached run cannot leak feedback forward."""
+        self._run_steer_consumption_script(
+            "counts.A = 0;\n"
+            "_armSteerConsumption('A', 'stream-1');\n"
+            "_setSteerPendingCount('A', 2);\n"
+            "_clearSteerConsumptionForStream('A', null);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_ui_js_never_reaches_into_commands_js_steer_store(self):
+        """ui.js is loaded without commands.js in the isolated SSE harness pages.
+
+        Classic scripts share only the global object, so a bare call from ui.js
+        into the pending-count store that lives in commands.js throws
+        ReferenceError on any page that omits commands.js. The accessors belong
+        with their store.
+        """
+        for needle in [
+            "_setSteerPendingCount",
+            "getSteerPendingCount",
+            "_updateSteerPendingIndicatorStatus",
+            "_currentSteerSessionId",
+            "_steerOwnerIsCurrent",
+        ]:
+            assert needle not in self.ui, (
+                "ui.js must not call %s: that binding lives in commands.js and "
+                "is not a global, so harness pages that load ui.js alone throw"
+                % needle
+            )
+
     def test_clear_steer_pending_refreshes_display(self):
         """Explicit clear is the only function that moves count to zero."""
         import json
@@ -1396,10 +1464,10 @@ class TestFrontendWiring:
         assert node is not None
 
         badge_start = "function updateSteerPendingBadge(sessionId){"
-        start = self.ui.find(badge_start)
+        start = self.cmds.find(badge_start)
         assert start >= 0
-        end = self.ui.find(chr(10) + "function updateQueueBadge", start + len(badge_start))
-        badge_src = self.ui[start:end]
+        end = self.cmds.find(chr(10) + "async function _steerPersistDraftForOwner", start + len(badge_start))
+        badge_src = self.cmds[start:end]
 
         script = textwrap.dedent(
             f"""
