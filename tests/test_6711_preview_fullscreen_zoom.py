@@ -525,3 +525,124 @@ def test_resize_and_fullscreen_exit_call_the_reconciler():
     assert "_reconcileWorkspacePanelBreakpoint" in fs_exit, (
         "exiting fullscreen must reconcile the panel breakpoint"
     )
+
+
+# ── Greptile review (b): an inline write re-pins the inherited size ───────────
+#
+# Fix (a) stopped the *storage* write, but `_applyPreviewFontSize()` still wrote
+# the variable inline on <html>. An inline custom property outranks the
+# `:root[data-font-size="…"]{--preview-font-size:…}` rule in the stylesheet, so
+# the first preview open froze whatever the mapping resolved to and a later
+# app-font change no longer reached previews — the same user-visible symptom as
+# the storage bug, reached by a different path.
+
+
+def _preview_font_css() -> str:
+    """The shipped `data-font-size` rules that define --preview-font-size."""
+    css = _read(STYLE_CSS_PATH)
+    rules = re.findall(r':root\[data-font-size="[a-z]+"\]\{[^}]*--preview-font-size:[^}]*\}', css)
+    assert len(rules) >= 3, f"expected the data-font-size rules, found {len(rules)}"
+    return "\n".join(rules)
+
+
+def _apply_preview_font_size(px: int, *, stored: str | None) -> dict:
+    """Run the shipped `_applyPreviewFontSize()` in a real browser.
+
+    Returns how the variable resolves for the caller's zoom, and again after the
+    app-wide font size changes — the second read is the regression: a pinned
+    inline value stays put instead of following `data-font-size`.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the preview-font browser test")
+
+    js_parts = {
+        "consts": _preview_fs_constants(),
+        "clamp": _function("_clampPreviewFontSize"),
+        "read": _function("_readPreviewFontSize"),
+        "apply": _function("_applyPreviewFontSize"),
+    }
+
+    playwright = sync_playwright().start()
+    # Only a missing/unlaunchable browser may skip; anything after a successful
+    # launch must fail loudly so a real regression cannot hide behind a skip.
+    try:
+        browser = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+    except Exception as exc:  # pragma: no cover - no browser binary in sandbox
+        playwright.stop()
+        pytest.skip(f"chromium unavailable for browser measurement: {exc}")
+
+    try:
+        page = browser.new_page()
+        page.set_content("<!doctype html><html data-font-size='large'></html>")
+        page.add_style_tag(content=_preview_font_css())
+        return page.evaluate(
+            """(parts) => {
+              // Stub storage at closure scope so the direct eval below sees it,
+              // then let the SHIPPED functions run against the real document.
+              const store = { 'hermes-preview-font-size': parts.stored };
+              const localStorage = {
+                getItem: (k) => (k in store ? store[k] : null),
+                setItem: (k, v) => { store[k] = String(v); },
+              };
+              eval(parts.consts);
+              eval(parts.clamp);
+              eval(parts.read);
+              eval(parts.apply);
+              const cs = () => getComputedStyle(document.documentElement)
+                .getPropertyValue('--preview-font-size').trim();
+              const inline = () => document.documentElement.style.getPropertyValue('--preview-font-size');
+              _applyPreviewFontSize(parts.px);
+              const before = { computed: cs(), inline: String(inline()) };
+              // The user changes the app-wide font size.
+              document.documentElement.dataset.fontSize = 'xlarge';
+              const after = { computed: cs(), inline: String(inline()) };
+              return { before, after };
+            }""",
+            {
+                **js_parts,
+                "stored": stored,
+                "px": px,
+            },
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_opening_a_preview_does_not_pin_the_inherited_size_inline():
+    """With no stored zoom, the app font size must keep driving previews."""
+    r = _apply_preview_font_size(13, stored=None)
+    assert r["before"]["inline"] == "", (
+        "opening a preview with no stored zoom wrote --preview-font-size inline; "
+        "the inline property outranks the data-font-size rule, so the inherited "
+        "size is pinned and later app-font changes stop reaching previews "
+        f"(inline={r['before']['inline']!r})"
+    )
+    assert r["before"]["computed"] == "14px", (
+        "with data-font-size=large the stylesheet defines 14px; the preview "
+        f"resolved {r['before']['computed']!r} instead"
+    )
+    assert r["after"]["computed"] == "16px", (
+        "after the app font size changed to xlarge the preview must follow the "
+        f"new mapping (16px), not stay pinned — got {r['after']['computed']!r}"
+    )
+
+
+def test_an_explicit_zoom_still_overrides_the_app_font_size():
+    """A stored zoom is a user choice and must still win over the mapping."""
+    r = _apply_preview_font_size(22, stored="22")
+    assert r["before"]["inline"] == "22px", (
+        "an explicit zoom must be written inline so it overrides the stylesheet "
+        f"(inline={r['before']['inline']!r})"
+    )
+    assert r["before"]["computed"] == "22px", (
+        f"the explicit zoom must apply, got {r['before']['computed']!r}"
+    )
+    assert r["after"]["computed"] == "22px", (
+        "the user's explicit zoom must keep overriding a later app-font change, "
+        f"got {r['after']['computed']!r}"
+    )
