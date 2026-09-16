@@ -3604,8 +3604,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // thinking row that is discarded because settled thinking replaced it
     // must not reserve a mirror slot, or its settled replacement would be
     // consumed as a mirror and the thinking would disappear entirely.
+    // Mirror capacity is keyed by ROLE + normalized text, never by text alone:
+    // a projected PROSE row and a settled THINKING row can carry the same
+    // normalized text (the content-parts path emits prose and thinking
+    // independently and does not reject cross-role text equality). Keyed by
+    // text alone, a surviving projected prose row reserved a slot that an
+    // EARLIER settled thinking row of the same text then consumed, so the
+    // settled thinking disappeared and the real settled prose survived as a
+    // duplicate.
+    const _mirrorSlotKey=(role,textKey)=>`${String(role||'').toLowerCase()}\u0000${textKey}`;
     const projectedMirrorSlots={};
-    const _idToLatestText={};
+    const _idToLatestSlot={};
     for(const row of projectedRows){
       if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
       // Running rows discarded by settlement (e.g. projected running thinking
@@ -3619,38 +3628,48 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(rowIsLiveTokenFinalPrefix(settledRow,textKey,finalSegmentEligible)) continue;
       if(_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) continue;
       const key=_anchorSceneExistingRowKey(settledRow)||'__no_key__';
-      if(_idToLatestText[key]!==undefined){
-        const oldTk=_idToLatestText[key];
-        if(oldTk!==textKey){
-          // Same identity re-appeared with newer text: move its single slot
-          // to the latest text key instead of allocating a second slot.
-          projectedMirrorSlots[oldTk]=(projectedMirrorSlots[oldTk]||1)-1;
-          if(projectedMirrorSlots[oldTk]<=0) delete projectedMirrorSlots[oldTk];
-          _idToLatestText[key]=textKey;
-          projectedMirrorSlots[textKey]=(projectedMirrorSlots[textKey]||0)+1;
+      const slotKey=_mirrorSlotKey(settledRow.role,textKey);
+      const prevSlot=_idToLatestSlot[key];
+      if(prevSlot){
+        if(prevSlot!==slotKey){
+          // Same identity re-appeared under a different role/text key: move its
+          // single slot to the latest key instead of allocating a second one.
+          projectedMirrorSlots[prevSlot]=(projectedMirrorSlots[prevSlot]||1)-1;
+          if(projectedMirrorSlots[prevSlot]<=0) delete projectedMirrorSlots[prevSlot];
+          _idToLatestSlot[key]=slotKey;
+          projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
         }
-        // Same key + same text: the identity already holds one slot; do not
+        // Same key + same role/text: the identity already holds one slot; do not
         // double-count repeated snapshots of the same identity.
       }else{
-        _idToLatestText[key]=textKey;
-        projectedMirrorSlots[textKey]=(projectedMirrorSlots[textKey]||0)+1;
+        _idToLatestSlot[key]=slotKey;
+        projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
       }
     }
-    const _projectedTextKeys=Object.keys(projectedMirrorSlots);
+    const _projectedSlotKeys=Object.keys(projectedMirrorSlots);
     // ── end provenance tracking ────────────────────────────────
-    const _consumeMirror=(textKey)=>{
-      if(!textKey||!projectedMirrorSlots[textKey]) return false;
-      if(projectedMirrorSlots[textKey]<=0) return false;
-      projectedMirrorSlots[textKey]-=1;
+    const _consumeMirror=(role,textKey)=>{
+      if(!role||!textKey) return false;
+      const slotKey=_mirrorSlotKey(role,textKey);
+      if(!projectedMirrorSlots[slotKey]) return false;
+      if(projectedMirrorSlots[slotKey]<=0) return false;
+      projectedMirrorSlots[slotKey]-=1;
       return true;
     };
-    const _tryNearOverlapMirror=(textKey)=>{
-      if(!textKey||textKey.length<80) return false;
-      for(const pk of _projectedTextKeys){
-        if(pk===textKey||!pk||pk.length<80) continue;
+    const _tryNearOverlapMirror=(role,textKey)=>{
+      if(!role||!textKey||textKey.length<80) return false;
+      const selfKey=_mirrorSlotKey(role,textKey);
+      const rolePrefix=`${String(role||'').toLowerCase()}\u0000`;
+      for(const slotKey of _projectedSlotKeys){
+        // Near-overlap capacity is role-scoped too: a thinking write-up that
+        // happens to contain a projected prose prefix is a different identity
+        // class and must not be consumed by the prose mirror.
+        if(slotKey===selfKey||slotKey.indexOf(rolePrefix)!==0) continue;
+        const pk=slotKey.slice(rolePrefix.length);
+        if(!pk||pk.length<80) continue;
         if(pk.includes(textKey)||textKey.includes(pk)){
-          if(projectedMirrorSlots[pk]>0){
-            projectedMirrorSlots[pk]-=1;
+          if(projectedMirrorSlots[slotKey]>0){
+            projectedMirrorSlots[slotKey]-=1;
             return true;
           }
         }
@@ -3678,9 +3697,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(key) seen.add(key);
       // ── provenance-aware mirror consumption (settled rows) ───
       if(origin==='settled'&&isTextual&&textKey){
-        if(_consumeMirror(textKey)) return;
+        if(_consumeMirror(row.role,textKey)) return;
         // Fallback: near-overlap mirror matching for >=80 char texts
-        if(_tryNearOverlapMirror(textKey)) return;
+        if(_tryNearOverlapMirror(row.role,textKey)) return;
       }
       // ── legacy text-only dedup ────────────────────────────────────
       // Exact-text dedup applies only to rows without a durable ID

@@ -467,24 +467,56 @@ const messages = [
   {role:'user', content:'Prompt', id:'user-1'},
   {role:'assistant', content:'Final answer', id:'asst-1'},
 ];
-const projectedScene = {
-  mode:'compact_worklog',
-  final_answer:'Final answer',
-  identity:{source_message_refs:['asst-1']},
-  lifecycle:{},
-  activity_rows:[
-    // Opaque provider ID, stream owner present, NO assistant index → live.
-    {role:'thinking', text:'Provider reasoning', local_id:'provider-call-abc123', row_id:'pr1', stream_id:'stream-1', source_event_type:'reasoning', status:'running'},
-  ]
-};
-const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
-const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status}));
-process.stdout.write(JSON.stringify(rows));
+// Full payload/tool assertion matrix: every role shape of an opaque
+// stream-owned running row must seal status, payload.status and (tool only)
+// payload.done / tool.done, and must NOT fabricate fields for other roles.
+const cases = [
+  {
+    name:'thinking',
+    row:{role:'thinking', text:'Provider reasoning', local_id:'provider-call-abc123', row_id:'pr1', stream_id:'stream-1', source_event_type:'reasoning', status:'running', payload:{status:'running', text:'Provider reasoning'}},
+  },
+  {
+    name:'prose',
+    row:{role:'prose', text:'Provider prose', local_id:'provider-call-def456', row_id:'pr2', stream_id:'stream-1', source_event_type:'token', kind:'process_prose', status:'running', payload:{status:'running', text:'Provider prose'}},
+  },
+  {
+    name:'tool',
+    row:{role:'tool', text:'Fetched data', local_id:'provider-tool-ghi789', row_id:'pr3', tool_call_id:'tc-1', stream_id:'stream-1', source_event_type:'tool', status:'running', payload:{status:'running', done:false}, tool:{name:'fetch', done:false}},
+  },
+];
+const out = cases.map(c => {
+  const scene = _completeSettledAnchorSceneForTurn(messages, 1, {
+    mode:'compact_worklog',
+    final_answer:'Final answer',
+    identity:{source_message_refs:['asst-1']},
+    lifecycle:{},
+    activity_rows:[c.row],
+  });
+  const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status, payload:r.payload, tool:r.tool}));
+  return {name:c.name, count:rows.length, row:rows[0] || null};
+});
+process.stdout.write(JSON.stringify(out));
 """
     )
     result = _run_node_script(script)
-    assert len(result) == 1, f"Expected 1 row, got {len(result)}: {result}"
-    assert result[0]["status"] == "completed", f"Opaque stream-owned running row must be sealed to completed, got: {result[0]}"
+    by_role = {case["name"]: case for case in result}
+    assert sorted(by_role) == ["prose", "thinking", "tool"], f"Expected all three role shapes, got: {by_role}"
+    for name in ("thinking", "prose", "tool"):
+        case = by_role[name]
+        assert case["count"] == 1, f"[{name}] Expected 1 row, got {case['count']}: {case}"
+        row = case["row"]
+        assert row["status"] == "completed", f"[{name}] Opaque stream-owned running row must be sealed to completed, got: {row}"
+        assert row["payload"]["status"] == "completed", f"[{name}] payload.status must be sealed too, got: {row['payload']}"
+        # payload payload (non-tool) fields survive the seal untouched
+        assert row["payload"].get("text") in (None, "Provider reasoning", "Provider prose"), f"[{name}] payload payload fields must survive: {row['payload']}"
+        if name == "tool":
+            assert row["payload"]["done"] is True, f"[tool] payload.done must be sealed, got: {row['payload']}"
+            assert row["tool"]["done"] is True, f"[tool] tool.done must be sealed, got: {row['tool']}"
+            assert row["tool"]["name"] == "fetch", f"[tool] tool payload fields must survive: {row['tool']}"
+        else:
+            # No fabricated tool completion state on textual roles.
+            assert "done" not in row["payload"], f"[{name}] must not gain payload.done, got: {row['payload']}"
+            assert not (row.get("tool") or {}), f"[{name}] must not gain a tool object, got: {row.get('tool')}"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -500,23 +532,168 @@ const messages = [
   {role:'user', content:'Prompt', id:'user-1'},
   {role:'assistant', content:'Final answer', id:'asst-1'},
 ];
+// Negative-control matrix: same three role shapes, each ALSO carrying a
+// settled assistant index → not a live identity, so nothing may be sealed.
+const cases = [
+  {
+    name:'thinking',
+    row:{role:'thinking', text:'Settled-index thinking', local_id:'settled-idx:1', row_id:'si1', stream_id:'stream-1', group:{assistant_msg_idx:1}, source_event_type:'reasoning', status:'running', payload:{status:'running'}},
+  },
+  {
+    name:'prose',
+    row:{role:'prose', text:'Settled-index prose', local_id:'settled-idx:2', row_id:'si2', stream_id:'stream-1', group:{assistant_msg_idx:1}, source_event_type:'token', kind:'process_prose', status:'running', payload:{status:'running'}},
+  },
+  {
+    name:'tool',
+    row:{role:'tool', text:'Settled-index tool', local_id:'settled-idx:3', row_id:'si3', tool_call_id:'tc-9', stream_id:'stream-1', group:{assistant_msg_idx:1}, source_event_type:'tool', status:'running', payload:{status:'running', done:false}, tool:{name:'fetch', done:false}},
+  },
+];
+const out = cases.map(c => {
+  const scene = _completeSettledAnchorSceneForTurn(messages, 1, {
+    mode:'compact_worklog',
+    final_answer:'Final answer',
+    identity:{source_message_refs:['asst-1']},
+    lifecycle:{},
+    activity_rows:[c.row],
+  });
+  const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status, payload:r.payload, tool:r.tool}));
+  return {name:c.name, count:rows.length, row:rows[0] || null};
+});
+process.stdout.write(JSON.stringify(out));
+"""
+    )
+    result = _run_node_script(script)
+    by_role = {case["name"]: case for case in result}
+    assert sorted(by_role) == ["prose", "thinking", "tool"], f"Expected all three role shapes, got: {by_role}"
+    for name in ("thinking", "prose", "tool"):
+        case = by_role[name]
+        assert case["count"] == 1, f"[{name}] Expected 1 row, got {case['count']}: {case}"
+        row = case["row"]
+        # Not a live identity → settle leaves the running status untouched
+        # (no fabricated sealing of a settled-index row), for payload/tool too.
+        assert row["status"] == "running", f"[{name}] Assistant-index row must NOT be sealed, got: {row}"
+        assert row["payload"]["status"] == "running", f"[{name}] payload.status must NOT be sealed, got: {row['payload']}"
+        if name == "tool":
+            assert row["payload"]["done"] is False, f"[tool] payload.done must NOT be sealed, got: {row['payload']}"
+            assert row["tool"]["done"] is False, f"[tool] tool.done must NOT be sealed, got: {row['tool']}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_mirror_capacity_is_role_scoped_thinking_first():
+    """Adversarial regression (real _completeSettledAnchorSceneForTurn):
+    mirror capacity must be keyed by ROLE + normalized text, never by text
+    alone.
+
+    Production shape: the content-parts path emits prose and thinking rows as
+    independent rows with their own durable IDs and never rejects identical
+    text across roles. So a settled THINKING row (thinking-first order) and a
+    settled PROSE row can both share the exact normalized text of a surviving
+    PROJECTED PROSE row. With text-only capacity the settled thinking row
+    consumes the single slot, the real settled prose row survives (duplicate
+    prose) and the thinking is lost.
+    """
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+function _anchorSceneRowsByMessageIndex(){ return new Map([
+  [1, [
+    // Thinking-first: settled THINKING precedes the settled prose mirror.
+    // Raw text differs from the projected row; normalized text is identical.
+    {role:'thinking', text:'Checking   The Cache Layer', local_id:'settled-thinking:9', row_id:'st9', source_event_type:'reasoning', status:'completed'},
+    // Genuine settled prose mirror of the projected prose row below,
+    // with its own independent durable ID.
+    {role:'prose', text:'checking the cache layer', local_id:'settled-prose:9', row_id:'sp9', source_event_type:'token', kind:'process_prose', status:'completed'},
+  ]]
+]); }
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
 const projectedScene = {
   mode:'compact_worklog',
   final_answer:'Final answer',
   identity:{source_message_refs:['asst-1']},
   lifecycle:{},
   activity_rows:[
-    // Stream owner present BUT a settled assistant index → NOT live.
-    {role:'thinking', text:'Settled-index thinking', local_id:'settled-idx:1', row_id:'si1', stream_id:'stream-1', group:{assistant_msg_idx:1}, source_event_type:'reasoning', status:'running'},
+    // Surviving PROJECTED prose row sharing the normalized text above.
+    {role:'prose', text:'  Checking the cache layer ', local_id:'live-prose:9', row_id:'lp9', source_event_type:'token', kind:'process_prose', status:'completed'},
   ]
 };
 const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
 const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id, status:r.status}));
+process.stdout.write(JSON.stringify({
+  rows:rows,
+  projected_text:'  Checking the cache layer ',
+  settled_thinking_text:'Checking   The Cache Layer',
+  settled_prose_text:'checking the cache layer',
+}));
+"""
+    )
+    data = _run_node_script(script)
+    rows = data["rows"]
+    norm = lambda value: " ".join(str(value).split()).lower()
+    assert (
+        norm(data["projected_text"])
+        == norm(data["settled_thinking_text"])
+        == norm(data["settled_prose_text"])
+    ), f"Fixture precondition: normalized texts must be identical, got {data}"
+    prose_rows = [r for r in rows if r["role"] == "prose"]
+    thinking_rows = [r for r in rows if r["role"] == "thinking"]
+    # ONLY the prose mirror may be consumed: the projected prose row survives
+    # once, and the real settled prose echo is suppressed.
+    assert len(prose_rows) == 1, (
+        f"Expected exactly 1 prose row (settled prose echo consumed), got {len(prose_rows)}: {rows}"
+    )
+    assert prose_rows[0]["local_id"] == "live-prose:9", f"Expected the projected prose row to survive, got: {prose_rows[0]}"
+    # ...and the settled THINKING row must survive with its own identity.
+    assert len(thinking_rows) == 1, f"Expected the settled thinking row to survive, got {len(thinking_rows)}: {rows}"
+    assert thinking_rows[0]["local_id"] == "settled-thinking:9", f"Expected the settled thinking row, got: {thinking_rows[0]}"
+    assert thinking_rows[0]["status"] == "completed", f"Expected completed settled thinking, got: {thinking_rows[0]}"
+    assert len(rows) == 2, f"Expected exactly 2 rows (1 prose + 1 thinking), got {len(rows)}: {rows}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settlement_repeated_same_id_snapshot_allocates_single_mirror_slot():
+    """Control for the role+text re-keying: repeated projections of the SAME
+    durable identity (snapshot resends) must still allocate exactly ONE mirror
+    slot per identity, so only one settled echo is consumed — not one per
+    snapshot. Guards against the re-keying inflating mirror capacity."""
+    script = (
+        _SETTLEMENT_JS_BOOT
+        + """
+function _anchorSceneRowsByMessageIndex(){ return new Map([
+  [1, [
+    {role:'prose', text:'Processing the snapshot', local_id:'settled-prose:a', row_id:'spa', source_event_type:'token', kind:'process_prose', status:'completed'},
+    {role:'prose', text:'Processing the snapshot', local_id:'settled-prose:b', row_id:'spb', source_event_type:'token', kind:'process_prose', status:'completed'},
+  ]]
+]); }
+const messages = [
+  {role:'user', content:'Prompt', id:'user-1'},
+  {role:'assistant', content:'Final answer', id:'asst-1'},
+];
+const projectedScene = {
+  mode:'compact_worklog',
+  final_answer:'Final answer',
+  identity:{source_message_refs:['asst-1']},
+  lifecycle:{},
+  activity_rows:[
+    // Two snapshots of the SAME durable identity and SAME normalized text.
+    {role:'prose', text:'Processing the snapshot', local_id:'live-prose:dup', row_id:'rd', source_event_type:'token', kind:'process_prose', status:'completed'},
+    {role:'prose', text:'Processing the snapshot', local_id:'live-prose:dup', row_id:'rd', source_event_type:'token', kind:'process_prose', status:'completed'},
+  ]
+};
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, projectedScene);
+const rows = (scene && scene.activity_rows || []).map(r => ({role:r.role, text:r.text, local_id:r.local_id}));
 process.stdout.write(JSON.stringify(rows));
 """
     )
-    result = _run_node_script(script)
-    # Not a live identity → settle leaves the running status untouched
-    # (no fabricated sealing of a settled-index row).
-    assert len(result) == 1, f"Expected 1 row, got {len(result)}: {result}"
-    assert result[0]["status"] == "running", f"Assistant-index row must NOT be sealed, got: {result[0]}"
+    rows = _run_node_script(script)
+    assert len(rows) == 2, (
+        f"Repeated same-ID snapshots must hold ONE slot (1 projected + 1 settled echo), got {len(rows)}: {rows}"
+    )
+    projected = [r for r in rows if r["local_id"] == "live-prose:dup"]
+    assert len(projected) == 1, f"Snapshots of one identity must coalesce into one row, got: {rows}"
+    settled = [r for r in rows if r["local_id"].startswith("settled-prose:")]
+    assert [r["local_id"] for r in settled] == ["settled-prose:b"], (
+        f"Exactly one settled echo (the second) must survive, got: {settled}"
+    )
