@@ -8,6 +8,13 @@ recoverable draft untouched both in the sidecar and in the session JSON, so the
 client can retain/recover it instead of a false clear.  Success and
 absent-sidecar clears stay idempotent, and a retry after a failed unlink still
 converges.
+
+The clear decision is taken on the MERGED draft (supplied fields applied
+first), not on the raw optional request fields: ``text: ''`` with ``files``
+omitted must not delete a sidecar while stored attachments survive, and a
+request that supplies only ``files: []`` — or omits both fields on an
+unchanged empty draft — must still clean up a stale sidecar.  The 500 for a
+failed unlink is serialized only after the per-session lock is released.
 """
 
 from __future__ import annotations
@@ -101,8 +108,13 @@ def _fail_sidecar_unlink(monkeypatch, sid):
     return state
 
 
-def _post_draft(monkeypatch, sid, text="", files=None):
-    """POST /api/session/draft and capture the route's JSON response."""
+def _post_draft(monkeypatch, sid, text="", files=None, on_response=None):
+    """POST /api/session/draft and capture the route's JSON response.
+
+    ``on_response(payload, status)`` — when given — runs inside the response
+    sink itself (i.e. at the exact moment the route serializes its reply), so a
+    test can observe state the response write must not be holding.
+    """
     import api.helpers as helpers
     import api.routes as routes
 
@@ -121,6 +133,8 @@ def _post_draft(monkeypatch, sid, text="", files=None):
     captured = {}
 
     def fake_j(_handler, payload, status=200, extra_headers=None):
+        if on_response is not None:
+            on_response(payload, status)
         captured["payload"] = payload
         captured["status"] = status
 
@@ -137,6 +151,34 @@ def _post_draft(monkeypatch, sid, text="", files=None):
     )
     routes.handle_post(handler, SimpleNamespace(path="/api/session/draft"))
     return captured
+
+
+def _session_agent_lock(sid):
+    """The very lock the route takes for *sid* (non-reentrant threading.Lock)."""
+    import api.config as config
+
+    return config._get_session_agent_lock(sid)
+
+
+def _lock_state_at_response(sid):
+    """Probe that records ``lock.locked()`` every time the route writes a reply."""
+    lock = _session_agent_lock(sid)
+    observed = []
+
+    def on_response(_payload, _status):
+        observed.append(lock.locked())
+
+    return lock, observed, on_response
+
+
+def _stored_draft(sid):
+    """Durable (text, files) of the loaded session, normalized for assertions."""
+    from api.models import Session
+
+    loaded = Session.load(sid)
+    draft = dict(getattr(loaded, "composer_draft", {}) or {})
+    text = draft.get("text")
+    return ("" if text is None else str(text)), list(draft.get("files") or [])
 
 
 # ── helper-level tests ──────────────────────────────────────────────────────
@@ -283,3 +325,199 @@ def test_route_clear_retry_after_failed_unlink_converges(monkeypatch, tmp_path):
     assert not sidecar.exists()
     loaded = Session.load(sid)
     assert (loaded.composer_draft or {}).get("text") == ""
+
+
+# ── merged-draft clear classification (real handle_post() request shapes) ───
+
+
+def test_route_clear_explicit_text_empty_files_empty(monkeypatch, tmp_path):
+    """The explicit frontend clear shape (``text: ''`` + ``files: []``) removes
+    the sidecar and persists the emptied draft."""
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "issue6242_explicit_shape"
+    draft = {"text": "clear me", "files": ["a.txt"]}
+    _seed_session(tmp_path, sid, draft)
+    sidecar = _seed_sidecar(session_dir, sid, draft)
+    lock, observed, probe = _lock_state_at_response(sid)
+
+    captured = _post_draft(monkeypatch, sid, text="", files=[], on_response=probe)
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"]["draft"] == {"text": "", "files": []}
+    assert not sidecar.exists()
+    assert _stored_draft(sid) == ("", [])
+    assert observed == [False]
+
+
+def test_route_clear_files_only_request_cleans_stale_sidecar(monkeypatch, tmp_path):
+    """``files: []`` with ``text`` omitted is still a clear when the MERGED draft
+    is empty: a stale sidecar may not survive it."""
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "issue6242_files_only"
+    empty = {"text": "", "files": []}
+    _seed_session(tmp_path, sid, empty)
+    sidecar = _seed_sidecar(session_dir, sid, {"text": "stale", "files": ["a.txt"]})
+
+    captured = _post_draft(monkeypatch, sid, text=None, files=[])
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"].get("unchanged") is True
+    assert not sidecar.exists()
+    assert _stored_draft(sid) == ("", [])
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [{}, {"text": "", "files": []}],
+    ids=["legacy_no_draft_keys", "legacy_empty_fields"],
+)
+def test_route_clear_both_omitted_cleans_stale_sidecar(monkeypatch, tmp_path, stored):
+    """Both optional fields omitted on an already-empty legacy draft must still
+    remove a stale sidecar (idempotent cleanup, no false error)."""
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "issue6242_both_omitted"
+    _seed_session(tmp_path, sid, dict(stored))
+    sidecar = _seed_sidecar(session_dir, sid, {"text": "stale", "files": []})
+
+    captured = _post_draft(monkeypatch, sid, text=None, files=None)
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"].get("unchanged") is True
+    assert not sidecar.exists()
+    assert _stored_draft(sid) == ("", [])
+
+
+def test_route_clear_text_only_keeps_sidecar_while_attachments_remain(
+    monkeypatch, tmp_path
+):
+    """``text: ''`` with ``files`` omitted is NOT a clear when stored attachments
+    remain: the merged draft is still non-empty, so the sidecar must survive."""
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "issue6242_text_only_attachments"
+    draft = {"text": "hi", "files": ["a.txt"]}
+    _seed_session(tmp_path, sid, draft)
+    sidecar = _seed_sidecar(session_dir, sid, draft)
+    lock, observed, probe = _lock_state_at_response(sid)
+
+    captured = _post_draft(monkeypatch, sid, text="", on_response=probe)
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"]["draft"] == {"text": "", "files": ["a.txt"]}
+    assert sidecar.exists()
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == draft
+    assert _stored_draft(sid) == ("", ["a.txt"])
+    assert observed == [False]
+
+
+def test_route_clear_files_only_keeps_sidecar_while_text_remains(monkeypatch, tmp_path):
+    """Mirror case: ``files: []`` with ``text`` omitted is NOT a clear while the
+    stored text remains, so the sidecar must survive."""
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "issue6242_files_only_text"
+    draft = {"text": "hi", "files": []}
+    _seed_session(tmp_path, sid, draft)
+    sidecar = _seed_sidecar(session_dir, sid, draft)
+
+    captured = _post_draft(monkeypatch, sid, text=None, files=[])
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"].get("unchanged") is True
+    assert sidecar.exists()
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == draft
+    assert _stored_draft(sid) == ("hi", [])
+
+
+# ── fail-closed for every logically-empty request form ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "text, files",
+    [
+        pytest.param("", [], id="text_empty_files_empty"),
+        pytest.param(None, [], id="text_omitted_files_empty"),
+        pytest.param(None, None, id="both_omitted"),
+    ],
+)
+def test_route_clear_unlink_failure_fails_closed_for_empty_form(
+    monkeypatch, tmp_path, text, files
+):
+    """Every request shape whose MERGED draft is empty must fail closed when the
+    unlink fails: 500 (never ``ok: true``), sidecar kept, stored session state
+    untouched, and the reply written only after the per-session lock is free."""
+    from api.models import Session
+
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "issue6242_fail_closed_form"
+    empty = {"text": "", "files": []}
+    _seed_session(tmp_path, sid, empty)
+    session_file = session_dir / f"{sid}.json"
+    seeded_session_bytes = session_file.read_bytes()
+    stale = {"text": "stale recoverable", "files": ["a.txt"]}
+    sidecar = _seed_sidecar(session_dir, sid, stale)
+    _fail_sidecar_unlink(monkeypatch, sid)
+    lock, observed, probe = _lock_state_at_response(sid)
+
+    captured = _post_draft(monkeypatch, sid, text=text, files=files, on_response=probe)
+
+    # fail closed: server error, never a false success
+    assert captured["status"] == 500
+    assert "ok" not in captured["payload"]
+    assert captured["payload"]["error"]
+
+    # authoritative sidecar still on disk, byte-identical
+    assert sidecar.exists()
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == stale
+
+    # stored session state untouched (no partial write of the clear)
+    assert session_file.read_bytes() == seeded_session_bytes
+    assert _stored_draft(sid) == ("", [])
+    assert Session.load(sid).composer_draft.get("files") == []
+
+    # and the 500 was not serialized while holding the per-session lock
+    assert observed == [False]
+    assert not lock.locked()
+
+
+def test_route_response_sink_observes_session_lock_released(monkeypatch, tmp_path):
+    """The response sink must never run while the per-session agent lock is held:
+    both the clear success and the fail-closed 500 are written after release."""
+    session_dir = _install_isolated_session_env(monkeypatch, tmp_path)
+
+    # ── success path ───────────────────────────────────────────────────────
+    sid_ok = "issue6242_lock_release_ok"
+    draft_ok = {"text": "clear me", "files": []}
+    _seed_session(tmp_path, sid_ok, draft_ok)
+    _seed_sidecar(session_dir, sid_ok, draft_ok)
+    lock_ok, observed_ok, probe_ok = _lock_state_at_response(sid_ok)
+
+    captured_ok = _post_draft(
+        monkeypatch, sid_ok, text="", files=[], on_response=probe_ok
+    )
+
+    assert captured_ok["status"] == 200
+    assert captured_ok["payload"]["ok"] is True
+    assert observed_ok == [False]
+    assert not lock_ok.locked()
+
+    # ── fail-closed path ───────────────────────────────────────────────────
+    sid_fail = "issue6242_lock_release_500"
+    draft_fail = {"text": "recoverable draft", "files": []}
+    _seed_session(tmp_path, sid_fail, draft_fail)
+    _seed_sidecar(session_dir, sid_fail, draft_fail)
+    _fail_sidecar_unlink(monkeypatch, sid_fail)
+    lock_fail, observed_fail, probe_fail = _lock_state_at_response(sid_fail)
+
+    captured_fail = _post_draft(
+        monkeypatch, sid_fail, text="", files=[], on_response=probe_fail
+    )
+
+    assert captured_fail["status"] == 500
+    assert "ok" not in captured_fail["payload"]
+    assert captured_fail["payload"]["error"]
+    assert observed_fail == [False]
+    assert not lock_fail.locked()

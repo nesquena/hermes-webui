@@ -14626,6 +14626,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
+        clear_failed = False
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
@@ -14636,32 +14637,40 @@ def handle_post(handler, parsed) -> bool:
                 next_draft["files"] = files
             # Authoritative clear (#6242): when the client empties the composer,
             # the per-session draft sidecar must be removed BEFORE the emptied
-            # legacy field is persisted. If the unlink fails we fail closed with
-            # a server error (never {"ok": true}) and the recoverable draft is
-            # left untouched both in the sidecar and in the session JSON. This
-            # runs even on the unchanged path so a retry after a failed clear
-            # still removes a leftover sidecar (idempotent retry).
+            # legacy field is persisted. The decision is taken on the MERGED
+            # ``next_draft`` (supplied fields applied first), never on the raw
+            # optional request fields: callers legitimately send only one of
+            # them (``{session_id, text: '', files: []}`` for the normal clear,
+            # ``files: []`` alone, or neither on an unchanged empty draft), and
+            # ``text: ''`` with ``files`` omitted must NOT delete a sidecar
+            # while stored attachments survive in ``next_draft``. Classification
+            # runs before the unchanged short-circuit so a client that omits
+            # both fields can still clean up a stale sidecar (idempotent retry).
+            _merged_text = next_draft.get("text")
+            _merged_files = next_draft.get("files")
             _clearing_draft = (
-                text is not None
-                and str(text) == ""
-                and not (files or [])
+                not str(_merged_text or "")
+                and not (_merged_files or [])
             )
             if _clearing_draft:
                 _draft_mark("before_sidecar_unlink")
                 try:
                     delete_composer_draft_sidecar(sid)
                 except OSError:
+                    # Fail closed: record the failure and leave the stored draft
+                    # untouched both in the sidecar and in the session JSON. The
+                    # 500 is serialized AFTER the per-session lock is released
+                    # (below) — socket I/O must not extend the session critical
+                    # section, and the request thread must not hold the lock
+                    # while another request waits on the response write.
                     _draft_mark("sidecar_unlink_failed")
-                    return bad(
-                        handler,
-                        "Failed to clear composer draft sidecar; draft retained",
-                        500,
-                    )
-                _draft_mark("after_sidecar_unlink")
+                    clear_failed = True
+                else:
+                    _draft_mark("after_sidecar_unlink")
             if next_draft == current_draft:
                 unchanged = True
                 saved_draft = current_draft
-            else:
+            elif not clear_failed:
                 s.composer_draft = next_draft
                 # Draft persistence is not conversation activity. Touching updated_at
                 # here makes the active-session external-refresh poll force-reload the
@@ -14672,6 +14681,12 @@ def handle_post(handler, parsed) -> bool:
                 _draft_mark("after_save")
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")
+        if clear_failed:
+            return bad(
+                handler,
+                "Failed to clear composer draft sidecar; draft retained",
+                500,
+            )
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
