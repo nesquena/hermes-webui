@@ -1,25 +1,35 @@
-"""Regression tests for #6709 round 2 — closing a preview must reconcile
-browse-state visibility (tree OR empty-state placeholder).
+"""Regression tests for #6709 — closing a preview must reconcile browse-state
+visibility (tree OR empty-state placeholder) and preserve the tree's scroll.
 
-Round 1 fix (`f3ae94b6`) kept the hidden tree rebuilt while a preview is
-open, but a maintainer review found an empty-directory edge case: when a
-background refresh empties the current directory while a preview is open,
-`renderFileTree()` correctly hides BOTH the tree and `#wsEmptyState` for the
-preview state — yet `clearPreview()` only restored `#fileTree.style.display`
-and never re-showed the empty-state placeholder. Closing the preview then
-revealed a blank panel.
+Round 2 (`9a85e328`) made `clearPreview()` defer browse-state visibility to
+`renderFileTree()`. Round 3 (`5aee86e0`) closed the close-→-reopen branch by
+always re-rendering after clearing the preview path.
 
-The fix defers to the renderer: `clearPreview()` calls `renderFileTree()`
-after clearing `_previewCurrentPath`, so the renderer owns the tree-vs-empty
-contract (placeholder hidden during preview, visible after close).
+Round 4 (this revision) responds to the exact-head gate:
+  1. Current master renamed `_visibleWorkspaceEntries` → `_workspaceEntriesForRender`
+     and added `_noteWorkspaceBirthtimeSupport`; the Node harness preambles below
+     are refreshed to match (the behavior assertions are unchanged).
+  2. `renderFileTree()` now runs while `#fileTree` is hidden (preview open), and a
+     hidden container reports `scrollTop=0` and ignores writes — so closing a
+     preview reset a long tree to the top. `openFile()` snapshots the last
+     readable scroll position before hiding the tree, and the renderer restores
+     from that snapshot (never from the zeroed live read) until the browse tree
+     is visible again.
 
-These tests drive the REAL extracted function bodies through a Node VM with a
-minimal fake DOM, covering both the empty and non-empty refresh cases.
+Two coverage layers:
+  - Node-VM behavioral tests drive the REAL `renderFileTree()` / `clearPreview()`
+    / `openFile()` bodies through the lifecycle with a fake DOM that emulates the
+    two real-browser behaviors this contract depends on (hidden read = 0, hidden
+    write ignored — verified against Chromium in the PR evidence).
+  - Playwright tests run the same lifecycle in a real Chromium against the
+    isolated test server, proving the browser-side contract end to end.
 """
-import re
+import json
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -75,6 +85,26 @@ def _extract_clear_preview() -> str:
     raise AssertionError("could not find clearPreview closing brace")
 
 
+def _extract_open_file() -> str:
+    src = _read("static/workspace.js")
+    start = src.find("async function openFile(path, opts={}){")
+    assert start >= 0, "openFile not found in static/workspace.js"
+    params_close = src.find(")", start)
+    body_open = src.find("{", params_close)
+    assert body_open > start, "openFile body brace not found"
+    depth = 0
+    i = body_open
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+        i += 1
+    raise AssertionError("could not find openFile closing brace")
+
+
 def _run_node(js: str) -> subprocess.CompletedProcess:
     assert NODE, "node is required"
     return subprocess.run(
@@ -82,15 +112,23 @@ def _run_node(js: str) -> subprocess.CompletedProcess:
     )
 
 
-def _lifecycle_harness(entries_json: str, expect_empty_after_close: bool) -> str:
-    """Build a Node script that drives the REAL renderFileTree + clearPreview
-    bodies through the preview-open → background-refresh → preview-close
-    lifecycle with a minimal fake DOM."""
-    render_ft = _extract_render_file_tree()
-    clear_pv = _extract_clear_preview()
-    preamble = r"""
+# Shared fake DOM + globals for the Node-VM harnesses. The fake #fileTree
+# emulates the two real-browser behaviors this contract depends on: a
+# display:none container reports scrollTop=0 and ignores scrollTop writes
+# (both verified against Chromium in the PR evidence).
+_NODE_PREAMBLE = r"""
 const store = {};
+const fileTreeBox = {
+  id: 'fileTree', style: {}, innerHTML: '',
+  _scrollTop: 0,
+  get scrollTop(){ return this.style.display === 'none' ? 0 : this._scrollTop; },
+  set scrollTop(v){ if(this.style.display !== 'none'){ this._scrollTop = Math.max(0, Number(v) || 0); } },
+  appendChild(){}, remove(){}, setAttribute(){}, getAttribute(){ return null; }, querySelector(){ return null; },
+  classList: {add(){}, remove(){}, toggle(){}, contains(){ return false; }},
+};
+store.fileTree = fileTreeBox;
 function $id(id){
+  if(id === 'fileTree') return fileTreeBox;
   if(store[id]) return store[id];
   const el = {
     id, style: {}, classList: {add(){}, remove(){}, toggle(){}, contains(){return false;}},
@@ -105,7 +143,9 @@ const S = {session:{workspace:'/ws'}, entries: null, currentDir:'.', _dirCache:{
 let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
 let _workspacePanelMode='preview';
 function t(k){ return k; }
-function _visibleWorkspaceEntries(entries){ return Array.isArray(entries)?entries:[]; }
+function _workspaceEntriesForRender(entries){ return Array.isArray(entries)?entries:[]; }
+function _noteWorkspaceBirthtimeSupport(){}
+function _syncWorkspaceBirthtimeSupportScope(){}
 function _renderTreeItems(box, items){ box.innerHTML='items:'+items.length; }
 function closeWorkspacePanel(){ _workspacePanelMode='closed'; }
 function openWorkspacePanel(mode){ _workspacePanelMode=mode; }
@@ -113,6 +153,42 @@ function syncWorkspacePanelUI(){}
 function _hasWorkspacePreviewVisible(){ return !!_previewCurrentPath; }
 
 """
+
+# Stubs for the extracted openFile() body — only the text-preview path runs in
+# these harnesses; the other branches are stubbed to keep the real body driving.
+_OPEN_FILE_STUBS = r"""
+const DOWNLOAD_EXTS = new Set(['.doc','.zip']);
+const IMAGE_EXTS = new Set(['.png']);
+const AUDIO_EXTS = new Set(['.mp3']);
+const VIDEO_EXTS = new Set(['.mp4']);
+const PDF_EXTS = new Set(['.pdf']);
+const MD_EXTS = new Set(['.md']);
+const HTML_EXTS = new Set(['.html']);
+function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
+let _previewServerEditable = null;
+let _previewSaveRoute = '/api/file/save';
+let _previewOfficeFormat = '';
+let _previewPreviewKind = '';
+function renderFileBreadcrumb(){}
+function showPreview(){}
+function _workspaceRouteForPath(){ return '/api/file/read'; }
+async function api(){ return {content:'#6709 scroll harness content'}; }
+function renderCodePreviewContent(){}
+function setStatus(){}
+function showToast(){}
+function downloadFile(){}
+function _workspaceEscapeGrantForPath(){ return null; }
+function _clearWorkspaceEscapeGrant(){}
+
+"""
+
+
+def _lifecycle_harness(entries_json: str, expect_empty_after_close: bool) -> str:
+    """Build a Node script that drives the REAL renderFileTree + clearPreview
+    bodies through the preview-open → background-refresh → preview-close
+    lifecycle with a minimal fake DOM."""
+    render_ft = _extract_render_file_tree()
+    clear_pv = _extract_clear_preview()
     lifecycle = r"""
 // ── Lifecycle: open preview → background refresh empties dir → close preview
 S.entries = __ENTRIES__;
@@ -136,7 +212,7 @@ console.log('LIFECYCLE ' + JSON.stringify(result));
 """
     # entries_json is a JSON array literal; inject as JS directly
     lifecycle = lifecycle.replace("__ENTRIES__", entries_json)
-    return preamble + render_ft + "\n" + clear_pv + "\n" + lifecycle
+    return _NODE_PREAMBLE + render_ft + "\n" + clear_pv + "\n" + lifecycle
 
 
 def _close_panel_reopen_harness(entries_json: str) -> str:
@@ -152,31 +228,6 @@ def _close_panel_reopen_harness(entries_json: str) -> str:
     """
     render_ft = _extract_render_file_tree()
     clear_pv = _extract_clear_preview()
-    preamble = r"""
-const store = {};
-function $id(id){
-  if(store[id]) return store[id];
-  const el = {
-    id, style: {}, classList: {add(){}, remove(){}, toggle(){}, contains(){return false;}},
-    innerHTML:'', textContent:'', scrollTop:0, appendChild(){}, remove(){},
-    setAttribute(){}, getAttribute(){return null;}, querySelector(){return null;},
-  };
-  store[id] = el;
-  return el;
-}
-const $ = $id;
-const S = {session:{workspace:'/ws'}, entries: null, currentDir:'.', _dirCache:{}};
-let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
-let _workspacePanelMode='preview';
-function t(k){ return k; }
-function _visibleWorkspaceEntries(entries){ return Array.isArray(entries)?entries:[]; }
-function _renderTreeItems(box, items){ box.innerHTML='items:'+items.length; }
-function closeWorkspacePanel(){ _workspacePanelMode='closed'; }
-function openWorkspacePanel(mode){ _workspacePanelMode=mode; }
-function syncWorkspacePanelUI(){}
-function _hasWorkspacePreviewVisible(){ return !!_previewCurrentPath; }
-
-"""
     lifecycle = r"""
 // ── Lifecycle: preview → close panel → reopen
 S.entries = __ENTRIES__;
@@ -206,7 +257,119 @@ const result = {duringPreview, afterClosePanel, afterReopen};
 console.log('LIFECYCLE ' + JSON.stringify(result));
 """
     lifecycle = lifecycle.replace("__ENTRIES__", entries_json)
-    return preamble + render_ft + "\n" + clear_pv + "\n" + lifecycle
+    return _NODE_PREAMBLE + render_ft + "\n" + clear_pv + "\n" + lifecycle
+
+
+# ── Scroll lifecycle harness (#6709 gate: scroll/read-position regression) ────
+#
+# Drives the REAL openFile() + renderFileTree() + clearPreview() bodies through
+# the same preview lifecycle and asserts the browse tree keeps its reading
+# position: the snapshot is captured before the tree is hidden, survives a
+# background refresh and a preview-close render, and is consumed once the
+# visible browse tree is back.
+
+_SCROLL_VARIANTS = {
+    # Ordinary close: open → background refresh → close (keep panel open).
+    "ordinary": {
+        "extra": "const extra = null;",
+        "close": "clearPreview({keepPanelOpen:true});",
+        "post": "",
+    },
+    # File-to-file switch: the second openFile() runs with the tree already
+    # hidden and must not clobber the snapshot with a zeroed live read.
+    "switch": {
+        "extra": (
+            "await openFile('file-031.txt');\n"
+            "renderFileTree();\n"
+            "const extra = {snapshot: S._wsBrowseScrollTop};"
+        ),
+        "close": "clearPreview({keepPanelOpen:true});",
+        "post": "",
+    },
+    # Empty refresh: a refresh that empties the directory while the preview is
+    # open must still reconcile the placeholder + drop the snapshot cleanly.
+    "empty": {
+        "extra": "S.entries = [];\nrenderFileTree();\nconst extra = null;",
+        "close": "clearPreview({keepPanelOpen:true});",
+        "post": "",
+    },
+    # Whole-panel close → reopen: the close-path render runs while the panel is
+    # collapsing; reopening must reveal the tree at the preserved position.
+    "panelclose": {
+        "extra": "const extra = null;",
+        "close": "_workspacePanelMode = 'preview';\nclearPreview();",
+        "post": (
+            "openWorkspacePanel('browse');\n"
+            "postReopen = {display: fileTreeBox.style.display, "
+            "scrollTop: fileTreeBox.scrollTop, panelMode: _workspacePanelMode};"
+        ),
+    },
+}
+
+
+def _scroll_lifecycle_harness(entries_json: str, variant: str) -> str:
+    steps = _SCROLL_VARIANTS[variant]
+    render_ft = _extract_render_file_tree()
+    clear_pv = _extract_clear_preview()
+    open_file = _extract_open_file()
+    lifecycle = r"""
+(async()=>{
+S.entries = __ENTRIES__;
+renderFileTree();
+// the reader scrolls a long tree
+fileTreeBox.scrollTop = 600;
+const before = {display: fileTreeBox.style.display, scrollTop: fileTreeBox.scrollTop};
+// open a preview (hides the tree)
+await openFile('file-030.txt');
+const open = {
+  display: fileTreeBox.style.display,
+  scrollTop: fileTreeBox.scrollTop,
+  snapshot: S._wsBrowseScrollTop,
+};
+// background refresh while the preview is open (loadDir → renderFileTree)
+renderFileTree();
+const refresh = {display: fileTreeBox.style.display, snapshot: S._wsBrowseScrollTop};
+__EXTRA__
+let postReopen = null;
+__CLOSE__
+const close = {
+  display: fileTreeBox.style.display,
+  scrollTop: fileTreeBox.scrollTop,
+  snapshot: S._wsBrowseScrollTop,
+  panelMode: _workspacePanelMode,
+  emptyDisplay: store.wsEmptyState ? store.wsEmptyState.style.display : null,
+};
+__POST__
+console.log('SCROLL ' + JSON.stringify({before: before, open: open, refresh: refresh,
+  extra: extra, close: close, postReopen: postReopen}));
+})().catch(function(e){ console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
+"""
+    lifecycle = lifecycle.replace("__ENTRIES__", entries_json)
+    lifecycle = lifecycle.replace("__EXTRA__", steps["extra"])
+    lifecycle = lifecycle.replace("__CLOSE__", steps["close"])
+    lifecycle = lifecycle.replace("__POST__", steps["post"])
+    return (
+        _NODE_PREAMBLE + render_ft + "\n" + clear_pv + "\n" + _OPEN_FILE_STUBS
+        + open_file + "\n" + lifecycle
+    )
+
+
+def _scroll_entries() -> str:
+    return json.dumps(
+        [
+            {"name": f"file-{i:03d}.txt", "path": f"file-{i:03d}.txt", "type": "file"}
+            for i in range(80)
+        ]
+    )
+
+
+def _run_scroll(variant: str) -> dict:
+    js = _scroll_lifecycle_harness(_scroll_entries(), variant)
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    assert "SCROLL" in proc.stdout, proc.stdout
+    payload = proc.stdout.split("SCROLL ", 1)[1].strip()
+    return json.loads(payload)
 
 
 # ── Behavioral lifecycle tests (real function bodies, Node VM) ──────────────
@@ -222,8 +385,6 @@ def test_empty_refresh_placeholder_hidden_during_preview_visible_after_close():
     assert "LIFECYCLE" in proc.stdout, proc.stdout
     # parse the JSON after LIFECYCLE
     payload = proc.stdout.split("LIFECYCLE ", 1)[1].strip()
-    import json
-
     data = json.loads(payload)
     during = data["duringPreview"]
     after = data["afterClose"]
@@ -246,8 +407,6 @@ def test_nonempty_refresh_tree_hidden_during_preview_visible_after_close():
     assert proc.returncode == 0, proc.stderr
     assert "LIFECYCLE" in proc.stdout, proc.stdout
     payload = proc.stdout.split("LIFECYCLE ", 1)[1].strip()
-    import json
-
     data = json.loads(payload)
     during = data["duringPreview"]
     after = data["afterClose"]
@@ -267,8 +426,6 @@ def test_close_panel_reopen_shows_tree_or_empty_state_nonempty():
     assert proc.returncode == 0, proc.stderr
     assert "LIFECYCLE" in proc.stdout, proc.stdout
     payload = proc.stdout.split("LIFECYCLE ", 1)[1].strip()
-    import json
-
     data = json.loads(payload)
     during = data["duringPreview"]
     after_close = data["afterClosePanel"]
@@ -293,8 +450,6 @@ def test_close_panel_reopen_shows_empty_state():
     assert proc.returncode == 0, proc.stderr
     assert "LIFECYCLE" in proc.stdout, proc.stdout
     payload = proc.stdout.split("LIFECYCLE ", 1)[1].strip()
-    import json
-
     data = json.loads(payload)
     during = data["duringPreview"]
     after_close = data["afterClosePanel"]
@@ -305,6 +460,189 @@ def test_close_panel_reopen_shows_empty_state():
     # after reopen: empty-state placeholder visible
     assert after_reopen["emptyDisplay"] == "flex", after_reopen
     assert after_reopen["panelMode"] == "browse", after_reopen
+
+
+# ── Scroll/read-position regression (#6709 gate blocker, round 4) ────────────
+
+
+def test_ordinary_close_preserves_tree_scroll():
+    """Closing a preview must not reset a long tree to the top: the snapshot is
+    captured before the tree is hidden (live hidden reads are 0), a background
+    refresh keeps it, and the close-path render restores the position."""
+    data = _run_scroll("ordinary")
+    before = data["before"]
+    opened = data["open"]
+    refresh = data["refresh"]
+    close = data["close"]
+    # the reader's position took effect before the preview opened
+    assert before["scrollTop"] == 600, before
+    # preview open: tree hidden, live read is 0 — the snapshot must hold 600
+    assert opened["display"] == "none", opened
+    assert opened["scrollTop"] == 0, opened
+    assert opened["snapshot"] == 600, opened
+    # background refresh while hidden: still hidden, snapshot intact
+    assert refresh["display"] == "none", refresh
+    assert refresh["snapshot"] == 600, refresh
+    # after close: tree visible again at the reader's position; snapshot consumed
+    assert close["display"] == "", close
+    assert close["scrollTop"] == 600, close
+    assert close["snapshot"] is None, close
+
+
+def test_file_to_file_switch_keeps_tree_scroll_snapshot():
+    """Switching from one preview to another happens with the tree already
+    hidden; the second openFile() must not overwrite the snapshot with a
+    hidden (zero) read, or closing would still reset the tree."""
+    data = _run_scroll("switch")
+    extra = data["extra"]
+    close = data["close"]
+    assert extra["snapshot"] == 600, extra
+    assert close["display"] == "", close
+    assert close["scrollTop"] == 600, close
+    assert close["snapshot"] is None, close
+
+
+def test_empty_refresh_after_preview_close_reconciles_without_stale_snapshot():
+    """A refresh that empties the directory while the preview is open must
+    still show the placeholder after close and must not strand the snapshot."""
+    data = _run_scroll("empty")
+    close = data["close"]
+    assert close["emptyDisplay"] == "flex", close
+    assert close["snapshot"] is None, close
+
+
+def test_panel_close_reopen_preserves_tree_scroll():
+    """Closing the whole panel over a preview and reopening it in browse mode
+    must reveal the tree at the reader's position (mobile drawer + desktop
+    collapsed-panel path)."""
+    data = _run_scroll("panelclose")
+    close = data["close"]
+    reopened = data["postReopen"]
+    assert close["panelMode"] == "closed", close
+    assert close["scrollTop"] == 600, close
+    assert reopened["panelMode"] == "browse", reopened
+    assert reopened["display"] == "", reopened
+    assert reopened["scrollTop"] == 600, reopened
+
+
+# ── Browser-level lifecycle proof (real Chromium, isolated test server) ──────
+#
+# The Node harnesses above emulate the hidden-container contract; these tests
+# hold the real browser to it: a long tree keeps its scroll position across
+# open → background refresh → close, and across whole-panel close → reopen,
+# on desktop and on the mobile drawer layout.
+
+from tests._pytest_port import BASE  # noqa: E402  (needs conftest env published)
+
+_BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+
+
+def _require_playwright():
+    pw = pytest.importorskip("playwright.sync_api")
+    return pw
+
+
+def _open_browser_page(browser, width, height):
+    context = browser.new_context(viewport={"width": width, "height": height})
+    page = context.new_page()
+    page.add_init_script("localStorage.setItem('hermes-webui-workspace-panel','open')")
+    page.goto(BASE + "/", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => typeof S !== 'undefined' && S._bootReady === true", timeout=15000
+    )
+    page.wait_for_function("() => typeof renderFileTree === 'function'", timeout=15000)
+    return context, page
+
+
+_DRIVE_LIFECYCLE_JS = r"""
+async (panelCloseFlow) => {
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const ft = document.getElementById('fileTree');
+  S.session = {session_id: 'browser-6709', workspace: '/tmp/6709-browser-ws'};
+  S.currentDir = '.';
+  openWorkspacePanel('browse');
+  S.entries = Array.from({length: 120}, (_, i) => {
+    const name = 'file-' + String(i).padStart(3, '0') + '.txt';
+    return {name: name, path: name, type: 'file', mtime_ns: 1000 + i};
+  });
+  window.api = async () => ({content: '6709 browser harness content'});
+  renderFileTree();
+  const scrollable = ft.scrollHeight > ft.clientHeight;
+  ft.scrollTop = 600;
+  const before = {took: ft.scrollTop, scrollable: scrollable, display: ft.style.display};
+  await openFile('file-060.txt');
+  const open = {display: ft.style.display, read: ft.scrollTop};
+  // background refresh while the preview is open (loadDir -> renderFileTree)
+  renderFileTree();
+  const refresh = {display: ft.style.display};
+  let close;
+  let reopened = null;
+  if (panelCloseFlow) {
+    // panel was opened from 'closed' as 'preview'; default close closes it
+    closeWorkspacePanel();
+    ensureWorkspacePreviewVisible();
+    clearPreview();
+    close = {display: ft.style.display, scrollTop: ft.scrollTop, mode: _workspacePanelMode};
+    openWorkspacePanel('browse');
+    reopened = {display: ft.style.display, scrollTop: ft.scrollTop, mode: _workspacePanelMode};
+  } else {
+    clearPreview({keepPanelOpen: true});
+    close = {display: ft.style.display, scrollTop: ft.scrollTop, mode: _workspacePanelMode};
+  }
+  return {before: before, open: open, refresh: refresh, close: close, reopened: reopened};
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "width,height,label", [(1280, 800, "desktop"), (480, 800, "mobile")]
+)
+def test_browser_preview_close_preserves_tree_scroll(width, height, label):
+    pw = _require_playwright()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            context, page = _open_browser_page(browser, width, height)
+            try:
+                data = page.evaluate(_DRIVE_LIFECYCLE_JS, False)
+            finally:
+                context.close()
+        finally:
+            browser.close()
+    before = data["before"]
+    opened = data["open"]
+    refresh = data["refresh"]
+    close = data["close"]
+    assert before["scrollable"], f"[{label}] tree not scrollable: {before}"
+    assert before["took"] == 600, f"[{label}] scroll set-up failed: {before}"
+    assert opened["display"] == "none", f"[{label}] preview did not hide the tree: {opened}"
+    assert refresh["display"] == "none", f"[{label}] refresh re-revealed the tree: {refresh}"
+    assert close["display"] == "", f"[{label}] tree not revealed after close: {close}"
+    assert close["scrollTop"] == 600, f"[{label}] scroll position lost on close: {close}"
+
+
+@pytest.mark.parametrize(
+    "width,height,label", [(1280, 800, "desktop"), (480, 800, "mobile")]
+)
+def test_browser_panel_close_reopen_preserves_tree_scroll(width, height, label):
+    pw = _require_playwright()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            context, page = _open_browser_page(browser, width, height)
+            try:
+                data = page.evaluate(_DRIVE_LIFECYCLE_JS, True)
+            finally:
+                context.close()
+        finally:
+            browser.close()
+    close = data["close"]
+    reopened = data["reopened"]
+    assert close["mode"] == "closed", f"[{label}] panel did not close: {close}"
+    assert close["scrollTop"] == 600, f"[{label}] scroll lost on panel close: {close}"
+    assert reopened["mode"] == "browse", f"[{label}] panel did not reopen: {reopened}"
+    assert reopened["display"] == "", f"[{label}] tree hidden after reopen: {reopened}"
+    assert reopened["scrollTop"] == 600, f"[{label}] scroll lost on reopen: {reopened}"
 
 
 # ── Source-shape lock ────────────────────────────────────────────────────────
