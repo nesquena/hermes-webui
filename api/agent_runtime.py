@@ -397,9 +397,18 @@ def ensure_agent_runtime_current() -> None:
     """Reject a known Git checkout change instead of mixing Python modules."""
     if _AGENT_REVISION is None:
         return
-    fresh_revision = _read_agent_revision(
-        _AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH
-    )
+    fresh_revision = None
+    try:
+        fresh_revision = _read_agent_revision(
+            _AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH
+        )
+    except Exception:
+        # An unreadable revision is indistinguishable from a changed one, so a
+        # failed read must fail CLOSED like every other identity-loss shape
+        # (deleted, permission-denied, empty, corrupt, removed directory).
+        # Letting the raw exception escape would surface as an HTTP 500 instead
+        # of the typed stale-runtime response the barrier is meant to produce.
+        fresh_revision = None
     if fresh_revision == _AGENT_REVISION:
         return
 

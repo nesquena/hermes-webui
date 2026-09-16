@@ -58,3 +58,34 @@ def test_git_identity_loss_rejects_changed_source_with_preserved_metadata(
 
     with pytest.raises(agent_runtime.AgentRuntimeChangedError):
         agent_runtime.ensure_agent_runtime_current()
+
+
+def test_raising_revision_reader_fails_closed(monkeypatch, tmp_path: Path):
+    """A revision read that RAISES must fail closed, not escape as a 500.
+
+    Every other identity-loss shape (deleted, permission-denied, empty,
+    whitespace-only, corrupt, removed directory) already raises
+    AgentRuntimeChangedError.  A reader that throws is the same situation --
+    the revision is unreadable, which is indistinguishable from changed --
+    so it must produce the same typed error rather than propagating a raw
+    OSError that the request layer would surface as an HTTP 500 instead of
+    the intended stale-runtime response.
+    """
+    from api import agent_runtime
+
+    source_dir = tmp_path / "raising-agent"
+    source_dir.mkdir()
+    module_file = source_dir / "run_agent.py"
+    module_file.write_bytes(b"class AIAgent: pass\n")
+
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", source_dir.resolve())
+    monkeypatch.setattr(agent_runtime, "_AGENT_MODULE_PATH", module_file.resolve())
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "0" * 40)
+
+    def _boom(*_args, **_kwargs):
+        raise PermissionError("revision unreadable")
+
+    monkeypatch.setattr(agent_runtime, "_read_agent_revision", _boom)
+
+    with pytest.raises(agent_runtime.AgentRuntimeChangedError):
+        agent_runtime.ensure_agent_runtime_current()
