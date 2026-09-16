@@ -75,6 +75,32 @@ def test_use_and_bundle_resolution_send_owning_session_id():
     assert bundle_call["body"] == {"command": "/bundle request", "session_id": "created-owner"}
 
 
+def test_empty_use_returns_before_installing_pending_directive():
+    commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    cmd_use = _extract_function(commands, "cmdUse", async_function=True)
+    output = _run_node(
+        "\n".join(
+            [
+                "const S={session:null,messages:[]};",
+                "let _forcedSkillDirectivePending=null;",
+                "let newSessions=0; let apiCalls=0;",
+                "const newSession=async()=>{newSessions+=1;};",
+                "const renderSessionList=async()=>{};",
+                "const renderMessages=()=>{};",
+                "const showToast=()=>{};",
+                "const api=async()=>{apiCalls+=1;return {};};",
+                cmd_use,
+                "(async()=>{await cmdUse(''); console.log(JSON.stringify({pending:_forcedSkillDirectivePending,newSessions,apiCalls,messages:S.messages}));})();",
+            ]
+        )
+    )
+    result = json.loads(output)
+    assert result["pending"] is None
+    assert result["newSessions"] == 0
+    assert result["apiCalls"] == 0
+    assert "Usage:" in result["messages"][0]["content"]
+
+
 def test_session_skill_use_renders_in_artifacts():
     workspace = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
     usage = _extract_function(workspace, "_sessionSkillUsage")
@@ -187,6 +213,13 @@ def test_skills_used_disclosure_renders_counts_at_supported_widths():
                 page.set_viewport_size({"width": width, "height": 320})
                 assert page.locator(".workspace-artifact-skill-row").count() == 2
                 assert page.locator(".workspace-artifact-skill-name").first.inner_text() == "alpha"
+                disclosure = page.locator("details.workspace-artifact-skills")
+                disclosure.locator("summary").click()
+                assert disclosure.evaluate("element => !element.open")
+                page.evaluate("renderSessionArtifacts()")
+                assert disclosure.evaluate("element => !element.open")
+                disclosure.locator("summary").click()
+                assert disclosure.evaluate("element => element.open")
                 assert_layout_sane(page, "#workspaceArtifacts", checks=["overlap", "clip", "container-escape", "raw-string"])
                 page.screenshot(path=str(ROOT.parent / ".claude" / "pr-sweep" / "runs" / "webui-6593-2-respec" / f"skills-used-{width}.png"))
         finally:

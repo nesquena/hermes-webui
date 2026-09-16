@@ -598,6 +598,9 @@ function renderSessionArtifacts(){
   if(!root) return;
   const items = collectSessionArtifacts();
   const skills = typeof _sessionSkillUsage==='function' ? _sessionSkillUsage() : [];
+  const ownerId=String(S.session&&S.session.session_id||'');
+  const currentDisclosure=root.querySelector&&root.querySelector('details.workspace-artifact-skills');
+  const skillsOpen=!currentDisclosure||currentDisclosure.dataset.sessionId!==ownerId||currentDisclosure.open;
   if(count) count.textContent = String(items.length + skills.length);
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
@@ -636,7 +639,7 @@ function renderSessionArtifacts(){
     return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
   }).join('');
   const skillMarkup = skills.length
-    ? `<details class="workspace-artifact-skills" open><summary>${esc(t('insights_skill_usage_skills_used') || 'Skills Used')}</summary><div class="workspace-artifact-skill-list">${skills.map(skill => `<div class="workspace-artifact-skill-row"><span class="workspace-artifact-skill-name">${esc(skill.name)}</span><span class="workspace-artifact-skill-uses">${esc(t('insights_skill_usage_col_uses') || 'Uses')}: ${skill.count}</span></div>`).join('')}</div></details>`
+    ? `<details class="workspace-artifact-skills" data-session-id="${esc(ownerId)}"${skillsOpen?' open':''}><summary>${esc(t('insights_skill_usage_skills_used') || 'Skills Used')}</summary><div class="workspace-artifact-skill-list">${skills.map(skill => `<div class="workspace-artifact-skill-row"><span class="workspace-artifact-skill-name">${esc(skill.name)}</span><span class="workspace-artifact-skill-uses">${esc(t('insights_skill_usage_col_uses') || 'Uses')}: ${skill.count}</span></div>`).join('')}</div></details>`
     : '';
   root.innerHTML = fileMarkup + skillMarkup;
 }
