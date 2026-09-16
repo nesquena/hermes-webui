@@ -210,37 +210,56 @@ def _strip_media_references(text: str) -> str:
 
     # (3) Stash fenced code blocks.  Match the renderer's line-anchored
     # variable-length fence grammar exactly.  Only stash a COMPLETE
-    # balanced fence — an unmatched opener (no valid closing fence) stays
-    # as active prose for sanitisation (review #6285 issue 1).
+    # balanced fence — an unmatched opener (no valid closing fence) is
+    # emitted as active prose for sanitisation and classification resumes
+    # on the FOLLOWING line (review #6285 issue 1: renderMd()'s global
+    # fence regex skips that failed opener and can still recognise a later
+    # complete shorter fence, so consuming the whole suffix as prose would
+    # corrupt content the renderer keeps inert inside <pre><code>).
     # Opening fence: ^[ ]{0,3}(`{3,})([^`]*)$
     # Closing fence: ^[ ]{0,3}(`{3,})[ \t]*$  (length >= opening length)
     _fenced: list[str] = []
     _lines = text.split("\n")
+    _nlines = len(_lines)
+    # Per-line closing-fence run length (0 when the line is not a pure
+    # closing fence) plus a suffix maximum, so "is there any valid close
+    # after line i?" is an O(1) lookup.  Without it, every orphan opener
+    # rescans the remaining suffix and a file of unmatched openers becomes
+    # O(openers x suffix) instead of O(lines).
+    _close_len = [0] * (_nlines + 1)
+    for _j in range(_nlines):
+        _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_j])
+        if _cm:
+            _close_len[_j] = len(_cm.group(1))
+    _close_max_from = [0] * (_nlines + 1)
+    for _j in range(_nlines - 1, -1, -1):
+        _nxt = _close_max_from[_j + 1]
+        _close_max_from[_j] = _close_len[_j] if _close_len[_j] > _nxt else _nxt
+
     _fence_parts: list[str] = []
     _i = 0
-    while _i < len(_lines):
+    while _i < _nlines:
         _om = re.match(r"^[ ]{0,3}(`{3,})([^`]*)$", _lines[_i])
         if _om:
             _open_len = len(_om.group(1))
             _start = _i
-            _i += 1
-            _found_close = False
-            while _i < len(_lines):
-                _cm = re.match(r"^[ ]{0,3}(`{3,})[ \t]*$", _lines[_i])
-                if _cm and len(_cm.group(1)) >= _open_len:
-                    _i += 1
-                    _found_close = True
-                    break
-                _i += 1
-            if _found_close:
+            _close_at = -1
+            if _close_max_from[_i + 1] >= _open_len:
+                _j = _i + 1
+                while _close_len[_j] < _open_len:
+                    _j += 1
+                _close_at = _j
+            if _close_at >= 0:
+                _i = _close_at + 1
                 _block = "\n".join(_lines[_start:_i])
                 _fenced.append(_block)
                 _fence_parts.append(f"\x00F{len(_fenced) - 1}\x00")
             else:
-                # No matching close — treat opener and subsequent lines
-                # as active prose (matching renderMd() behaviour).
-                for _j in range(_start, _i):
-                    _fence_parts.append(_lines[_j])
+                # No valid close for this opener: only the opener line is
+                # active prose, and classification resumes on the next
+                # line so a later complete fence is still stashed.
+                _fence_parts.append(_lines[_start])
+                _i = _start + 1
         else:
             _fence_parts.append(_lines[_i])
             _i += 1

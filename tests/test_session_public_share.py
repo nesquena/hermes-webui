@@ -538,3 +538,105 @@ def test_legacy_snapshot_strips_media_on_read():
             path.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+# ── Orphan LONG opener + later SHORT complete fence (re-gate #6285) ───────────
+# An unmatched 5-backtick opener must not swallow the rest of the message:
+# the renderer skips that opener and still honours a later complete
+# 3-backtick fence, keeping its file:// literal inert.  Both the create →
+# public-GET path and the seeded legacy snapshot must preserve that fence
+# byte-for-byte while stripping the genuinely active prose target.
+
+_ORPHAN_OPENER_FENCE = "```\nconst p = file:///srv/inside-code.txt\n```"
+_ORPHAN_OPENER_CONTENT = (
+    "`````\n"
+    "Outside prose file:///tmp/outside-leak.txt\n"
+    + _ORPHAN_OPENER_FENCE
+    + "\n"
+)
+_PLACEHOLDER = "[Local attachment omitted from public share]"
+
+
+def test_share_orphan_long_fence_opener_keeps_later_short_fence():
+    """create → public GET: orphan long opener + later complete short fence."""
+    created, _ = post("/api/session/new", {})
+    sid = created["session"]["session_id"]
+    from api.models import Session
+
+    session = Session.load(sid) or Session(session_id=sid)
+    session.title = "Orphan Long Fence"
+    session.messages = [
+        {"role": "user", "content": "Read this."},
+        {"role": "assistant", "content": _ORPHAN_OPENER_CONTENT},
+    ]
+    session.workspace = "/tmp"
+    session.profile = None
+    session.save()
+
+    try:
+        created, _ = post("/api/share/create", {"session_id": sid})
+        token = created["share"]["token"]
+        shared, status, _ = get(f"/api/share/{token}")
+        assert status == 200
+        content = shared["share"]["messages"][1]["content"]
+        # Exact preservation of the later complete fence.
+        assert _ORPHAN_OPENER_FENCE in content, (
+            f"later complete fence must survive intact: {content!r}"
+        )
+        assert "file:///srv/inside-code.txt" in content, (
+            f"literal inside the later fence must survive: {content!r}"
+        )
+        # The active prose target is stripped, exactly.
+        assert "file:///tmp/outside-leak.txt" not in content, (
+            f"active prose target must be stripped: {content!r}"
+        )
+        assert "Outside prose " + _PLACEHOLDER in content, (
+            f"active prose target must be replaced in place: {content!r}"
+        )
+    finally:
+        post("/api/session/delete", {"session_id": sid})
+
+
+def test_legacy_snapshot_orphan_long_fence_opener_keeps_later_short_fence():
+    """Seeded legacy snapshot: same orphan-long-opener shape sanitized on read."""
+    from api.shares import _write_json_atomic, _share_path, load_share
+    import secrets
+
+    token = "test_legacy_fence_" + secrets.token_hex(6)
+    payload = {
+        "token": token,
+        "source_session_id": "test-legacy-fence-sid",
+        "title": "Legacy Orphan Fence",
+        "messages": [
+            {"role": "user", "content": "Read this."},
+            {"role": "assistant", "content": _ORPHAN_OPENER_CONTENT},
+        ],
+        "message_count": 2,
+        "created_at": 1000.0,
+        "updated_at": 1000.0,
+        "revoked_at": None,
+    }
+    path = _share_path(token)
+    try:
+        _write_json_atomic(path, payload)
+        result = load_share(token)
+        assert result is not None
+        content = result["messages"][1]["content"]
+        # Exact preservation of the later complete fence.
+        assert _ORPHAN_OPENER_FENCE in content, (
+            f"later complete fence must survive intact: {content!r}"
+        )
+        assert "file:///srv/inside-code.txt" in content, (
+            f"literal inside the later fence must survive: {content!r}"
+        )
+        assert "file:///tmp/outside-leak.txt" not in content, (
+            f"active prose target must be stripped: {content!r}"
+        )
+        assert "Outside prose " + _PLACEHOLDER in content, (
+            f"active prose target must be replaced in place: {content!r}"
+        )
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass

@@ -1097,3 +1097,59 @@ class TestPublicShareSanitizerThroughRenderer:
         assert "file:///etc/hostname" in html, (
             "file:// inside inline code must survive in HTML"
         )
+
+    # ── Orphan LONG opener followed by a shorter COMPLETE fence ──────────
+    # Re-gate #6285.  renderMd()'s global fence regex skips an unmatched
+    # opener (no close of equal-or-greater length) and then still matches a
+    # later, shorter but COMPLETE fence.  The sanitizer must mirror that:
+    # the orphan opener line alone is active prose and classification
+    # resumes on the NEXT line.  Treating the whole suffix as prose destroys
+    # the file:// literal the renderer keeps inert inside the later fence.
+
+    _ORPHAN_LONG_OPENER_SRC = (
+        "`````\n"
+        "Outside prose file:///tmp/outside-leak.txt\n"
+        "```\n"
+        "const p = file:///srv/inside-code.txt\n"
+        "```\n"
+    )
+    _ORPHAN_LONG_OPENER_FENCE = "```\nconst p = file:///srv/inside-code.txt\n```"
+
+    def test_control_orphan_long_opener_activates_only_outside_target(
+        self, driver_path
+    ):
+        """Control (raw, unsanitized): the 5-backtick opener has no valid
+        close, so the renderer leaves it as prose, activates the file://
+        outside target, and still recognises the later complete 3-backtick
+        fence — whose file:// stays inert as code text."""
+        html = _render(driver_path, self._ORPHAN_LONG_OPENER_SRC)
+        assert "api/media?path=%2Ftmp%2Foutside-leak.txt" in html, (
+            f"Control: the outside target must be renderer-active: {html!r}"
+        )
+        assert "api/media?path=%2Fsrv%2Finside-code.txt" not in html, (
+            f"Control: the inside target must stay inert (shorter fence is "
+            f"still honoured by the renderer): {html!r}"
+        )
+        assert "file:///srv/inside-code.txt" in html, (
+            f"Control: the inert literal must survive as code text: {html!r}"
+        )
+
+    def test_orphan_long_opener_keeps_later_short_fence_intact(self, driver_path):
+        """After sanitisation: the outside target is gone and the literal
+        inside the later complete fence survives byte-for-byte."""
+        from api.shares import _strip_media_references
+        sanitized = _strip_media_references(self._ORPHAN_LONG_OPENER_SRC)
+        # Exact preservation of the later balanced fence.
+        assert self._ORPHAN_LONG_OPENER_FENCE in sanitized, (
+            f"Later complete fence must survive sanitisation intact: {sanitized!r}"
+        )
+        assert "file:///tmp/outside-leak.txt" not in sanitized, (
+            f"Active prose target must be stripped: {sanitized!r}"
+        )
+        html = _render(driver_path, sanitized)
+        assert "api/media?path=" not in html, (
+            f"Orphan long opener let a file:// ref reach the renderer: {html!r}"
+        )
+        assert "file:///srv/inside-code.txt" in html, (
+            f"file:// inside the preserved fence must still render as code: {html!r}"
+        )
