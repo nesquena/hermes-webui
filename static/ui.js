@@ -19134,7 +19134,9 @@ function _postProcessMdInlineSubtree(root){
   // Mirrors postProcessRenderedMessages() except loadMarkdownInline: running
   // that here would re-enter the fetch loop on nested .md references (and can
   // recurse unboundedly on self-referencing documents). Nested .md placeholders
-  // are picked up by the next full postProcessRenderedMessages() pass instead.
+  // therefore get an explicit bounded terminal policy instead: they are
+  // replaced with the session-preserving download fallback below, so no
+  // "Loading..." placeholder can outlive this single pass.
   highlightCode(root);
   addCopyButtons(root);
   loadDiffInline(root);
@@ -19145,26 +19147,128 @@ function _postProcessMdInlineSubtree(root){
   renderMermaidBlocks(root);
   renderKatexBlocks(root);
   initTreeViews(root);
+  _terminateNestedMdPlaceholders(root);
+}
+
+// ── Inline Markdown preview: byte-budgeted fetch ─────────────────────────────
+// The inline preview budget is enforced on BYTES, never on JavaScript string
+// length (UTF-16 code units under-count multibyte UTF-8). The media route
+// supports Range and length headers, so the preview asks for `cap + 1` bytes,
+// validates the length/range metadata before touching the body, and decodes
+// only the bounded buffer.
+const MD_INLINE_MAX_BYTES = 256 * 1024; // 256 KB cap for inline Markdown preview
+
+function _mdInlineSessionId(){
+  return (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+}
+
+// Chat-preview URL for an inline Markdown reference. Carries the session id so
+// the media route can honour the session media grant for authorized files.
+function _mdInlineMediaUrl(path, sessionId){
+  const base = 'api/media?path=' + encodeURIComponent(path);
+  return sessionId ? base + '&session_id=' + encodeURIComponent(sessionId) : base;
+}
+
+// Terminal fallback markup: keeps the session-preserving download link and never
+// leaves a placeholder at "Loading...". `reasonKey` selects the i18n reason.
+function _mdInlineFallbackHtml(path, mediaUrl, reasonKey, fallbackText){
+  const fname = path.split('/').pop() || path;
+  const downloadUrl = mediaUrl + '&download=1';
+  const reason = (typeof t === 'function') ? t(reasonKey) : fallbackText;
+  return `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(reason)}</span></div>`;
+}
+
+// Byte size the response itself declares, or null when it declares none:
+//   Content-Range: bytes 0-262144/1048576  -> 1048576 (Range request path)
+//   Content-Length: 1048576                -> 1048576 (full-body request path)
+function _mdInlineDeclaredBytes(r){
+  const headers = r && r.headers;
+  if (!headers || typeof headers.get !== 'function') return null;
+  const range = headers.get('content-range');
+  if (range) {
+    const m = /\/(\d+)\s*$/.exec(String(range));
+    if (m) return Number(m[1]);
+    return null; // unparsable metadata: fall through to the bounded stream read
+  }
+  const len = headers.get('content-length');
+  if (len != null && /^\d+$/.test(String(len).trim())) return Number(String(len).trim());
+  return null;
+}
+
+// Read at most the budget + 1 bytes, cancelling the reader as soon as the byte
+// count exceeds the cap so an oversize body is never fully transferred. Chunks
+// are decoded incrementally, so only the bounded buffer is ever decoded.
+async function _mdInlineReadBounded(r){
+  const budget = MD_INLINE_MAX_BYTES + 1; // cap + 1 proves oversize with one byte
+  if (!r.body || typeof r.body.getReader !== 'function') {
+    const text = await r.text();
+    const bytes = new TextEncoder().encode(text).length;
+    return { text: bytes > budget ? '' : text, overflow: bytes > MD_INLINE_MAX_BYTES };
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let text = '';
+  let bytes = 0;
+  let overflow = false;
+  try {
+    for(;;){
+      const step = await reader.read();
+      if (step.done) break;
+      const value = step.value;
+      if (!value || !value.length) continue;
+      bytes += value.length;
+      if (bytes > MD_INLINE_MAX_BYTES) { overflow = true; break; }
+      text += (typeof value === 'string') ? value : decoder.decode(value, { stream: true });
+    }
+  } finally {
+    if (overflow && typeof reader.cancel === 'function') {
+      try { await reader.cancel(); } catch(e) { /* reader already closed */ }
+    }
+  }
+  if (overflow) return { text: '', overflow: true };
+  text += decoder.decode(); // flush any split multibyte sequence
+  return { text, overflow: false };
+}
+
+// Fetch an inline Markdown preview under the byte budget. Never calls
+// response.text() on an oversized body: metadata decides first, the bounded
+// stream read decides second (chunked responses without length metadata).
+async function _mdInlineFetchPreview(mediaUrl){
+  // cap + 1: the Range request asks for one byte past the budget, so a 206 whose
+  // Content-Range total exceeds the cap is itself proof of oversize.
+  const r = await fetch(mediaUrl, { headers: { Range: 'bytes=0-' + MD_INLINE_MAX_BYTES } });
+  if (r.status === 416) {
+    // Unsatisfiable range: an empty file (Content-Range: bytes */0) renders as
+    // an empty preview; anything else is treated as oversize.
+    const declared = _mdInlineDeclaredBytes(r);
+    if (declared === null || declared === 0) return { ok: true, text: '' };
+    return { ok: false, overflow: true };
+  }
+  if (!r.ok) throw new Error(String(r.status));
+  const declared = _mdInlineDeclaredBytes(r);
+  if (declared !== null && declared > MD_INLINE_MAX_BYTES) return { ok: false, overflow: true };
+  const read = await _mdInlineReadBounded(r);
+  if (read.overflow) return { ok: false, overflow: true };
+  return { ok: true, text: read.text };
 }
 
 function loadMarkdownInline(container){
-  const MD_MAX_SIZE = 256 * 1024; // 256 KB cap for inline Markdown preview
   const root = container || document;
   root.querySelectorAll('.md-inline-load:not([data-loaded])').forEach(el => {
     el.setAttribute('data-loaded', '1');
     const path = el.dataset.path;
     const fname = path.split('/').pop() || path;
-    const mediaSessionId = (typeof S !== 'undefined' && S && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+    const mediaSessionId = _mdInlineSessionId();
     const publicMediaUrl = 'api/media?path=' + encodeURIComponent(path);
     const mediaUrl = publicMediaUrl + (mediaSessionId ? '&session_id=' + encodeURIComponent(mediaSessionId) : '');
     const downloadUrl = mediaUrl + '&download=1';
-    fetch(mediaUrl)
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
-      .then(text => {
-        if (text.length > MD_MAX_SIZE) {
-          el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('md_too_large') : 'File too large for preview')}</span></div>`;
+    _mdInlineFetchPreview(mediaUrl)
+      .then(res => {
+        if (!res.ok) {
+          el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_too_large', 'File too large for preview');
           return;
         }
+        const text = res.text;
         const rendered = renderMd(text);
         const wrap = document.createElement('div');
         wrap.innerHTML = `<div class="md-inline-wrap"><div class="md-inline-header"><span class="md-preview-title">${esc(fname)}</span><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a></div><div class="md-inline-content">${rendered}</div></div>`;
@@ -19176,8 +19280,23 @@ function loadMarkdownInline(container){
         _postProcessMdInlineSubtree(contentEl);
       })
       .catch(() => {
-        el.outerHTML = `<div class="md-inline-fallback"><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('md_error') : 'Error loading markdown')}</span></div>`;
+        el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_error', 'Error loading markdown');
       });
+  });
+}
+
+// Explicit bounded terminal policy for nested inline-Markdown placeholders.
+// A nested (or self-referential) .md-inline-load is never hydrated in place —
+// that is the unbounded fetch loop — it is immediately replaced with the
+// session-preserving download fallback, so this single pass always terminates
+// with zero stranded "Loading..." placeholders.
+function _terminateNestedMdPlaceholders(root){
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  const sessionId = _mdInlineSessionId();
+  root.querySelectorAll('.md-inline-load').forEach(el => {
+    const path = (el.dataset && el.dataset.path) || '';
+    const mediaUrl = _mdInlineMediaUrl(path, sessionId);
+    el.outerHTML = _mdInlineFallbackHtml(path, mediaUrl, 'md_nested', 'Nested Markdown preview not expanded — use the download link');
   });
 }
 

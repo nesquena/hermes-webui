@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -65,8 +66,10 @@ def _extract_func_script(js: str) -> str:
     body = r"""
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
+  let start = src.search(re);
   if (start < 0) throw new Error(name + ' not found');
+  // Keep a leading `async ` so an async helper is still async when re-evaluated.
+  if (src.slice(Math.max(0, start - 6), start) === 'async ') start -= 6;
   let i = src.indexOf('{', start);
   let depth = 1; i++;
   let str = null;
@@ -295,6 +298,50 @@ const initTreeViews = _spy('initTreeViews');
 """
 
 
+# Real dependency closure of loadMarkdownInline()/_postProcessMdInlineSubtree():
+# these top-level helpers are extracted too, tolerantly, so the suite still runs
+# against the pre-refactor revision where the budget logic lived inline.
+_MD_HELPERS = (
+    "_mdInlineSessionId",
+    "_mdInlineMediaUrl",
+    "_mdInlineFallbackHtml",
+    "_mdInlineDeclaredBytes",
+    "_mdInlineReadBounded",
+    "_mdInlineFetchPreview",
+    "_terminateNestedMdPlaceholders",
+)
+
+
+def _md_helper_evals(js: str) -> str:
+    """Top-level ``eval(extractFunc(...))`` for every helper this revision defines.
+
+    Emission is decided in Python (presence of ``function NAME(`` in ui.js) and
+    the eval stays at top level: a direct eval inside a nested callback would
+    bind in the callback's scope instead of the module scope.
+    """
+    return "".join(
+        f"eval(extractFunc({json.dumps(name)}));\n"
+        for name in _MD_HELPERS
+        if re.search(r"function\s+" + re.escape(name) + r"\s*\(", js)
+    )
+
+
+def _md_budget_prelude(js: str) -> str:
+    """Replay the MD_* budget constants + helper functions the extracted code uses.
+
+    Only function bodies are extracted from static/ui.js, so a hoisted budget
+    constant has to be re-declared as a global here; its value is read from the
+    source (the pre-hoist literal is 256 KB).  Helper extraction is tolerant:
+    on a revision where that logic is still inline inside loadMarkdownInline()
+    the helpers do not exist and are skipped.
+    """
+    decls = re.findall(r"^const\s+(MD_[A-Z0-9_]+)\s*=\s*([^;\n]+);", js, re.M)
+    lines = [f"var {name} = {expr};" for name, expr in decls]
+    if not any("MD_INLINE" in line for line in lines):
+        lines.insert(0, "var MD_INLINE_MAX_BYTES = 256 * 1024;")
+    return "\n".join(lines) + "\n" + _md_helper_evals(js)
+
+
 def _scenario(fetch_impl: str, session_id: str = "sess-123", path: str = "/tmp/notes.md") -> str:
     return (
         "eval(extractFunc('_postProcessMdInlineSubtree'));\n"
@@ -332,6 +379,7 @@ def _harness(fetch_impl: str, session_id: str = "sess-123", path: str = "/tmp/no
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = (
         _extract_func_script(js)
+        + _md_budget_prelude(js)
         + _fakedom_prelude()
         + _scenario(fetch_impl, session_id=session_id, path=path)
     )
