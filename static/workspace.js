@@ -657,13 +657,19 @@ async function openArtifactPath(path){
   // sync reopen the stale preview while the request was still pending, and a
   // failed open (missing file / request error) then stripped the dismissal
   // guard for good. Both are fixed by writing the flag only here.
+  //
+  // The read can ALSO fail after the existence check succeeded (403 grant
+  // expired, oversized, binary→download, network error). openFile() reports
+  // that, and a failed read must not clear the dismissal either: the panel
+  // would be force-opened onto stale or empty preview content, which is exactly
+  // the intrusion this flag exists to prevent.
+  const opened = await openFile(rel);
+  if(opened === false){
+    // Nothing was previewed (read failed or the file was downloaded instead).
+    // Leave the dismissal flag untouched and do not promote the panel.
+    return;
+  }
   if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
-  // Await the open so the panel transition belongs to THIS user action: openFile
-  // reveals the preview DOM (#previewArea.visible) and only then do we promote
-  // the panel to preview mode. Previously the call was fire-and-forget and the
-  // mode flip was left to some later unrelated sync, so the panel could stay
-  // closed even though a valid file was opened.
-  await openFile(rel);
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
 }
 
@@ -1179,10 +1185,10 @@ async function openFile(path, opts={}){
         $('previewCode').textContent=data.content;
         setLargeMarkdownForceRenderVisible(true);
         setStatus(largeMarkdownPlainTextStatus(data.content));
-        return;
+        return true;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){setStatus(t('file_open_failed')); return false;}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1204,12 +1210,13 @@ async function openFile(path, opts={}){
       const data=await api(_workspaceRouteForPath(path, 'read'));
       if(data.binary){
         downloadFile(path);
-        return;
+        return false;   // downloaded, nothing previewed
       }
-      if(renderCsvPreviewContent(path, data.content)) return;
+      if(renderCsvPreviewContent(path, data.content)) return true;
       renderCodePreviewContent(path, data.content);
     }catch(e){
       downloadFile(path);
+      return false;   // downloaded, nothing previewed
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
@@ -1218,7 +1225,7 @@ async function openFile(path, opts={}){
       if(data.binary){
         // Server flagged this as binary content
         downloadFile(path);
-        return;
+        return false;   // downloaded, nothing previewed
       }
       if(data.preview_kind==='office'){
         _previewRawContent = data.content || '';
@@ -1234,12 +1241,14 @@ async function openFile(path, opts={}){
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
         showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
-        return;
+        return false;
       }
       // If it's a 400/too-large error, offer download instead
       downloadFile(path);
+      return false;   // downloaded, nothing previewed
     }
   }
+  return true;
 }
 
 function downloadFile(path){
