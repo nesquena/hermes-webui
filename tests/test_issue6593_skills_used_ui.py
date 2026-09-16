@@ -1,12 +1,20 @@
 """Browser-facing regression coverage for the Skills Used Artifacts section."""
 
 import json
+import io
 import shutil
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
+
+import api.models as models
+import api.routes as routes
+from api.models import Session
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +132,80 @@ def test_session_skill_use_renders_in_artifacts():
     assert result["usage"] == [{"name": "review-skill", "count": 2}]
     assert result["rendered"] == 1
     assert result["S"]["session"]["skill_provenance"] == {"review-skill": 2}
+
+
+def test_use_persists_then_artifacts_open_fetches_and_renders_repeated_count(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    models.SESSIONS.clear()
+    session = Session(session_id="issue6593-e2e", profile="default")
+    session.save(touch_updated_at=False, skip_index=True)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: Session.load(session.session_id))
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(
+        routes,
+        "_skill_view_from_active_dir",
+        lambda _name: {"success": True, "name": "review-skill", "content": "body"},
+    )
+    payload = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, body, **_kwargs: payload.update(body) or True)
+
+    class Handler:
+        command = "GET"
+        headers = {}
+        rfile = io.BytesIO()
+        wfile = io.BytesIO()
+
+        def _safe_webui_print(self, *_args, **_kwargs):
+            return None
+
+    parsed = SimpleNamespace(
+        path="/api/skills/content",
+        query=urlencode({"name": "client-name", "session_id": session.session_id}),
+    )
+    assert routes.handle_get(Handler(), parsed) is True
+    assert routes.handle_get(Handler(), parsed) is True
+    detail = Session.load(session.session_id).compact()
+    assert detail["skill_provenance"] == {"review-skill": 2}
+
+    workspace = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    switch_tab = _extract_function(workspace, "switchWorkspacePanelTab")
+    refresh = _extract_function(workspace, "_refreshSessionSkillUsageForOwner", async_function=True)
+    usage = _extract_function(workspace, "_sessionSkillUsage")
+    renderer = _extract_function(workspace, "renderSessionArtifacts")
+    output = _run_node(
+        "\n".join(
+            [
+                f"const detail={json.dumps({'session': detail})};",
+                "const root={innerHTML:'',hidden:true,querySelector(){return null;}}; const count={textContent:''};",
+                "const tab={classList:{toggle(){}},setAttribute(){}};",
+                "const $=id=>id==='workspaceArtifacts'?root:id==='workspaceArtifactsCount'?count:id==='workspaceArtifactsTab'?tab:null;",
+                f"const S={{session:{{session_id:{json.dumps(session.session_id)},workspace:'',skill_provenance:{{}}}},messages:[],toolCalls:[]}};",
+                "let _workspacePanelActiveTab='files';",
+                "const _setWorkspacePanelTabDataset=()=>{};",
+                "const collectSessionArtifacts=()=>[];",
+                "const _isSessionCurrentPane=id=>S.session&&S.session.session_id===id;",
+                "const t=key=>key==='insights_skill_usage_skills_used'?'Skills Used':'Uses';",
+                "const esc=value=>String(value);",
+                "const api=async()=>detail;",
+                usage,
+                renderer,
+                refresh,
+                switch_tab,
+                "(async()=>{switchWorkspacePanelTab('artifacts'); await new Promise(resolve=>setTimeout(resolve,0)); console.log(JSON.stringify({html:root.innerHTML,count:S.session.skill_provenance['review-skill'],badge:count.textContent}));})();",
+            ]
+        )
+    )
+    result = json.loads(output)
+    assert result["count"] == 2
+    assert result["badge"] == "1"
+    assert "review-skill" in result["html"]
+    assert "Uses: 2" in result["html"]
 
 
 def test_artifacts_open_refreshes_owner_and_rejects_stale_response():
@@ -254,8 +336,96 @@ def test_artifacts_empty_and_files_only_states_remain_usable():
 
 def test_active_stream_conflict_keeps_resolved_use_payload():
     messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
-    assert "await resolveBundleCommand(text,_bundleCmd)" in messages
-    assert "text=_bundleMessage" in messages
+    send_start = messages.index("async function send(){")
+    send_end = messages.index("\nasync function startRegeneration", send_start)
+    send = messages[send_start:send_end]
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        const input = {value:'hello'};
+        const queued = [];
+        const S = {
+          session:{session_id:'A',workspace:'/a',profile:'work',model:'model-a',model_provider:'provider-a',title:'A'},
+          messages:[],pendingFiles:[],toolCalls:[],activeProfile:'work',busy:false,activeStreamId:null,
+        };
+        const INFLIGHT = {};
+        const _pendingSelections = [];
+        let _forcedSkillDirectivePending = {
+          sessionId:'A',
+          promise:Promise.resolve({directive:'/use writer',name:'writer',content:'follow the guide'}),
+        };
+        let _sendInProgress = false;
+        let _sendInProgressSid = null;
+        let _queueDrainSid = null;
+        const localStorage = {setItem(){},removeItem(){}};
+        const history = {replaceState(){}};
+        const window = {_defaultModel:'model-a',_activeProvider:'provider-a'};
+        const document = {querySelector(){return null;}};
+        const $ = id => id === 'msg' ? input : null;
+        function _composerTextWithPendingSelections(){return input.value;}
+        function _chatPayloadModelState(){return {model:S.session.model,model_provider:S.session.model_provider};}
+        function _flushSelectionBlocksToComposer(){}
+        function shouldInterceptCompressionRecoveryContinuation(){return false;}
+        function _dismissHandoffHint(){}
+        function _clearStaleBusyStateBeforeSend(){}
+        function renderTray(){}
+        function autoResize(){}
+        function _clearComposerDraft(){return Promise.resolve();}
+        function setComposerStatus(){}
+        function clearLiveToolCards(){}
+        function renderMessages(){}
+        function setBusy(value){S.busy=value;}
+        function ensureLiveWorklogShell(){}
+        function appendThinking(){}
+        function _runOptionalPreStartUiStep(_label,fn){if(fn)fn();}
+        function _runOptionalPostStartUiStep(_label,fn){if(fn)fn();}
+        function upsertActiveSessionForLocalTurn(){}
+        function renderSessionListFromCache(){}
+        function startApprovalPolling(){}
+        function startClarifyPolling(){}
+        function _fetchYoloState(){}
+        function updateSendBtn(){}
+        function applySessionTitleUpdate(){}
+        function _readPendingSessionModel(){return null;}
+        function _clearPendingSessionModel(){}
+        function _writePersistedModelState(){}
+        function _applyModelToDropdown(){}
+        function syncTopbar(){}
+        function syncModelChip(){}
+        function stopApprovalPolling(){}
+        function stopClarifyPolling(){}
+        function hideApprovalCard(){}
+        function hideClarifyCard(){}
+        function removeThinking(){}
+        function clearOptimisticSessionStreaming(){}
+        function renderSessionList(){}
+        function markInflight(){}
+        function saveInflightState(){}
+        function clearInflightState(){}
+        function queueSessionMessage(sid,payload){queued.push({sid,payload});}
+        function _clearComposerAfterQueuedSelectionSend(){}
+        function updateQueueBadge(){}
+        function showToast(){}
+        function stopSessionStream(){}
+        async function loadSession(sid){assert.strictEqual(sid,'A');}
+        async function newSession(){throw new Error('unexpected new session');}
+        async function uploadPendingFiles(){return [];}
+        async function api(){throw new Error('Session already has an active stream');}
+        %(send)s
+        (async()=>{
+          await send();
+          assert.strictEqual(queued.length,1);
+          assert.strictEqual(queued[0].sid,'A');
+          assert.strictEqual(queued[0].payload.files.length,0);
+          assert.ok(queued[0].payload.text.includes('/use writer'));
+          assert.ok(queued[0].payload.text.includes('[FORCED SKILL CONTEXT: writer]'));
+          assert.ok(queued[0].payload.text.includes('follow the guide'));
+          assert.ok(queued[0].payload.text.endsWith('hello'));
+          assert.strictEqual(_forcedSkillDirectivePending,null);
+        })().catch(error=>{console.error(error);process.exit(1);});
+        """
+    ) % {"send": send}
+    _run_node(script)
 
 
 def test_real_page_layout_probe_is_available_for_reality_gate():
