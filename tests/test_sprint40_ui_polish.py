@@ -264,12 +264,13 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """After await newSession(false) in the sessionInProgress branch,
         the code must call syncTopbar() so the profile/workspace chips reflect
         the new profile's default workspace."""
-        # Find the sessionInProgress block
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        # Find the sessionInProgress block by brace matching. A fixed 1000-char
+        # window stopped reaching syncTopbar() once the branch gained the resume
+        # helper and the generation comments, so the assertion was measuring
+        # distance-from-the-top rather than the ordering it claims to check.
+        idx = PANELS_JS.find('} else if (sessionInProgress) {')
         self.assertGreater(idx, -1, "sessionInProgress branch must exist in panels.js")
-
-        # Slice from that point to cover the relevant block
-        block = PANELS_JS[idx:idx + 1000]
+        block = _balanced_block(PANELS_JS, idx)
 
         # newSession(false, ...) must be called first
         self.assertIn('await newSession(false', block,
