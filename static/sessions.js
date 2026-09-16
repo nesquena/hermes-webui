@@ -1723,7 +1723,7 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
-      return;
+      return false;
     }
   }
   const forceReload = !!opts.force;
@@ -1878,9 +1878,26 @@ async function loadSession(sid){
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
+      // #6712 F3: when this load belongs to a profile switch, the mismatch
+      // recovery must not drag the browser back to another profile. The
+      // recovery below calls _switchProfileForSessionLoad(), which issues its
+      // own profile switch — if a newer switch has already taken ownership, or
+      // the recovery would move AWAY from the profile this switch selected, the
+      // correct action is to abandon the load and let the owner decide. Without
+      // this, switch A's stale response could pull the browser back to A after
+      // switch B had already advanced the cookie.
+      if(opts.profileSwitchOwned){
+        const owns = typeof opts.switchGen !== 'number'
+          || typeof _profileSwitchGeneration === 'undefined'
+          || opts.switchGen === _profileSwitchGeneration;
+        if(!owns || !_isCurrentLoad()){
+          _rearmActiveSessionStream();
+          return false;
+        }
+      }
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return false;
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
@@ -1892,7 +1909,16 @@ async function loadSession(sid){
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
           _rearmActiveSessionStream();
-          return;
+          return false;
+        }
+        // #6712 F3: the recovery switched the active profile. If a newer
+        // profile switch has since taken ownership, retrying here would fight
+        // it; abandon instead.
+        if(opts.profileSwitchOwned
+           && typeof opts.switchGen === 'number'
+           && typeof _profileSwitchGeneration !== 'undefined'
+           && opts.switchGen !== _profileSwitchGeneration){
+          return false;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
@@ -2444,6 +2470,14 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
+  // Callers that need to distinguish a real load from a swallowed failure (e.g.
+  // the profile-switch resume path) rely on this result. Reaching this tail with
+  // S.session pointing at the requested session is the success condition —
+  // every failure/abort branch above returns earlier without it, and those
+  // paths intentionally stay falsy (undefined) rather than growing a return
+  // value each. Verified against the shipped failure paths: metadata failures,
+  // auth/stale exits, and message-load failures all `return;` before here.
+  return !!(S.session && S.session.session_id === sid);
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────

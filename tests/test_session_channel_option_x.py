@@ -20,6 +20,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _top_level_function(src: str, declaration: str) -> str:
+    """Return the body from `declaration` up to the next top-level declaration.
+
+    `sessions.js` declares its top-level functions at column 0, so the next
+    line starting with `async function `/`function `/`const `/`let `/`var ` at
+    column 0 marks the end of the current one. Used instead of brace matching
+    for functions that contain comments or regex literals which defeat a naive
+    brace/string scanner, and instead of a fixed character window which silently
+    truncates as the function grows.
+    """
+    start = src.index(declaration)
+    search_from = start + len(declaration)
+    lines = src[search_from:].split("\n")
+    offset = search_from
+    for line in lines:
+        if line.startswith(("async function ", "function ", "const ", "let ", "var ")):
+            return src[start:offset]
+        offset += len(line) + 1
+    return src[start:]
+
+
 def _js_function_decl(src: str, name: str) -> str:
     marker = f"function {name}("
     start = src.find(marker)
@@ -935,11 +956,18 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
-    # added inside loadSession pushed the fetch-error catch's stream restart past
-    # the old 14000-char cutoff.
-    fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 16000]
+    # Isolate the loadSession body by slicing to the next top-level declaration.
+    # This was a fixed 16000-char window (already widened once when #4946 pushed
+    # the catch past 14000) and further additions moved the block to the edge of
+    # it, so the assertion was silently measuring distance-from-the-top rather
+    # than the code.
+    #
+    # Not brace matching: `_js_function_decl` stops early on this function (it
+    # does not understand comments/regex literals inside it), and loadSession is
+    # long enough to contain plenty of both. `sessions.js` declares top-level
+    # functions at column 0, so anchoring on the next such declaration is exact
+    # for this file and grows with the function instead of cutting it off.
+    body = _top_level_function(js, "async function loadSession(")
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
