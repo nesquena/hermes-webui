@@ -162,14 +162,22 @@ let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 // the panel alone; the preview DOM (file + scroll position) stays intact so
 // reopening restores exactly where the user was reading.
 let _workspacePanelUserDismissed=false;
-// Monotonic counter bumped on every dismissal write. An artifact open captures
-// it before its awaits and only promotes the panel if it is unchanged: a read
-// that was still pending when the user dismissed the panel must not erase that
-// newer intent and force the panel back open.
+// Monotonic counter bumped on every DISMISSAL (never on a clear). An artifact
+// open captures it before its awaits and only promotes the panel if it is
+// unchanged: a read that was still pending when the user dismissed the panel
+// must not erase that newer intent and force the panel back open.
+//
+// It must NOT bump when the flag is cleared. Clearing is a promote (explicit
+// reopen via `openWorkspacePanel`, or the artifact reveal itself), and the
+// user's newest intent there is "panel open" — the same thing the in-flight
+// reveal wants. Counting it as a change made the guard reject the very read
+// the reopen agreed with, so an explicit reopen during a pending read skipped
+// the promotion and left the panel in browse mode without the artifact
+// (#6710 review: "Reopen invalidates artifact reveal").
 let _workspacePanelDismissGen=0;
 function _setWorkspacePanelDismissed(dismissed){
+  if(dismissed) _workspacePanelDismissGen++;
   _workspacePanelUserDismissed=dismissed;
-  _workspacePanelDismissGen++;
 }
 
 function _isCompactWorkspaceViewport(){
