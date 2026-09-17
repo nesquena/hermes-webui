@@ -2970,6 +2970,128 @@ from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
 
+# ── Non-streaming custom-provider connection authority ───────────────────────
+#
+# Several WebUI consumers build their own AIAgent outside the streaming path
+# (POST /api/chat, manual compression, update summary, git commit message,
+# handoff summary). They resolve a model/provider, ask the Hermes runtime
+# provider for a connection, then had to apply the named ``custom:<slug>``
+# record's authority by hand.
+#
+# ``apply_custom_provider_connection_authority`` returns only the THREE
+# connection fields, and three fields are not a complete constructor contract:
+# AIAgent also takes ``api_mode`` (wire protocol), ``credential_pool``
+# (credential source) and ``acp_command``/``acp_args`` (subprocess transport).
+# A consumer that replaced the endpoint and credential while leaving those to
+# default — or, worse, to the ambient runtime — built a mixed-authority agent:
+# an exact row's ``api_mode: anthropic_messages`` or its own pool never reached
+# the constructor at all. These helpers carry the WHOLE bundle instead, exactly
+# as ``api/streaming.py`` does for the streaming path.
+
+# The constructor-routing fields that travel with provider/base_url/api_key as
+# one authority. Mirrors ``api.streaming._RUNTIME_BUNDLE_FIELDS`` and
+# ``api.config.CUSTOM_CONNECTION_SIDE_FIELDS``.
+_AGENT_BUNDLE_SIDE_FIELDS = ("api_mode", "acp_command", "acp_args", "credential_pool")
+
+
+def _resolve_agent_connection_bundle(
+    resolved_provider,
+    resolved_api_key,
+    resolved_base_url,
+    runtime_provider=None,
+    *,
+    lookup_provider=None,
+):
+    """Return the COMPLETE constructor-routing bundle for a non-streaming send.
+
+    Keys: ``provider``, ``base_url``, ``api_key`` plus every field in
+    :data:`_AGENT_BUNDLE_SIDE_FIELDS`. Pass the whole dict to the constructor
+    via :func:`_agent_bundle_kwargs` — the endpoint/credential and the
+    transport/protocol/pool fields are ONE authority.
+
+    ``runtime_provider`` is the dict ``resolve_runtime_provider`` returned. It
+    matters: the merge seeds the side fields from it and then decides, by
+    endpoint provenance, whether they are same-authority (keep) or the ambient
+    provider's (clear). Omitting it silently drops that signal.
+
+    ``lookup_provider`` preserves the pre-canonicalization ``custom:<slug>``
+    identity, since the merge rewrites a resolved bundle's provider to the
+    generic ``custom``.
+
+    Raises :class:`api.config.CustomProviderRouteError` when the merge returns a
+    TERMINAL route verdict — a named ``custom:<slug>`` that resolved no complete
+    ``(api_key, base_url)`` pair. This is the single chokepoint for every
+    non-streaming and auxiliary consumer precisely because an incomplete bundle
+    is NOT a refusal at the constructor: AIAgent's ``_init_openai_client()``
+    only honours an explicit pair when BOTH fields are truthy and otherwise
+    calls ``_routed_client_kwargs()``, which re-resolves a provider and can
+    reach the ambient endpoint or the init-time fallback chain. Returning the
+    bundle with a hole in it would therefore route the send somewhere the user
+    never asked for; raising here keeps the refusal terminal for all five call
+    sites (POST /api/chat, manual compression, update summary, git commit
+    message, handoff summary) without each having to remember to check.
+
+    The exception subclasses ``ValueError``, so the existing ``except
+    ValueError`` / broad-``except`` handlers at those call sites already turn it
+    into a controlled 400 or a deterministic non-LLM fallback.
+    """
+    return api_config.raise_for_custom_provider_route(
+        api_config.merge_custom_provider_runtime_bundle(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            runtime_provider,
+            lookup_provider=lookup_provider or resolved_provider,
+        )
+    )
+
+
+def _agent_bundle_kwargs(agent_cls, bundle):
+    """Return the bundle's side-field kwargs supported by ``agent_cls``.
+
+    ``api_mode``/``acp_command``/``acp_args``/``credential_pool`` were added to
+    AIAgent over several releases, so gate each on the constructor signature the
+    way the streaming path does rather than raising TypeError against an older
+    hermes-agent build. Values come from the BUNDLE, never from the runtime
+    provider dict: a custom-provider override clears these, and reading them off
+    the runtime would re-introduce the authority the merge just replaced.
+    """
+    import inspect as _inspect
+
+    try:
+        params = set(_inspect.signature(agent_cls.__init__).parameters)
+    except (TypeError, ValueError):
+        return {}
+    return {
+        field: bundle[field]
+        for field in _AGENT_BUNDLE_SIDE_FIELDS
+        if field in params
+    }
+
+
+def _auxiliary_main_runtime(bundle, model):
+    """Return the ``main_runtime`` an auxiliary client must receive for a bundle.
+
+    When the auxiliary client answers, AIAgent is never built, so this dict is
+    the ONLY place the resolved authority reaches the wire. It therefore carries
+    the same whole bundle :func:`_agent_bundle_kwargs` hands the constructor —
+    endpoint and credential plus every field in
+    :data:`_AGENT_BUNDLE_SIDE_FIELDS`. Sending only provider/model/base_url/
+    api_key silently downgraded an exact row's ``api_mode``
+    (``anthropic_messages`` fell back to chat completions) and dropped the
+    credential pool/ACP transport that belong to the same record.
+    """
+    runtime = {
+        "provider": bundle["provider"],
+        "model": model,
+        "base_url": bundle["base_url"],
+        "api_key": bundle["api_key"],
+    }
+    for field in _AGENT_BUNDLE_SIDE_FIELDS:
+        runtime[field] = bundle[field]
+    return runtime
+
+
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
     """Return a Kanban-specific 404 for stale clients/obsolete endpoint shapes."""
     return bad(
@@ -10544,6 +10666,7 @@ from api.workspace import (
     safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
+    _resolve_path,
     resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
     open_anchored_create_fd,
@@ -13451,7 +13574,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
         return _serve_manifest(handler)
 
-    if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
+    if parsed.path in ("/", "/index.html", "/sessions") or parsed.path.startswith("/session/"):
         try:
             from api.extensions import inject_extension_tags
 
@@ -14160,22 +14283,39 @@ def handle_get(handler, parsed) -> bool:
         return _handle_session_export(handler, parsed)
 
     if parsed.path == "/api/workspaces":
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        try:
+            lw = get_last_workspace(profile=active_profile)
+        except TypeError:
+            lw = get_last_workspace()
         return j(
             handler,
             {
-                "workspaces": load_workspaces(),
-                "last": get_last_workspace(),
+                "workspaces": wss,
+                "last": lw,
                 "terminal_remote_backend": _terminal_remote_backend_enabled(),
             },
         )
 
     if parsed.path == "/api/workspaces/suggest":
+        from api.profiles import get_active_profile_name
+
         qs = parse_qs(parsed.query)
         prefix = qs.get("prefix", [""])[0]
+        active_profile = get_active_profile_name()
+        try:
+            suggestions = list_workspace_suggestions(prefix, profile=active_profile)
+        except TypeError:
+            suggestions = list_workspace_suggestions(prefix)
         return j(
             handler,
             {
-                "suggestions": list_workspace_suggestions(prefix),
+                "suggestions": suggestions,
                 "prefix": prefix,
             },
         )
@@ -14626,7 +14766,10 @@ def handle_get(handler, parsed) -> bool:
         # profile-scoped via the per-request hermes_profile cookie set in server.py.
         # Fail open: a resolution error must never 500 this boot-critical endpoint.
         try:
-            _profile_default_workspace = get_profile_default_workspace()
+            try:
+                _profile_default_workspace = get_profile_default_workspace(profile=active_profile_name)
+            except TypeError:
+                _profile_default_workspace = get_profile_default_workspace()
         except Exception:
             logger.debug("Failed to resolve profile default workspace for /api/profile/active", exc_info=True)
             _profile_default_workspace = None
@@ -14849,27 +14992,132 @@ def _validate_session_toolsets_shape(toolsets):
     return toolsets
 
 
-def _resolve_new_session_workspace(body, visible_prev_session_id):
+def _resolve_new_session_workspace(body, visible_prev_session_id, profile=None):
     """Resolve a new-session workspace, recovering only verified inheritance."""
     candidate = body.get("workspace")
     if not candidate:
         return None
+
+    def _rtw(value):
+        # Legacy test doubles may predate the profile kwarg.
+        try:
+            return resolve_trusted_workspace(value, profile=profile)
+        except TypeError:
+            return resolve_trusted_workspace(value)
+
     if (
         body.get("workspace_inherited_from_prev_session") is not True
         or not visible_prev_session_id
     ):
-        return str(resolve_trusted_workspace(candidate))
+        return str(_rtw(candidate))
     try:
         previous_session = get_session(visible_prev_session_id, metadata_only=True)
     except KeyError:
-        return str(resolve_trusted_workspace(candidate))
+        return str(_rtw(candidate))
     if str(getattr(previous_session, "workspace", None) or "") != str(candidate):
-        return str(resolve_trusted_workspace(candidate))
-    workspace, _recovered = resolve_implicit_workspace_with_recovery(
-        candidate,
-        get_last_workspace,
-    )
+        return str(_rtw(candidate))
+    try:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            candidate,
+            get_last_workspace,
+            profile=profile,
+        )
+    except TypeError:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            candidate,
+            get_last_workspace,
+        )
     return str(workspace)
+
+
+def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: str | None = None) -> str:
+    from api import profiles as profiles_api
+
+    profile = active_profile or profiles_api.get_active_profile_name() or "default"
+
+    with profiles_api.profile_env_for_background_worker(
+        profile,
+        "update summary",
+        logger_override=logger,
+    ):
+        from api.config import (
+            get_effective_default_model,
+            resolve_model_provider,
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
+        _main_api_key = None
+        _rt = None
+        try:
+            from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                resolve_runtime_provider,
+                requested=_main_provider,
+            )
+            _main_api_key = _rt.get("api_key")
+            if not _main_provider:
+                _main_provider = _rt.get("provider")
+            if not _main_base_url:
+                _main_base_url = _rt.get("base_url")
+        except Exception as _e:
+            logger.debug("update summary runtime provider resolution failed: %s", _e)
+        # Atomic custom-provider authority (see the /api/chat note): the record
+        # that supplies the endpoint must also supply the credential — and the
+        # wire protocol, credential pool and ACP transport that go with it.
+        _bundle = _resolve_agent_connection_bundle(
+            _main_provider, _main_api_key, _main_base_url, _rt
+        )
+        _main_provider = _bundle["provider"]
+        _main_api_key = _bundle["api_key"]
+        _main_base_url = _bundle["base_url"]
+
+        main_runtime = _auxiliary_main_runtime(_bundle, _main_model)
+
+        ensure_agent_runtime_current()
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            aux_client, aux_model = get_text_auxiliary_client(
+                "compression",
+                main_runtime=main_runtime,
+            )
+            if aux_client is not None and aux_model:
+                response = aux_client.chat.completions.create(
+                    model=aux_model,
+                    messages=messages,
+                )
+                return str(response.choices[0].message.content or "").strip()
+        except Exception as _e:
+            logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
+
+        AIAgent = require_ai_agent_class()
+
+        agent = AIAgent(
+            model=_main_model,
+            provider=_main_provider,
+            base_url=_main_base_url,
+            api_key=_main_api_key,
+            platform="webui",
+            quiet_mode=True,
+            enabled_toolsets=[],
+            session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+            **_agent_bundle_kwargs(AIAgent, _bundle),
+        )
+        result = agent.run_conversation(
+            user_message=user_prompt,
+            system_message=system_prompt,
+            conversation_history=[],
+            task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+        )
+        return str(result.get("final_response") or "").strip()
+
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
@@ -15210,7 +15458,9 @@ def handle_post(handler, parsed) -> bool:
         ):
             workspace_prev_session_id = None
         try:
-            workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
+            workspace = _resolve_new_session_workspace(
+                body, workspace_prev_session_id, profile=body.get("profile") or None
+            )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None
@@ -15239,7 +15489,17 @@ def handle_post(handler, parsed) -> bool:
                 from api.worktrees import create_worktree_for_workspace
                 base_workspace = workspace
                 if not base_workspace:
-                    base_workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                    _new_profile = body.get("profile") or None
+                    try:
+                        _lw = get_last_workspace(profile=_new_profile)
+                    except TypeError:
+                        _lw = get_last_workspace()
+                    try:
+                        base_workspace = str(
+                            resolve_trusted_workspace(_lw, profile=_new_profile)
+                        )
+                    except TypeError:
+                        base_workspace = str(resolve_trusted_workspace(_lw))
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
             except (TypeError, ValueError) as e:
@@ -15804,7 +16064,7 @@ def handle_post(handler, parsed) -> bool:
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
         except ValueError as e:
             return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
@@ -15838,7 +16098,7 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
-        set_last_workspace(new_ws)
+        set_last_workspace(new_ws, profile=getattr(s, "profile", None))
         return j(
             handler,
             {"session": public_session_projection(s.compact() | {"messages": s.messages})},
@@ -17026,14 +17286,16 @@ def handle_post(handler, parsed) -> bool:
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
+                _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
                     title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
-                    workspace=get_last_workspace(),
+                    workspace=get_last_workspace(profile=_arch_profile),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
+                    profile=_arch_profile,
                 )
                 s.is_cli_session = is_cli_session_row(cli_meta)
                 s.source_tag = cli_meta.get("source_tag")
@@ -17318,99 +17580,6 @@ def handle_post(handler, parsed) -> bool:
 
         updates = body.get("updates") if isinstance(body, dict) else {}
         target = body.get("target") if isinstance(body, dict) else None
-
-        def _llm_update_summary(system_prompt: str, user_prompt: str) -> str:
-            from api import profiles as profiles_api
-
-            active_profile = profiles_api.get_active_profile_name() or "default"
-
-            with profiles_api.profile_env_for_background_worker(
-                active_profile,
-                "update summary",
-                logger_override=logger,
-            ):
-                from api.config import (
-                    get_effective_default_model,
-                    resolve_model_provider,
-                    resolve_custom_provider_connection,
-                )
-
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ]
-
-                _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
-                _main_api_key = None
-                try:
-                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                    from hermes_cli.runtime_provider import resolve_runtime_provider
-
-                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                        resolve_runtime_provider,
-                        requested=_main_provider,
-                    )
-                    _main_api_key = _rt.get("api_key")
-                    if not _main_provider:
-                        _main_provider = _rt.get("provider")
-                    if not _main_base_url:
-                        _main_base_url = _rt.get("base_url")
-                except Exception as _e:
-                    logger.debug("update summary runtime provider resolution failed: %s", _e)
-                if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
-                    _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
-                    if not _main_api_key and _cp_key:
-                        _main_api_key = _cp_key
-                    if not _main_base_url and _cp_base:
-                        _main_base_url = _cp_base
-
-                main_runtime = {
-                    "provider": _main_provider,
-                    "model": _main_model,
-                    "base_url": _main_base_url,
-                    "api_key": _main_api_key,
-                }
-
-                ensure_agent_runtime_current()
-                try:
-                    from agent.auxiliary_client import get_text_auxiliary_client
-
-                    # Update summaries are a short text-compression/summarization task.
-                    # Reuse the documented auxiliary.compression slot instead of
-                    # inventing a WebUI-only auxiliary task name that users cannot
-                    # discover in the Hermes Agent setup/config UI.
-                    aux_client, aux_model = get_text_auxiliary_client(
-                        "compression",
-                        main_runtime=main_runtime,
-                    )
-                    if aux_client is not None and aux_model:
-                        response = aux_client.chat.completions.create(
-                            model=aux_model,
-                            messages=messages,
-                        )
-                        return str(response.choices[0].message.content or "").strip()
-                except Exception as _e:
-                    logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
-
-                AIAgent = require_ai_agent_class()
-
-                agent = AIAgent(
-                    model=_main_model,
-                    provider=_main_provider,
-                    base_url=_main_base_url,
-                    api_key=_main_api_key,
-                    platform="webui",
-                    quiet_mode=True,
-                    enabled_toolsets=[],
-                    session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-                )
-                result = agent.run_conversation(
-                    user_message=user_prompt,
-                    system_message=system_prompt,
-                    conversation_history=[],
-                    task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-                )
-                return str(result.get("final_response") or "").strip()
 
         return j(handler, summarize_update_payload(updates, llm_callback=_llm_update_summary, target=target))
 
@@ -18019,15 +18188,26 @@ def _handle_list_dir(handler, parsed):
         except Exception:
             return bad(handler, "Session not found", 404)
     try:
+        _list_profile = getattr(webui_session, "profile", None)
         if webui_session is None:
-            workspace = resolve_trusted_workspace(workspace)
+            try:
+                workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
+            except TypeError:
+                workspace = resolve_trusted_workspace(workspace)
             recovered = False
         else:
             stored_workspace = workspace
-            workspace, recovered = resolve_implicit_workspace_with_recovery(
-                stored_workspace,
-                get_last_workspace,
-            )
+            try:
+                workspace, recovered = resolve_implicit_workspace_with_recovery(
+                    stored_workspace,
+                    get_last_workspace,
+                    profile=_list_profile,
+                )
+            except TypeError:
+                workspace, recovered = resolve_implicit_workspace_with_recovery(
+                    stored_workspace,
+                    get_last_workspace,
+                )
             if recovered:
                 persisted = persist_recovered_workspace_binding(
                     webui_session,
@@ -19069,7 +19249,7 @@ def _handle_terminal_start(handler, body):
                 },
                 status=400,
             )
-        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "")
+        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "", profile=getattr(session, "profile", None))
         from api.terminal import start_terminal
         term = start_terminal(
             sid,
@@ -22053,10 +22233,11 @@ def _memory_project_context_workspace(parsed) -> Path | None:
             # fall through to Path("").resolve(), which returns the server's own
             # CWD and would surface the install's AGENTS.md/HERMES.md as if it
             # were the user's project context.
-            ws = (get_session(sid).workspace or "").strip()
+            session = get_session(sid)
+            ws = (session.workspace or "").strip()
             if not ws:
                 return None
-            return Path(ws).expanduser().resolve()
+            return _resolve_path(ws, profile=getattr(session, "profile", None))
         except Exception:
             return None
 
@@ -22064,7 +22245,7 @@ def _memory_project_context_workspace(parsed) -> Path | None:
     if not raw_workspace:
         return None
     try:
-        return Path(resolve_trusted_workspace(raw_workspace)).expanduser().resolve()
+        return resolve_trusted_workspace(raw_workspace)
     except Exception:
         logger.debug("Skipping project context for untrusted workspace %s", raw_workspace, exc_info=True)
         return None
@@ -22834,7 +23015,7 @@ def _start_regeneration_stream_locked(
         save_attempted = True
         s.save()
         accepted = True
-        set_last_workspace(workspace)
+        set_last_workspace(workspace, profile=getattr(s, "profile", None))
         release_worker.set()
     except Exception as exc:
         abort_worker.set()
@@ -23173,7 +23354,7 @@ def _start_chat_stream_for_session(
     except Exception:
         logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
+    set_last_workspace(workspace, profile=getattr(s, "profile", None))
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
     register_stream_owner(stream_id, s.session_id)
@@ -23886,7 +24067,7 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -23955,7 +24136,7 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
             except ValueError as e:
                 return bad(handler, str(e))
         if model is None:
@@ -24336,14 +24517,25 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
+    _session_profile = getattr(s, "profile", None)
     explicit = requested_workspace not in (None, "")
     if explicit:
-        return str(resolve_trusted_workspace(requested_workspace))
+        try:
+            return str(resolve_trusted_workspace(requested_workspace, profile=_session_profile))
+        except TypeError:
+            return str(resolve_trusted_workspace(requested_workspace))
     stored_workspace = getattr(s, "workspace", None)
-    workspace, recovered = resolve_implicit_workspace_with_recovery(
-        stored_workspace,
-        get_last_workspace,
-    )
+    try:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+            profile=_session_profile,
+        )
+    except TypeError:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+        )
     if not recovered:
         return str(workspace)
     persisted = persist_recovered_workspace_binding(
@@ -24356,12 +24548,23 @@ def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
 
 def _resolve_chat_workspace_for_regeneration(s, requested_workspace) -> str:
     """Resolve regeneration's workspace without persisting before start acceptance."""
+    _session_profile = getattr(s, "profile", None) or None
     if requested_workspace not in (None, ""):
-        return str(resolve_trusted_workspace(requested_workspace))
-    workspace, _recovered = resolve_implicit_workspace_with_recovery(
-        getattr(s, "workspace", None),
-        get_last_workspace,
-    )
+        try:
+            return str(resolve_trusted_workspace(requested_workspace, profile=_session_profile))
+        except TypeError:
+            return str(resolve_trusted_workspace(requested_workspace))
+    try:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            getattr(s, "workspace", None),
+            get_last_workspace,
+            profile=_session_profile,
+        )
+    except TypeError:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            getattr(s, "workspace", None),
+            get_last_workspace,
+        )
     return str(workspace)
 
 
@@ -24407,7 +24610,10 @@ def _handle_chat_sync(handler, body):
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        try:
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
+        except TypeError:
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
@@ -24438,16 +24644,14 @@ def _handle_chat_sync(handler, body):
         AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
-            from api.config import (
-                resolve_model_provider,
-                resolve_custom_provider_connection,
-            )
+            from api.config import resolve_model_provider
 
             _model, _provider, _base_url = resolve_model_provider(
                 model_with_provider_context(s.model, getattr(s, "model_provider", None))
             )
             # Resolve API key via Hermes runtime provider (matches gateway behaviour)
             _api_key = None
+            _rt = None
             try:
                 from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                 from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -24467,12 +24671,35 @@ def _handle_chat_sync(handler, body):
                     f"[webui] WARNING: resolve_runtime_provider failed: {_e}",
                     flush=True,
                 )
-            if isinstance(_provider, str) and _provider.startswith("custom:"):
-                _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
-                if not _api_key and _cp_key:
-                    _api_key = _cp_key
-                if not _base_url and _cp_base:
-                    _base_url = _cp_base
+            # Apply the named custom provider's OWN record atomically, as one
+            # COMPLETE bundle. The fill-only form this replaced kept a truthy
+            # runtime value, so a slug present in BOTH custom_providers[] and
+            # providers: sent the list row's URL with the keyed row's API key;
+            # the connection-only view that followed still truncated the record's
+            # api_mode / credential_pool / ACP transport before the constructor.
+            try:
+                _bundle = _resolve_agent_connection_bundle(
+                    _provider, _api_key, _base_url, _rt
+                )
+            except api_config.CustomProviderRouteError as _route_err:
+                # The named route resolved no usable connection. Constructing
+                # AIAgent with the incomplete pair would send this turn through
+                # ``_routed_client_kwargs()`` to whatever provider init resolves
+                # next, so answer with the actionable cause instead. 400, not
+                # 500: it is a user-fixable provider misconfiguration, exactly
+                # like the ambiguous-slug collision.
+                logger.warning(
+                    "Chat blocked by unroutable custom provider: %s", _route_err.message
+                )
+                return j(handler, {
+                    "error": _route_err.message,
+                    "type": "custom_provider_unroutable",
+                    "reason": _route_err.reason,
+                    "hint": _route_err.hint,
+                }, status=400)
+            _provider = _bundle["provider"]
+            _api_key = _bundle["api_key"]
+            _base_url = _bundle["base_url"]
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -24484,6 +24711,7 @@ def _handle_chat_sync(handler, body):
                 quiet_mode=True,
                 enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
+                **_agent_bundle_kwargs(AIAgent, _bundle),
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
@@ -25051,7 +25279,6 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         from api.config import (
             get_effective_default_model,
             model_with_provider_context,
-            resolve_custom_provider_connection,
             resolve_model_provider,
         )
 
@@ -25064,6 +25291,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         )
         _main_model, _main_provider, _main_base_url = resolve_model_provider(model_for_resolution)
         _main_api_key = None
+        _rt = None
         try:
             from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
             from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -25079,23 +25307,21 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
                 _main_base_url = _rt.get("base_url")
         except Exception as _e:
             logger.debug("git commit message runtime provider resolution failed: %s", _e)
-        if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
-            _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
-            if not _main_api_key and _cp_key:
-                _main_api_key = _cp_key
-            if not _main_base_url and _cp_base:
-                _main_base_url = _cp_base
+        # Atomic custom-provider authority (see the /api/chat note): the record
+        # that supplies the endpoint must also supply the credential — and the
+        # wire protocol, credential pool and ACP transport that go with it.
+        _bundle = _resolve_agent_connection_bundle(
+            _main_provider, _main_api_key, _main_base_url, _rt
+        )
+        _main_provider = _bundle["provider"]
+        _main_api_key = _bundle["api_key"]
+        _main_base_url = _bundle["base_url"]
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        main_runtime = {
-            "provider": _main_provider,
-            "model": _main_model,
-            "base_url": _main_base_url,
-            "api_key": _main_api_key,
-        }
+        main_runtime = _auxiliary_main_runtime(_bundle, _main_model)
         ensure_agent_runtime_current()
         try:
             from agent.auxiliary_client import get_text_auxiliary_client
@@ -25124,6 +25350,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             quiet_mode=True,
             enabled_toolsets=[],
             session_id=f"git-commit-message-{uuid.uuid4().hex[:8]}",
+            **_agent_bundle_kwargs(AIAgent, _bundle),
         )
         result = agent.run_conversation(
             user_message=user_prompt,
@@ -25790,38 +26017,49 @@ def _handle_workspace_add(handler, body):
     # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
     # still register cleanly.
     try:
-        candidate = Path(path_str).expanduser().resolve()
+        from api.workspace import _remote_terminal_workspace_candidate, _resolve_path
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        remote_candidate = _remote_terminal_workspace_candidate(path_str, profile=active_profile)
+        candidate = _resolve_path(path_str, profile=active_profile)
     except (ValueError, OSError, RuntimeError) as e:
         # Invalid path (e.g. embedded null byte) — fail closed with a clean 400
         # instead of letting .resolve() raise an uncaught 500.
         return bad(handler, f"Invalid path: {_sanitize_error(e)}")
-    if _is_blocked_system_path(candidate):
-        # Home-directory carve-out, mirroring the validators
-        # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
-        # at or under the active user's home must stay allowed even when that
-        # home lives under an otherwise-blocked root (e.g. systemd-homed
-        # /var/home/<user>/...). Without this the route rejects valid
-        # /var/home workspaces before validate_workspace_to_add()'s carve-out
-        # can run.
-        _home = _home_path()
-        if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
-            return bad(handler, f"Path points to a system directory: {candidate}")
-    # Now safe to create the directory if requested
-    if auto_create:
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-        except (OSError, PermissionError) as e:
-            return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
+    if remote_candidate is None:
+        if _is_blocked_system_path(candidate):
+            # Home-directory carve-out, mirroring the validators
+            # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
+            # at or under the active user's home must stay allowed even when that
+            # home lives under an otherwise-blocked root (e.g. systemd-homed
+            # /var/home/<user>/...). Without this the route rejects valid
+            # /var/home workspaces before validate_workspace_to_add()'s carve-out
+            # can run.
+            _home = _home_path()
+            if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
+                return bad(handler, f"Path points to a system directory: {candidate}")
+        # Now safe to create the directory if requested
+        if auto_create:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except (OSError, PermissionError) as e:
+                return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
     # Full validation (exists, is_dir) — should pass now that dir exists
     try:
-        p = validate_workspace_to_add(path_str)
+        p = validate_workspace_to_add(path_str, profile=active_profile)
     except ValueError as e:
         return bad(handler, str(e))
-    wss = load_workspaces()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     if any(w["path"] == str(p) for w in wss):
         return bad(handler, "Workspace already in list")
     wss.append({"path": str(p), "name": name or p.name})
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25829,9 +26067,17 @@ def _handle_workspace_remove(handler, body):
     path_str = body.get("path", "").strip()
     if not path_str:
         return bad(handler, "path is required")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     wss = [w for w in wss if w["path"] != path_str]
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25840,14 +26086,22 @@ def _handle_workspace_rename(handler, body):
     name = body.get("name", "").strip()
     if not path_str or not name:
         return bad(handler, "path and name are required")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     for w in wss:
         if w["path"] == path_str:
             w["name"] = name
             break
     else:
         return bad(handler, "Workspace not found", 404)
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25861,7 +26115,12 @@ def _handle_workspace_reorder(handler, body):
     paths = body.get("paths", [])
     if not paths or not isinstance(paths, list):
         return bad(handler, "paths is required and must be a list")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     by_path = {w["path"]: w for w in wss}
     # Build reordered list: given order first, then any omitted entries
     reordered = []
@@ -25875,7 +26134,11 @@ def _handle_workspace_reorder(handler, body):
     for w in wss:
         if w["path"] not in seen:
             reordered.append(w)
-    save_workspaces(reordered)
+    try:
+        save_workspaces(reordered, profile=active_profile)
+    except TypeError:
+        # Legacy signature (test doubles with single-arg lambdas, older forks).
+        save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
@@ -27107,6 +27370,7 @@ def _handle_session_compress(handler, body):
         )
 
         resolved_api_key = None
+        _rt = None
         try:
             _rt = resolve_runtime_provider_with_anthropic_env_lock(
                 _runtime_provider.resolve_runtime_provider,
@@ -27120,12 +27384,16 @@ def _handle_session_compress(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for compression: %s", _e)
 
-        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
-            if not resolved_api_key and _cp_key:
-                resolved_api_key = _cp_key
-            if not resolved_base_url and _cp_base:
-                resolved_base_url = _cp_base
+        # Atomic custom-provider authority: the deterministic list-row URL must
+        # not be paired with a keyed/runtime API key (see the /api/chat note),
+        # and the record's own api_mode / credential_pool / ACP transport must
+        # reach the constructor with it rather than being truncated away.
+        _bundle = _resolve_agent_connection_bundle(
+            resolved_provider, resolved_api_key, resolved_base_url, _rt
+        )
+        resolved_provider = _bundle["provider"]
+        resolved_api_key = _bundle["api_key"]
+        resolved_base_url = _bundle["base_url"]
 
         if not resolved_api_key:
             return bad(handler, "No provider configured -- cannot compress.")
@@ -27154,6 +27422,7 @@ def _handle_session_compress(handler, body):
             quiet_mode=True,
             enabled_toolsets=_resolve_cli_toolsets(),
             session_id=sid,
+            **_agent_bundle_kwargs(AIAgent, _bundle),
         )
         compressed = agent.context_compressor.compress(
             original_messages,
@@ -27782,7 +28051,7 @@ def _handle_handoff_summary(handler, body):
             # of the resolve_model_provider fix). model_with_provider_context
             # encodes it as @custom:A:model so the resolver honors the session's
             # endpoint; base_url is backfilled from that provider's own custom
-            # entry by the resolve_custom_provider_connection block below.
+            # entry by the custom-provider authority block below.
             session_model_provider = getattr(s_obj, "model_provider", None)
         except Exception:
             pass
@@ -27793,6 +28062,7 @@ def _handle_handoff_summary(handler, body):
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(model_for_resolution)
 
         resolved_api_key = None
+        _rt = None
         try:
             _rt = resolve_runtime_provider_with_anthropic_env_lock(
                 _runtime_provider.resolve_runtime_provider,
@@ -27806,12 +28076,16 @@ def _handle_handoff_summary(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for handoff summary: %s", _e)
 
-        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
-            if not resolved_api_key and _cp_key:
-                resolved_api_key = _cp_key
-            if not resolved_base_url and _cp_base:
-                resolved_base_url = _cp_base
+        # Atomic custom-provider authority (see the /api/chat note): the session's
+        # own custom_providers[] row owns BOTH the endpoint and the credential,
+        # plus the api_mode / credential_pool / ACP transport that travel with
+        # them as one constructor bundle.
+        _bundle = _resolve_agent_connection_bundle(
+            resolved_provider, resolved_api_key, resolved_base_url, _rt
+        )
+        resolved_provider = _bundle["provider"]
+        resolved_api_key = _bundle["api_key"]
+        resolved_base_url = _bundle["base_url"]
 
         if not resolved_api_key:
             summary_text = _fallback_handoff_summary(msgs)
@@ -27842,6 +28116,7 @@ def _handle_handoff_summary(handler, body):
             quiet_mode=True,
             enabled_toolsets=[],
             session_id=sid,
+            **_agent_bundle_kwargs(AIAgent, _bundle),
         )
 
         summary_system_prompt = (
@@ -28391,7 +28666,7 @@ def _handle_session_import_cli(handler, body):
         session_payload = {
             "session_id": sid,
             "title": title,
-            "workspace": str(get_last_workspace()),
+            "workspace": str(get_last_workspace(profile=profile)),
             "model": model,
             "message_count": len(msgs),
             "created_at": created_at,

@@ -2424,7 +2424,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2434,6 +2434,7 @@ const _MESSAGING_SOURCE_LABELS = {
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
   matrix: 'Matrix',
+  signal: 'Signal',
 };
 
 function _isMessagingSession(session) {
@@ -2555,7 +2556,7 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  return filter === 'cli' ? t('sessions_source_cli', n) : t('sessions_source_webui', n);
 }
 
 function _clearSessionSourceTabCounts() {
@@ -7133,6 +7134,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    const childRawRole=[
+      child&&child.raw_source,
+      child&&child.source_tag,
+      child&&child.source,
+    ].map(source=>String(source||'').trim().toLowerCase()).find(Boolean)||'';
+    const childIsDelegatedSubagent=_isChildSession(child)&&childRawRole==='subagent';
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
@@ -7157,11 +7164,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       hiddenArchivedChildTree.add(child.session_id);
       continue;
     }
-    // Cross-surface rows (for example a WebUI continuation from a Telegram
-    // conversation) should remain top-level when there is no WebUI-owned parent
-    // row to stack under.  But if the parent is visible in this same sidebar
-    // render, attach normally — delegated subagent rows are also cross-source
-    // relative to their WebUI parent and should not be forced into orphans.
+    // Independent cross-surface rows (for example a WebUI continuation from a
+    // Telegram conversation) remain top-level instead of nesting under an
+    // external parent. Delegated subagents are also cross-source, but they are
+    // parent-owned work and should still attach to the visible parent row.
     const parentSourceMarker=String(parentRow&&(
       parentRow.session_source||parentRow.raw_source||parentRow.source_tag||parentRow.source
     )||'').toLowerCase();
@@ -7172,7 +7178,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentRow.session_source==='messaging'||
       (parentSourceMarker&&parentSourceMarker!=='webui'&&parentSourceMarker!=='subagent'&&parentSourceMarker!=='other'&&parentSourceMarker!=='fork')
     );
-    if(parentRow&&child._cross_surface_child_session&&parentIsExternal){
+    if(parentRow&&child._cross_surface_child_session&&parentIsExternal&&!childIsDelegatedSubagent){
       if(childRenderable) orphans.push({...child,_orphan_child_session:true});
       continue;
     }
