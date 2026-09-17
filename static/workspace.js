@@ -626,6 +626,117 @@ async function _workspacePathExists(path){
   return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
 }
 
+/**
+ * #6710: verify a `raw` preview route actually serves the file before reporting
+ * a successful reveal.
+ *
+ * Image / media / PDF / HTML previews hand the URL to a browser element and let
+ * the browser fetch it. That fetch is asynchronous and NOT covered by the
+ * `/api/list` existence check: the entry can exist while the raw request still
+ * fails (expired escape grant → 403, file removed between the two calls → 404,
+ * oversized/binary → attachment). Reporting success on the assignment alone made
+ * `openArtifactPath()` clear the user's dismissal and promote the panel before
+ * the outcome was known, leaving them on a broken preview in a panel that had
+ * just forced itself open.
+ *
+ * Probe with a 1-byte ranged GET: the file route honours Range and answers 206,
+ * so this costs a single byte of body instead of the whole file (a large image
+ * or PDF must not be downloaded twice). `api()` rejects with `.status` attached,
+ * and never throws on the 401 redirect path.
+ */
+async function _workspaceRawReachable(url){
+  try{
+    await api(url, {headers:{Range:'bytes=0-0'}, retries:0, timeoutMs:8000, timeoutToast:false});
+    return true;
+  }catch(_){
+    setStatus(t('file_open_failed'));
+    return false;
+  }
+}
+
+/**
+ * #6710: wait for an element that loads its own source (`<img>`) to report
+ * whether it succeeded, then return that outcome.
+ *
+ * `assign()` starts the request; the outcome arrives later as a `load` or
+ * `error` event. Resolving on either means a broken source is reported as a
+ * failure instead of an immediate success. Guarded for the Node harnesses and
+ * older test doubles that have no event plumbing: without `addEventListener`
+ * there is nothing to wait on, so the previous fire-and-forget behaviour is
+ * preserved rather than hanging forever.
+ */
+function _awaitElementLoad(el, assign, failKey){
+  if(!el||typeof el.addEventListener!=='function'){
+    assign();
+    return Promise.resolve(true);
+  }
+  return new Promise(resolve=>{
+    let settled=false;
+    const done=(ok)=>{
+      if(settled) return;
+      settled=true;
+      el.removeEventListener('load', onLoad);
+      el.removeEventListener('error', onError);
+      if(!ok) setStatus(t(failKey));
+      resolve(ok);
+    };
+    const onLoad=()=>done(true);
+    const onError=()=>done(false);
+    el.addEventListener('load', onLoad);
+    el.addEventListener('error', onError);
+    assign();
+    // A cached image can settle during assignment; `complete` covers that, and
+    // naturalWidth distinguishes a real bitmap from a decode failure.
+    if(el.complete){
+      if(el.naturalWidth>0) done(true);
+      else done(false);
+    }
+  });
+}
+
+/**
+ * #6710: mount a media player and hand back the `<video>`/`<audio>` element so
+ * the caller can await its outcome. Returns null when the markup cannot be
+ * inspected (harness doubles), which the caller treats as "cannot verify".
+ */
+function _mountMediaPlayer(wrap, html, mode){
+  wrap.innerHTML=html;
+  const el=wrap.querySelector?wrap.querySelector(mode):null;
+  if(!el||typeof el.addEventListener!=='function') return null;
+  return el;
+}
+
+/**
+ * #6710: resolve once a media element is playable, or fail on a hard error.
+ * `loadedmetadata` is the first point the source is known to be readable;
+ * waiting for the whole file would stall large videos. A `stalled`/`error`
+ * before metadata means the route failed. Never rejects — a timeout reports
+ * failure rather than hanging the open.
+ */
+function _awaitMediaReady(el){
+  return new Promise(resolve=>{
+    let settled=false;
+    const cleanup=()=>{
+      el.removeEventListener('loadedmetadata', onReady);
+      el.removeEventListener('error', onError);
+      clearTimeout(timer);
+    };
+    const done=(ok)=>{
+      if(settled) return;
+      settled=true;
+      cleanup();
+      if(!ok) setStatus(t('file_open_failed'));
+      resolve(ok);
+    };
+    const onReady=()=>done(true);
+    const onError=()=>done(false);
+    const timer=setTimeout(()=>done(false), 8000);
+    el.addEventListener('loadedmetadata', onReady);
+    el.addEventListener('error', onError);
+    if(el.readyState>=1) done(true);
+  });
+}
+
 async function openArtifactPath(path){
   if(!path) return false;
   switchWorkspacePanelTab('files');
@@ -1162,25 +1273,37 @@ async function openFile(path, opts={}){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
     const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
-    $('previewImg').alt=path;
-    $('previewImg').src=url;
-    $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+    const img=$('previewImg');
+    img.alt=path;
+    // #6710: assigning src only STARTS the request. Report the real outcome so
+    // a broken image fails closed instead of promoting the panel onto a blank
+    // preview (see _awaitElementLoad).
+    if(!(await _awaitElementLoad(img, ()=>{img.src=url;}, 'image_load_failed'))) return false;
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const wrap=$('previewMediaWrap');
     if(wrap){
-      wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
+      const html=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      // #6710: mount the player first so its outcome can be observed, then
+      // report it — a dead grant or missing file must not read as a reveal.
+      const mediaEl=_mountMediaPlayer(wrap, html, mode);
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
+      if(mediaEl && !(await _awaitMediaReady(mediaEl))) return false;
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
+      // #6710: an iframe that cannot fetch its document still fires `load`
+      // (the browser substitutes its own error page), so the event cannot
+      // report failure. Probe the route instead and commit the frame only once
+      // it is known to serve.
+      if(!(await _workspaceRawReachable(url))) return false;
       frame.src=''; // clear first to avoid stale content
       frame.src=url;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
@@ -1220,6 +1343,9 @@ async function openFile(path, opts={}){
     const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
     const iframe=$('previewHtmlIframe');
     if(iframe){
+      // #6710: same iframe limitation as the PDF branch — a failed document
+      // still fires `load`, so probe the route before committing the frame.
+      if(!(await _workspaceRawReachable(url))) return false;
       iframe.src=''; // clear first to avoid stale content
       iframe.src=url;
     }
