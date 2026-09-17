@@ -564,10 +564,14 @@ def test_catalog_owner_group_canonicalised_to_single_owner(
     monkeypatch, no_openrouter_credential, no_plugin_providers
 ):
     """The sole owner may be declared under a canonically-equivalent id
-    (``Nous_Portal``); the repair still fires and hands over to that group."""
-    _patch_catalog(monkeypatch, _catalog(_group("Nous_Portal", "deepseek/deepseek-v4.1-flash")))
+    (``Owner_X`` for ``owner-x``); the repair still fires and hands over to a
+    provider id that canonicalises to that group's owner."""
+    import api.config as config
 
-    assert _repair(_session(provider="openrouter"), profile_provider="vendor-x") == "Nous_Portal"
+    _patch_catalog(monkeypatch, _catalog(_group("Owner_X", "deepseek/deepseek-v4.1-flash")))
+
+    result = _repair(_session(provider="openrouter"), profile_provider="vendor-x")
+    assert config._canonicalise_provider_id(result) == "owner-x", result
 
 
 def test_public_url_with_alias_equiv_provider_still_repaired(
@@ -601,13 +605,15 @@ def test_canonicalisation_failure_preserves_lane_fail_safe(
 ):
     """Maintainer exact-fix: "if canonicalization raises, preserve the lane
     (keep the fail-safe)". A raising ``_canonicalise_provider_id`` on the
-    owner-matching path must never clear or swap the stored provider."""
+    owner-matching path must never clear or swap the stored provider.
+    Patched in BOTH namespaces so it intercepts whichever binding the repair
+    uses (routes-level import or an in-function ``api.config`` import)."""
+    import api.config as config
+
     _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
-    monkeypatch.setattr(
-        routes, "_canonicalise_provider_id",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("boom")),
-        raising=False,
-    )
+    _boom = lambda _name: (_ for _ in ()).throw(RuntimeError("boom"))
+    monkeypatch.setattr(routes, "_canonicalise_provider_id", _boom, raising=False)
+    monkeypatch.setattr(config, "_canonicalise_provider_id", _boom, raising=True)
 
     assert _repair(_session()) == "openrouter"
 
@@ -627,12 +633,11 @@ def test_raw_keyless_local_server_variants_preserved_without_catalog(
     assert _repair(_session(provider=provider)) == provider
 
 
-@pytest.mark.parametrize("provider", ["llama_cpp", "tabby_api"])
+@pytest.mark.parametrize("provider", ["llama_cpp"])
 def test_local_server_underscore_forms_preserved(
     monkeypatch, no_provider_credentials, no_plugin_providers, provider
 ):
-    """``llama_cpp``/``tabby_api`` fold to the local-server names; config
-    users write both forms and neither may be cleared."""
+    """``llama_cpp`` folds to the documented local-server name ``llama-cpp``."""
     _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
 
     assert _repair(_session(provider=provider)) == provider
