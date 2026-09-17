@@ -334,9 +334,9 @@ provider supplies its configured endpoint and credential; an explicitly declared
 overrides only that credential.
 
 A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
-leaves the session pointing at a route nothing owns. That send fails closed with a controlled "model
-alias unavailable" error instead of quietly falling back to another provider; pick the model again to
-store a live route.
+leaves the session pointing at a route nothing owns. That send fails closed — on every backend, the
+in-process worker, the gateway and the runner alike — with a controlled "model alias unavailable"
+error instead of quietly falling back to another provider; pick the model again to store a live route.
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
