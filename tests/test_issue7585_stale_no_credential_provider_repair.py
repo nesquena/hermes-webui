@@ -493,7 +493,9 @@ def test_top_level_public_base_url_does_not_preserve_stale_lane(
 
 def test_canonicalise_helper_equivalence_classes():
     """Pin the equivalence vocabulary the repair contract relies on."""
-    canon = routes._canonicalise_provider_id
+    import api.config as config
+
+    canon = config._canonicalise_provider_id
     assert canon("my_local") == canon("my-local") == canon("My-Local") == "my-local"
     assert canon("z-ai") == canon("glm") == canon("zai") == "zai"
     # Unknown ids keep their normalised form (no alias target).
@@ -533,11 +535,11 @@ def test_top_level_alias_provider_matches_stored_canonical(
 
 
 def test_profile_provider_alias_equiv_still_short_circuits_repair(
-    monkeypatch, no_openrouter_credential, no_plugin_providers
+    monkeypatch, no_provider_credentials, no_plugin_providers
 ):
     """Repro (gate CORE #1c): profile ``model.provider: z-ai`` is the stored
     ``zai`` lane itself — repair must not even start. Raw equality lets the
-    repair reassign the session's own provider to the sole catalog owner."""
+    keyless ``zai`` lane be reassigned to the sole catalog owner."""
     _patch_catalog(monkeypatch, _catalog(_group("kilocode", "glm/glm-4.6")))
     session = _session(model="glm/glm-4.6", provider="zai")
 
@@ -547,17 +549,15 @@ def test_profile_provider_alias_equiv_still_short_circuits_repair(
 def test_catalog_provider_id_underscore_form_matches_stored(
     monkeypatch, no_plugin_providers
 ):
-    """Repro (gate CORE #1d): catalog group emitted under the un-canonicalised
-    id ``Nous_Portal`` is the stored ``nous`` lane's own group; the raw
-    comparison creates a phantom second owner so the ambiguous-ownership
-    fail-safe never fires and the lane gets swapped."""
+    """Repro (gate CORE #1d): the stored ``my-local`` lane's OWN catalog group
+    is published under the un-canonicalised id ``my_local``. The raw
+    provider_id != stored comparison treats that group as a foreign sole owner
+    and "repairs" the session to ``my_local`` — rewriting the provider to a
+    canonically-identical string and bypassing the exact-ownership check."""
     monkeypatch.setattr(routes, "provider_has_usable_credential", lambda _pid, **_kw: False, raising=False)
-    _patch_catalog(monkeypatch, _catalog(
-        _group("Nous_Portal", "deepseek/deepseek-v4.1-flash"),
-        _group("other", "deepseek/deepseek-v4.1-flash"),
-    ))
+    _patch_catalog(monkeypatch, _catalog(_group("my_local", "deepseek/deepseek-v4.1-flash")))
 
-    assert _repair(_session(provider="nous"), profile_provider="vendor-z") == "nous"
+    assert _repair(_session(provider="my-local"), profile_provider="vendor-z") == "my-local"
 
 
 def test_catalog_owner_group_canonicalised_to_single_owner(
