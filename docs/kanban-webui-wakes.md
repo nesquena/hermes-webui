@@ -24,6 +24,20 @@ Disable with the same authenticated CSRF request and `{"action":"disable"}`. Dis
 
 Do not perform SQL cleanup to activate or repair this feature. Do not enable it through browser notification settings.
 
+## Session routing
+
+Each agent turn binds its WebUI chat ID, platform, and profile in context-local
+state, inherited by concurrent tool execution and restored on exit. Kanban task
+creation also receives the trusted turn origin through a scoped tool adapter for
+agent versions whose create handler otherwise reads process-global environment
+variables. Switching chats or running concurrent turns must not change either a
+task's recorded origin or its notification destination. The adapter leaves
+non-WebUI calls unchanged and does not change the public tool schema.
+
+This prevents new misaddressed subscriptions; it does not rewrite existing
+records. Repair any confirmed historical routing errors separately, preserving
+event cursors and unrelated subscriptions.
+
 ## Verification coverage
 
 The activation and wake regression matrix is intentionally split at the existing session-scoped server boundary. `tests/test_kanban_webui_wake_activation_e2e.py` exercises the WebUI route boundary, sidecar writes, one-time event boundaries, disable/re-enable, and a subscription added after activation; it skips only when the session server reports its repository Kanban dependency is unavailable. It does not restart the server or attempt a real provider turn.
