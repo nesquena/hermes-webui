@@ -329,6 +329,11 @@ Alias resolution follows the format of the alias:
 Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
 receives the model, the provider id, and an opaque route id, never a base URL or key.
 
+A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
+leaves the session pointing at a route nothing owns. That send fails closed with a controlled "model
+alias unavailable" error instead of quietly falling back to another provider; pick the model again to
+store a live route.
+
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts

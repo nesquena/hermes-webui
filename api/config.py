@@ -1046,7 +1046,6 @@ MIME_MAP = {
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
-    ".zip": "application/zip",
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",
@@ -3368,6 +3367,11 @@ CUSTOM_SELECTION_UNOWNED = (CUSTOM_SELECTION_MISSING, CUSTOM_SELECTION_MALFORMED
 CUSTOM_ROUTE_UNOWNED = "unowned_custom_provider"
 CUSTOM_ROUTE_NO_CREDENTIAL = "custom_provider_credential_unresolved"
 CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
+# An opaque model-alias lane that no longer resolves to any configured alias
+# (deleted, renamed, owned by another profile, or targeting a different model).
+# Kept beside the custom-provider reasons because it travels the same terminal
+# verdict path: an unresolvable route must stop before any provider routing.
+MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -5563,10 +5567,8 @@ def _lmstudio_model_reasoning_options(
         )
 
     try:
-        from api.agent_compat import agent_attr
-
-        _cli_lmstudio_model_reasoning_options = agent_attr(
-            "hermes_cli.models", "lmstudio_model_reasoning_options", "hermes_cli.models_local"
+        from hermes_cli.models import (
+            lmstudio_model_reasoning_options as _cli_lmstudio_model_reasoning_options,
         )
     except Exception:
         return _lmstudio_reasoning_probe_options_fallback(
@@ -8075,6 +8077,8 @@ def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str
                 model = str(raw_entry.get("model") or "").strip()
                 explicit_provider = str(raw_entry.get("provider") or "").strip()
                 base_url = str(raw_entry.get("base_url") or "").strip()
+                api_key = str(raw_entry.get("api_key") or "").strip()
+                key_env = str(raw_entry.get("key_env") or "").strip()
                 if not explicit_provider and not base_url:
                     continue
                 provider = explicit_provider or current_provider or "custom"
@@ -8084,6 +8088,7 @@ def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str
                     continue
                 provider, model = value.split("/", 1)
                 provider, model, base_url = provider.strip(), model.strip(), ""
+                api_key, key_env = "", ""
                 if not provider:
                     continue
             else:
@@ -8093,8 +8098,8 @@ def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str
                     "model": model,
                     "provider": provider or current_provider or "custom",
                     "base_url": base_url,
-                    "api_key": "",
-                    "key_env": "",
+                    "api_key": api_key,
+                    "key_env": key_env,
                 }
     return entries
 
@@ -8119,7 +8124,7 @@ def _public_model_alias_routes() -> dict[str, dict[str, str]]:
 def resolve_model_alias_runtime(
     route_provider: str | None,
     expected_model: str | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, object] | None:
     """Resolve an opaque alias lane to server-side runtime routing material."""
     route_provider = str(route_provider or "").strip().lower()
     if not route_provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
@@ -8132,7 +8137,10 @@ def resolve_model_alias_runtime(
     if name is None:
         return None
 
-    resolved = dict(aliases[name])
+    configured = aliases[name]
+    resolved = dict(configured)
+    base_url_explicit = bool(configured.get("base_url"))
+    credential_explicit = bool(configured.get("api_key") or configured.get("key_env"))
     try:
         from hermes_cli.model_switch import _load_direct_aliases, direct_alias_runtime_request
 
@@ -8142,14 +8150,19 @@ def resolve_model_alias_runtime(
             resolved = {
                 "model": str(direct.model or "").strip(),
                 "provider": str(requested_provider or direct.provider or "custom").strip(),
-                "base_url": str(direct.base_url or "").strip(),
-                "api_key": str(api_key or "").strip(),
-                "key_env": "",
+                "base_url": str(direct.base_url or configured.get("base_url") or "").strip(),
+                "api_key": str(api_key or configured.get("api_key") or "").strip(),
+                "key_env": "" if api_key else str(configured.get("key_env") or "").strip(),
             }
     except Exception:
         pass
 
     resolved["alias"] = name
+    # Keep server-only provenance for composing aliases with named custom
+    # providers. An explicit alias endpoint is its own authority and must not be
+    # replaced by, or paired with credentials from, ``custom:<slug>`` config.
+    resolved["base_url_explicit"] = base_url_explicit
+    resolved["credential_explicit"] = credential_explicit
     if expected_model and str(expected_model).strip() != resolved["model"]:
         return None
     raw_api_key = resolved.get("api_key", "")
@@ -8158,6 +8171,137 @@ def resolve_model_alias_runtime(
     elif not raw_api_key and resolved.get("key_env"):
         resolved["api_key"] = _thread_local_env_value(resolved["key_env"]).strip()
     return resolved
+
+
+def is_model_alias_route_provider(route_provider: object) -> bool:
+    """True when ``route_provider`` is an opaque model-alias lane.
+
+    True whether or not the lane currently resolves: the lane is a WebUI-minted
+    identity for one alias name, so it identifies the alias route even when the
+    alias was deleted, belongs to another profile, or now targets a different
+    model. Callers use this to keep such a lane out of generic provider
+    resolution, which would read the opaque digest as a provider id.
+    """
+    return str(route_provider or "").strip().lower().startswith(_MODEL_ALIAS_ROUTE_PREFIX)
+
+
+def unresolved_model_alias_route_error() -> dict:
+    """Return the terminal verdict for an alias lane that resolved to nothing."""
+    return {
+        "reason": MODEL_ALIAS_ROUTE_UNRESOLVED,
+        "provider": None,
+        "message": (
+            "This session's model alias is not configured in the active profile: it "
+            "may have been deleted or renamed, or its target model may have changed."
+        ),
+        "hint": (
+            "Pick the model again (the /model command or the model selector), then "
+            "send again."
+        ),
+    }
+
+
+def raise_for_unresolved_model_alias_route(route_provider: object) -> None:
+    """Fail closed when an opaque alias lane no longer resolves.
+
+    No-op for a lane that is not a ``model-alias-*`` route. Otherwise raise the
+    terminal :class:`CustomProviderRouteError` so the caller stops before
+    generic provider resolution, before any AIAgent is constructed, and before
+    the agent cache is written — the opaque digest is not a provider id, and
+    resolving it as one can land on an ambient/fallback endpoint the user never
+    picked. The verdict carries no endpoint, credential, or alias-name detail.
+    """
+    if not is_model_alias_route_provider(route_provider):
+        return
+    verdict = unresolved_model_alias_route_error()
+    raise CustomProviderRouteError(
+        verdict["message"],
+        reason=verdict["reason"],
+        provider=verdict["provider"],
+        hint=verdict["hint"],
+    )
+
+
+def merge_model_alias_runtime_bundle(
+    alias_route: dict,
+    runtime_provider: dict | None = None,
+    *,
+    connection_resolver=None,
+) -> dict:
+    """Compose one alias route with provider runtime state without mixing authorities.
+
+    An alias-declared ``base_url`` owns the whole endpoint boundary. Its declared
+    credential is the only credential that may accompany it; an alias with no
+    credential declaration is deliberately keyless. When the alias names only a
+    provider, normal provider resolution remains authoritative. A credential-only
+    alias may override that provider's credential, but not its endpoint or wire
+    protocol, and it clears the provider credential pool it displaced.
+    """
+    route = alias_route if isinstance(alias_route, dict) else {}
+    runtime = runtime_provider if isinstance(runtime_provider, dict) else {}
+    provider = str(route.get("provider") or runtime.get("provider") or "").strip() or None
+    explicit_base_url = bool(route.get("base_url_explicit"))
+    explicit_credential = bool(route.get("credential_explicit"))
+    alias_api_key = route.get("api_key") or None
+
+    if explicit_base_url:
+        bundle = {
+            "provider": "custom",
+            "base_url": route.get("base_url") or None,
+            "api_key": alias_api_key if explicit_credential else KEYLESS_CUSTOM_API_KEY,
+            "api_mode": None,
+            "acp_command": None,
+            "acp_args": None,
+            "credential_pool": None,
+            CUSTOM_ROUTE_ERROR_FIELD: None,
+        }
+        if explicit_credential and not alias_api_key:
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+                CUSTOM_ROUTE_NO_CREDENTIAL,
+                provider or f"model alias {route.get('alias') or '<unknown>'}",
+            )
+        return bundle
+
+    resolved_provider = provider
+    resolved_api_key = runtime.get("api_key")
+    resolved_base_url = runtime.get("base_url")
+    if isinstance(provider, str) and provider.lower().startswith("custom:"):
+        bundle = merge_custom_provider_runtime_bundle(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            runtime,
+            lookup_provider=provider,
+            connection_resolver=connection_resolver,
+        )
+    else:
+        bundle = {
+            "provider": resolved_provider,
+            "base_url": resolved_base_url,
+            "api_key": resolved_api_key,
+            "api_mode": runtime.get("api_mode"),
+            "acp_command": runtime.get("acp_command", runtime.get("command")),
+            "acp_args": runtime.get("acp_args", runtime.get("args")),
+            "credential_pool": runtime.get("credential_pool"),
+            CUSTOM_ROUTE_ERROR_FIELD: None,
+        }
+
+    if explicit_credential:
+        bundle["api_key"] = alias_api_key
+        bundle["credential_pool"] = None
+        if alias_api_key and bundle.get("base_url"):
+            # The alias supplied the credential the provider bundle lacked; the
+            # pair is now complete, so a prior missing-credential verdict no
+            # longer applies. Endpoint/unowned verdicts remain terminal.
+            verdict = bundle.get(CUSTOM_ROUTE_ERROR_FIELD)
+            if not verdict or verdict.get("reason") == CUSTOM_ROUTE_NO_CREDENTIAL:
+                bundle[CUSTOM_ROUTE_ERROR_FIELD] = None
+        elif not alias_api_key:
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+                CUSTOM_ROUTE_NO_CREDENTIAL,
+                provider or f"model alias {route.get('alias') or '<unknown>'}",
+            )
+    return bundle
 
 
 def _load_stale_models_cache_from_disk() -> dict | None:

@@ -199,6 +199,8 @@ def test_custom_alias_route_resolves_exact_endpoint_and_credential(monkeypatch):
         "api_key": "east-secret",
         "key_env": "",
         "alias": "east",
+        "base_url_explicit": True,
+        "credential_explicit": True,
     }
     assert west["base_url"] == "https://west.example.test/v1"
     assert west["api_key"] == "west-secret"
@@ -229,8 +231,138 @@ def test_alias_runtime_fallback_supports_older_agent_loader(monkeypatch):
         "api_key": "local-secret",
         "key_env": "LOCAL_ALIAS_KEY",
         "alias": "local",
+        "base_url_explicit": True,
+        "credential_explicit": True,
     }
     assert config.resolve_model_alias_runtime(route, "different-model") is None
+
+
+def _named_custom_provider_config():
+    return {
+        "custom_providers": [{
+            "name": "West",
+            "base_url": "https://provider-west.example.test/v1",
+            "api_key": "provider-west-secret",
+        }],
+    }
+
+
+def test_alias_endpoint_and_credential_override_named_custom_provider(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-special",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "https://alias-west.example.test/v1",
+        "api_key": "alias-west-secret",
+        "base_url_explicit": True,
+        "credential_explicit": True,
+    }
+    runtime = {
+        "provider": "openrouter",
+        "base_url": "https://unrelated.example.test/v1",
+        "api_key": "unrelated-secret",
+        "credential_pool": object(),
+        "api_mode": "responses",
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, runtime)
+
+    assert bundle["provider"] == "custom"
+    assert bundle["base_url"] == "https://alias-west.example.test/v1"
+    assert bundle["api_key"] == "alias-west-secret"
+    assert bundle["credential_pool"] is None
+    assert bundle["api_mode"] is None
+    assert "provider-west-secret" not in str(bundle)
+    assert "unrelated-secret" not in str(bundle)
+
+
+def test_alias_endpoint_without_credential_never_borrows_custom_provider_key(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-keyless",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "https://alias-keyless.example.test/v1",
+        "api_key": "",
+        "base_url_explicit": True,
+        "credential_explicit": False,
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, {
+        "provider": "custom:west",
+        "base_url": "https://provider-west.example.test/v1",
+        "api_key": "provider-west-secret",
+    })
+
+    assert bundle["base_url"] == "https://alias-keyless.example.test/v1"
+    assert bundle["api_key"] == config.KEYLESS_CUSTOM_API_KEY
+    assert "provider-west-secret" not in str(bundle)
+
+
+def test_provider_only_alias_uses_named_custom_provider_connection(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-default",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "",
+        "api_key": "",
+        "base_url_explicit": False,
+        "credential_explicit": False,
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, {
+        "provider": "openrouter",
+        "base_url": "https://unrelated.example.test/v1",
+        "api_key": "unrelated-secret",
+    })
+
+    assert bundle["provider"] == "custom"
+    assert bundle["base_url"] == "https://provider-west.example.test/v1"
+    assert bundle["api_key"] == "provider-west-secret"
+    assert "unrelated-secret" not in str(bundle)
+
+
+def test_credential_only_alias_overrides_named_custom_provider_key(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-account-two",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "",
+        "api_key": "alias-account-secret",
+        "base_url_explicit": False,
+        "credential_explicit": True,
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, {
+        "provider": "custom:west",
+        "base_url": "https://provider-west.example.test/v1",
+        "api_key": "provider-west-secret",
+        "credential_pool": object(),
+    })
+
+    assert bundle["base_url"] == "https://provider-west.example.test/v1"
+    assert bundle["api_key"] == "alias-account-secret"
+    assert bundle["credential_pool"] is None
+    assert "provider-west-secret" not in str(bundle)
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -287,6 +419,8 @@ def _canonical_runtime_route():
         "base_url": "https://east.example.test/v1",
         "api_key": "east-secret",
         "key_env": "",
+        "base_url_explicit": True,
+        "credential_explicit": True,
     }
 
 
@@ -303,7 +437,7 @@ def _start_run_kwargs():
     }
 
 
-def test_legacy_dispatch_receives_canonical_alias_endpoint_and_credential(monkeypatch):
+def test_legacy_dispatch_keeps_opaque_alias_lane_until_profile_scoped_resolution(monkeypatch):
     from api import routes
 
     captured = {}
@@ -320,9 +454,10 @@ def test_legacy_dispatch_receives_canonical_alias_endpoint_and_credential(monkey
     routes._start_run(session, **_start_run_kwargs())
 
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "custom"
-    assert captured["runtime_base_url"] == "https://east.example.test/v1"
-    assert captured["runtime_api_key"] == "east-secret"
+    assert captured["model_provider"] == "model-alias-canonical"
+    assert "runtime_base_url" not in captured
+    assert "runtime_api_key" not in captured
+    assert "east-secret" not in json.dumps(captured)
 
 
 def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatch):
@@ -344,8 +479,8 @@ def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatc
     assert captured["external_runtime_owned"] is True
     assert captured["model"] == "east"
     assert captured["model_provider"] is None
-    assert captured["runtime_api_key"] is None
-    assert captured["runtime_base_url"] is None
+    assert "runtime_api_key" not in captured
+    assert "runtime_base_url" not in captured
 
 
 def test_runner_dispatch_uses_alias_identity_in_start_run_contract(monkeypatch):
@@ -371,3 +506,438 @@ def test_runner_dispatch_uses_alias_identity_in_start_run_contract(monkeypatch):
     assert captured[0].model == "east"
     assert captured[0].provider is None
     assert "east-secret" not in json.dumps(captured[0].metadata)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Server-initiated turns (start_session_turn) must reach the same alias routing
+# as a human /api/chat/start turn.
+#
+# /api/chat/start computes gateway ownership from its request-scoped config
+# snapshot and passes it explicitly; the wakeup path left the argument unset and
+# `_start_chat_stream_for_session` only discovered gateway mode AFTER the
+# alias-lane conversion had been skipped — so a gateway-backed wakeup handed the
+# external runtime the opaque lane instead of the alias name.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _stub_start_session_turn(monkeypatch, *, profile=None, provider="model-alias-canonical"):
+    from api import routes as routes_mod
+
+    session = types.SimpleNamespace(
+        session_id="sess-alias-wake",
+        model="shared-model",
+        model_provider=provider,
+        profile=profile,
+        workspace="/tmp/ws-test",
+    )
+    monkeypatch.setattr(routes_mod, "get_session", lambda _sid: session)
+    monkeypatch.setattr(
+        routes_mod, "_resolve_chat_workspace_with_recovery", lambda _s, _req: "/tmp/ws-test"
+    )
+    monkeypatch.setattr(
+        routes_mod,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **kwargs: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes_mod,
+        "get_config_snapshot",
+        lambda: {},
+    )
+    import api.background_process as bp_mod
+
+    monkeypatch.setattr(bp_mod, "get_session_channel", lambda _sid: None)
+    return routes_mod
+
+
+def _capture_legacy_dispatch(monkeypatch, routes_mod):
+    captured = {}
+    monkeypatch.setattr(
+        routes_mod,
+        "_start_chat_stream_for_session",
+        lambda _session, **kwargs: captured.update(kwargs)
+        or {"_status": 200, "stream_id": "stream-wake", "session_id": "sess-alias-wake"},
+    )
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
+    return captured
+
+
+def test_start_session_turn_gateway_wakeup_converts_alias_lane(monkeypatch):
+    """A gateway-backed wakeup routes the alias NAME, not the opaque lane."""
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    routes_mod = _stub_start_session_turn(monkeypatch)
+    captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
+    monkeypatch.setattr(
+        routes_mod.api_config,
+        "resolve_model_alias_runtime",
+        lambda *_args, **_kwargs: _canonical_runtime_route(),
+    )
+
+    resp = routes_mod.start_session_turn("sess-alias-wake", "wakeup")
+
+    assert resp["_status"] == 200
+    assert captured["model"] == "east", (
+        "the external runtime's request contract is the alias route, not the "
+        "session's stored model"
+    )
+    assert captured["model_provider"] is None
+    assert captured["external_runtime_owned"] is True
+    assert "east-secret" not in json.dumps(captured)
+
+
+def test_start_session_turn_legacy_wakeup_keeps_opaque_alias_lane(monkeypatch):
+    """Without gateway ownership the legacy worker still resolves the lane itself."""
+    monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
+    routes_mod = _stub_start_session_turn(monkeypatch)
+    captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
+    monkeypatch.setattr(
+        routes_mod.api_config,
+        "resolve_model_alias_runtime",
+        lambda *_args, **_kwargs: _canonical_runtime_route(),
+    )
+
+    resp = routes_mod.start_session_turn("sess-alias-wake", "wakeup")
+
+    assert resp["_status"] == 200
+    assert captured["model"] == "shared-model"
+    assert captured["model_provider"] == "model-alias-canonical"
+    assert captured["external_runtime_owned"] is False
+
+
+def test_start_session_turn_gateway_detection_uses_session_profile_scope(monkeypatch):
+    """A named profile's backend setting is read inside that profile's scope."""
+    import contextlib
+
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    routes_mod = _stub_start_session_turn(monkeypatch, profile="named-profile")
+    captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
+    monkeypatch.setattr(
+        routes_mod.api_config,
+        "resolve_model_alias_runtime",
+        lambda *_args, **_kwargs: _canonical_runtime_route(),
+    )
+    entered = []
+
+    @contextlib.contextmanager
+    def _fake_scope(profile_name, purpose="detached worker", logger_override=None):
+        entered.append(profile_name)
+        yield
+
+    monkeypatch.setattr(routes_mod, "profile_scope_for_detached_worker", _fake_scope)
+
+    routes_mod.start_session_turn("sess-alias-wake", "wakeup")
+
+    assert entered == ["named-profile"], (
+        "gateway ownership and the alias lane must be resolved under the owning "
+        "session's profile scope on a thread without request profile TLS"
+    )
+    assert captured["model"] == "east"
+
+
+def test_start_run_explicit_gateway_flag_skips_ownership_detection(monkeypatch):
+    """An explicit False from the HTTP path is honored, not re-derived."""
+    from api import routes
+
+    captured = {}
+    session = types.SimpleNamespace(session_id="session-1", profile=None)
+    monkeypatch.setattr(
+        routes.api_config,
+        "resolve_model_alias_runtime",
+        lambda *_args, **_kwargs: _canonical_runtime_route(),
+    )
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda _session, **kwargs: captured.update(kwargs)
+        or {"stream_id": "legacy-1", "session_id": "session-1"},
+    )
+
+    routes._start_run(session, gateway_chat_enabled=False, **_start_run_kwargs())
+
+    assert captured["external_runtime_owned"] is False
+    assert captured["model"] == "shared-model"
+    assert captured["model_provider"] == "model-alias-canonical"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# An opaque alias lane that no longer resolves is terminal.
+#
+# The lane is a WebUI-minted digest, not a provider id. Letting it reach generic
+# provider resolution hands the session's prompt to whatever the ambient or
+# fallback chain resolves, for a route the session no longer owns.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ALIAS_WORKER_CFG = {
+    "model": {"default": "active/model", "provider": "openrouter"},
+    "model_aliases": {
+        "east": {
+            "model": "shared-model",
+            "provider": "custom",
+            "base_url": "https://east.example.test/v1",
+            "api_key": "east-secret",
+        },
+    },
+}
+
+_ALIAS_WORKER_RUNTIME = {
+    "provider": "openrouter",
+    "base_url": "https://ambient.example.test/v1",
+    "api_key": "ambient-secret",
+}
+
+
+def _setup_alias_worker(monkeypatch, cfg_dict, session_id="session-alias-1"):
+    """Compose the production streaming send path around a capturing agent."""
+    import queue
+    from unittest import mock
+
+    import api.oauth
+    import api.streaming as streaming
+    from api import config as worker_config
+
+    with worker_config.SESSION_AGENT_CACHE_LOCK:
+        worker_config.SESSION_AGENT_CACHE.clear()
+
+    old_cfg = dict(worker_config.cfg)
+    worker_config.cfg.clear()
+    worker_config.cfg.update(cfg_dict)
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = session_id
+            self.title = "Test"
+            self.workspace = "/tmp"
+            self.model = "shared-model"
+            self.messages = []
+            self.personality = None
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = None
+            self.tool_calls = []
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.pending_user_source = None
+            self.profile = None
+
+        def save(self, touch_updated_at=True, skip_index=False):
+            self._saved = touch_updated_at
+
+        def compact(self):
+            return {"session_id": self.session_id, "messages": self.messages}
+
+    captured = {}
+
+    class CapturingAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            api_mode=None,
+            acp_command=None,
+            acp_args=None,
+            credential_pool=None,
+            **kwargs,
+        ):
+            captured["init_kwargs"] = {
+                "model": model,
+                "provider": provider,
+                "base_url": base_url,
+                "api_key": api_key,
+            }
+            captured.setdefault("init_kwargs_history", []).append(dict(captured["init_kwargs"]))
+            self.session_id = kwargs.get("session_id")
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            captured["run_calls"] = captured.get("run_calls", 0) + 1
+            return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+        def interrupt(self, _message):
+            captured["interrupted"] = _message
+
+    fake_session = FakeSession()
+    fake_stream_id = f"stream-{session_id}"
+    fake_session.active_stream_id = fake_stream_id
+    fake_queue = queue.Queue()
+
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = mock.Mock(
+        return_value=dict(_ALIAS_WORKER_RUNTIME)
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(
+        api.oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, **kwargs: resolver(**kwargs),
+    )
+    monkeypatch.setattr(streaming, "get_session", lambda _session_id: fake_session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: CapturingAgent)
+    monkeypatch.setattr("api.config.get_config", lambda: dict(worker_config.cfg))
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+
+    def restore():
+        with worker_config.SESSION_AGENT_CACHE_LOCK:
+            worker_config.SESSION_AGENT_CACHE.clear()
+        worker_config.cfg.clear()
+        worker_config.cfg.update(old_cfg)
+        worker_config.invalidate_models_cache()
+
+    return streaming, fake_stream_id, fake_queue, captured, restore
+
+
+def _drive_alias_worker_send(monkeypatch, cfg_dict, *, model, lane, session_id):
+    import queue as _queue
+
+    streaming, stream_id, q, captured, restore = _setup_alias_worker(
+        monkeypatch, cfg_dict, session_id=session_id
+    )
+    try:
+        streaming.STREAMS[stream_id] = q
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text="hello",
+            model=model,
+            model_provider=lane,
+            workspace="/tmp",
+            stream_id=stream_id,
+        )
+        apperrors = []
+        while True:
+            try:
+                item = q.get_nowait()
+            except _queue.Empty:
+                break
+            if item and item[0] == "apperror":
+                apperrors.append(item[1])
+        cache_empty = True
+        from api import config as worker_config
+
+        with worker_config.SESSION_AGENT_CACHE_LOCK:
+            cache_empty = not worker_config.SESSION_AGENT_CACHE
+    finally:
+        streaming.STREAMS.pop(stream_id, None)
+        streaming.AGENT_INSTANCES.pop(stream_id, None)
+        restore()
+    return captured, apperrors, cache_empty
+
+
+def _assert_alias_lane_refused(captured, apperrors, cache_empty, label):
+    assert not captured.get("init_kwargs_history"), f"{label}: an agent was constructed"
+    assert not captured.get("run_calls"), f"{label}: the turn was actually sent"
+    assert cache_empty, f"{label}: the agent cache was poisoned"
+    assert apperrors, f"{label}: no controlled failure was emitted"
+    payload = apperrors[-1]
+    assert payload["type"] == "provider_unroutable", (
+        f"{label}: emitted {payload['type']!r} instead of a provider-route failure"
+    )
+    assert payload.get("reason") == "model_alias_route_unresolved"
+    assert payload.get("hint"), f"{label}: the failure named no fix"
+    assert "ambient-secret" not in json.dumps(payload)
+    return payload
+
+
+def test_deleted_alias_lane_is_terminal(monkeypatch):
+    """The alias no longer exists in the active profile's config."""
+    from api import config
+
+    lane = config._model_alias_route_provider("ghost")
+    captured, apperrors, cache_empty = _drive_alias_worker_send(
+        monkeypatch,
+        {"model": {"default": "active/model", "provider": "openrouter"}},
+        model="shared-model",
+        lane=lane,
+        session_id="session-alias-deleted",
+    )
+
+    payload = _assert_alias_lane_refused(captured, apperrors, cache_empty, "deleted alias")
+    assert "alias" in payload["message"].lower()
+
+
+def test_alias_lane_unknown_to_active_profile_is_terminal(monkeypatch):
+    """A lane minted under another profile does not resolve here."""
+    from api import config
+
+    lane = config._model_alias_route_provider("west")
+    captured, apperrors, cache_empty = _drive_alias_worker_send(
+        monkeypatch,
+        _ALIAS_WORKER_CFG,
+        model="shared-model",
+        lane=lane,
+        session_id="session-alias-other-profile",
+    )
+
+    assert lane != config._model_alias_route_provider("east")
+    _assert_alias_lane_refused(captured, apperrors, cache_empty, "unknown lane")
+
+
+def test_alias_lane_model_mismatch_is_terminal(monkeypatch):
+    """The alias resolves, but not to the model the session stored."""
+    from api import config
+
+    lane = config._model_alias_route_provider("east")
+    captured, apperrors, cache_empty = _drive_alias_worker_send(
+        monkeypatch,
+        _ALIAS_WORKER_CFG,
+        model="other-model",
+        lane=lane,
+        session_id="session-alias-mismatch",
+    )
+
+    _assert_alias_lane_refused(captured, apperrors, cache_empty, "model mismatch")
+
+
+def test_hostile_alias_lane_is_terminal(monkeypatch):
+    """A crafted lane that never belonged to any configured alias."""
+    hostile = "model-alias-" + "f" * 64
+    captured, apperrors, cache_empty = _drive_alias_worker_send(
+        monkeypatch,
+        _ALIAS_WORKER_CFG,
+        model="shared-model",
+        lane=hostile,
+        session_id="session-alias-hostile",
+    )
+
+    payload = _assert_alias_lane_refused(captured, apperrors, cache_empty, "hostile lane")
+    assert hostile not in json.dumps(payload)
+
+
+def test_resolved_alias_lane_still_reaches_its_own_endpoint(monkeypatch):
+    """Positive control: a live lane keeps routing to the alias endpoint/key."""
+    from api import config
+
+    lane = config._model_alias_route_provider("east")
+    captured, apperrors, cache_empty = _drive_alias_worker_send(
+        monkeypatch,
+        _ALIAS_WORKER_CFG,
+        model="shared-model",
+        lane=lane,
+        session_id="session-alias-live",
+    )
+
+    assert not apperrors
+    init_kwargs = captured["init_kwargs"]
+    assert init_kwargs["base_url"] == "https://east.example.test/v1"
+    assert init_kwargs["api_key"] == "east-secret"
+    assert init_kwargs["provider"] == "custom"
+    assert captured.get("run_calls") == 1
