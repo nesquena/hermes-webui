@@ -628,3 +628,210 @@ def test_the_generation_guard_precedes_session_creation():
         "still creates a session under the newer profile's cookie and overwrites "
         "its session/URL/transcript/stream (Greptile review)"
     )
+
+
+# ── Greptile review: a superseded newSession() must not INSTALL its session ───
+#
+# The earlier fix scoped the shared in-flight promise to its owning switch, and
+# the caller re-checks the generation around the call. Neither stops the install
+# that happens INSIDE newSession(): once POST /api/session/new resolves it
+# unconditionally adopted data.session, the localStorage key, the URL and the
+# session stream. A switch superseded mid-flight therefore installed a session
+# belonging to the PREVIOUS profile, while the newer switch — following its
+# empty-session fallback — left no replacement. The browser was left on the new
+# profile holding profile-gated state it could not load or stream.
+#
+# The session is still created server-side; the fix only declines to adopt it
+# into browser state that a newer switch now owns.
+
+_NEW_SESSION_INSTALL_HARNESS = r"""
+const params = __PARAMS__;
+
+// ── module state the shipped body touches ────────────────────────────────────
+let S = { session: {session_id: 'seed-session', messages: [], workspace: ''},
+          messages: [], toolCalls: [], _pendingSessionToolsets: null,
+          lastUsage: {} };
+const storage = { 'hermes-webui-session': 'seed-session' };
+const localStorage = {
+  setItem: (k, v) => { storage[k] = String(v); },
+  getItem: (k) => (k in storage ? storage[k] : null),
+};
+let _profileSwitchGeneration = params.genAtStart;
+let _newSessionInFlight = null;
+let _newSessionInFlightGen = null;
+let _activeProject = null;
+const NO_PROJECT_FILTER = '__none__';
+let _sessionSourceFilter = 'webui';
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+
+const calls = { urls: [], setUrl: [], startStream: [], renderList: 0,
+                sessionNewStarted: false };
+
+// A deferred the driver resolves once the newer switch owns the state. The
+// request must be genuinely pending at that moment — that is the whole point.
+let _gateResolve = null;
+const gate = new Promise(resolve => { _gateResolve = resolve; });
+
+// Globals the shipped body reaches through `window.` / `document.`. `typeof`
+// guards an undeclared identifier, not a member access on an undefined one.
+var window = { _clearPendingSelections(){}, _defaultModel: null,
+               _activeProvider: null };
+var document = { documentElement: { dataset: {} }, getElementById(){ return null; } };
+function _readPersistedModelState(){ return null; }
+function _modelStateForSelect(){ return null; }
+function _readEmptyComposerModelOverride(){ return null; }
+function $(id){
+  return { value: '', style: {}, classList: {add(){},remove(){},toggle(){}},
+           setAttribute(){}, getAttribute(){ return null; }, textContent: '' };
+}
+
+function api(path){
+  calls.urls.push(String(path));
+  if(String(path).includes('/api/session/new')){
+    calls.sessionNewStarted = true;
+    const payload = {session: {session_id: 'stale-created', messages: [],
+      workspace: '', message_count: 0, last_usage: {}}};
+    return params.holdRequest ? gate.then(() => payload) : Promise.resolve(payload);
+  }
+  return Promise.resolve({});
+}
+function _setActiveSessionUrl(sid){ calls.setUrl.push(sid); }
+function startSessionStream(sid){ calls.startStream.push(sid); }
+function _setSessionViewedCount(){}
+function updateQueueBadge(){}
+function clearLiveToolCards(){}
+function _setNewSessionPending(){}
+function _newSessionPendingText(){ return 'pending'; }
+function showToast(){}
+function _rememberNewChatDraftSession(){}
+function _deferWorkspaceRefreshForSession(){}
+function loadDir(){ return Promise.resolve(); }
+function refreshSessionList(){ calls.renderList++; return Promise.resolve(); }
+function t(k){ return k; }
+function _adoptRegenerationRevision(){}
+function _hydrateTodosFromSession(){}
+function setComposerStatus(){}
+function renderSessionList(){ calls.renderList++; return Promise.resolve(); }
+
+__NEW_SESSION_BODY__
+
+(async () => {
+  const out = {};
+  out.genAtStart = _profileSwitchGeneration;
+
+  // Switch A (its own generation) starts creating a session.
+  const p = newSession(false, {worktree: false, profileSwitchGen: params.callerGen});
+
+  // Wait until the POST is genuinely in flight before moving ownership.
+  for(let i = 0; i < 500 && !calls.sessionNewStarted; i++){
+    await new Promise(r => setImmediate(r));
+  }
+  out.requestStarted = calls.sessionNewStarted;
+  out.duringFlight = { session: S.session && S.session.session_id,
+                       stored: storage['hermes-webui-session'] };
+
+  // Switch B takes ownership while A's request is still in flight.
+  _profileSwitchGeneration = params.genAfter;
+  _gateResolve();
+
+  let returned;
+  try{ returned = await p; }catch(e){ returned = 'threw:' + e.message; }
+  for(let i = 0; i < 20; i++){ await new Promise(r => setImmediate(r)); }
+
+  out.returned = returned;
+  out.afterFlight = {
+    session: S.session && S.session.session_id,
+    stored: storage['hermes-webui-session'],
+    url: calls.setUrl.slice(),
+    streams: calls.startStream.slice(),
+  };
+  out.sessionNewCalls = calls.urls.filter(u => u.includes('/api/session/new')).length;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def _run_new_session_install(*, caller_gen=5, gen_after=6, hold: bool = True) -> dict:
+    """Drive the REAL newSession() body while a newer switch takes ownership."""
+    import json as _json
+
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function newSession(")
+    payload = {
+        "callerGen": caller_gen,
+        "genAtStart": caller_gen,
+        "genAfter": gen_after,
+        "holdRequest": hold,
+    }
+    js = _NEW_SESSION_INSTALL_HARNESS.replace("__NEW_SESSION_BODY__", body).replace(
+        "__PARAMS__", _json.dumps(payload)
+    )
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return _json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_the_harness_drives_a_genuinely_pending_request():
+    """Precondition: without this the superseded probes could pass vacuously."""
+    out = _run_new_session_install()
+    assert out["requestStarted"] is True, (
+        f"the POST never reached the in-flight state, so the scenario under test "
+        f"was never exercised: {out}"
+    )
+    assert out["sessionNewCalls"] == 1, out
+
+
+def test_a_superseded_new_session_does_not_install_its_session():
+    """The install the caller's generation checks cannot reach."""
+    out = _run_new_session_install()
+    assert out["duringFlight"]["session"] == "seed-session", out
+    assert out["afterFlight"]["session"] == "seed-session", (
+        f"a superseded newSession() installed {out['afterFlight']['session']!r} "
+        f"into S.session — the browser now holds a session owned by the previous "
+        f"profile while the newer switch owns the state (Greptile review)"
+    )
+
+
+def test_a_superseded_new_session_does_not_write_storage_url_or_stream():
+    """The same damage, measured on the other three install points."""
+    out = _run_new_session_install()
+    assert out["afterFlight"]["stored"] == "seed-session", (
+        f"localStorage was repointed at a stale session: {out['afterFlight']['stored']!r}"
+    )
+    assert out["afterFlight"]["url"] == [], (
+        f"the URL was switched to a stale session: {out['afterFlight']['url']}"
+    )
+    assert out["afterFlight"]["streams"] == [], (
+        f"a stream was opened for a stale session: {out['afterFlight']['streams']}"
+    )
+
+
+def test_a_superseded_new_session_still_made_the_request_once():
+    """The fix declines to ADOPT the session; the caller still owns creating it."""
+    out = _run_new_session_install()
+    assert out["sessionNewCalls"] == 1, (
+        f"the request must still be made exactly once: {out}"
+    )
+    assert out["returned"] is None, (
+        f"a superseded run must report that it produced no session: {out['returned']!r}"
+    )
+
+
+def test_an_unchanged_generation_still_installs_normally():
+    """The guard must not suppress a switch that still owns the browser state."""
+    out = _run_new_session_install(caller_gen=5, gen_after=5)
+    assert out["afterFlight"]["session"] == "stale-created", (
+        f"a switch that still owns the state must install its session: {out}"
+    )
+    assert out["afterFlight"]["stored"] == "stale-created", out
+    assert out["afterFlight"]["streams"] == ["stale-created"], out
+
+
+def test_an_unowned_new_session_still_installs_normally():
+    """Callers that pass no generation (New Chat, boot, commands) are unaffected:
+    callerGen is null, so the profile-switch guard cannot apply to them."""
+    out = _run_new_session_install(caller_gen=None, gen_after=9)
+    assert out["afterFlight"]["session"] == "stale-created", (
+        f"a plain New Chat must not be suppressed by the switch guard: {out}"
+    )
+    assert out["afterFlight"]["streams"] == ["stale-created"], out

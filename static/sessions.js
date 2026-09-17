@@ -1549,6 +1549,24 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // #6712 (Greptile): a superseded switch must not install its session.
+    //
+    // The caller's generation checks sit AROUND newSession(), so they cannot
+    // stop the install that happens INSIDE it: once the POST resolves, this
+    // function unconditionally adopted data.session, the localStorage key, the
+    // URL and the session stream. During rapid profile switches the cookie and
+    // active profile have already moved on, so the completed request installed
+    // a session that belongs to the PREVIOUS profile — the newer switch then
+    // follows its empty-session fallback, leaves no replacement, and the
+    // browser is left holding profile-gated state it cannot load or stream.
+    //
+    // The session was still created server-side; this only declines to adopt
+    // it into the browser's active state, which is now owned by a newer switch.
+    if(callerGen!==null
+       && typeof _profileSwitchGeneration==='number'
+       && callerGen!==_profileSwitchGeneration){
+      return null;
+    }
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
