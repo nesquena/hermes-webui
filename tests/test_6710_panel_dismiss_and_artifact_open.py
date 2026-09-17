@@ -60,6 +60,10 @@ def _shipped_functions() -> dict:
         "ensureWorkspacePreviewVisible": extract_function(boot_js, "ensureWorkspacePreviewVisible"),
         "openWorkspacePanel": extract_function(boot_js, "openWorkspacePanel"),
         "closeWorkspacePanel": extract_function(boot_js, "closeWorkspacePanel"),
+        # Shipped, not mirrored: the generation counter's bump policy IS the
+        # behaviour under test for the reopen-during-read case, so the harness
+        # must run the real function or it could pass against a stale copy.
+        "_setWorkspacePanelDismissed": extract_function(boot_js, "_setWorkspacePanelDismissed"),
     }
 
 
@@ -72,12 +76,9 @@ let _workspacePanelMode = 'closed';
 let _workspacePanelUserDismissed = false;
 // The shipped code tracks a dismissal GENERATION so a read that is still
 // pending when the user dismisses cannot erase that newer intent. The harness
-// must mirror it, otherwise the production guard has nothing to read.
+// installs the REAL `_setWorkspacePanelDismissed()` (see the eval() block
+// below) so the generation's bump policy is exercised, not mirrored.
 let _workspacePanelDismissGen = 0;
-function _setWorkspacePanelDismissed(dismissed){
-  _workspacePanelUserDismissed = dismissed;
-  _workspacePanelDismissGen++;
-}
 let syncUiCalls = 0;
 let setModeCalls = [];
 let previewVisible = params.previewVisibleInitially;
@@ -138,7 +139,7 @@ async function _workspacePathExists(rel){
   return true;
 }
 
-// ── install the exact shipped functions ──────────────────────────────────────
+eval(fn._setWorkspacePanelDismissed);
 eval(fn.syncWorkspacePanelState);
 eval(fn.ensureWorkspacePreviewVisible);
 eval(fn.openWorkspacePanel);
@@ -191,9 +192,19 @@ eval(fn.openArtifactPath);
     snap('dismissed during read');
   }
 
+  // 3b'. the mirror image: the user explicitly REOPENS the panel while the
+  //      read is in flight. That intent agrees with the pending reveal, so it
+  //      must not invalidate it — the read still completes and promotes.
+  if(params.reopenDuringRead){
+    await tick();
+    await tick();
+    openWorkspacePanel('browse');
+    snap('reopened during read');
+  }
+
   // 3c. settle only when the scenario actually settles
   if(params.existsMode !== 'pending'){
-    await openPromise;
+    out.openReturned = await openPromise;
     await tick();
   }
   snap('after open settled');
@@ -212,6 +223,7 @@ def _run_scenario(*, exists_mode: str, open_file_settles: str = "immediately",
                   open_file_downloads_only: bool = False,
                   compact_viewport: bool = True,
                   dismiss_during_read: bool = False,
+                  reopen_during_read: bool = False,
                   slow_read: bool = False,
                   open_file_returns_undefined: bool = False) -> dict:
     payload = {
@@ -223,6 +235,7 @@ def _run_scenario(*, exists_mode: str, open_file_settles: str = "immediately",
         "openFileDownloadsOnly": open_file_downloads_only,
         "compactViewport": compact_viewport,
         "dismissDuringRead": dismiss_during_read,
+        "reopenDuringRead": reopen_during_read,
         "slowRead": slow_read,
         "openFileReturnsUndefined": open_file_returns_undefined,
     }
@@ -523,4 +536,64 @@ def test_open_file_fails_closed_for_non_preview_outcomes():
     assert "if(!S.session)return false;" in body, (
         "the no-session early return must fail closed too, otherwise a missing "
         "session reads as a successful preview"
+    )
+
+
+# ── Greptile review (17 Sep): reopen during a pending read ───────────────────
+#
+# The mirror image of "dismissal during a slow read wins". An explicit reopen
+# (`openWorkspacePanel`) clears the dismissal flag, and the generation counter
+# used to bump on EVERY flag write — including that clear. The in-flight read
+# had captured the pre-reopen generation, so when it resolved it saw a changed
+# counter, concluded the user had dismissed the panel, and skipped the reveal:
+# the panel stayed in browse mode with no artifact shown, even though the read
+# had succeeded and the user had asked for the panel to be open.
+#
+# Bumping only on an actual dismissal keeps the guard aimed at what it was
+# written for (a newer *dismiss*) without rejecting the reveal the reopen
+# agrees with.
+
+def test_reopen_during_a_pending_read_still_reveals_the_artifact():
+    """Reopening the panel while the artifact read is in flight must not
+    invalidate that read — the artifact still gets revealed."""
+    result = _run_scenario(
+        exists_mode="ok", slow_read=True, reopen_during_read=True
+    )
+    during = _step(result, "reopened during read")
+    settled = _step(result, "after open settled")
+
+    assert during["mode"] == "browse", (
+        f"precondition: the explicit reopen must take effect, got {during}"
+    )
+    # The contract: the read succeeded, so openArtifactPath() must report the
+    # reveal instead of rejecting it as stale. The panel legitimately stays in
+    # 'browse' mode — the user opened it to browse, and a tree click previews
+    # without forcing 'preview' mode — so mode alone is not the signal here.
+    assert result["openReturned"] is True, (
+        "an explicit reopen during a pending read made openArtifactPath() "
+        "reject a successful read as stale (Greptile: reopen invalidates "
+        "artifact reveal)"
+    )
+    assert settled["dismissed"] is False, (
+        "the reopen's intent was not honoured: the dismissal came back"
+    )
+    assert settled["mode"] != "closed", (
+        f"the panel did not stay open after the reveal, got {settled}"
+    )
+
+
+def test_the_generation_only_advances_on_a_dismissal():
+    """Both halves, in the shipped source: a dismiss bumps the counter, a clear
+    must not — otherwise the counter conflates 'user closed' with 'user opened'
+    and the in-flight reveal cannot tell them apart."""
+    boot = _read(BOOT_JS_PATH)
+    body = extract_function(boot, "_setWorkspacePanelDismissed")
+    compact = "".join(body.split())
+    assert "_workspacePanelDismissGen++" in compact, (
+        "the counter is no longer bumped, so a dismissal during a pending read "
+        "can no longer be detected"
+    )
+    assert "if(dismissed)_workspacePanelDismissGen++;" in compact, (
+        "the counter still advances on every flag write, so a reopen during a "
+        "pending read is indistinguishable from a dismissal"
     )
