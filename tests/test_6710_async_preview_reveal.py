@@ -229,6 +229,14 @@ const el = {
   out.statuses = statuses.slice();
   out.listenersLeft = el.listenerCount();
 
+  // After the bound released the wait, emit whatever arrives late and record
+  // what — if anything — was reported.
+  statuses = [];
+  if(params.fireBound && params.late === 'error') el.emit('error');
+  if(params.fireBound && params.late === 'load') el.emit('load');
+  await new Promise(r => setImmediate(r));
+  out.lateStatuses = statuses.slice();
+
   // A response that later succeeds must still be honoured while waiting.
   statuses = [];
   const el2 = Object.assign({}, el, {
@@ -271,10 +279,10 @@ def _run_harness(*, image_outcome="load", media_outcome="loadedmetadata",
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def _run_stall_harness(*, fire_bound: bool) -> dict:
+def _run_stall_harness(*, fire_bound: bool, late: str = "") -> dict:
     js = _STALL_HARNESS.replace(
         "__HELPERS__", json.dumps({"_awaitElementLoad": _helper("_awaitElementLoad")})
-    ).replace("__PARAMS__", json.dumps({"fireBound": fire_bound})).replace(
+    ).replace("__PARAMS__", json.dumps({"fireBound": fire_bound, "late": late})).replace(
         "__CONSTS__", _shipped_const_line("_PREVIEW_LOAD_TIMEOUT_MS")
     )
     proc = subprocess.run(
@@ -435,22 +443,39 @@ def test_a_stalled_image_response_arms_a_bound():
     )
 
 
-def test_firing_the_bound_reports_failure_and_cleans_up():
-    """The bound must fail closed, not resolve as a success."""
+def test_firing_the_bound_releases_the_wait_without_reporting_failure():
+    """The bound is an anti-hang guard, not a failure signal. It cannot tell
+    "slow" from "dead", so failing closed here hid legitimately slow images
+    behind a closed panel while they were still loading (Greptile: slow
+    previews remain hidden). It must release the wait and let the panel open."""
     out = _run_stall_harness(fire_bound=True)
     assert out["settled"] is True, out
-    assert out["result"] is False, (
-        f"a stalled image reported a successful reveal: {out}"
+    assert out["result"] is True, (
+        f"the bound reported a failure for a response that may still be "
+        f"loading, hiding a slow-but-valid image: {out}"
     )
-    assert out["statuses"] == ["image_load_failed"], out
-    assert out["listenersLeft"] == 0, (
-        f"the load/error listeners were left attached after the bound fired: {out}"
+    assert out["statuses"] == [], (
+        f"the bound reported an error status for an unconfirmed load: {out}"
     )
+
+
+def test_a_late_error_after_the_bound_is_still_surfaced():
+    """The panel is already open by then, so the error is reported through the
+    status line — the fire-and-forget code did this too, and dropping it would
+    leave a genuinely broken source silent."""
+    out = _run_stall_harness(fire_bound=True, late="error")
+    assert out["lateStatuses"] == ["image_load_failed"], out
+
+
+def test_a_late_load_harmlessly_clears_the_late_error_watch():
+    """A slow response that does arrive must not be reported as broken."""
+    out = _run_stall_harness(fire_bound=True, late="load")
+    assert out["lateStatuses"] == [], out
 
 
 def test_a_late_load_is_still_honoured():
     """The bound must not pre-empt a response that does arrive — only a genuine
-    stall fails. Otherwise a slow-but-valid image would be reported broken."""
+    stall is released early."""
     out = _run_stall_harness(fire_bound=False)
     assert out["lateLoadResult"] is True, out
 
