@@ -118,6 +118,45 @@ def test_cache_only_mismatch_does_not_close_an_agent_owned_by_another_run(scene)
     other.steer.assert_not_called()
 
 
+@pytest.mark.parametrize("ownership", [
+    "both", "missing-owner", "missing-run-session", "empty-run-session",
+    "missing-both", "missing-run-entry",
+])
+def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, ownership):
+    """Cache-only Steer must prove ownership, not merely fail to refute it.
+
+    With no registered worker and a matching cached agent on a live stream, a
+    missing stream owner or a missing active-run session is ambiguous and must
+    fail closed with ``stream_dead`` without calling ``agent.steer()``. Only
+    both identities present and equal to the requesting session may enqueue.
+    """
+    agent, other, _ = scene
+    agent.session_id = "original"
+    config.AGENT_INSTANCES.pop("run")  # Cache-only compatibility path.
+    if ownership in ("missing-owner", "missing-both"):
+        config.STREAM_SESSION_OWNERS.pop("run")
+    if ownership in ("missing-run-session", "missing-both"):
+        config.ACTIVE_RUNS["run"].pop("session_id")
+    elif ownership == "empty-run-session":
+        config.ACTIVE_RUNS["run"]["session_id"] = ""
+    elif ownership == "missing-run-entry":
+        config.ACTIVE_RUNS.pop("run")
+    before = dict(config.SESSION_AGENT_CACHE)
+    assert "run" in config.STREAMS
+    result = steer()
+    if ownership == "both":
+        assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+        agent.steer.assert_called_once_with("updated guidance")
+    else:
+        assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+        agent.steer.assert_not_called()
+    other.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    agent._session_db.close.assert_not_called()
+    assert config.SESSION_AGENT_CACHE == before
+    assert "run" in config.STREAMS
+
+
 def test_http_response_is_written_after_stream_lock_release(scene, monkeypatch):
     from api import helpers
 
