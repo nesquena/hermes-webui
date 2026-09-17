@@ -7694,6 +7694,7 @@ def _stored_provider_can_legitimately_own_model(
     try:
         from api.config import _canonicalise_provider_id
 
+        raw = str(stored_provider or "").strip().lower()
         provider = _canonicalise_provider_id(stored_provider)
     except Exception:
         return True
@@ -7751,12 +7752,18 @@ def _stored_provider_can_legitimately_own_model(
     try:
         from api.config import _named_custom_provider_slug_for_provider
 
-        if _named_custom_provider_slug_for_provider(provider):
+        # Both identities: the slug table registers underscore names raw, and
+        # ``_canonicalise_provider_id`` rewrites them (#7594 gate5 regression).
+        if _named_custom_provider_slug_for_provider(raw):
+            return True
+        if provider != raw and _named_custom_provider_slug_for_provider(provider):
             return True
     except Exception:
         return True
     try:
-        return bool(is_plugin_model_provider(provider))
+        if is_plugin_model_provider(raw):
+            return True
+        return bool(provider != raw and is_plugin_model_provider(provider))
     except Exception:
         return True
 
