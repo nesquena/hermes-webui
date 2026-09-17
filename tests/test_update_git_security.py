@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import functools
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -159,10 +160,11 @@ def _unused_local_port() -> int:
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
-def test_fetch_allows_git_protocol_without_repo_proxy(
-    tmp_path: Path, caller: str,
+@pytest.mark.parametrize("proxy_value", ["none", "false for example.invalid"])
+def test_fetch_allows_git_protocol_without_applicable_repo_proxy(
+    tmp_path: Path, caller: str, proxy_value: str,
 ) -> None:
-    """Update and workspace hardening must preserve legitimate git:// remotes."""
+    """Unrelated host-scoped proxies must preserve legitimate git:// remotes."""
     _, origin = _make_bare_origin(tmp_path)
     port = _unused_local_port()
     daemon = subprocess.Popen(
@@ -192,7 +194,7 @@ def test_fetch_allows_git_protocol_without_repo_proxy(
         repo.mkdir()
         _git(repo, "init", "-q")
         _git(repo, "remote", "add", "origin", f"git://127.0.0.1:{port}/origin.git")
-        _git(repo, "config", "core.gitProxy", "none")
+        _git(repo, "config", "core.gitProxy", proxy_value)
         if caller == "updates":
             output, ok = updates._run_git(["fetch", "origin"], repo, timeout=30)
             assert ok, output
@@ -205,7 +207,10 @@ def test_fetch_allows_git_protocol_without_repo_proxy(
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
-def test_fetch_does_not_run_repo_git_proxy(tmp_path: Path, caller: str) -> None:
+@pytest.mark.parametrize("host_scope", [False, True])
+def test_fetch_does_not_run_applicable_repo_git_proxy(
+    tmp_path: Path, caller: str, host_scope: bool,
+) -> None:
     """A checkout-controlled core.gitProxy must not execute for git:// fetch."""
     if os.name == "nt":
         pytest.skip("executable proxy setup is POSIX-only")
@@ -218,7 +223,8 @@ def test_fetch_does_not_run_repo_git_proxy(tmp_path: Path, caller: str) -> None:
     helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
     helper.chmod(0o755)
     _git(repo, "remote", "add", "origin", "git://example.invalid/origin.git")
-    _git(repo, "config", "core.gitProxy", str(helper))
+    proxy_value = f"{helper} for example.invalid" if host_scope else str(helper)
+    _git(repo, "config", "core.gitProxy", proxy_value)
 
     if caller == "updates":
         output, ok = updates._run_git(["fetch", "origin"], repo, timeout=10)
@@ -340,8 +346,16 @@ def test_update_git_diagnostic_redacts_invalid_checkout_path(tmp_path: Path) -> 
     assert "<redacted-path>" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("remote", "helper_names"),
+    [
+        ("evil::attacker-controlled", ("git-remote-evil",)),
+        ("ssh::attacker-controlled", ("git-remote-ssh", "ssh")),
+        ("https::attacker-controlled", ("git-remote-https",)),
+    ],
+)
 def test_update_git_diagnostic_rejects_remote_helper_without_invoking_it(
-    tmp_path: Path,
+    tmp_path: Path, remote: str, helper_names: tuple[str, ...],
 ) -> None:
     if os.name == "nt":
         pytest.skip("executable remote helper setup is POSIX-only")
@@ -349,11 +363,23 @@ def test_update_git_diagnostic_rejects_remote_helper_without_invoking_it(
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
-    _git(repo, "remote", "add", "origin", "evil::attacker-controlled")
+    _git(repo, "remote", "add", "origin", remote)
     marker = tmp_path / "remote-helper-ran"
-    helper = tmp_path / "git-remote-evil"
-    helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
-    helper.chmod(0o755)
+    probe_marker = tmp_path / "remote-probe-ran"
+    for helper_name in helper_names:
+        helper = tmp_path / helper_name
+        helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
+        helper.chmod(0o755)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    git_wrapper = tmp_path / "git"
+    git_wrapper.write_text(
+        "#!/bin/sh\n"
+        f"case \" $* \" in *\" ls-remote {remote} \"*) touch '{probe_marker}' ;; esac\n"
+        f"exec '{real_git}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    git_wrapper.chmod(0o755)
     env = os.environ.copy()
     env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
 
@@ -367,4 +393,73 @@ def test_update_git_diagnostic_rejects_remote_helper_without_invoking_it(
     )
 
     assert result.returncode == 1
+    assert not probe_marker.exists(), result.stdout + result.stderr
     assert not marker.exists(), result.stdout + result.stderr
+
+
+def test_update_git_diagnostic_does_not_relay_credential_helper_stderr(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("executable credential helper setup is POSIX-only")
+
+    _, origin = _make_bare_origin(tmp_path)
+    _AuthenticatedGitHandler.expected_authorization = "Basic deliberately-wrong"
+    handler = functools.partial(_AuthenticatedGitHandler, directory=str(origin.parent))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    home = tmp_path / "home"
+    home.mkdir()
+    private_path = "/private/credential-helper/location"
+    secret = "plain-secret-value"
+    helper = tmp_path / "credential_helper.py"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"print('password={secret} {private_path}', file=sys.stderr)\n"
+        "print('username=user')\n"
+        "print('password=wrong-password')\n"
+        "print()\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    subprocess.run(
+        ["git", "config", "--global", "credential.helper", f"!{sys.executable} {helper}"],
+        env=env,
+        check=True,
+        timeout=20,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(
+        repo,
+        "remote",
+        "add",
+        "origin",
+        f"http://127.0.0.1:{server.server_port}/origin.git",
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(DIAGNOSTIC), str(repo)],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert secret not in output
+    assert private_path not in output
+    assert "origin is unreachable or authentication failed" in output

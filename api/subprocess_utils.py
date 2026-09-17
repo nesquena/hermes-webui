@@ -260,18 +260,40 @@ def repository_git_proxy_blocks(
         )
         if scope in {"local", "worktree"}
     ]
-    has_local_proxy = any(
-        not value.strip() or value.split(maxsplit=1)[0].lower() != "none"
-        for value in local_proxy_values
-    )
-    if not has_local_proxy:
+    if not local_proxy_values:
         return False
     url = _remote_url_for_command(args, cwd, env, executable=executable)
     if url == "":
         return False
     # A local proxy plus an unresolvable active URL is not safe to pass through:
     # the subsequent network command may resolve more successfully and execute it.
-    return url is None or url.lower().startswith("git://")
+    if url is None:
+        return True
+    if not url.lower().startswith("git://"):
+        return False
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return True
+    if not host:
+        return True
+
+    # Git selects the first value whose optional ``for DOMAIN`` suffix matches
+    # the remote hostname. A suffix matches either the whole host or a complete
+    # trailing DNS label, not an arbitrary string suffix.
+    selected_proxy: str | None = None
+    for value in local_proxy_values:
+        for_pos = value.find(" for ")
+        if for_pos < 0:
+            selected_proxy = value
+            break
+        domain = value[for_pos + 5 :]
+        if domain and (host == domain or host.endswith(f".{domain}")):
+            selected_proxy = value[:for_pos]
+            break
+    if selected_proxy is None:
+        return False
+    return selected_proxy != "none"
 
 
 def sanitize_git_diagnostic(
@@ -302,6 +324,8 @@ def sanitize_git_diagnostic(
 def is_safe_diagnostic_remote(remote: str) -> bool:
     """Accept only built-in network transports that cannot name remote helpers."""
     value = remote.strip()
+    if re.match(r"^[^/:\s]+::", value):
+        return False
     if re.match(r"^[^/@:\s]+@[^/:\s]+:.+", value):
         return True
     scheme = urlsplit(value).scheme.lower()

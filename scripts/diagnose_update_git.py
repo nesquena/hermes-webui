@@ -77,9 +77,9 @@ def main() -> int:
         return 1
     try:
         checkout = supplied_checkout.resolve()
-    except OSError as exc:
+    except OSError:
         _emit(
-            f"Update Git diagnostic cannot resolve checkout: {exc}",
+            "Update Git diagnostic cannot resolve checkout path",
             sensitive_paths=sensitive,
             error=True,
         )
@@ -108,9 +108,8 @@ def main() -> int:
             credential_helpers,
         )
         if origin.returncode != 0:
-            detail = (origin.stderr or origin.stdout or "origin is not configured").strip()
             _emit(
-                f"Update Git diagnostic failed: {detail}",
+                "Update Git diagnostic failed: origin is not configured or cannot be read",
                 sensitive_paths=sensitive,
                 error=True,
             )
@@ -146,18 +145,17 @@ def main() -> int:
             error=True,
         )
         return 1
-    except OSError as exc:
+    except OSError:
         _emit(
-            f"Update Git diagnostic failed to start Git: {exc}",
+            "Update Git diagnostic failed: could not start Git",
             sensitive_paths=sensitive,
             error=True,
         )
         return 1
 
     if probe.returncode != 0:
-        detail = (probe.stderr or probe.stdout or f"git exited with status {probe.returncode}").strip()
         _emit(
-            f"Update Git diagnostic failed: {detail}",
+            "Update Git diagnostic failed: origin is unreachable or authentication failed",
             sensitive_paths=sensitive,
             error=True,
         )
