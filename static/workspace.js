@@ -681,30 +681,50 @@ function _awaitElementLoad(el, assign, failKey){
   }
   return new Promise(resolve=>{
     let settled=false;
-    const done=(ok)=>{
-      if(settled) return;
-      settled=true;
+    const detach=()=>{
       el.removeEventListener('load', onLoad);
       el.removeEventListener('error', onError);
+    };
+    const finish=(ok)=>{
+      if(settled) return;
+      settled=true;
+      detach();
       clearTimeout(timer);
       if(!ok) setStatus(t(failKey));
       resolve(ok);
     };
-    const onLoad=()=>done(true);
-    const onError=()=>done(false);
+    const onLoad=()=>finish(true);
+    const onError=()=>finish(false);
+    // Late outcome after the anti-hang bound released the open: the panel is
+    // already up, so only a genuine error still needs surfacing — this restores
+    // the status reporting the fire-and-forget code had. A late success needs
+    // nothing: the content is visible by then.
+    const onLateLoad=()=>el.removeEventListener('error', onLateError);
+    const onLateError=()=>setStatus(t(failKey));
     el.addEventListener('load', onLoad);
     el.addEventListener('error', onError);
-    // A response that stalls — proxy holding the socket open, server wedged —
-    // never fires load OR error. Without this bound the promise would never
-    // settle, openArtifactPath() would stay pending forever, and the explicitly
-    // selected image would never be promoted. Same bound as the media path.
-    const timer=setTimeout(()=>done(false), _PREVIEW_LOAD_TIMEOUT_MS);
+    // Anti-hang guard (Greptile): a response that stalls — proxy holding the
+    // socket open, server wedged — fires neither load nor error, so without
+    // this the promise never settles and openArtifactPath() stays pending
+    // forever. But this bound CANNOT tell "slow" from "dead", so it must not
+    // report failure: doing that hid legitimately slow images behind a closed
+    // panel even though the assigned src kept loading and would have appeared.
+    // It releases the wait and lets the panel open; the source keeps loading.
+    const timer=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      detach();
+      el.addEventListener('load', onLateLoad, {once:true});
+      el.addEventListener('error', onLateError, {once:true});
+      resolve(true);
+    }, _PREVIEW_LOAD_TIMEOUT_MS);
     assign();
     // A cached image can settle during assignment; `complete` covers that, and
     // naturalWidth distinguishes a real bitmap from a decode failure.
     if(el.complete){
-      if(el.naturalWidth>0) done(true);
-      else done(false);
+      if(el.naturalWidth>0) finish(true);
+      else finish(false);
     }
   });
 }
@@ -724,31 +744,46 @@ function _mountMediaPlayer(wrap, html, mode){
 /**
  * #6710: resolve once a media element is playable, or fail on a hard error.
  * `loadedmetadata` is the first point the source is known to be readable;
- * waiting for the whole file would stall large videos. A `stalled`/`error`
- * before metadata means the route failed. Never rejects — a timeout reports
- * failure rather than hanging the open.
+ * waiting for the whole file would stall large videos. Never rejects.
+ *
+ * The bound follows the same contract as `_awaitElementLoad()`: it releases a
+ * stalled wait so `openArtifactPath()` cannot hang, but because it cannot tell
+ * "slow" from "dead" it must not report failure — a large file on a slow link
+ * would otherwise be hidden behind a closed panel while it was still loading.
+ * Only a real `error` event fails closed; a late error after the bound fired is
+ * still surfaced through the status line.
  */
 function _awaitMediaReady(el){
   return new Promise(resolve=>{
     let settled=false;
-    const cleanup=()=>{
+    const detach=()=>{
       el.removeEventListener('loadedmetadata', onReady);
       el.removeEventListener('error', onError);
-      clearTimeout(timer);
     };
-    const done=(ok)=>{
+    const finish=(ok)=>{
       if(settled) return;
       settled=true;
-      cleanup();
+      detach();
+      clearTimeout(timer);
       if(!ok) setStatus(t('file_open_failed'));
       resolve(ok);
     };
-    const onReady=()=>done(true);
-    const onError=()=>done(false);
-    const timer=setTimeout(()=>done(false), _PREVIEW_LOAD_TIMEOUT_MS);
+    const onReady=()=>finish(true);
+    const onError=()=>finish(false);
+    const onLateReady=()=>el.removeEventListener('error', onLateError);
+    const onLateError=()=>setStatus(t('file_open_failed'));
+    const timer=setTimeout(()=>{
+      if(settled) return;
+      settled=true;
+      clearTimeout(timer);
+      detach();
+      el.addEventListener('loadedmetadata', onLateReady, {once:true});
+      el.addEventListener('error', onLateError, {once:true});
+      resolve(true);
+    }, _PREVIEW_LOAD_TIMEOUT_MS);
     el.addEventListener('loadedmetadata', onReady);
     el.addEventListener('error', onError);
-    if(el.readyState>=1) done(true);
+    if(el.readyState>=1) finish(true);
   });
 }
 
