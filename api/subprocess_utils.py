@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 def windows_hide_flags() -> int:
@@ -49,6 +49,11 @@ _QUERY_SECRET_RE = re.compile(
     r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|"
     r"api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+",
     re.IGNORECASE,
+)
+_URL_REMOTE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_REMOTE_HELPER_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*::")
+_SCP_SSH_REMOTE_RE = re.compile(
+    r"^(?:[^/@:\s]+@)?(?:\[[^\[\]/\s]+\]|[^/@:\s]+):(?!:).+$"
 )
 
 
@@ -253,14 +258,10 @@ def repository_git_proxy_blocks(
     """
     if not args or args[0] not in {"fetch", "pull", "push", "ls-remote"}:
         return False
-    local_proxy_values = [
-        value
-        for scope, value in _scoped_git_config_values(
-            cwd, env, "core.gitProxy", executable=executable,
-        )
-        if scope in {"local", "worktree"}
-    ]
-    if not local_proxy_values:
+    proxy_values = _scoped_git_config_values(
+        cwd, env, "core.gitProxy", executable=executable,
+    )
+    if not any(scope in {"local", "worktree"} for scope, _value in proxy_values):
         return False
     url = _remote_url_for_command(args, cwd, env, executable=executable)
     if url == "":
@@ -272,28 +273,37 @@ def repository_git_proxy_blocks(
     if not url.lower().startswith("git://"):
         return False
     try:
-        host = urlsplit(url).hostname
-    except ValueError:
+        # Git matches core.gitProxy's DOMAIN against parse_connect_url()'s
+        # URL-decoded hostandport, before brackets and an explicit port are
+        # removed for the connection. Preserve their spelling and case here.
+        hostandport = unquote(urlsplit(url).netloc)
+    except (UnicodeError, ValueError):
         return True
-    if not host:
+    if not hostandport:
         return True
 
-    # Git selects the first value whose optional ``for DOMAIN`` suffix matches
-    # the remote hostname. A suffix matches either the whole host or a complete
-    # trailing DNS label, not an arbitrary string suffix.
-    selected_proxy: str | None = None
-    for value in local_proxy_values:
+    # Git considers all scopes in config order and selects the first value whose
+    # optional ``for DOMAIN`` suffix matches the complete hostandport or a suffix
+    # following a dot. Only reject when that selected value came from the repo.
+    selected_proxy: tuple[str, str] | None = None
+    for scope, value in proxy_values:
         for_pos = value.find(" for ")
         if for_pos < 0:
-            selected_proxy = value
+            selected_proxy = (scope, value)
             break
         domain = value[for_pos + 5 :]
-        if domain and (host == domain or host.endswith(f".{domain}")):
-            selected_proxy = value[:for_pos]
+        suffix_start = len(hostandport) - len(domain)
+        if (
+            suffix_start >= 0
+            and hostandport.endswith(domain)
+            and (suffix_start == 0 or hostandport[suffix_start - 1] == ".")
+        ):
+            selected_proxy = (scope, value[:for_pos])
             break
     if selected_proxy is None:
         return False
-    return selected_proxy != "none"
+    scope, command = selected_proxy
+    return scope in {"local", "worktree"} and command not in {"", "none"}
 
 
 def sanitize_git_diagnostic(
@@ -324,9 +334,14 @@ def sanitize_git_diagnostic(
 def is_safe_diagnostic_remote(remote: str) -> bool:
     """Accept only built-in network transports that cannot name remote helpers."""
     value = remote.strip()
-    if re.match(r"^[^/:\s]+::", value):
+    if _REMOTE_HELPER_RE.match(value):
         return False
-    if re.match(r"^[^/@:\s]+@[^/:\s]+:.+", value):
-        return True
-    scheme = urlsplit(value).scheme.lower()
-    return scheme in {"http", "https", "ssh"}
+    if _URL_REMOTE_RE.match(value):
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            _port = parsed.port
+        except ValueError:
+            return False
+        return bool(hostname) and parsed.scheme.lower() in {"http", "https", "ssh"}
+    return _SCP_SSH_REMOTE_RE.match(value) is not None

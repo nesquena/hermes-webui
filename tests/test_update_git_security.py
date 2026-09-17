@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from api import updates
+from api.subprocess_utils import is_safe_diagnostic_remote
 from api.workspace_git import GitWorkspaceError, git_fetch
 
 
@@ -237,6 +238,57 @@ def test_fetch_does_not_run_applicable_repo_git_proxy(
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
+@pytest.mark.parametrize(
+    ("remote", "proxy_values"),
+    [
+        ("git://127.0.0.1:9/origin.git", ("{helper} for 127.0.0.1:9",)),
+        ("git://[::1]:9/origin.git", ("{helper} for [::1]:9",)),
+        ("git://EXAMPLE.INVALID/origin.git", ("{helper} for EXAMPLE.INVALID",)),
+        (
+            "git://127.0.0.1:9/origin.git",
+            ("{helper} for 127.0.0.1:9", "none"),
+        ),
+    ],
+    ids=["port", "ipv6-brackets", "case-sensitive-host", "first-applicable-entry"],
+)
+def test_fetch_does_not_run_repo_proxy_selected_by_git_hostandport(
+    tmp_path: Path,
+    caller: str,
+    remote: str,
+    proxy_values: tuple[str, ...],
+) -> None:
+    """The guard must make the same proxy selection as Git before Git runs it."""
+    if os.name == "nt":
+        pytest.skip("executable proxy setup is POSIX-only")
+
+    repo = tmp_path / "workspace"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", remote)
+    marker = tmp_path / "repo-proxy-ran"
+    helper = tmp_path / "proxy.sh"
+    helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
+    helper.chmod(0o755)
+    for proxy_value in proxy_values:
+        _git(
+            repo,
+            "config",
+            "--add",
+            "core.gitProxy",
+            proxy_value.format(helper=helper),
+        )
+
+    if caller == "updates":
+        output, ok = updates._run_git(["fetch", "origin"], repo, timeout=10)
+        assert ok is False, output
+    else:
+        with pytest.raises(GitWorkspaceError):
+            git_fetch(repo)
+
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("caller", ["updates", "workspace"])
 def test_fetch_blocks_included_proxy_after_repo_url_rewrite(
     tmp_path: Path, caller: str,
 ) -> None:
@@ -344,6 +396,88 @@ def test_update_git_diagnostic_redacts_invalid_checkout_path(tmp_path: Path) -> 
     assert result.returncode == 1
     assert str(checkout) not in result.stderr
     assert "<redacted-path>" in result.stderr
+
+
+def test_update_git_diagnostic_rejects_malformed_origin_without_traceback(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "private" / "checkout"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    private_origin_fragment = "private-malformed/private-path"
+    _git(repo, "remote", "add", "origin", f"https://[{private_origin_fragment}")
+
+    result = subprocess.run(
+        [sys.executable, str(DIAGNOSTIC), str(repo)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1
+    assert "origin uses an unsupported or malformed transport" in output
+    assert "Traceback" not in output
+    assert str(repo) not in output
+    assert private_origin_fragment not in output
+
+
+@pytest.mark.parametrize("remote", ["host:path", "user@[::1]:path"])
+def test_update_git_diagnostic_probes_builtin_scp_syntax(
+    tmp_path: Path,
+    remote: str,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("executable Git wrapper setup is POSIX-only")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", remote)
+    probe_marker = tmp_path / "remote-probe-ran"
+    real_git = shutil.which("git")
+    assert real_git is not None
+    git_wrapper = tmp_path / "git"
+    git_wrapper.write_text(
+        "#!/bin/sh\n"
+        f"case \" $* \" in *\" ls-remote {remote} \"*) touch '{probe_marker}'; exit 0 ;; esac\n"
+        f"exec '{real_git}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    git_wrapper.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        [sys.executable, str(DIAGNOSTIC), str(repo)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert probe_marker.exists()
+    assert is_safe_diagnostic_remote(remote) is True
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "host::path",
+        "user@[::1]::path",
+        "evil::attacker-controlled",
+        "ssh::attacker-controlled",
+        "https::attacker-controlled",
+        "user@@host:path",
+        "host:",
+        "https://[private-malformed",
+    ],
+)
+def test_diagnostic_remote_rejects_scp_and_helper_near_misses(remote: str) -> None:
+    assert is_safe_diagnostic_remote(remote) is False
 
 
 @pytest.mark.parametrize(

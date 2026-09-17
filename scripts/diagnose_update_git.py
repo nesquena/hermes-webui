@@ -116,15 +116,15 @@ def main() -> int:
             return 1
 
         origin_url = (origin.stdout or "").strip()
-        origin_path = urlsplit(origin_url).path
-        sensitive = (*sensitive, origin_url, origin_path)
         if not is_safe_diagnostic_remote(origin_url):
             _emit(
-                "Update Git diagnostic failed: origin uses an unsupported transport",
+                "Update Git diagnostic failed: origin uses an unsupported or malformed transport",
                 sensitive_paths=sensitive,
                 error=True,
             )
             return 1
+        origin_path = urlsplit(origin_url).path
+        sensitive = (*sensitive, origin_url, origin_path)
 
         # Probe the captured URL outside the checkout. This keeps repository-local
         # url rewrites, remote.<name>.uploadpack, and other executable overrides
