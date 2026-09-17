@@ -7,7 +7,6 @@ from urllib.parse import quote
 
 import api.config as api_config
 import api.routes as routes
-from api.updates import WEBUI_VERSION
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +70,27 @@ def test_manifest_routes_follow_selected_static_root(tmp_path, monkeypatch):
     assert bytes(session_handler.body) == payload
 
 
+def _version_at_call() -> str:
+    """Resolve WEBUI_VERSION the way the route does — at call time.
+
+    `api/routes.py` imports the constant lazily inside the request handler, so it
+    reads whatever value `api.updates` holds at that moment. Several tests clear
+    `api.updates` from `sys.modules` (test_issue1579_whats_new_link_404.py does it
+    in four places), which forces a re-detect on the next import. A module-level
+    `from api.updates import WEBUI_VERSION` in THIS file binds the value once at
+    collection, so if anything re-detects in between, the test compares a stale
+    value against the route's fresh one.
+
+    That is not hypothetical: in a shallow CI checkout `git describe --tags
+    --always` returns a bare SHA whose auto-abbrev length grows as objects are
+    added, and a test in this shard fetches enough objects to move it from 7 to
+    8 characters mid-run. Resolving at call time keeps the comparison about the
+    substitution the route performs, which is what this test is for.
+    """
+    import importlib
+    return importlib.import_module("api.updates").WEBUI_VERSION
+
+
 def test_service_worker_and_favicon_follow_selected_static_root(tmp_path, monkeypatch):
     static_root = tmp_path / "static"
     static_root.mkdir()
@@ -80,9 +100,14 @@ def test_service_worker_and_favicon_follow_selected_static_root(tmp_path, monkey
     favicon_path.write_bytes(b"favicon-bytes")
     monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
 
+    # Read the version BEFORE the request: the route resolves the constant while
+    # handling it, so binding the expected value immediately beforehand compares
+    # like for like. Reading afterwards would risk capturing a re-detect that
+    # landed during the call.
+    expected_version = _version_at_call()
     sw_handler = _get("/sw.js")
     expected = sw_path.read_text(encoding="utf-8").replace(
-        "__WEBUI_VERSION__", quote(WEBUI_VERSION, safe="")
+        "__WEBUI_VERSION__", quote(expected_version, safe="")
     ).encode("utf-8")
     assert sw_handler.status == 200
     assert sw_handler.header("Service-Worker-Allowed") == "/"
