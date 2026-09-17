@@ -333,6 +333,11 @@ is authoritative over a configured `custom:<slug>` URL and is paired only with t
 provider supplies its configured endpoint and credential; an explicitly declared alias credential
 overrides only that credential.
 
+A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
+leaves the session pointing at a route nothing owns. That send fails closed with a controlled "model
+alias unavailable" error instead of quietly falling back to another provider; pick the model again to
+store a live route.
+
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts

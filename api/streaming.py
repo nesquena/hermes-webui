@@ -50,6 +50,8 @@ from api.config import (
     apply_custom_provider_connection_authority,
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
+    MODEL_ALIAS_ROUTE_UNRESOLVED,
+    raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
     custom_provider_route_error,
@@ -1543,7 +1545,9 @@ def _custom_provider_route_classification(error) -> dict:
         reason = getattr(error, 'reason', None)
         hint = getattr(error, 'hint', '') or ''
         message = getattr(error, 'message', None) or str(error)
-    if reason == CUSTOM_ROUTE_NO_CREDENTIAL:
+    if reason == MODEL_ALIAS_ROUTE_UNRESOLVED:
+        label = 'Model alias unavailable'
+    elif reason == CUSTOM_ROUTE_NO_CREDENTIAL:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
@@ -10534,6 +10538,16 @@ def _run_agent_streaming(
                     resolved_base_url = _alias_route.get("base_url") or None
                     resolved_api_key = _alias_route.get("api_key") or None
                 else:
+                    # An opaque alias lane that did not resolve (alias deleted,
+                    # owned by another profile, or now targeting a different
+                    # model) is terminal: the digest is not a provider id, so
+                    # falling through to generic provider resolution would let
+                    # the ambient/fallback chain answer a route the session no
+                    # longer owns. Stop before the agent kwargs, before
+                    # _AIAgent(), and before the cache write below; the outer
+                    # handler turns the typed error into a controlled
+                    # provider_unroutable apperror.
+                    raise_for_unresolved_model_alias_route(provider_context)
                     resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                         model_with_provider_context(model, provider_context),
                         explicitly_picked=_explicitly_picked,

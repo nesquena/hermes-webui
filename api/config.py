@@ -3367,6 +3367,11 @@ CUSTOM_SELECTION_UNOWNED = (CUSTOM_SELECTION_MISSING, CUSTOM_SELECTION_MALFORMED
 CUSTOM_ROUTE_UNOWNED = "unowned_custom_provider"
 CUSTOM_ROUTE_NO_CREDENTIAL = "custom_provider_credential_unresolved"
 CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
+# An opaque model-alias lane that no longer resolves to any configured alias
+# (deleted, renamed, owned by another profile, or targeting a different model).
+# Kept beside the custom-provider reasons because it travels the same terminal
+# verdict path: an unresolvable route must stop before any provider routing.
+MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -8166,6 +8171,55 @@ def resolve_model_alias_runtime(
     elif not raw_api_key and resolved.get("key_env"):
         resolved["api_key"] = _thread_local_env_value(resolved["key_env"]).strip()
     return resolved
+
+
+def is_model_alias_route_provider(route_provider: object) -> bool:
+    """True when ``route_provider`` is an opaque model-alias lane.
+
+    True whether or not the lane currently resolves: the lane is a WebUI-minted
+    identity for one alias name, so it identifies the alias route even when the
+    alias was deleted, belongs to another profile, or now targets a different
+    model. Callers use this to keep such a lane out of generic provider
+    resolution, which would read the opaque digest as a provider id.
+    """
+    return str(route_provider or "").strip().lower().startswith(_MODEL_ALIAS_ROUTE_PREFIX)
+
+
+def unresolved_model_alias_route_error() -> dict:
+    """Return the terminal verdict for an alias lane that resolved to nothing."""
+    return {
+        "reason": MODEL_ALIAS_ROUTE_UNRESOLVED,
+        "provider": None,
+        "message": (
+            "This session's model alias is not configured in the active profile: it "
+            "may have been deleted or renamed, or its target model may have changed."
+        ),
+        "hint": (
+            "Pick the model again (the /model command or the model selector), then "
+            "send again."
+        ),
+    }
+
+
+def raise_for_unresolved_model_alias_route(route_provider: object) -> None:
+    """Fail closed when an opaque alias lane no longer resolves.
+
+    No-op for a lane that is not a ``model-alias-*`` route. Otherwise raise the
+    terminal :class:`CustomProviderRouteError` so the caller stops before
+    generic provider resolution, before any AIAgent is constructed, and before
+    the agent cache is written — the opaque digest is not a provider id, and
+    resolving it as one can land on an ambient/fallback endpoint the user never
+    picked. The verdict carries no endpoint, credential, or alias-name detail.
+    """
+    if not is_model_alias_route_provider(route_provider):
+        return
+    verdict = unresolved_model_alias_route_error()
+    raise CustomProviderRouteError(
+        verdict["message"],
+        reason=verdict["reason"],
+        provider=verdict["provider"],
+        hint=verdict["hint"],
+    )
 
 
 def merge_model_alias_runtime_bundle(

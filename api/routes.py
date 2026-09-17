@@ -23456,6 +23456,36 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _server_initiated_turn_routing(session, *, model, model_provider):
+    """Resolve gateway ownership and the alias route for a server-initiated turn.
+
+    ``/api/chat/start`` computes gateway ownership from its request-scoped
+    config snapshot and passes it to ``_start_run`` explicitly; its request
+    thread also carries the profile TLS that makes the alias-lane resolution
+    profile-correct. ``start_session_turn`` (process wakeup) passes neither and
+    runs on a drain thread with no profile TLS, so resolve BOTH here under the
+    owning session's profile scope — otherwise gateway ownership is discovered
+    only later, inside ``_start_chat_stream_for_session``, after the alias-lane
+    conversion that depends on it, and a named profile's ``webui_chat_backend``
+    setting / alias table would be read from the default profile.
+    """
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    if profile_name and not _is_root_profile(profile_name):
+        with profile_scope_for_detached_worker(
+            profile_name,
+            "server-initiated turn routing",
+            logger_override=logger,
+        ):
+            return (
+                webui_gateway_chat_enabled(get_config_snapshot()),
+                api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+            )
+    return (
+        webui_gateway_chat_enabled(get_config_snapshot()),
+        api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+    )
+
+
 def _start_run(
     s,
     *,
@@ -23490,7 +23520,16 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
-    alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
+    if gateway_chat_enabled is None:
+        # Server-initiated turn (start_session_turn): gateway ownership was not
+        # computed by the caller, so resolve it — together with the alias lane —
+        # under the owning session's profile scope BEFORE the alias conversion
+        # below. Explicit True/False from /api/chat/start is preserved unchanged.
+        gateway_chat_enabled, alias_route = _server_initiated_turn_routing(
+            s, model=model, model_provider=model_provider
+        )
+    else:
+        alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
 
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
