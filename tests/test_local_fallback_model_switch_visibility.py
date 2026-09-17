@@ -163,6 +163,86 @@ console.log(JSON.stringify(cases));
     return json.loads(_run_node(source))
 
 
+def _eval_same_label_cases() -> dict:
+    """Evaluate the JS helper with a getModelLabel that collapses provider prefixes.
+
+    The production label function reduces ``@openrouter:anthropic/claude-opus-4.6``
+    and ``@anthropic:claude-opus-4.6`` to the same "claude-opus-4.6" text. This
+    stub mirrors that collapse so the helper's identical-label fallback is
+    exercised without depending on the label tables.
+    """
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {ui_js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function getModelLabel(modelId) {{
+  let m = String(modelId || '');
+  if (m.startsWith('@') && m.includes(':')) m = m.slice(m.indexOf(':') + 1);
+  if (m.includes('/')) m = m.slice(m.lastIndexOf('/') + 1);
+  return m || 'Unknown';
+}}
+function t(key) {{ return ''; }}
+eval(extractFunc('_bareModelId'));
+eval(extractFunc('_localModelSwitchText'));
+eval(extractFunc('_localModelSwitchTitle'));
+const cases = {{
+  // Same model family served by another provider: labels collapse, ids must not.
+  sameLabelDifferentProvider: _localModelSwitchText({{
+    _requestedModel: '@openrouter:anthropic/claude-opus-4.6', _requestedProvider: 'openrouter',
+    _usedModel: '@anthropic:claude-opus-4.6', _usedProvider: 'anthropic',
+  }}),
+  // Bare served id + provider provenance: qualify it so the pair stays distinct.
+  sameLabelBareServed: _localModelSwitchText({{
+    _requestedModel: '@openrouter:anthropic/claude-opus-4.6', _requestedProvider: 'openrouter',
+    _usedModel: 'claude-opus-4.6', _usedProvider: 'anthropic',
+  }}),
+  // Distinct labels keep the label-based copy.
+  differentLabels: _localModelSwitchText({{
+    _requestedModel: '@alibaba:qwen3.8-max', _requestedProvider: 'alibaba',
+    _usedModel: 'deepseek-v4-flash-0731', _usedProvider: 'ollama',
+  }}),
+  // Notation-only difference stays silent.
+  noSwitch: _localModelSwitchText({{
+    _requestedModel: '@anthropic:claude-opus-4.6', _requestedProvider: 'anthropic',
+    _usedModel: 'claude-opus-4.6', _usedProvider: 'anthropic',
+  }}),
+  title: _localModelSwitchTitle(),
+}};
+console.log(JSON.stringify(cases));
+"""
+    return json.loads(_run_node(source))
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_label_provider_failover_falls_back_to_qualified_ids():
+    """A provider failover within one model family must not render "x → x"."""
+    cases = _eval_same_label_cases()
+
+    assert cases["sameLabelDifferentProvider"] == (
+        "Model switched: @openrouter:anthropic/claude-opus-4.6 → @anthropic:claude-opus-4.6"
+    )
+    assert cases["sameLabelBareServed"] == (
+        "Model switched: @openrouter:anthropic/claude-opus-4.6 → @anthropic:claude-opus-4.6"
+    )
+    assert cases["differentLabels"] == "Model switched: qwen3.8-max → deepseek-v4-flash-0731"
+    assert cases["noSwitch"] == ""
+    assert cases["title"] == (
+        "The configured provider failed; a fallback provider served this turn."
+    )
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_gateway_switch_uses_the_same_localized_prefix_as_local_switch():
     """Gateway and local switch notices must not mix English and active-locale copy."""
@@ -411,5 +491,150 @@ def test_real_footer_render_keeps_long_colon_tagged_switch_visible_and_contained
         assert rendered["rect"]["left"] >= rendered["foot"]["left"] - 1
         assert rendered["rect"]["right"] <= rendered["foot"]["right"] + 1
         assert rendered["foot"]["scrollWidth"] <= rendered["foot"]["clientWidth"] + 1
+    finally:
+        page.close()
+
+
+_RENDER_FOOTER_JS = """(msg) => {
+  S.session = {session_id: 'provider-failover-render-proof', model: msg._requestedModel || '', model_provider: msg._requestedProvider || ''};
+  S.messages = [
+    {role: 'user', content: 'render the fallback warning'},
+    Object.assign({role: 'assistant', content: 'Rendered answer'}, msg),
+  ];
+  S.toolCalls = [];
+  S.busy = false;
+  renderMessages();
+  const warning = document.querySelector('.msg-model-warning-inline');
+  if (!warning) return {missing: true, count: 0};
+  return {
+    missing: false,
+    count: document.querySelectorAll('.msg-model-warning-inline').length,
+    text: warning.textContent,
+    title: warning.title,
+    ariaDescription: warning.getAttribute('aria-description'),
+  };
+}"""
+
+
+def test_real_footer_render_same_label_provider_failover_shows_distinct_ids_and_why(
+    browser, base_url
+):
+    """Production ``renderMessages()`` + real ``getModelLabel()`` on the gate case.
+
+    Requested ``@openrouter:anthropic/claude-opus-4.6`` served by
+    ``@anthropic:claude-opus-4.6`` must not render "claude-opus-4.6 →
+    claude-opus-4.6" with an empty title.
+    """
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof renderMessages === 'function' && !!document.querySelector('#msgInner')",
+            timeout=15000,
+        )
+        rendered = page.evaluate(
+            _RENDER_FOOTER_JS,
+            {
+                "_requestedModel": "@openrouter:anthropic/claude-opus-4.6",
+                "_requestedProvider": "openrouter",
+                "_usedModel": "@anthropic:claude-opus-4.6",
+                "_usedProvider": "anthropic",
+                "_modelSwitched": True,
+            },
+        )
+        assert rendered["missing"] is False, "provider failover warning did not render"
+        assert rendered["count"] == 1
+        assert rendered["text"] == (
+            "Model switched: @openrouter:anthropic/claude-opus-4.6 → @anthropic:claude-opus-4.6"
+        )
+        assert rendered["title"] == (
+            "The configured provider failed; a fallback provider served this turn."
+        )
+        assert rendered["ariaDescription"] == rendered["title"]
+    finally:
+        page.close()
+
+
+def test_real_footer_render_distinct_labels_keep_label_copy_with_why(browser, base_url):
+    """A genuine model change keeps the readable label pair and gains the title."""
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof renderMessages === 'function' && !!document.querySelector('#msgInner')",
+            timeout=15000,
+        )
+        rendered = page.evaluate(
+            _RENDER_FOOTER_JS,
+            {
+                "_requestedModel": "@alibaba:qwen3.8-max",
+                "_requestedProvider": "alibaba",
+                "_usedModel": "deepseek-v4-flash-0731",
+                "_usedProvider": "ollama",
+                "_modelSwitched": True,
+            },
+        )
+        assert rendered["missing"] is False
+        assert rendered["count"] == 1
+        assert rendered["text"].startswith("Model switched: ")
+        assert "→" in rendered["text"]
+        assert "@" not in rendered["text"], "distinct labels must not fall back to raw ids"
+        assert rendered["title"] == (
+            "The configured provider failed; a fallback provider served this turn."
+        )
+    finally:
+        page.close()
+
+
+def test_real_footer_render_no_switch_renders_no_warning(browser, base_url):
+    """Notation-only difference on the same provider renders no warning at all."""
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof renderMessages === 'function' && !!document.querySelector('#msgInner')",
+            timeout=15000,
+        )
+        rendered = page.evaluate(
+            _RENDER_FOOTER_JS,
+            {
+                "_requestedModel": "@anthropic:claude-opus-4.6",
+                "_requestedProvider": "anthropic",
+                "_usedModel": "claude-opus-4.6",
+                "_usedProvider": "anthropic",
+            },
+        )
+        assert rendered["missing"] is True
+        assert rendered["count"] == 0
+    finally:
+        page.close()
+
+
+def test_real_footer_render_gateway_warning_keeps_its_own_copy(browser, base_url):
+    """The gateway-owned notice is untouched: no local-fallback title is attached."""
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof renderMessages === 'function' && !!document.querySelector('#msgInner')",
+            timeout=15000,
+        )
+        rendered = page.evaluate(
+            _RENDER_FOOTER_JS,
+            {
+                "_requestedModel": "@anthropic:claude-opus-5",
+                "_usedModel": "claude-sonnet-5",
+                "_gatewayRouting": {
+                    "model_changed": True,
+                    "requested_model": "@anthropic:claude-opus-5",
+                    "used_model": "claude-sonnet-5",
+                },
+            },
+        )
+        assert rendered["missing"] is False
+        assert rendered["count"] == 1
+        assert rendered["text"].startswith("Model switched: ")
+        assert rendered["title"] == ""
+        assert rendered["ariaDescription"] is None
     finally:
         page.close()
