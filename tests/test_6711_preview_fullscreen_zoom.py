@@ -646,3 +646,50 @@ def test_an_explicit_zoom_still_overrides_the_app_font_size():
         "the user's explicit zoom must keep overriding a later app-font change, "
         f"got {r['after']['computed']!r}"
     )
+
+
+# ── Fullscreen must neutralise the panel's own inline-size container ─────────
+#
+# `.rightpanel` is `container-type:inline-size` with a named container, and the
+# preview header has `@container rightpanel (max-width:520px)` rules that drop
+# button labels on a narrow PANE. Fullscreen covers the viewport, so those
+# narrow-pane rules must stop applying — otherwise a fullscreen preview on a
+# phone hides the header's button labels even though there is a full screen of
+# width available. `.rightpanel.preview-fullscreen` therefore sets
+# `container-type:normal`.
+#
+# Without this pinned, the property looks like an arbitrary declaration and is
+# an easy thing to "clean up" — which silently reintroduces the collapsed
+
+
+def test_fullscreen_neutralises_the_panel_container_for_narrow_panes():
+    """The fullscreen rule must drop the panel's inline-size containment."""
+    css = _read(STYLE_CSS_PATH)
+    rule = re.search(r"\.rightpanel\.preview-fullscreen\{([^}]*)\}", css)
+    assert rule, ".rightpanel.preview-fullscreen rule missing"
+    body = rule.group(1).replace(" ", "")
+    assert "container-type:normal" in body, (
+        "the fullscreen rule must set container-type:normal: .rightpanel is an "
+        "inline-size container and the preview header's @container rightpanel "
+        "(max-width:520px) rules would otherwise keep hiding button labels in "
+        "fullscreen, where the panel is as wide as the viewport"
+    )
+    assert "position:fixed" in body, "fullscreen must still cover the viewport"
+    assert "100vw" in body and "100dvh" in body, (
+        "fullscreen must still span the viewport (100vw / 100dvh)"
+    )
+
+
+def test_the_narrow_pane_container_rule_actually_exists():
+    """Pin the rule the neutralisation exists for, so the pair cannot drift."""
+    css = _read(STYLE_CSS_PATH)
+    assert "@container rightpanel (max-width:520px)" in css, (
+        "the narrow-pane @container rule is gone; if the panel no longer has "
+        "width-based rules, container-type:normal in fullscreen may be removable "
+        "— revisit both together"
+    )
+    m = re.search(r"@container rightpanel \(max-width:520px\)\{([^}]*)\}", css)
+    assert m and "display:none" in m.group(1), (
+        "the narrow-pane rule no longer hides anything, so the fullscreen "
+        "neutralisation needs re-justifying"
+    )
