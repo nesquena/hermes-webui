@@ -7676,6 +7676,100 @@ def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
     return False
 
 
+def _stored_provider_can_legitimately_own_model(
+    stored_provider: str, profile_config: dict | None = None
+) -> bool:
+    """Return True when a catalog absence is not evidence against ownership.
+
+    Self-hosted, local-server, plugin, and custom-endpoint providers serve
+    arbitrary local/external models that never appear in any catalog (vLLM,
+    llama.cpp, TabbyAPI, or llama-server behind a named ``custom_providers``
+    entry need no API key), so a missing model there does not prove the
+    stored provider is stale (#7585 review; #5731 fail-safe). A profile that
+    configures ``providers.<id>.base_url`` likewise declares that the OpenAI-
+    compatible endpoint owns its models regardless of catalog/key presence
+    (PR #7594 review, CORE). Every lookup keeps an ``except: return True``
+    fail-safe so an unexpected config shape never clears a lane.
+    """
+    provider = str(stored_provider or "").strip().lower()
+    if provider in _SELF_HOSTED_PROVIDER_IDS:
+        return True
+    if provider == "custom" or provider.startswith("custom:"):
+        return True
+    try:
+        from api.config import _is_local_server_provider
+
+        if _is_local_server_provider(provider):
+            return True
+    except Exception:
+        return True
+    if provider and isinstance(profile_config, dict):
+        try:
+            providers_cfg = profile_config.get("providers")
+            if isinstance(providers_cfg, dict):
+                entry = providers_cfg.get(provider)
+                if isinstance(entry, dict) and str(entry.get("base_url") or "").strip():
+                    return True
+        except Exception:
+            return True
+        # PR #7594 review P1 follow-up: a profile may declare the local endpoint at
+        # the TOP level (FAQ-documented shape ``model: {provider: ..., base_url:
+        # http://127.0.0.1:...}``) rather than nested under ``providers.<id>``. The
+        # top-level URL is ownership evidence ONLY for its configured
+        # ``model.provider``: a loopback/private URL configured for provider X must
+        # not protect an unrelated stored provider Y from the stale repair (Greptile
+        # P1). A missing ``model.provider`` therefore evidences nobody; public
+        # relay-style URLs stay non-evidence (boundary guard).
+        try:
+            from api.config import _base_url_points_at_local_server
+
+            model_cfg = profile_config.get("model")
+            if isinstance(model_cfg, dict):
+                configured_provider = str(model_cfg.get("provider") or "").strip().lower()
+                top_base_url = str(model_cfg.get("base_url") or "").strip()
+                if (
+                    configured_provider == provider
+                    and top_base_url
+                    and _base_url_points_at_local_server(top_base_url)
+                ):
+                    return True
+        except Exception:
+            return True
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+
+        if _named_custom_provider_slug_for_provider(provider):
+            return True
+    except Exception:
+        return True
+    try:
+        return bool(is_plugin_model_provider(provider))
+    except Exception:
+        return True
+
+
+def _catalog_evidence_is_incomplete(catalog: dict, groups: list[dict]) -> bool:
+    """Return True when the catalog cannot prove anything about ownership.
+
+    A cold/emergency minimal catalog lists only the active provider's
+    default model, and an errored group never discovered anything —
+    neither may clear a stale provider (#7585 and its review).
+    """
+    if catalog.get("catalog_minimal"):
+        return True
+    for group in groups:
+        if group.get("models_endpoint_error"):
+            return True
+    return False
+
+
+def _stored_provider_has_live_credential(stored_provider: str) -> bool:
+    try:
+        return bool(provider_has_usable_credential(stored_provider))
+    except Exception:
+        return True
+
+
 def _repair_foreign_session_model_provider(
     session,
     *,
@@ -7685,6 +7779,7 @@ def _repair_foreign_session_model_provider(
     resolved_provider: str | None,
     explicit_model_pick: bool,
     profile_provider: str | None,
+    profile_config: dict | None = None,
 ) -> str | None:
     """Repair a stale provider only when the cached catalog names one owner."""
     stored_model = str(getattr(session, "model", "") or "").strip()
@@ -7724,11 +7819,26 @@ def _repair_foreign_session_model_provider(
         if str(group.get("provider_id") or "").strip().lower() == stored_provider
     ]
     if (
-        not stored_groups
-        or any(group.get("models_endpoint_error") for group in stored_groups)
+        any(group.get("models_endpoint_error") for group in stored_groups)
         or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
     ):
         return resolved_provider
+    if not stored_groups:
+        # A missing stored group used to preserve the lane unconditionally,
+        # which let a stale catalog-backed provider (e.g. "openrouter" left on
+        # a session after moving to another provider without an OpenRouter
+        # key) survive into every agent construction and re-trigger paid
+        # fallback probes (#7585). A catalog-backed provider is expected to
+        # have a group even with zero credentials, so its absence plus
+        # complete catalog evidence proves non-ownership. Self-hosted/plugin
+        # providers may legitimately own unlisted models, and an incomplete
+        # or credential-live stored lane stays fail-safe preserved (#5731).
+        if _stored_provider_can_legitimately_own_model(stored_provider, profile_config):
+            return resolved_provider
+        if _catalog_evidence_is_incomplete(catalog, groups):
+            return resolved_provider
+        if _stored_provider_has_live_credential(stored_provider):
+            return resolved_provider
     owners = [
         group
         for group in groups
@@ -12447,10 +12557,13 @@ from api.run_journal import (
 )
 from api.todo_state import attach_todo_state
 from api.providers import (
+    _SELF_HOSTED_PROVIDER_IDS,
     get_providers,
     get_provider_quota,
     get_provider_cost_history,
+    is_plugin_model_provider,
     provider_has_process_wakeup_recovery_credential,
+    provider_has_usable_credential,
     set_provider_key,
     remove_provider_key,
 )
@@ -28707,6 +28820,7 @@ def _handle_chat_start(handler, body, diag=None):
             resolved_provider=model_provider,
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
+            profile_config=_pp_cfg,
         )
         if model_provider == "moa" and gateway_chat_enabled:
             from api.config import get_effective_default_model
