@@ -2944,7 +2944,41 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 # the _run_agent_streaming thread (concurrent tool batches use
 # contextvars.copy_context() so children inherit this binding); binding the
 # context-local here makes the capture task/thread-local and race-immune.
-def _set_turn_session_identity(session_id: str, workspace: str = ""):
+_KANBAN_ORIGIN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "webui_kanban_origin", default=""
+)
+_KANBAN_ORIGIN_WRAPPER_LOCK = threading.Lock()
+
+
+def _install_streaming_kanban_origin_wrapper() -> None:
+    """Supply the trusted WebUI origin to older agent Kanban handlers.
+
+    Those handlers accept session_id internally but otherwise read os.environ.
+    Keep the adapter scoped to WebUI turns; do not change schemas or non-WebUI
+    callers, and never mutate the model's argument dictionary.
+    """
+    try:
+        from tools.registry import registry
+        import tools.kanban_tools  # noqa: F401
+    except ImportError:
+        return  # Kanban is optional on older agent installations.
+    with _KANBAN_ORIGIN_WRAPPER_LOCK:
+        entry = registry.get_entry("kanban_create")
+        if entry is None or getattr(entry.handler, "_webui_kanban_origin", False):
+            return
+        original = entry.handler
+
+        def handler(args, **kwargs):
+            sid = _KANBAN_ORIGIN.get()
+            if sid:
+                args = {**args, "session_id": sid}
+            return original(args, **kwargs)
+
+        handler.__dict__["_webui_kanban_origin"] = True
+        entry.handler = handler
+
+
+def _set_turn_session_identity(session_id: str, workspace: str = "", profile: str = "default"):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
@@ -2972,16 +3006,37 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         concurrent turns overwrite; this contextvar is task-local, so it is
         race-immune for exactly the reason the three bindings above are.
 
-    It deliberately does NOT call ``gateway.session_context.set_session_vars``:
-    that blanket setter also zeroes the platform/chat_id/user contextvars,
-    flipping ``HERMES_SESSION_PLATFORM`` from its env fallback (``'webui'``,
-    still written to os.environ at turn-start) to an explicit ``""`` — which
-    would break the ``notify_on_complete`` watcher registration gate.
+    Routing fields are bound explicitly rather than through the blanket gateway
+    setter: reset tokens preserve nesting and do not clear unrelated context.
+    Empty topic/user fields mask stale routing metadata from other transports.
     """
     sid = str(session_id or "")
-    tokens: dict = {}
+    tokens: dict = {"kanban_origin": _KANBAN_ORIGIN.set(sid)}
     try:
-        from tools.approval import set_current_session_key
+        from gateway import session_context as sc
+        values = {
+            "_SESSION_PLATFORM": "webui", "_SESSION_SOURCE": "webui",
+            "_SESSION_CHAT_ID": sid, "_SESSION_ID": sid,
+            "_SESSION_PROFILE": str(profile or "default"),
+            "_SESSION_CHAT_TYPE": "dm", "_SESSION_THREAD_ID": "",
+            "_SESSION_USER_ID": "", "_SESSION_USER_ID_ALT": "",
+            "_SESSION_SCOPE_ID": "", "_SESSION_PARENT_CHAT_ID": "",
+            "_SESSION_MESSAGE_ID": "",
+        }
+        tokens["routing"] = []
+        for name, value in values.items():
+            var = getattr(sc, name, None)
+            if var is not None:
+                tokens["routing"].append((var, var.set(value)))
+    except ImportError:
+        logger.debug("per-turn gateway routing context unavailable", exc_info=True)
+    try:
+        try:
+            from tools.approval_context import set_current_session_key
+        except ModuleNotFoundError as exc:
+            if exc.name != "tools.approval_context":
+                raise
+            from tools.approval import set_current_session_key
         tokens["approval"] = set_current_session_key(sid)
     except Exception:
         logger.debug("per-turn approval session-key bind failed", exc_info=True)
@@ -3043,10 +3098,19 @@ def _reset_turn_session_identity(tokens) -> None:
     tok = tokens.get("approval")
     if tok is not None:
         try:
-            from tools.approval import reset_current_session_key
+            try:
+                from tools.approval_context import reset_current_session_key
+            except ModuleNotFoundError as exc:
+                if exc.name != "tools.approval_context":
+                    raise
+                from tools.approval import reset_current_session_key
             reset_current_session_key(tok)
         except Exception:
             logger.debug("per-turn approval session-key reset failed", exc_info=True)
+    for var, token in reversed(tokens.get("routing", [])):
+        var.reset(token)
+    if "kanban_origin" in tokens:
+        _KANBAN_ORIGIN.reset(tokens["kanban_origin"])
 
 
 @contextlib.contextmanager
@@ -9641,7 +9705,8 @@ def _run_agent_streaming(
             _turn_workspace_cwd = ""
             logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
         _turn_session_identity_tokens = _set_turn_session_identity(
-            session_id, workspace=_turn_workspace_cwd
+            session_id, workspace=_turn_workspace_cwd,
+            profile=getattr(s, 'profile', None) or 'default',
         )
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
@@ -9778,6 +9843,7 @@ def _run_agent_streaming(
         ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
+        _install_streaming_kanban_origin_wrapper()
 
         # Full-turn serialization is only needed for static/legacy skill-module
         # resolution, where process-global skill-module globals are still used.

@@ -153,9 +153,8 @@ def test_turn_identity_binder_restores_previous_value():
     """Restore uses contextvars reset-token semantics (the canonical idiom),
     NOT a blanket clear_session_vars: it composes correctly under nesting and
     restores _UNSET for the top-level turn so CLI/cron env-fallback compat is
-    preserved, and it must NOT touch the platform/chat_id/user session vars
-    (those keep their env fallback so the notify_on_complete watcher
-    registration that reads HERMES_SESSION_PLATFORM still works)."""
+    preserved. Within the turn platform is explicitly webui, so background
+    watcher registration works without reading another turn's environment."""
     streaming = importlib.import_module("api.streaming")
     pytest.importorskip("tools.approval", reason="hermes-agent not installed")
     from tools.approval import get_current_session_key
@@ -172,8 +171,8 @@ def test_turn_identity_binder_restores_previous_value():
         # Reset-token restores the OUTER value (composes under nesting),
         # it does NOT clear to "".
         assert get_current_session_key(default="") == "sid-outer"
-        # The binder must never disturb the other session vars.
-        assert sc._SESSION_PLATFORM.get() is sc._UNSET
+        # Routing remains bound to the outer WebUI turn.
+        assert sc._SESSION_PLATFORM.get() == "webui"
     # Full exit restores _UNSET → env fallback resumes (CLI/cron compat).
     assert sc._SESSION_KEY.get() is sc._UNSET
     assert sc._SESSION_PLATFORM.get() is sc._UNSET

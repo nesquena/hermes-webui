@@ -82,6 +82,7 @@ STATE_DIR = (
     .expanduser()
     .resolve()
 )
+KANBAN_WEBUI_WAKE_STATE_FILE = STATE_DIR / "kanban_webui_wake_state.json"
 
 SESSION_DIR = STATE_DIR / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
