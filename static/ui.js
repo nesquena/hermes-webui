@@ -5270,7 +5270,27 @@ function _localModelSwitchText(msg, requestedModel){
   if(usedId===requestedId&&!provenanceContradicts)return'';
   // _bareModelId removes only the @provider: routing notation. A remaining slash
   // namespace is identity-bearing, even when the other id has the same basename.
-  return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
+  const prefix=`${t('model_switched')||'Model switched'}: `;
+  const requestedLabel=getModelLabel(requested);
+  const usedLabel=getModelLabel(used);
+  if(String(requestedLabel).toLowerCase()!==String(usedLabel).toLowerCase()){
+    return`${prefix}${requestedLabel} → ${usedLabel}`;
+  }
+  // A provider failover can keep the model family (@openrouter:anthropic/x
+  // served by @anthropic:x): the switch is real, but both display labels
+  // collapse to the same text and "x → x" would explain nothing. Fall back
+  // to provider-qualified (or bare) ids that preserve the distinction.
+  const qualify=(modelId,providerId)=>{
+    const m=String(modelId||'').trim();
+    const provider=String(providerId||'').trim();
+    return(m.charAt(0)!=='@'&&provider)?`@${provider}:${m}`:m;
+  };
+  return`${prefix}${qualify(requested,msg._requestedProvider)} → ${qualify(used,msg._usedProvider)}`;
+}
+function _localModelSwitchTitle(){
+  // Hover/assistive explanation for the LOCAL fallback notice: the label pair
+  // says what changed, this says why.
+  return t('model_switched_fallback_title')||'The configured provider failed; a fallback provider served this turn.';
 }
 function _reasoningEffortContext(){
   const transition=_profileTransitionReasoningContext;
@@ -18123,7 +18143,8 @@ function renderMessages(options){
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing)||_localModelSwitchText(msg);
+      const gatewayWarningText=_gatewayModelWarningText(routing);
+      const modelWarningText=gatewayWarningText||_localModelSwitchText(msg);
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -18142,6 +18163,13 @@ function renderMessages(options){
         const warning=document.createElement('span');
         warning.className='msg-model-warning-inline';
         warning.textContent=modelWarningText;
+        if(!gatewayWarningText){
+          // Local fallback: the visible pair says what changed; explain why on
+          // hover and to assistive tech. Gateway notices keep their own copy.
+          const why=_localModelSwitchTitle();
+          warning.title=why;
+          warning.setAttribute('aria-description',why);
+        }
         fragments.push(warning);
       }
       if(failoverText){
