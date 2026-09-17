@@ -675,3 +675,66 @@ def test_chat_start_repairs_stale_lane_declared_with_underscore(
     assert provider_before == "my_local"
     assert captured["model_provider"] == "nous", captured["model_provider"]
     assert provider_after == "nous", provider_after
+
+
+def _capture_provider_saves(monkeypatch):
+    """Observe the provider handed to session.save by real chat preparation."""
+    saved = []
+    prepare = routes._prepare_chat_start_session_for_stream
+
+    def capture_save(session, **kwargs):
+        session.save = lambda: saved.append(session.model_provider)
+        return prepare(session, **kwargs)
+
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", capture_save)
+    return saved
+
+
+def test_chat_start_preserves_underscore_named_custom_provider_and_saves(
+    monkeypatch, tmp_path, no_provider_credentials, no_plugin_providers
+):
+    """#7594 review: raw custom names survive absent credentials/catalog groups."""
+    import api.config as config
+
+    profile = {
+        "model": {"provider": "nous"},
+        "custom_providers": [
+            {"name": "my_local", "base_url": "http://127.0.0.1:8080/v1"},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", profile)
+    saved = _capture_provider_saves(monkeypatch)
+    captured, after, before = _run_chat_start_local_lane(
+        monkeypatch, tmp_path, session_id="issue-7594-raw-custom",
+        provider="my_local", profile_cfg=profile,
+    )
+
+    assert before == "my_local"
+    assert (captured["model_provider"], after, saved) == (
+        "my_local", "my_local", ["my_local"],
+    )
+
+
+def test_chat_start_preserves_underscore_plugin_provider_and_saves(
+    monkeypatch, tmp_path, no_provider_credentials
+):
+    """#7594 review: a registered raw plugin id must not become a foreign lane."""
+    import api.config as config
+    import api.plugin_providers as plugins
+
+    profile = {"model": {"provider": "nous"}, "custom_providers": []}
+    monkeypatch.setattr(config, "cfg", profile)
+    monkeypatch.setattr(
+        plugins, "plugin_model_provider_profiles",
+        lambda: {"plugin_x": SimpleNamespace(name="plugin_x")},
+    )
+    saved = _capture_provider_saves(monkeypatch)
+    captured, after, before = _run_chat_start_local_lane(
+        monkeypatch, tmp_path, session_id="issue-7594-raw-plugin",
+        provider="plugin_x", profile_cfg=profile,
+    )
+
+    assert before == "plugin_x"
+    assert (captured["model_provider"], after, saved) == (
+        "plugin_x", "plugin_x", ["plugin_x"],
+    )
