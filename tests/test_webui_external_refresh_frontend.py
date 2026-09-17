@@ -130,7 +130,9 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "_sessionEventsNeedsRefreshOnOpen = false" in SESSIONS_JS
     assert "void refreshSessionList(reason, {force:true})" in SESSIONS_JS
     assert "function ensureSessionEventsSSE()" in SESSIONS_JS
-    assert "new EventSource('api/sessions/events')" in SESSIONS_JS
+    # Opened through the shared tab-context helper (#6559) so the stream
+    # resolves to this tab's profile rather than the browser-wide cookie.
+    assert "_tabContextEventSource('api/sessions/events')" in SESSIONS_JS
     assert "addEventListener('sessions_changed'" in SESSIONS_JS
     assert "function _scheduleSessionEventsRefresh(reason, opts={})" in SESSIONS_JS
     assert "let _sessionEventsRefreshPendingRequest = null;" in SESSIONS_JS

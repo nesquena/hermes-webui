@@ -102,7 +102,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // API and streaming endpoints — always go to network.
+  // API and streaming endpoints — always go to network. This is also why the
+  // service worker needs no per-tab profile context (#6559): it never handles
+  // a profile-sensitive request, and a worker has no sessionStorage to read a
+  // tab's token from in any case.
   // The WebUI may be mounted under a subpath such as /hermes/, so API
   // requests can look like /hermes/api/sessions rather than /api/sessions.
   if (

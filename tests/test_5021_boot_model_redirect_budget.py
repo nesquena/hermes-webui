@@ -214,6 +214,11 @@ function installGlobals(select, redirects, fetchQueue, jsonCalls) {
     }
     return next.response;
   };
+  // populateModelDropdown() (ui.js) requests through _profileFetch() (#6559),
+  // the delegator that routes to workspace.js's tab-context transport when it
+  // is loaded. This harness has none, so it falls back to the fetch() stub
+  // above exactly as the real _profileFetch() does.
+  globalThis._profileFetch = (url, opts) => globalThis.fetch(url, opts);
 }
 
 const bootBlock = extractBlock(

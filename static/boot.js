@@ -32,7 +32,7 @@ async function cancelStream(reason){
   let respBody=null;
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await _tabContextFetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
@@ -75,7 +75,7 @@ async function cancelSessionStream(session){
   }
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await _tabContextFetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
@@ -858,7 +858,7 @@ function _micToastKeyForRecognitionError(error){
     // BEFORE _setRecording(false) clears _prefix (async server STT path).
     setComposerStatus('Transcribing…');
     try{
-      const res=await fetch('api/transcribe',{method:'POST',body:form});
+      const res=await _tabContextFetch(new URL('api/transcribe',document.baseURI||location.href).href,{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
       if(!res.ok){
         const err=new Error(data.error||'Transcription failed');
@@ -1091,7 +1091,7 @@ function _micToastKeyForRecognitionError(error){
   async function _probeServerSttCapability(){
     if(!_canRecordAudio||_micForceMediaRecorderStored!==null) return;
     try{
-      const res=await fetch('api/transcribe/capability',{cache:'no-store'});
+      const res=await _tabContextFetch(new URL('api/transcribe/capability',document.baseURI||location.href).href,{cache:'no-store'});
       const data=await res.json().catch(()=>({}));
       if(res.ok&&data&&data.available){
         _serverSttAvailable=true;
@@ -1812,7 +1812,7 @@ window.renderTranscript=function(container, messages, opts){
     }
     if(engine==="elevenlabs"){
       _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      _tabContextFetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, engine: 'elevenlabs'})
@@ -1852,7 +1852,7 @@ window.renderTranscript=function(container, messages, opts){
     }
     if(engine==="openai"){
       _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      _tabContextFetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, engine: 'openai'})
@@ -1898,7 +1898,7 @@ window.renderTranscript=function(container, messages, opts){
       if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
       if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
       _ttsSpeaking=true;
-      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      _tabContextFetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, voice, rate, pitch})
@@ -3276,6 +3276,41 @@ function _mirrorSpeechSettingsFromServer(s){
 window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 
 (async()=>{
+  // ── #6559 tab-context binding — settled before anything profile-sensitive ─
+  // The binding itself starts at workspace.js parse time, earlier than this
+  // IIFE and earlier than panels.js's parse-time version-skew check; api()
+  // awaits it, so no request can overtake it. Boot's job here is to act on the
+  // verdict before it runs the rest of the page.
+  //
+  // Fail-closed: if the tab could not be bound, boot STOPS. Continuing would
+  // run the whole page under the browser-wide cookie's profile behind a URL
+  // that names a different one — the failure this ordering exists to prevent.
+  // Two exceptions: a target the server does not know (a typed URL) binds to
+  // this tab's own profile and warns, exactly as a malformed ?profile= value
+  // already did, and an unauthenticated tab carries on to the 401 → login
+  // redirect it would have hit anyway.
+  const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
+  let _bootProfileTargetUnknown=false;
+  // True when this tab bound itself to a profile OTHER than the one the
+  // browser-wide cookie names. The saved session in localStorage is
+  // browser-wide and belongs to that other profile (#5682).
+  let _bootBoundToDifferentProfile=false;
+  if(typeof _tabContextBootBindingResult==='function'){
+    let bound=null;
+    try{bound=await _tabContextBootBindingResult();}catch(e){console.warn('[boot] tab-context binding threw',e);}
+    if(bound&&!bound.ok&&bound.reason!=='unauthenticated'){
+      console.error('[boot] could not bind this tab to a profile context; stopping boot');
+      _showTabContextBootFailure();
+      return;
+    }
+    if(bound&&bound.targetUnknown){
+      console.warn('[boot] unknown profile in query', bound.target);
+      _bootProfileTargetUnknown=true;
+    }
+    if(bound&&bound.target&&!bound.targetUnknown&&bound.previousProfile&&bound.boundProfile){
+      _bootBoundToDifferentProfile=bound.boundProfile!==bound.previousProfile;
+    }
+  }
   // Load send key preference
   let _bootSettings={};
   const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
@@ -3620,15 +3655,20 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
-  const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
   const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
   const _profileSwitchProfileBefore=S.activeProfile||'default';
   const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
   let _profileSwitchCompleted=false;
   let _profileSwitchChangedProfile=false;
+  // The tab is already bound to the target (top of this IIFE), so for the
+  // ordinary new-tab case S.activeProfile is ALREADY the target and
+  // switchToProfile() self-cancels — its flags stay honest about whether it
+  // actually moved the tab. The call is kept for the paths where the resolved
+  // profile still differs from the target (e.g. a server that pinned this tab
+  // elsewhere), where the in-place switch — and its rebind — is what is needed.
   if(profileIntent&&profileIntent.hasParam){
     try{
-      if(profileIntent.valid){
+      if(profileIntent.valid&&!_bootProfileTargetUnknown){
         if(typeof switchToProfile==='function'){
           _profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;
           if(_profileSwitchCompleted){
@@ -3637,11 +3677,25 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           }
         }
       }else{
-        console.warn('[boot] ignored invalid profile query', profileIntent.name);
+        // Either a malformed name or one the server does not know: the tab is
+        // bound to its own profile, so drop the parameter and boot normally.
+        if(!_bootProfileTargetUnknown) console.warn('[boot] ignored invalid profile query', profileIntent.name);
         if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
       }
     }catch(e){
       console.warn('[boot] profile query switch failed', e);
+    }
+  }
+  // Re-assert the binding (#6559) after the switch above: switchToProfile()
+  // rebinds when it moves the tab, but a switch that failed part-way must not
+  // leave the tab holding a token for a profile it is no longer running as.
+  // Cheap in the common case — an already-correct binding is kept as-is.
+  if(typeof _ensureTabContextForBoot==='function'){
+    const _rebound=await _ensureTabContextForBoot(S.activeProfile||'default');
+    if(!_rebound.ok){
+      console.error('[boot] lost this tab\'s profile context; stopping boot');
+      _showTabContextBootFailure();
+      return;
     }
   }
   if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
@@ -3759,7 +3813,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
-  if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
+  // Either the tab switched profile in place, or it booted straight into a
+  // profile the browser-wide cookie does not name — both mean the saved
+  // session in localStorage belongs to a different profile than this tab.
+  if(_profileQueryBlocksSavedLocal&&((_profileSwitchCompleted&&_profileSwitchChangedProfile)||_bootBoundToDifferentProfile)){
     try{
       if(localStorage.getItem('hermes-webui-session')===_savedLocalBeforeProfileSwitch) localStorage.removeItem('hermes-webui-session');
     }catch(_){}
@@ -3931,6 +3988,20 @@ async function shutdownServer() {
   try { var bc = new BroadcastChannel('hermes-webui-shutdown'); bc.postMessage('stop'); bc.close(); } catch(_) {}
   _showServerStopped();
   try { await api('/api/shutdown', { method: 'POST' }); } catch (_) {}
+}
+
+// #6559 fail-closed boot stop. Reached only when this tab cannot obtain a
+// profile context: continuing would run every request under the browser-wide
+// cookie, i.e. as whichever profile another tab last selected, behind a URL
+// that names a different one. Showing nothing and doing nothing is the safe
+// outcome; a reload retries the binding.
+function _showTabContextBootFailure() {
+  var msg = (typeof t === 'function'
+    ? t('profile_context_boot_failed')
+    : 'Could not start this tab under the requested profile. Reload the page to try again.');
+  try {
+    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:var(--font-ui);font-size:14px;padding:24px;text-align:center"><p>' + msg + '</p></div>';
+  } catch (_) {}
 }
 
 function _showServerStopped() {

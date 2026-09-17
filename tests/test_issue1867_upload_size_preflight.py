@@ -53,7 +53,7 @@ def test_pending_uploads_skip_fetch_for_oversize_files():
 
     size_gate = body.index("f&&f.size>MAX_UPLOAD_BYTES")
     form_data = body.index("const fd=new FormData()")
-    upload_fetch = body.index("fetch(url")
+    upload_fetch = body.index("_profileFetch(url")
 
     assert size_gate < form_data < upload_fetch
     assert "throw new Error(_uploadTooLargeMessage(f))" in body[size_gate:form_data]

@@ -527,6 +527,9 @@ class FakeEventSource {
   close(){ this.readyState=2; }
 }
 global.EventSource=FakeEventSource;
+// attachLiveStream opens streams through the shared tab-context helper (#6559)
+// so every SSE URL carries this tab's profile context.
+global._tabContextEventSource=(url,opts)=>new FakeEventSource(url,opts);
 
 const attachStart=messagesSrc.indexOf('function attachLiveStream(');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);

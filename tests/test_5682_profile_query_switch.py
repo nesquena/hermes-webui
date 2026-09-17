@@ -151,7 +151,7 @@ global.switchToProfile = async (name) => {
   const consumePos = bootSrc.indexOf("if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();", profilePos);
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
-  const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", profilePos);
+  const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&((_profileSwitchCompleted&&_profileSwitchChangedProfile)||_bootBoundToDifferentProfile)){", profilePos);
   const initialReasoningFetchPos = bootSrc.indexOf("if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();", profilePos);
   console.log(JSON.stringify({ intent, switched, promoted, afterProfile, afterPrefill, historyCalls: window.history.calls, profilePos, renderPos, savedPos, loadPos, consumePos, completedPos, changedPos, cleanupGuardPos, initialReasoningFetchPos, savedLocalBefore, savedLocalAfterSuppress, savedLocalAfterReload, blocksSavedLocal, keepsExplicitSession }));
 })().catch(err => {
@@ -248,7 +248,7 @@ global.switchToProfile = async () => true;
   }
   const blocksSavedLocal = _profileQueryBlocksSavedLocalRestore(intent, null);
   if (blocksSavedLocal && profileSwitchCompleted && profileSwitchChangedProfile && localStorage.getItem('hermes-webui-session') === savedLocalBefore) localStorage.removeItem('hermes-webui-session');
-  const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", bootSrc.indexOf("const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;"));
+  const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&((_profileSwitchCompleted&&_profileSwitchChangedProfile)||_bootBoundToDifferentProfile)){", bootSrc.indexOf("const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;"));
   console.log(JSON.stringify({
     intent,
     blocksSavedLocal,
@@ -830,3 +830,114 @@ console.log(JSON.stringify({{
     assert payload["lastKey"] == "?model=claude-sonnet&provider=anthropic"
     assert payload["clearPos"] >= 0
     assert payload["clearPos"] < payload["noSessionSyncPos"]
+
+
+# ── #6559: profile tab URL helper ──────────────────────────────────────────
+
+def test_profile_tab_url_isolates_the_target_profile_and_carries_no_tab_context():
+    """A profile link names the TARGET profile and must not ship this tab's
+    context token.
+
+    The token is bound to the profile the CURRENT tab is running. Copying it
+    into an href that names a different profile inverts the identity: the newly
+    opened tab would hold a token bound to A while its URL asks for B, and tab
+    context outranks the cookie, so every request in the new tab would resolve
+    to A. See tests/test_6559_tab_context_isolation.py for the boot-side half
+    (the opened tab must end up with a DISTINCT token bound to B).
+    """
+    source = _node_prelude() + """
+evalSession('_profileTabUrl');
+const PANELS_SRC = """ + repr(PANELS_JS) + """;
+function makeGlobal() {
+  globalThis.window = { location: { href: 'https://example.test/app/', pathname: '/app/', search: '?keep=1', hash: '#frag' } };
+  globalThis.document = { baseURI: 'https://example.test/app/' };
+  globalThis.sessionStorage = { store: {}, getItem(k) { return this.store[k] || null; }, setItem(k, v) { this.store[k] = v; } };
+}
+makeGlobal();
+// Test 1: basic href
+const basic = _profileTabUrl('vops');
+// Test 2: a tab that HAS a context token must still emit a token-free href
+globalThis.sessionStorage.setItem('hermes-tab-profile-ctx', 'abc123token');
+const withCtx = _profileTabUrl('vops');
+// Test 3: an inherited tab_context already in the address bar is stripped
+globalThis.window.location.href = 'https://example.test/app/?keep=1&tab_context=abc123token#frag';
+const fromTaintedUrl = _profileTabUrl('vops');
+// Test 4: encoded profile name
+const encoded = _profileTabUrl('my-profile');
+// Test 5: panels.js renders <a> with href
+const anchorCreateMatch = PANELS_SRC.includes("createElement('a')");
+const anchorHrefMatch = PANELS_SRC.includes('profileHref = _profileTabUrl(p.name)');
+const setsHrefMatch = PANELS_SRC.includes('opt.href = profileHref');
+console.log(JSON.stringify({
+  basic, withCtx, fromTaintedUrl, encoded,
+  createsAnchor: !!anchorCreateMatch,
+  usesProfileHref: !!anchorHrefMatch,
+  setsHrefAttr: !!setsHrefMatch
+}));
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["createsAnchor"], "dropdown should create <a> elements"
+    assert payload["usesProfileHref"], "dropdown should call _profileTabUrl"
+    assert payload["setsHrefAttr"], "dropdown should set opt.href"
+    assert "profile=vops" in payload["basic"], f"basic href should contain profile=vops, got {payload['basic']}"
+    assert payload["basic"].startswith("/app/"), f"basic href should preserve path, got {payload['basic']}"
+    assert "tab_context" not in payload["withCtx"], \
+        f"profile link must not embed this tab's context, got {payload['withCtx']}"
+    assert "abc123token" not in payload["withCtx"]
+    assert "profile=vops" in payload["withCtx"]
+    assert "tab_context" not in payload["fromTaintedUrl"], \
+        f"an inherited tab_context must be stripped from the link, got {payload['fromTaintedUrl']}"
+    assert "keep=1" in payload["fromTaintedUrl"]
+    assert "profile=my-profile" in payload["encoded"], f"encoded should contain profile=my-profile, got {payload['encoded']}"
+
+
+def test_profile_tab_url_preserves_existing_query_and_hash():
+    source = _node_prelude() + """
+evalSession('_profileTabUrl');
+globalThis.window = { location: { href: 'https://example.test/app/?q=hello&keep=1#frag', pathname: '/app/', search: '?q=hello&keep=1', hash: '#frag' } };
+globalThis.document = { baseURI: 'https://example.test/app/' };
+globalThis.sessionStorage = { getItem() { return null; } };
+const url = _profileTabUrl('vops');
+console.log(JSON.stringify({ url }));
+"""
+    payload = json.loads(_run_node(source))
+    assert "profile=vops" in payload["url"], f"url should contain profile=vops, got {payload['url']}"
+    assert "keep=1" in payload["url"], f"url should preserve keep=1, got {payload['url']}"
+    assert "#frag" in payload["url"], f"url should preserve hash, got {payload['url']}"
+
+
+def test_profile_dropdown_creates_anchor_elements_with_click_guards():
+    render_start = PANELS_JS.index("function renderProfileDropdown(")
+    render_end = PANELS_JS.index("function toggleProfileDropdown(", render_start)
+    render_func = PANELS_JS[render_start:render_end]
+    assert "createElement('a')" in render_func, "must create <a> elements"
+    assert "opt.href = profileHref" in render_func, "must set href attribute"
+    assert "addEventListener" in render_func, "must use addEventListener"
+    has_mod = "e.button !== 0" in render_func or "e.ctrlKey" in render_func
+    assert has_mod, "must check modifier keys"
+    assert "preventDefault" in render_func, "must call preventDefault on plain click"
+    assert "switchToProfile(p.name)" in render_func, "must call switchToProfile on plain click"
+
+
+def test_log_redaction_removes_tab_context_from_path():
+    """A tab context is a bearer credential for a profile — it must never reach
+    the access log. Exercises the real redactor, not a copy of its regex."""
+    from api.profiles import redact_tab_context
+
+    cases = [
+        ("/api/sessions/events", "/api/sessions/events"),
+        ("/api/sessions/events?tab_context=abc123", "/api/sessions/events?tab_context=<redacted>"),
+        ("/api/chat/stream?stream_id=xyz", "/api/chat/stream?stream_id=xyz"),
+        ("/api/chat/stream?stream_id=xyz&tab_context=abc123&keep=1",
+         "/api/chat/stream?stream_id=xyz&tab_context=<redacted>&keep=1"),
+        ("/api/profile/active?tab_context=abc123", "/api/profile/active?tab_context=<redacted>"),
+        ("?tab_context=abc123", "?tab_context=<redacted>"),
+        ("/api/upload?tab_context=abc123", "/api/upload?tab_context=<redacted>"),
+        ("-", "-"),
+    ]
+    for raw, expected in cases:
+        result = redact_tab_context(raw)
+        assert result == expected, f"redact_tab_context({raw!r}) = {result!r}, expected {expected!r}"
+    # ...and the access log actually routes the path through it.
+    server_src = (Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
+    assert "'path': redact_tab_context(getattr(self, 'path', None) or '-')," in server_src

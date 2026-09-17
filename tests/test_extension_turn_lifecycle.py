@@ -16,6 +16,13 @@ EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
+# attachLiveStream() opens its EventSource through _tabContextEventSource(),
+# which lives in workspace.js (#6559). The harness loads the real file in the
+# same order index.html does — ui.js → workspace.js → … → messages.js — rather
+# than stubbing the helper, so the stream URL this exercise builds is the one
+# production builds, tab context and all.
+WORKSPACE_JS = (STATIC / "workspace.js").read_text(encoding="utf-8")
+HARNESS_TAB_CONTEXT = "harness-tab-context-token"
 SUPPORT_SCRIPTS = [
     (STATIC / name).read_text(encoding="utf-8")
     for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
@@ -106,6 +113,7 @@ async ({kind}) => {
   attachLiveStream(activeSid, streamId, []);
   const source = MockEventSource.instances.at(-1);
   if (!source) throw new Error('attachLiveStream did not construct EventSource');
+  const streamUrl = source.url;
 
   if (kind === 'done') {
     await source.emit('done', {
@@ -175,7 +183,7 @@ async ({kind}) => {
   } else {
     throw new Error(`unknown lifecycle scenario: ${kind}`);
   }
-  return lifecycle;
+  return {lifecycle, streamUrl};
 }
 """
 
@@ -384,7 +392,7 @@ def lifecycle_browser():
         browser.close()
 
 
-def _run_lifecycle_scenario(browser, kind: str) -> list[dict]:
+def _run_lifecycle_scenario(browser, kind: str) -> dict:
     page = browser.new_page()
     page.route(
         "**/*",
@@ -397,6 +405,13 @@ def _run_lifecycle_scenario(browser, kind: str) -> list[dict]:
         ),
     )
     page.add_init_script(_MOCK_EVENT_SOURCE)
+    # Seed the per-tab profile context before any page script runs, so the
+    # stream URL is built exactly as it is for a booted tab. The harness URL
+    # carries no ?profile=, so workspace.js's parse-time
+    # _dropInheritedTabContextOnProfileBoot() leaves this alone.
+    page.add_init_script(
+        f"try {{ sessionStorage.setItem('hermes-tab-profile-ctx', {json.dumps(HARNESS_TAB_CONTEXT)}); }} catch (e) {{}}"
+    )
     try:
         page.goto("http://harness.test/", wait_until="domcontentloaded")
         page.evaluate(
@@ -410,7 +425,10 @@ def _run_lifecycle_scenario(browser, kind: str) -> list[dict]:
             page.add_script_tag(content=script)
         page.add_script_tag(content=EXTENSION_SETTINGS_JS.read_text(encoding="utf-8"))
         page.add_script_tag(content=UI_JS)
+        page.add_script_tag(content=WORKSPACE_JS)
         page.add_script_tag(content=MESSAGES_JS)
+        # Overrides land AFTER the real sources, so api() is the stub these
+        # lifecycle scenarios expect even though workspace.js defines the real one.
         page.evaluate(_STABILIZE_UNRELATED_UI)
         return page.evaluate(_LIFECYCLE_SCENARIO, {"kind": kind})
     finally:
@@ -439,7 +457,13 @@ def test_real_sse_terminal_callback_observes_settled_core_state(
     terminal_status,
     last_content,
 ):
-    lifecycle = _run_lifecycle_scenario(lifecycle_browser, kind)
+    result = _run_lifecycle_scenario(lifecycle_browser, kind)
+    lifecycle = result["lifecycle"]
+
+    # #6559: the live stream is opened through _tabContextEventSource(), so the
+    # URL carries this tab's profile context. A stream opened without it is
+    # resolved through the browser-wide cookie — another profile's events.
+    assert f"tab_context={HARNESS_TAB_CONTEXT}" in result["streamUrl"], result["streamUrl"]
 
     assert [entry["event"]["type"] for entry in lifecycle] == [
         "turn:start",
@@ -467,7 +491,7 @@ def test_live_stream_terminal_paths_use_original_stream_owner_identity():
 
     start_dispatch = attach_body.index("_dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId")
     dead_reconnect_return = attach_body.index("_scheduleAnchorRegistryCleanup(120000);")
-    event_source_attach = attach_body.index("_wireSSE(new EventSource", start_dispatch)
+    event_source_attach = attach_body.index("_wireSSE(_tabContextEventSource(", start_dispatch)
     assert dead_reconnect_return < start_dispatch < event_source_attach
     assert "_dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId" in done
     assert "_dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId" in application_error
