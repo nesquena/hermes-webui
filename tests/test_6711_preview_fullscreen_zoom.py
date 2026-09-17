@@ -693,3 +693,149 @@ def test_the_narrow_pane_container_rule_actually_exists():
         "the narrow-pane rule no longer hides anything, so the fullscreen "
         "neutralisation needs re-justifying"
     )
+
+
+# ── Greptile review (d): the edit surface must follow an app-font change ──────
+#
+# `#previewEditArea` has no stylesheet rule of its own: its size is the inline
+# `font-size` written by `_applyPreviewFontSizeToEditArea()`, and the textarea
+# ships `font-size:12px` inline in index.html. Changing the app-wide font size
+# while a text preview was open therefore resized the rendered preview (it reads
+# `--preview-font-size` from CSS) while the editor and the zoom label kept the
+# old value — three surfaces, two sizes.
+#
+# The refresh is measured in a real browser rather than asserted as source shape,
+# because the bug is precisely about what the computed sizes resolve to.
+
+
+_EDIT_FIXTURE = """
+<textarea id="previewEditArea" style="font-size:12px"></textarea>
+<span id="previewFontSizeLabel">12</span>
+"""
+
+
+def _run_app_font_change(*, stored=None) -> dict:
+    """Change the app font size via the shipped `_applyFontSize()` and report
+    what each of the three surfaces resolves to afterwards."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the preview-font browser test")
+
+    parts = {
+        "consts": _preview_fs_constants(),
+        "clamp": _function("_clampPreviewFontSize"),
+        "read": _function("_readPreviewFontSize"),
+        "get": _function("_getPreviewFontSize"),
+        "apply": _function("_applyPreviewFontSize"),
+        "applyEdit": _function("_applyPreviewFontSizeToEditArea"),
+        "refresh": _function("_refreshPreviewFontSize"),
+        "applyFontSize": extract_function(_read(BOOT_JS_PATH), "_applyFontSize"),
+        "previewFontCss": _preview_font_css(),
+    }
+
+    playwright = sync_playwright().start()
+    try:
+        browser = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+    except Exception as exc:  # pragma: no cover - no browser binary in sandbox
+        playwright.stop()
+        pytest.skip(f"chromium unavailable for browser measurement: {exc}")
+
+    try:
+        page = browser.new_page()
+        page.set_content("<!doctype html><html>" + _EDIT_FIXTURE + "</html>")
+        page.add_style_tag(content=parts["previewFontCss"])
+        return page.evaluate(
+            """(p) => {
+              const store = { 'hermes-preview-font-size': p.stored };
+              const localStorage = {
+                getItem: (k) => (k in store ? store[k] : null),
+                setItem: (k, v) => { store[k] = String(v); },
+                removeItem: (k) => { delete store[k]; },
+              };
+              eval(p.consts);
+              eval(p.clamp);
+              eval(p.read);
+              eval(p.get);
+              eval(p.apply);
+              eval(p.applyEdit);
+              eval(p.refresh);
+              eval(p.applyFontSize);
+
+              const ta = document.getElementById('previewEditArea');
+              const label = document.getElementById('previewFontSizeLabel');
+              const root = document.documentElement;
+              const snapshot = () => ({
+                edit: getComputedStyle(ta).fontSize,
+                editInline: ta.style.fontSize,
+                label: label.textContent,
+                rootInline: root.style.getPropertyValue('--preview-font-size'),
+                previewVar: getComputedStyle(root).getPropertyValue('--preview-font-size').trim(),
+              });
+
+              // Open the preview (no user zoom stored): the preview path applies
+              // the inherited size without persisting it.
+              _applyPreviewFontSize(_getPreviewFontSize());
+              _applyPreviewFontSizeToEditArea();
+              const before = snapshot();
+
+              // The user changes the app-wide font size while it is open.
+              _applyFontSize('xlarge');
+              const after = snapshot();
+              return { before, after };
+            }""",
+            parts | {"stored": stored},
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_edit_surface_follows_an_app_font_change():
+    """Inherited preview: editor, label and preview must all move together."""
+    r = _run_app_font_change(stored=None)
+    before, after = r["before"], r["after"]
+
+    # Sanity: xlarge maps --preview-font-size to 16px (see style.css).
+    assert after["previewVar"] == "16px", (
+        f"precondition: the app font change must move the preview variable, "
+        f"got {after['previewVar']!r}"
+    )
+    assert before["edit"] != after["edit"], (
+        "the preview variable changed but the edit textarea kept its previous "
+        f"size ({after['edit']!r}) — the editor is stale"
+    )
+    assert after["edit"] == after["previewVar"], (
+        f"editor ({after['edit']!r}) and rendered preview ({after['previewVar']!r}) "
+        "must resolve to the same size after an app-font change"
+    )
+    assert after["label"] == "16", (
+        f"the zoom label must be refreshed to the new size, got {after['label']!r}"
+    )
+
+
+def test_an_explicit_zoom_survives_an_app_font_change():
+    """A stored zoom is the user's choice and must still win."""
+    r = _run_app_font_change(stored="22")
+    after = r["after"]
+
+    assert after["edit"] == "22px", (
+        f"a stored zoom must keep driving the editor, got {after['edit']!r}"
+    )
+    assert after["label"] == "22", (
+        f"a stored zoom must keep driving the label, got {after['label']!r}"
+    )
+    assert after["previewVar"] == "22px", (
+        f"a stored zoom must keep overriding the app mapping, got {after['previewVar']!r}"
+    )
+
+
+def test_the_app_font_change_path_calls_the_refresh():
+    """Pin the wiring: without the call, the measured fix cannot happen."""
+    body = extract_function(_read(BOOT_JS_PATH), "_applyFontSize")
+    assert "_refreshPreviewFontSize" in body, (
+        "changing the app font size must re-resolve the preview typography, or "
+        "an open preview's editor keeps the previous size (Greptile review)"
+    )

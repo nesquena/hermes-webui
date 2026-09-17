@@ -2934,6 +2934,11 @@ function _applyFontSize(size){
   } else {
     delete document.documentElement.dataset.fontSize;
   }
+  // The preview's own size is derived from this mapping, and its edit textarea
+  // carries an inline size with no stylesheet rule to fall back on — so an open
+  // preview (and its editor) must be re-resolved here, or it keeps the previous
+  // app font size while the rest of the UI resizes.
+  if(typeof _refreshPreviewFontSize==='function') _refreshPreviewFontSize();
 }
 
 function _pickFontSize(size){

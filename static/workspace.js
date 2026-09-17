@@ -1174,6 +1174,24 @@ function _applyPreviewFontSizeToEditArea(){
   const ta = document.getElementById('previewEditArea');
   if(ta) ta.style.fontSize = _getPreviewFontSize() + 'px';
 }
+/**
+ * Re-resolve and re-apply the preview typography after the app-wide font size
+ * changed.
+ *
+ * The edit textarea has no stylesheet rule of its own — its size comes solely
+ * from the inline value written here — so changing the app font size while a
+ * text preview (or its editor) is open left the editor at the previous size and
+ * the zoom label reading the old number, while the rendered preview resized.
+ * Re-resolving is what makes all three follow the same value.
+ *
+ * A stored zoom is a user choice and still wins: `_getPreviewFontSize()` prefers
+ * it over the computed variable, so an explicit A−/A+ setting is unchanged.
+ */
+function _refreshPreviewFontSize(){
+  const px = _getPreviewFontSize();
+  _applyPreviewFontSize(px);
+  _applyPreviewFontSizeToEditArea();
+}
 function adjustPreviewFontSize(delta){
   const cur = _getPreviewFontSize();
   _setPreviewFontSize(cur + delta);
