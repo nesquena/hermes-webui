@@ -162,6 +162,15 @@ let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 // the panel alone; the preview DOM (file + scroll position) stays intact so
 // reopening restores exactly where the user was reading.
 let _workspacePanelUserDismissed=false;
+// Monotonic counter bumped on every dismissal write. An artifact open captures
+// it before its awaits and only promotes the panel if it is unchanged: a read
+// that was still pending when the user dismissed the panel must not erase that
+// newer intent and force the panel back open.
+let _workspacePanelDismissGen=0;
+function _setWorkspacePanelDismissed(dismissed){
+  _workspacePanelUserDismissed=dismissed;
+  _workspacePanelDismissGen++;
+}
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
@@ -276,7 +285,11 @@ function syncWorkspacePanelState(){
     // Only auto-promote closed→preview when the user did NOT deliberately
     // dismiss the panel (chat-tap close on mobile). The keyboard resize that
     // follows typing would otherwise force the panel back open mid-reply.
-    if(_workspacePanelMode==='closed'&&!_workspacePanelUserDismissed) _setWorkspacePanelMode('preview');
+    // Scoped to compact viewports: the dismissal is a mobile-only concept (see
+    // closeWorkspacePanel), so desktop keeps its long-standing behaviour of
+    // restoring a still-visible preview on resize.
+    const dismissed=_isCompactWorkspaceViewport()&&_workspacePanelUserDismissed;
+    if(_workspacePanelMode==='closed'&&!dismissed) _setWorkspacePanelMode('preview');
     else syncWorkspacePanelUI();
     return;
   }
@@ -295,7 +308,7 @@ function syncWorkspacePanelState(){
 function openWorkspacePanel(mode='browse'){
   // Explicit user reopen — clear the dismissal flag so future previews
   // auto-open the panel again normally.
-  _workspacePanelUserDismissed=false;
+  _setWorkspacePanelDismissed(false);
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -308,13 +321,18 @@ function closeWorkspacePanel(){
   // Deliberate user close — mark dismissal so the next resize sync does NOT
   // force the panel back open. The preview (file + scroll position) stays in
   // the DOM and is restored when the user reopens the panel.
-  _workspacePanelUserDismissed=true;
+  //
+  // The dismissal only applies to compact/mobile viewports: the resurrection
+  // this guards against is the soft-keyboard viewport churn, which does not
+  // exist on desktop. Marking it unconditionally would silently change desktop
+  // behaviour, where a resize has always restored the still-visible preview.
+  if(_isCompactWorkspaceViewport()) _setWorkspacePanelDismissed(true);
   _setWorkspacePanelMode('closed');
 }
 
 function ensureWorkspacePreviewVisible(){
   if(_workspacePanelMode==='closed'){
-    _workspacePanelUserDismissed=false;
+    _setWorkspacePanelDismissed(false);
     _setWorkspacePanelMode('preview');
   }
   else syncWorkspacePanelUI();
