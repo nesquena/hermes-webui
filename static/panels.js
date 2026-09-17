@@ -1855,6 +1855,7 @@ function _bindCronSkillPicker(){
     const q=search.value.trim().toLowerCase();
     if(!q||!_cronSkillsCache){dropdown.style.display='none';return;}
     const matches=_cronSkillsCache.filter(s=>
+      !s.disabled&&
       !_cronSelectedSkills.includes(s.name)&&
       (s.name.toLowerCase().includes(q)||(s.category||'').toLowerCase().includes(q))
     ).slice(0,8);
@@ -4898,6 +4899,13 @@ function renderSkills(skills) {
   const box = $('skillsList');
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
+  const offTotal = filtered.filter(s => s.disabled).length;
+  if (offTotal) {
+    const sum = document.createElement('div');
+    sum.className = 'skills-policy-note';
+    sum.textContent = `${filtered.length - offTotal} enabled · ${offTotal} disabled`;
+    box.appendChild(sum);
+  }
   for (const [cat, items] of Object.entries(cats).sort()) {
     const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
@@ -4905,7 +4913,9 @@ function renderSkills(skills) {
     const hdr = document.createElement('div');
     hdr.className = 'skills-cat-header';
     hdr.dataset.cat = cat;
-    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${items.length})</span>`;
+    const catOff = items.filter(s => s.disabled).length;
+    const catCount = catOff ? `${items.length - catOff}/${items.length}` : `${items.length}`;
+    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${catCount})</span>`;
     hdr.onclick = () => _toggleCatCollapse(cat);
     sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
@@ -4926,7 +4936,17 @@ function renderSkills(skills) {
       const descEl = document.createElement('span');
       descEl.className = 'skill-desc';
       descEl.textContent = skill.description || '';
-      el.append(toggle, nameEl, descEl);
+      el.append(toggle, nameEl);
+      if (isDisabled) {
+        /* .skill-item.disabled only dims the row, which reads as styling rather than as state:
+           the agent will REFUSE this skill, so the panel says so in words. */
+        const offEl = document.createElement('span');
+        offEl.className = 'skill-off-tag';
+        offEl.textContent = t('skill_disabled');
+        offEl.title = t('skill_disabled');
+        el.append(offEl);
+      }
+      el.append(descEl);
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
     }
