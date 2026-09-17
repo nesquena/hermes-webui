@@ -627,6 +627,15 @@ async function _workspacePathExists(path){
 }
 
 /**
+ * #6710: how long a browser-loaded preview may take to report readiness before
+ * the open is treated as failed. Shared by every preview branch so a stalled
+ * response can never leave `openFile()` (and therefore `openArtifactPath()`)
+ * pending forever — the user selected the file explicitly, so a hang is worse
+ * than a reported failure.
+ */
+const _PREVIEW_LOAD_TIMEOUT_MS = 8000;
+
+/**
  * #6710: verify a `raw` preview route actually serves the file before reporting
  * a successful reveal.
  *
@@ -677,6 +686,7 @@ function _awaitElementLoad(el, assign, failKey){
       settled=true;
       el.removeEventListener('load', onLoad);
       el.removeEventListener('error', onError);
+      clearTimeout(timer);
       if(!ok) setStatus(t(failKey));
       resolve(ok);
     };
@@ -684,6 +694,11 @@ function _awaitElementLoad(el, assign, failKey){
     const onError=()=>done(false);
     el.addEventListener('load', onLoad);
     el.addEventListener('error', onError);
+    // A response that stalls — proxy holding the socket open, server wedged —
+    // never fires load OR error. Without this bound the promise would never
+    // settle, openArtifactPath() would stay pending forever, and the explicitly
+    // selected image would never be promoted. Same bound as the media path.
+    const timer=setTimeout(()=>done(false), _PREVIEW_LOAD_TIMEOUT_MS);
     assign();
     // A cached image can settle during assignment; `complete` covers that, and
     // naturalWidth distinguishes a real bitmap from a decode failure.
@@ -730,7 +745,7 @@ function _awaitMediaReady(el){
     };
     const onReady=()=>done(true);
     const onError=()=>done(false);
-    const timer=setTimeout(()=>done(false), 8000);
+    const timer=setTimeout(()=>done(false), _PREVIEW_LOAD_TIMEOUT_MS);
     el.addEventListener('loadedmetadata', onReady);
     el.addEventListener('error', onError);
     if(el.readyState>=1) done(true);

@@ -18,6 +18,7 @@ These tests cover both halves:
     asserts a broken image fails closed.
 """
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,6 +38,18 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _shipped_const_line(name: str) -> str:
+    """Return the shipped `const NAME = ...;` line verbatim.
+
+    The preview helpers read shared constants; the harness must run the REAL
+    value rather than a copy, so the declaration is lifted from the source.
+    """
+    src = _read(WORKSPACE_JS_PATH)
+    match = re.search(r"^const %s\s*=.*?;$" % re.escape(name), src, re.M)
+    assert match, f"const {name} not found in static/workspace.js"
+    return match.group(0)
+
+
 def _helper(name: str) -> str:
     body = _read(WORKSPACE_JS_PATH)
     # `_workspaceRawReachable` is async; extract_function() defaults to the
@@ -49,6 +62,8 @@ def _helper(name: str) -> str:
 _HARNESS = r"""
 const helpers = __HELPERS__;
 const params = __PARAMS__;
+
+__CONSTS__
 
 let statuses = [];
 function setStatus(s){ statuses.push(s); }
@@ -165,6 +180,72 @@ function makeWrap(el){
 })();
 """
 
+# A stalled response fires neither `load` nor `error`. The bound is what keeps
+# `openFile()` (and therefore `openArtifactPath()`) from staying pending
+# forever, so the probe drives it directly: `setTimeout` is shimmed to capture
+# the callback instead of waiting the real bound out. The test asserts on the
+# PATH (does a bound exist and does firing it fail closed), never on the number.
+_STALL_HARNESS = r"""
+const helpers = __HELPERS__;
+const params = __PARAMS__;
+
+__CONSTS__
+
+const captured = [];
+const realSetTimeout = setTimeout;
+setTimeout = (fn, _ms) => { captured.push(fn); return captured.length; };
+clearTimeout = () => {};
+
+let statuses = [];
+function setStatus(s){ statuses.push(s); }
+function t(k){ return k; }
+
+const listeners = {};
+const el = {
+  complete: false, naturalWidth: 0, assigned: null,
+  addEventListener(ev, fn){ (listeners[ev] = listeners[ev] || []).push(fn); },
+  removeEventListener(ev, fn){ if(listeners[ev]) listeners[ev] = listeners[ev].filter(f => f !== fn); },
+  emit(ev){ (listeners[ev] || []).slice().forEach(f => f()); },
+  listenerCount(){ return Object.keys(listeners).reduce((n, k) => n + listeners[k].length, 0); },
+};
+
+(async () => {
+  const out = {};
+  eval(helpers._awaitElementLoad);
+
+  const pending = _awaitElementLoad(el, () => { el.assigned = 'x'; }, 'image_load_failed');
+  await new Promise(r => setImmediate(r));
+  out.assigned = el.assigned;
+  out.timersArmed = captured.length;
+
+  if(params.fireBound){ captured.slice().forEach(fn => fn()); }
+
+  let settled = false;
+  out.result = await Promise.race([
+    Promise.resolve(pending).then(v => { settled = true; return v; }),
+    new Promise(r => realSetTimeout(() => r('UNSETTLED'), 50)),
+  ]);
+  out.settled = settled;
+  out.statuses = statuses.slice();
+  out.listenersLeft = el.listenerCount();
+
+  // A response that later succeeds must still be honoured while waiting.
+  statuses = [];
+  const el2 = Object.assign({}, el, {
+    complete: false, naturalWidth: 0,
+    addEventListener(ev, fn){ (listeners['two_' + ev] = listeners['two_' + ev] || []).push(fn); },
+    removeEventListener(ev, fn){ if(listeners['two_' + ev]) listeners['two_' + ev] = listeners['two_' + ev].filter(f => f !== fn); },
+  });
+  const pending2 = _awaitElementLoad(el2, () => {}, 'image_load_failed');
+  await new Promise(r => setImmediate(r));
+  el2.naturalWidth = 10;
+  (listeners['two_load'] || []).slice().forEach(f => f());
+  out.lateLoadResult = await pending2;
+
+  console.log(JSON.stringify(out));
+})();
+"""
+
 
 def _run_harness(*, image_outcome="load", media_outcome="loadedmetadata",
                  api_fails=False, api_status=404) -> dict:
@@ -182,6 +263,19 @@ def _run_harness(*, image_outcome="load", media_outcome="loadedmetadata",
     }
     js = _HARNESS.replace("__HELPERS__", json.dumps(helpers)).replace(
         "__PARAMS__", json.dumps(payload)
+    ).replace("__CONSTS__", _shipped_const_line("_PREVIEW_LOAD_TIMEOUT_MS"))
+    proc = subprocess.run(
+        [NODE, "-e", js], capture_output=True, text=True, cwd=REPO_ROOT, timeout=30
+    )
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _run_stall_harness(*, fire_bound: bool) -> dict:
+    js = _STALL_HARNESS.replace(
+        "__HELPERS__", json.dumps({"_awaitElementLoad": _helper("_awaitElementLoad")})
+    ).replace("__PARAMS__", json.dumps({"fireBound": fire_bound})).replace(
+        "__CONSTS__", _shipped_const_line("_PREVIEW_LOAD_TIMEOUT_MS")
     )
     proc = subprocess.run(
         [NODE, "-e", js], capture_output=True, text=True, cwd=REPO_ROOT, timeout=30
@@ -292,7 +386,9 @@ def test_raw_probe_treats_a_401_redirect_as_reachable():
         "_awaitMediaReady": _helper("_awaitMediaReady"),
         "_mountMediaPlayer": _helper("_mountMediaPlayer"),
         "_workspaceRawReachable": _helper("_workspaceRawReachable"),
-    })).replace("__PARAMS__", json.dumps({"imageOutcome": "load", "mediaOutcome": "loadedmetadata"}))
+    })).replace("__PARAMS__", json.dumps({"imageOutcome": "load", "mediaOutcome": "loadedmetadata"})).replace(
+        "__CONSTS__", _shipped_const_line("_PREVIEW_LOAD_TIMEOUT_MS")
+    )
     js = js.replace("async function api(url, opts){", "async function api(url, opts){ if(params.redirect401){ return undefined; }")
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True,
                           cwd=REPO_ROOT, timeout=30)
@@ -315,6 +411,48 @@ def test_shipped_preview_branches_await_their_outcome():
     assert body.count("_workspaceRawReachable(url)") >= 2, (
         "both iframe-backed branches (pdf + html) must probe the route"
     )
+
+
+# ── stalled response: the bound that prevents an indefinite hang ─────────────
+#
+# The Greptile follow-up: a raw response that stalls fires neither `load` nor
+# `error`, so without a bound `_awaitElementLoad()` never settles,
+# `openArtifactPath()` stays pending forever, and the explicitly selected image
+# is never promoted. These probes drive the bound directly (the timer is
+# captured rather than waited out) and assert on the PATH, not on the number.
+
+
+def test_a_stalled_image_response_arms_a_bound():
+    """Without an armed timeout there is nothing that can settle the promise."""
+    out = _run_stall_harness(fire_bound=False)
+    assert out["assigned"], "the src assignment must still start the load"
+    assert out["timersArmed"] >= 1, (
+        "no timeout was armed — a response that never fires load/error leaves "
+        "openArtifactPath() pending forever (Greptile: image reveal can hang)"
+    )
+    assert out["settled"] is False, (
+        f"the promise settled with no load, no error and no bound fired: {out}"
+    )
+
+
+def test_firing_the_bound_reports_failure_and_cleans_up():
+    """The bound must fail closed, not resolve as a success."""
+    out = _run_stall_harness(fire_bound=True)
+    assert out["settled"] is True, out
+    assert out["result"] is False, (
+        f"a stalled image reported a successful reveal: {out}"
+    )
+    assert out["statuses"] == ["image_load_failed"], out
+    assert out["listenersLeft"] == 0, (
+        f"the load/error listeners were left attached after the bound fired: {out}"
+    )
+
+
+def test_a_late_load_is_still_honoured():
+    """The bound must not pre-empt a response that does arrive — only a genuine
+    stall fails. Otherwise a slow-but-valid image would be reported broken."""
+    out = _run_stall_harness(fire_bound=False)
+    assert out["lateLoadResult"] is True, out
 
 
 # ── real browser: a broken image fails closed ───────────────────────────────
