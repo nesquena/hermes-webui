@@ -70,6 +70,14 @@ const fn = params.functions;
 // ── minimal DOM/state doubles ────────────────────────────────────────────────
 let _workspacePanelMode = 'closed';
 let _workspacePanelUserDismissed = false;
+// The shipped code tracks a dismissal GENERATION so a read that is still
+// pending when the user dismisses cannot erase that newer intent. The harness
+// must mirror it, otherwise the production guard has nothing to read.
+let _workspacePanelDismissGen = 0;
+function _setWorkspacePanelDismissed(dismissed){
+  _workspacePanelUserDismissed = dismissed;
+  _workspacePanelDismissGen++;
+}
 let syncUiCalls = 0;
 let setModeCalls = [];
 let previewVisible = params.previewVisibleInitially;
@@ -91,7 +99,7 @@ function _setWorkspacePanelMode(mode){
   setModeCalls.push(_workspacePanelMode);
 }
 function syncWorkspacePanelUI(){ syncUiCalls++; }
-function _isCompactWorkspaceViewport(){ return true; }
+function _isCompactWorkspaceViewport(){ return params.compactViewport; }
 function _workspacePanelEls(){ return { layout: $('layout'), panel: $('panel') }; }
 function setStatus(){}
 function t(k){ return k; }
@@ -107,6 +115,15 @@ async function openFile(path){
   openFileCalls.push(path);
   if(params.openFileSettles === 'never'){ return new Promise(()=>{}); }
   if(params.openFileReadFails){ return false; }
+  if(params.openFileDownloadsOnly){ return false; }   // download-only (e.g. .zip)
+  // The OLD contract: a bare `return;`. openArtifactPath() must fail closed on it
+  // too, so the fix cannot rest on openFile() alone.
+  if(params.openFileReturnsUndefined){ return undefined; }
+  // A slow read: the harness can dismiss the panel while this is in flight, so
+  // the "newer intent wins" guard has something to protect.
+  if(params.slowRead){
+    await new Promise((r) => setTimeout(r, 20));
+  }
   previewVisible = true;
   return true;
 }
@@ -166,7 +183,15 @@ eval(fn.openArtifactPath);
   }
   snap('during pending open');
 
-  // 3b. settle only when the scenario actually settles
+  // 3b. a slow read: the user dismisses the panel while openFile() is in
+  //     flight. That newer intent must survive the read completing.
+  if(params.dismissDuringRead){
+    await tick();
+    closeWorkspacePanel();
+    snap('dismissed during read');
+  }
+
+  // 3c. settle only when the scenario actually settles
   if(params.existsMode !== 'pending'){
     await openPromise;
     await tick();
@@ -183,13 +208,23 @@ eval(fn.openArtifactPath);
 
 def _run_scenario(*, exists_mode: str, open_file_settles: str = "immediately",
                   preview_visible_initially: bool = True,
-                  open_file_read_fails: bool = False) -> dict:
+                  open_file_read_fails: bool = False,
+                  open_file_downloads_only: bool = False,
+                  compact_viewport: bool = True,
+                  dismiss_during_read: bool = False,
+                  slow_read: bool = False,
+                  open_file_returns_undefined: bool = False) -> dict:
     payload = {
         "functions": _shipped_functions(),
         "existsMode": exists_mode,
         "openFileSettles": open_file_settles,
         "previewVisibleInitially": preview_visible_initially,
         "openFileReadFails": open_file_read_fails,
+        "openFileDownloadsOnly": open_file_downloads_only,
+        "compactViewport": compact_viewport,
+        "dismissDuringRead": dismiss_during_read,
+        "slowRead": slow_read,
+        "openFileReturnsUndefined": open_file_returns_undefined,
     }
     js = _HARNESS.replace("__PARAMS__", json.dumps(payload))
     proc = subprocess.run(
@@ -342,4 +377,150 @@ def test_failed_read_does_not_reopen_after_viewport_churn():
     # A subsequent resize must not find a cleared flag to act on.
     assert after_link["dismissed"] is True, (
         "the dismissal guard was consumed by a failed read"
+    )
+
+
+# ── Gate review (17 Sep): the three silent correctness/scope gaps ────────────
+#
+# The gate confirmed the headline bug is fixed and asked for three more things:
+# a download-only artifact must not count as a reveal, a read that outlives a
+# later dismissal must not override it, and the guard must be mobile-scoped so
+# desktop behaviour is untouched.
+
+_DEFAULT_OPENFILE_NOTE = """
+`openFile()` contract used by the harness: only a literal `true` means something
+was previewed. The real function returns false for a download-only format
+(``DOWNLOAD_EXTS`` → ``downloadFile()``) and for any swallowed read failure; the
+harness mirrors that so ``openArtifactPath()`` cannot pass a test by reading
+``undefined`` as success.
+"""
+
+
+def test_download_only_artifact_is_not_treated_as_a_reveal():
+    """A .zip-style artifact downloads; it must not clear the dismissal or open
+    the panel onto the stale preview underneath."""
+    result = _run_scenario(exists_mode="ok", open_file_downloads_only=True)
+    settled = _step(result, "after open settled")
+
+    assert result["openFileCalls"] == ["dir/valid.md"], (
+        f"openFile should still be attempted, got {result['openFileCalls']}"
+    )
+    assert settled["dismissed"] is True, (
+        "a download-only artifact cleared the dismissal, force-opening the panel "
+        "onto stale preview content"
+    )
+    assert settled["mode"] == "closed", (
+        "a download-only artifact force-opened the panel onto stale preview content"
+    )
+    # The stub above cannot prove the shipped branch reports failure — assert the
+    # production source too, otherwise this test passes even with `return;` back.
+    branch = _open_file_body().split("DOWNLOAD_EXTS.has(ext)", 1)[1][:250]
+    assert "return false;" in branch, (
+        "the shipped download-only branch must return false, not bare-return; "
+        "otherwise a download is indistinguishable from a successful preview"
+    )
+
+
+def test_open_artifact_path_fails_closed_on_a_bare_return():
+    """The gate's blocker was that a download-only artifact returned *undefined*,
+    which `openArtifactPath()` read as a successful preview. Fixing `openFile()`
+    alone is not enough — the caller must require a literal true, so any
+    non-preview outcome (old contract or new) fails closed."""
+    result = _run_scenario(exists_mode="ok", open_file_returns_undefined=True)
+    settled = _step(result, "after open settled")
+
+    assert settled["dismissed"] is True, (
+        "openArtifactPath treated `undefined` as a successful preview: a download "
+        "cleared the dismissal and the next resize reopens the stale panel (the "
+        "gate's download-only blocker)"
+    )
+    assert settled["mode"] == "closed", (
+        "a non-preview outcome promoted the panel to preview mode"
+    )
+
+
+def test_dismissal_during_a_slow_read_wins():
+    """The user dismisses the panel while the artifact read is still in flight.
+    That newer intent must not be erased when the read completes."""
+    result = _run_scenario(exists_mode="ok", slow_read=True, dismiss_during_read=True)
+    during = _step(result, "dismissed during read")
+    settled = _step(result, "after open settled")
+
+    assert during["dismissed"] is True, "precondition: the dismissal must be recorded"
+    assert settled["dismissed"] is True, (
+        "a read that completed after the user dismissed the panel cleared the "
+        "dismissal, so the next resize force-reopens the panel the user closed"
+    )
+    assert settled["mode"] == "closed", (
+        "a stale read promoted the panel back to preview over the user's dismissal"
+    )
+
+
+def test_desktop_close_then_resize_keeps_its_original_behaviour():
+    """The dismissal is mobile-specific: on desktop a visible preview has always
+    been restored by a resize, and this PR must not silently change that."""
+    result = _run_scenario(exists_mode="ok", compact_viewport=False)
+    after_sync = _step(result, "after resize sync")
+
+    assert after_sync["mode"] == "preview", (
+        "desktop close→resize stopped restoring the visible preview; the "
+        "mobile-keyboard guard must not apply on desktop"
+    )
+
+
+def test_mobile_close_then_resize_stays_closed():
+    """The counterpart: on a compact viewport the dismissal still holds."""
+    result = _run_scenario(exists_mode="ok", compact_viewport=True)
+    after_sync = _step(result, "after resize sync")
+
+    assert after_sync["mode"] == "closed", (
+        "the mobile keyboard-churn guard regressed: a resize reopened a "
+        "deliberately dismissed panel"
+    )
+
+
+def test_the_mobile_scope_covers_both_the_write_and_the_guard():
+    """Both halves of the scope must be conditional, in the shipped source."""
+    boot = _read(BOOT_JS_PATH)
+    close_body = extract_function(boot, "closeWorkspacePanel")
+    sync_body = extract_function(boot, "syncWorkspacePanelState")
+    assert "_isCompactWorkspaceViewport()" in close_body, (
+        "closeWorkspacePanel marks the dismissal unconditionally, which changes "
+        "desktop behaviour (the gate's scope blocker)"
+    )
+    assert "_isCompactWorkspaceViewport()" in sync_body, (
+        "syncWorkspacePanelState applies the dismissal guard on every viewport, "
+        "so desktop no longer restores a visible preview on resize"
+    )
+
+
+def _open_file_body() -> str:
+    """`extract_function()` brace-matches from the first `{`, which for
+    `openFile(path, opts={})` is the default-value brace — it returns the
+    signature only. Slice to the next top-level declaration instead (the file
+    declares top-level functions at column 0).
+    """
+    src = _read(WORKSPACE_JS_PATH)
+    declaration = "async function openFile(path, opts={}){"
+    start = src.index(declaration)
+    offset = start + len(declaration)
+    for line in src[offset:].split("\n"):
+        if line.startswith(("function ", "async function ", "const ", "let ", "var ")):
+            return src[start:offset]
+        offset += len(line) + 1
+    return src[start:]
+
+
+def test_open_file_fails_closed_for_non_preview_outcomes():
+    """`openFile()` must report a real reveal, not merely finish."""
+    body = _open_file_body()
+    assert "DOWNLOAD_EXTS.has(ext)" in body, "the download-only branch is missing"
+    branch = body.split("DOWNLOAD_EXTS.has(ext)", 1)[1][:250]
+    assert "return false;" in branch, (
+        "the download-only branch must return false so a download is not read as "
+        "a successful preview"
+    )
+    assert "if(!S.session)return false;" in body, (
+        "the no-session early return must fail closed too, otherwise a missing "
+        "session reads as a successful preview"
     )

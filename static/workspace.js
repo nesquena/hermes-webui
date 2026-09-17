@@ -627,8 +627,16 @@ async function _workspacePathExists(path){
 }
 
 async function openArtifactPath(path){
-  if(!path) return;
+  if(!path) return false;
   switchWorkspacePanelTab('files');
+  // Capture the dismissal generation before any await. If the user dismisses the
+  // panel while the existence check or the read is in flight, that newer intent
+  // must win: promoting the panel afterwards would erase it and force the panel
+  // open over whatever the user just closed.
+  const dismissGen=typeof _workspacePanelDismissGen!=='undefined'?_workspacePanelDismissGen:null;
+  const _dismissalUnchanged=()=>dismissGen===null
+    ||typeof _workspacePanelDismissGen==='undefined'
+    ||_workspacePanelDismissGen===dismissGen;
   // Normalize backslash separators to '/' first — Windows absolute paths
   // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
   // /api/list existence check (which splits on '/').
@@ -644,11 +652,11 @@ async function openArtifactPath(path){
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
-      return;
+      return false;
     }
   }catch(_){
     setStatus(t('file_open_failed'));
-    return;
+    return false;
   }
   // User-initiated file open from chat (workspace:// link or artifact click):
   // clear any prior dismissal so the panel auto-opens to show this file.
@@ -663,14 +671,24 @@ async function openArtifactPath(path){
   // that, and a failed read must not clear the dismissal either: the panel
   // would be force-opened onto stale or empty preview content, which is exactly
   // the intrusion this flag exists to prevent.
+  //
+  // Only a literal `true` counts as a preview. A download-only artifact (e.g.
+  // .zip) or an unreadable file reports false, and must fail closed rather than
+  // being read as a reveal.
   const opened = await openFile(rel);
-  if(opened === false){
+  if(opened !== true){
     // Nothing was previewed (read failed or the file was downloaded instead).
     // Leave the dismissal flag untouched and do not promote the panel.
-    return;
+    return false;
   }
-  if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
+  if(!_dismissalUnchanged()){
+    // The user dismissed the panel while this open was in flight. Honour it.
+    return false;
+  }
+  if(typeof _setWorkspacePanelDismissed==='function') _setWorkspacePanelDismissed(false);
+  else if(typeof _workspacePanelUserDismissed!=='undefined') _workspacePanelUserDismissed=false;
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  return true;
 }
 
 // ── Workspace file-tree loading skeleton (#4662 Phase 1) ────────────────────
@@ -1117,7 +1135,7 @@ function _prismLanguageForPath(path){
 }
 
 async function openFile(path, opts={}){
-  if(!S.session)return;
+  if(!S.session)return false;   // nothing can be previewed without a session
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
@@ -1126,7 +1144,7 @@ async function openFile(path, opts={}){
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
     downloadFile(path);
-    return;
+    return false;   // nothing was previewed — the caller must not treat this as a reveal
   }
 
   _previewServerEditable = null;
