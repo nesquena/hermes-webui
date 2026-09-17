@@ -675,7 +675,7 @@ def test_load_session_schedules_session_visit_model_refresh_before_message_load(
 
     assign_idx = body.index("S.session=data.session")
     message_load_idx = body.index("await _ensureMessagesLoaded(sid", assign_idx)
-    failure_return_idx = body.index("return;", message_load_idx)
+    failure_return_idx = body.index("return false;", message_load_idx)
     model_block_idx = body.index("if(typeof populateModelDropdown==='function')", assign_idx)
     guard_helper_idx = body.index("const isActiveModelRefreshSession", model_block_idx)
     promise_idx = body.index("const modelRefreshPromise=_deferSessionSideEffect", model_block_idx)

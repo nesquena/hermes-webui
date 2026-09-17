@@ -130,7 +130,15 @@ function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
   return !urlSession&&!!savedLocal&&_prefillHasDraftText(prefillIntent);
 }
 function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
-  return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
+  return !!(profileIntent&&profileIntent.hasParam&&!urlSession);
+}
+async function _restoreBootSession(urlSession, profileIntent, savedSession){
+  if(profileIntent&&profileIntent.hasParam){
+    if(!urlSession||!profileIntent.valid||typeof _openSessionReference!=='function') return false;
+    return await _openSessionReference(urlSession,profileIntent.name)===true;
+  }
+  if(!savedSession||typeof loadSession!=='function') return false;
+  return await loadSession(savedSession,{preserveActiveInput:true})===true;
 }
 function _shouldStartFreshPwaChat(action,urlSession){
   return action==='new-chat'&&!urlSession;
@@ -3621,27 +3629,32 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
+  const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
   const _profileSwitchProfileBefore=S.activeProfile||'default';
   const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
   let _profileSwitchCompleted=false;
   let _profileSwitchChangedProfile=false;
+  let _profileIntentBlocked=false;
   if(profileIntent&&profileIntent.hasParam){
-    try{
-      if(profileIntent.valid){
-        if(typeof switchToProfile==='function'){
-          _profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;
-          if(_profileSwitchCompleted){
-            _profileSwitchChangedProfile=(S.activeProfile||'default')!==_profileSwitchProfileBefore||!!S.activeProfileIsDefault!==_profileSwitchIsDefaultBefore;
-            if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
-          }
-        }
-      }else{
-        console.warn('[boot] ignored invalid profile query', profileIntent.name);
-        if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
+    if(urlSession){
+      _profileIntentBlocked=!profileIntent.valid;
+    }else if(!profileIntent.valid){
+      console.warn('[boot] ignored invalid profile query', profileIntent.name);
+      _profileIntentBlocked=true;
+    }else if(typeof switchToProfile==='function'){
+      try{
+        _profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;
+        if(_profileSwitchCompleted){
+          _profileSwitchChangedProfile=(S.activeProfile||'default')!==_profileSwitchProfileBefore||!!S.activeProfileIsDefault!==_profileSwitchIsDefaultBefore;
+          if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
+        }else _profileIntentBlocked=true;
+      }catch(e){
+        console.warn('[boot] profile query switch failed', e);
+        _profileIntentBlocked=true;
       }
-    }catch(e){
-      console.warn('[boot] profile query switch failed', e);
+    }else{
+      _profileIntentBlocked=true;
     }
   }
   if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
@@ -3739,7 +3752,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
-  const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
@@ -3765,7 +3777,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }catch(_){}
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
-  const saved=urlSession||savedLocal;
+  if(_profileIntentBlocked&&!urlSession){
+    S._bootReady=true;
+    syncTopbar();syncWorkspacePanelState();
+    $('emptyState').style.display='';
+    await renderSessionList();
+    return;
+  }
+  const saved=urlSession||(_profileQueryBlocksSavedLocal?null:savedLocal);
   if(saved){
     try{
       const savedSidebarOnlyState=(!urlSession&&savedLocal)
@@ -3794,7 +3813,23 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
-      await loadSession(saved, {preserveActiveInput:true});
+      const restoreIntent=(urlSession&&profileIntent&&profileIntent.hasParam)?profileIntent:null;
+      const loaded=await _restoreBootSession(urlSession,restoreIntent,saved);
+      if(loaded!==true){
+        if(urlSession){
+          S._bootReady=true;
+          syncTopbar();syncWorkspacePanelState();
+          $('emptyState').style.display='';
+          await renderSessionList();
+          return;
+        }
+        try{localStorage.removeItem('hermes-webui-session');}catch(_){ }
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();
+        return;
+      }
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
@@ -3842,7 +3877,16 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+    catch(e){
+      if(urlSession){
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();
+        return;
+      }
+      localStorage.removeItem('hermes-webui-session');
+    }
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
