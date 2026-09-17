@@ -3031,7 +3031,12 @@ def _set_turn_session_identity(session_id: str, workspace: str = "", profile: st
     except ImportError:
         logger.debug("per-turn gateway routing context unavailable", exc_info=True)
     try:
-        from tools.approval import set_current_session_key
+        try:
+            from tools.approval_context import set_current_session_key
+        except ModuleNotFoundError as exc:
+            if exc.name != "tools.approval_context":
+                raise
+            from tools.approval import set_current_session_key
         tokens["approval"] = set_current_session_key(sid)
     except Exception:
         logger.debug("per-turn approval session-key bind failed", exc_info=True)
@@ -3093,7 +3098,12 @@ def _reset_turn_session_identity(tokens) -> None:
     tok = tokens.get("approval")
     if tok is not None:
         try:
-            from tools.approval import reset_current_session_key
+            try:
+                from tools.approval_context import reset_current_session_key
+            except ModuleNotFoundError as exc:
+                if exc.name != "tools.approval_context":
+                    raise
+                from tools.approval import reset_current_session_key
             reset_current_session_key(tok)
         except Exception:
             logger.debug("per-turn approval session-key reset failed", exc_info=True)
