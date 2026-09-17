@@ -6457,7 +6457,18 @@ if(typeof window!=='undefined'){
         return;
       }
       _lastScrollTop=top;
-      if(movedUp){
+      if(movedUp&&bottomDistance>1){
+        // Only a real scroll-away unpins. A collapse ABOVE the tail (worklog
+        // "Done" fold, thinking/tool card collapse, interim-note collapse) shrinks
+        // scrollHeight while the reader is still flush at the tail, so the browser
+        // clamps scrollTop DOWN by the collapsed height and fires a scroll event:
+        // movedUp is true while bottomDistance stays ~0. Reading that as user
+        // intent killed live-follow mid-stream on a reader who never scrolled.
+        // The render-artifact suppression below cannot cover it: it needs a
+        // renderMessages() within the last 1400ms, and the collapse paths above run
+        // from the streaming handlers, which update the DOM incrementally and never
+        // stamp _lastMessageRenderAt. A genuine upward scroll always leaves the true
+        // bottom first, so it still has bottomDistance>1 here.
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;

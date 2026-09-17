@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import secrets
 import shutil
 import stat
@@ -40,8 +41,14 @@ from api.subprocess_utils import windows_hide_flags
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
 
-def _profile_state_dir() -> Path:
-    """Return the webui_state directory for the active profile.
+# Logical profile-name grammar — mirrors api.profiles._PROFILE_ID_RE. Kept as
+# a local copy so workspace-layer validation does not import profiles at module
+# load time (profiles may not be importable in every embedding context).
+_PROFILE_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
+
+
+def _profile_state_dir(profile: str | Path | None = None) -> Path:
+    """Return the webui_state directory for the active or given profile.
 
     For the default profile, returns the global STATE_DIR (respects
     HERMES_WEBUI_STATE_DIR env var for test isolation).
@@ -49,6 +56,28 @@ def _profile_state_dir() -> Path:
     """
     try:
         from api.profiles import get_active_profile_name, get_active_hermes_home
+        if profile is not None:
+            # Literal-"default" STATE routing (#7168 re-gate round 7): the
+            # default profile's workspace state always lives in the global
+            # state files, even when isolated mode pins the default home at
+            # <base>/profiles/default. The round-6 resolver change made
+            # _resolve_profile_home_param("default") return that pinned home,
+            # so the canonical-home check below sent explicit
+            # profile="default" state reads/writes to {pinned}/webui_state/
+            # while ambient calls kept using the global dir — splitting saved
+            # workspaces between two authorities. Config and workspace PATH
+            # resolution still use the pinned home via
+            # _resolve_profile_home_param; only this state-file tier stays
+            # global for the logical string "default".
+            if isinstance(profile, str) and profile.strip() == 'default':
+                return _GLOBAL_WS_FILE.parent
+            profile_home = _resolve_profile_home_param(profile)
+            if not _is_default_profile_home(profile_home):
+                d = profile_home / 'webui_state'
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+            return _GLOBAL_WS_FILE.parent
+
         name = get_active_profile_name()
         if name and name != 'default':
             d = get_active_hermes_home() / 'webui_state'
@@ -59,14 +88,41 @@ def _profile_state_dir() -> Path:
     return _GLOBAL_WS_FILE.parent
 
 
-def _workspaces_file() -> Path:
-    """Return the workspaces.json path for the active profile."""
-    return _profile_state_dir() / 'workspaces.json'
+def _workspaces_file(profile: str | Path | None = None) -> Path:
+    """Return the workspaces.json path for the active or given profile."""
+    return _profile_state_dir(profile=profile) / 'workspaces.json'
 
 
-def _last_workspace_file() -> Path:
-    """Return the last_workspace.txt path for the active profile."""
-    return _profile_state_dir() / 'last_workspace.txt'
+def _last_workspace_file(profile: str | Path | None = None) -> Path:
+    """Return the last_workspace.txt path for the active or given profile."""
+    return _profile_state_dir(profile=profile) / 'last_workspace.txt'
+
+
+def _workspaces_file_for_profile(profile: str | Path | None = None) -> Path | None:
+    """Profile-scoped workspaces.json path, or None for an INVALID profile.
+
+    ``None`` is the fail-closed contract (#7168 re-gate round 4): a malformed
+    profile name must not be clamped onto the default/global state files, so
+    callers treat it as "no readable/writable profile-local state".
+    """
+    try:
+        return _workspaces_file(profile=profile) if profile is not None else _workspaces_file()
+    except TypeError:
+        return _workspaces_file()
+    except ValueError:
+        logger.debug("Ignoring invalid profile name %r for workspaces file", profile)
+        return None
+
+
+def _last_workspace_file_for_profile(profile: str | Path | None = None) -> Path | None:
+    """Profile-scoped last_workspace.txt path, or None for an INVALID profile."""
+    try:
+        return _last_workspace_file(profile=profile) if profile is not None else _last_workspace_file()
+    except TypeError:
+        return _last_workspace_file()
+    except ValueError:
+        logger.debug("Ignoring invalid profile name %r for last-workspace file", profile)
+        return None
 
 
 def _expanduser_path(path: str | Path) -> Path:
@@ -101,8 +157,11 @@ def _expanduser_path(path: str | Path) -> Path:
     return Path(raw)
 
 
-def _resolve_path(path: str | Path) -> Path:
-    """Resolve *path* after env-aware home expansion, without raising."""
+def _resolve_path(path: str | Path, profile: str | Path | None = None) -> Path:
+    """Resolve *path* after env-aware home expansion, preserving remote POSIX paths without raising."""
+    remote_candidate = _remote_terminal_workspace_candidate(path, profile=profile)
+    if remote_candidate is not None:
+        return remote_candidate
     return _safe_resolve(_expanduser_path(path))
 
 
@@ -148,12 +207,75 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
-def _remote_terminal_cwd() -> str | None:
-    """Return target-side terminal cwd for remote profiles, without local stat()."""
-    try:
-        from api.config import get_config
+def _resolve_profile_home_param(profile: str | Path | None) -> Path:
+    """Resolve a profile parameter (name string, directory path string, or Path) to a profile home Path.
 
-        terminal_cfg = get_config().get('terminal', {})
+    Logical profile names are validated strictly (#7168 re-gate round 4): a
+    name that fails the profile-id grammar raises ValueError instead of being
+    silently clamped onto the default home — the old clamp let a malformed
+    name such as ``"bad name"`` read/write the DEFAULT profile's state.
+    Round 5 tightens the grammar gate: a STRING profile value is strictly a
+    logical profile id and is NEVER treated as a path-shaped home — the old
+    ``"/" in raw`` branch resolved any slash-bearing string directly, so a
+    malformed value like ``"../evil"`` bypassed validation entirely and could
+    read/overwrite an arbitrary ``webui_state/last_workspace.txt``
+    (#7168 re-gate round 5, path traversal on the profile-isolation boundary).
+    Round 6 closes the last isolation hole in this resolver: the logical
+    string ``"default"`` used to short-circuit to ``_DEFAULT_HERMES_HOME``
+    before reaching ``get_hermes_home_for_profile()``, bypassing the
+    isolated-mode clamp in ``api.profiles._resolve_profile_home_for_name``
+    (#7168 re-gate round 6). In an isolated deployment pinned at
+    ``<base>/profiles/default``, a session created with ``profile="default"``
+    therefore resolved workspace/config from the BASE root home instead of
+    the pinned one. The name now flows through the same delegated path as
+    every other logical id; literal-default routing to the global state
+    files is retained in ``_profile_state_dir``/``get_last_workspace`` via
+    canonical ``_is_default_profile_home`` identity.
+    An explicit home directory is expressed as a ``Path`` object (callers such
+    as streaming's legacy ``_profile_home`` fallback wrap their home strings
+    in ``Path``); Path values are honored and canonicalized so identity
+    comparisons never depend on lexical spelling (e.g. a symlink alias of the
+    default home must compare equal to it).
+    """
+    if profile is None or str(profile).strip() == "":
+        from api.profiles import get_active_hermes_home
+        return get_active_hermes_home()
+
+    raw = str(profile).strip()
+
+    if isinstance(profile, Path):
+        return _safe_resolve(profile.expanduser())
+
+    # Strings are LOGICAL PROFILE IDS ONLY — no path-shaped strings, ever.
+    if not _PROFILE_NAME_RE.fullmatch(raw):
+        raise ValueError(f"invalid profile name: {raw!r}")
+
+    from api.profiles import get_hermes_home_for_profile
+    return _safe_resolve(get_hermes_home_for_profile(raw))
+
+
+def _is_default_profile_home(profile_home: Path) -> bool:
+    """Canonical identity check against the root/default Hermes home.
+
+    Compares resolved paths so a symlink alias of _DEFAULT_HERMES_HOME is
+    recognized as the default profile rather than treated as a foreign,
+    lexically-different directory (#7168 re-gate round 4).
+    """
+    try:
+        from api.profiles import _DEFAULT_HERMES_HOME
+        return _safe_resolve(profile_home) == _safe_resolve(_DEFAULT_HERMES_HOME)
+    except Exception:
+        return False
+
+
+def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
+    """Return target-side terminal cwd for a remote profile, without local stat()."""
+    try:
+        from api.config import get_config_for_profile_home
+
+        profile_home = _resolve_profile_home_param(profile)
+        terminal_cfg = get_config_for_profile_home(profile_home).get('terminal', {})
+
         if not _is_remote_terminal_backend(terminal_cfg):
             return None
         cwd = str(terminal_cfg.get('cwd') or '').strip()
@@ -165,8 +287,8 @@ def _remote_terminal_cwd() -> str | None:
         return None
 
 
-def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
-    """Return a non-stat'ed target-side Path when it is under terminal.cwd.
+def _remote_terminal_workspace_candidate(path: str | Path, profile: str | Path | None = None) -> Path | None:
+    """Return a non-stat'ed target-side Path when it is under terminal.cwd for the given profile.
 
     Remote workspace paths live on the target host (e.g., remote SSH/Docker
     backend). For valid target-side POSIX paths under ``terminal.cwd``, the
@@ -174,7 +296,10 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     local host-filesystem resolution (avoiding host-specific firmlink rewriting
     such as macOS synthetic ``/home`` -> ``/System/Volumes/Data/home``).
     """
-    cwd = _remote_terminal_cwd()
+    try:
+        cwd = _remote_terminal_cwd(profile=profile) if profile is not None else _remote_terminal_cwd()
+    except TypeError:
+        cwd = _remote_terminal_cwd()
     if not cwd:
         return None
     raw = _strip_surrounding_quotes(str(path)).strip()
@@ -192,8 +317,8 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
             return Path(normalized_raw)
         return None
-    candidate = _resolve_path(raw)
-    base = _resolve_path(cwd)
+    candidate = _safe_resolve(_expanduser_path(raw))
+    base = _safe_resolve(_expanduser_path(cwd))
     if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
         return None
     if candidate == base or _is_within(candidate, base):
@@ -201,7 +326,7 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     return None
 
 
-def _profile_default_workspace() -> str:
+def _profile_default_workspace(profile: str | Path | None = None) -> str:
     """Read the profile's default workspace from its config.yaml.
 
     Checks keys in priority order:
@@ -217,8 +342,9 @@ def _profile_default_workspace() -> str:
     Falls back to the live DEFAULT_WORKSPACE from api.config.
     """
     try:
-        from api.config import get_config
-        cfg = get_config()
+        from api.config import get_config_for_profile_home
+        profile_home = _resolve_profile_home_param(profile)
+        cfg = get_config_for_profile_home(profile_home)
         terminal_cfg = cfg.get('terminal', {})
         remote_terminal = _is_remote_terminal_backend(terminal_cfg)
         # Explicit webui workspace keys first
@@ -227,7 +353,7 @@ def _profile_default_workspace() -> str:
             if ws:
                 if remote_terminal:
                     return str(ws).strip()
-                p = _resolve_path(str(ws))
+                p = _resolve_path(str(ws), profile=profile)
                 if remote_terminal or p.is_dir():
                     return str(p)
         # Fall through to terminal.cwd — the agent's configured working directory
@@ -236,7 +362,7 @@ def _profile_default_workspace() -> str:
             if cwd and str(cwd) not in ('.', ''):
                 if remote_terminal:
                     return str(cwd).strip()
-                p = _resolve_path(str(cwd))
+                p = _resolve_path(str(cwd), profile=profile)
                 if remote_terminal or p.is_dir():
                     return str(p)
     except (ImportError, Exception):
@@ -244,14 +370,14 @@ def _profile_default_workspace() -> str:
     try:
         from api.config import DEFAULT_WORKSPACE as _LIVE_DEFAULT_WORKSPACE
 
-        return str(_resolve_path(_LIVE_DEFAULT_WORKSPACE))
+        return str(_resolve_path(_LIVE_DEFAULT_WORKSPACE, profile=profile))
     except Exception:
-        return str(_resolve_path(_BOOT_DEFAULT_WORKSPACE))
+        return str(_resolve_path(_BOOT_DEFAULT_WORKSPACE, profile=profile))
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
-def _clean_workspace_list(workspaces: list) -> list:
+def _clean_workspace_list(workspaces: list, profile: str | Path | None = None) -> list:
     """Sanitize a workspace list:
     - Preserve target-side remote terminal workspace paths (SSH/Docker) without
       resolving them against the local WebUI host filesystem.
@@ -270,7 +396,7 @@ def _clean_workspace_list(workspaces: list) -> list:
         name = w.get('name', '')
         if not path:
             continue
-        remote_cand = _remote_terminal_workspace_candidate(path)
+        remote_cand = _remote_terminal_workspace_candidate(path, profile=profile)
         if remote_cand is not None:
             p = remote_cand
         else:
@@ -283,7 +409,14 @@ def _clean_workspace_list(workspaces: list) -> list:
             # p is under ~/.hermes/profiles/ — only skip if it's under a DIFFERENT profile
             try:
                 from api.profiles import get_active_hermes_home
-                own_profile_dir = get_active_hermes_home().resolve()
+                if profile is not None:
+                    # Explicit profile wins: the list belongs to that profile,
+                    # so "own" is defined by the profile parameter, never by the
+                    # ambient home (loading profile A's list under ambient B must
+                    # not silently drop A's own workspaces).
+                    own_profile_dir = _resolve_profile_home_param(profile).resolve()
+                else:
+                    own_profile_dir = get_active_hermes_home().resolve()
                 p.relative_to(own_profile_dir)
                 # p is under our own profile dir — keep it
             except (ValueError, Exception):
@@ -350,12 +483,12 @@ def _migrate_global_workspaces() -> list:
         return []
 
 
-def load_workspaces() -> list:
-    ws_file = _workspaces_file()
-    if ws_file.exists():
+def load_workspaces(profile: str | Path | None = None) -> list:
+    ws_file = _workspaces_file_for_profile(profile)
+    if ws_file is not None and ws_file.exists():
         try:
             raw = json.loads(ws_file.read_text(encoding='utf-8'))
-            cleaned = _clean_workspace_list(raw)
+            cleaned = _clean_workspace_list(raw, profile=profile)
             if len(cleaned) != len(raw):
                 # Persist the cleaned version so stale entries don't keep reappearing
                 try:
@@ -364,7 +497,7 @@ def load_workspaces() -> list:
                     )
                 except Exception:
                     logger.debug("Failed to persist cleaned workspace list")
-            return cleaned or [{'path': _profile_default_workspace(), 'name': 'Home'}]
+            return cleaned or [{'path': _profile_default_workspace(profile=profile), 'name': 'Home'}]
         except Exception:
             logger.debug("Failed to load workspaces from %s", ws_file)
     # No profile-local file yet.
@@ -372,7 +505,11 @@ def load_workspaces() -> list:
     # For NAMED profiles: always start clean with just their own workspace.
     try:
         from api.profiles import get_active_profile_name
-        is_default = get_active_profile_name() in ('default', None)
+        if profile is not None:
+            profile_home = _resolve_profile_home_param(profile)
+            is_default = _is_default_profile_home(profile_home)
+        else:
+            is_default = get_active_profile_name() in ('default', None)
     except ImportError:
         is_default = True
     if is_default:
@@ -380,16 +517,20 @@ def load_workspaces() -> list:
         if migrated:
             return migrated
     # Fresh start: single entry from the profile's configured workspace, labeled "Home"
-    return [{'path': _profile_default_workspace(), 'name': 'Home'}]
+    return [{'path': _profile_default_workspace(profile=profile), 'name': 'Home'}]
 
 
-def save_workspaces(workspaces: list) -> None:
-    ws_file = _workspaces_file()
+def save_workspaces(workspaces: list, profile: str | Path | None = None) -> None:
+    ws_file = _workspaces_file_for_profile(profile)
+    if ws_file is None:
+        # Fail-closed: an invalid profile name must not write any state file
+        # (it would land in the default profile's directory via the old clamp).
+        raise ValueError(f"cannot save workspaces for invalid profile {profile!r}")
     ws_file.parent.mkdir(parents=True, exist_ok=True)
     ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def get_profile_default_workspace() -> str:
+def get_profile_default_workspace(profile: str | Path | None = None) -> str:
     """Resolve the ACTIVE PROFILE's default workspace, never the global file.
 
     Like get_last_workspace() but WITHOUT the global ``_GLOBAL_LW_FILE``
@@ -404,32 +545,38 @@ def get_profile_default_workspace() -> str:
     Priority: profile-scoped ``last_workspace.txt`` -> profile ``config.yaml``
     ``workspace``/``default_workspace`` -> ``terminal.cwd`` -> process default.
     """
-    remote_cwd = _remote_terminal_cwd()
+    try:
+        remote_cwd = _remote_terminal_cwd(profile=profile) if profile is not None else _remote_terminal_cwd()
+    except TypeError:
+        remote_cwd = _remote_terminal_cwd()
 
     def _valid(raw: str) -> str | None:
         if not raw:
             return None
         if remote_cwd:
-            if _remote_terminal_workspace_candidate(raw) is not None:
+            if _remote_terminal_workspace_candidate(raw, profile=profile) is not None:
                 return raw
             return None
         if Path(raw).is_dir():
             return raw
         return None
 
-    lw_file = _last_workspace_file()
-    if lw_file.exists():
+    lw_file = _last_workspace_file_for_profile(profile)
+    if lw_file is not None and lw_file.exists():
         try:
             p = _valid(lw_file.read_text(encoding='utf-8').strip())
             if p:
                 return p
         except Exception:
             logger.debug("Failed to read profile last workspace from %s", lw_file)
-    return _profile_default_workspace()
+    return _profile_default_workspace(profile=profile)
 
 
-def get_last_workspace() -> str:
-    remote_cwd = _remote_terminal_cwd()
+def get_last_workspace(profile: str | Path | None = None) -> str:
+    try:
+        remote_cwd = _remote_terminal_cwd(profile=profile) if profile is not None else _remote_terminal_cwd()
+    except TypeError:
+        remote_cwd = _remote_terminal_cwd()
 
     def valid_last_workspace(raw: str) -> str | None:
         if not raw:
@@ -438,35 +585,58 @@ def get_last_workspace() -> str:
             # For remote/SSH profiles, last_workspace is target-side state. Do
             # not accept stale server-local paths merely because they exist on
             # the WebUI host; require the value to stay under terminal.cwd.
-            if _remote_terminal_workspace_candidate(raw) is not None:
+            if _remote_terminal_workspace_candidate(raw, profile=profile) is not None:
                 return raw
             return None
         if Path(raw).is_dir():
             return raw
         return None
 
-    lw_file = _last_workspace_file()
-    if lw_file.exists():
+    lw_file = _last_workspace_file_for_profile(profile)
+    if lw_file is not None and lw_file.exists():
         try:
             p = valid_last_workspace(lw_file.read_text(encoding='utf-8').strip())
             if p:
                 return p
         except Exception:
             logger.debug("Failed to read last workspace from %s", lw_file)
-    # Fallback: try global file
-    if _GLOBAL_LW_FILE.exists():
+    # Fallback: try global file — but ONLY for the root/default profile. A named
+    # profile must never inherit another profile's last-workspace binding through
+    # the legacy global state (#7168 re-gate round 3). Identity is canonical:
+    # a symlink alias of the default home still counts as default, while a
+    # malformed profile name fails validation and is denied the fallback
+    # rather than being clamped onto the global file (#7168 re-gate round 4).
+    _global_fallback_allowed = True  # ambient / no explicit profile: historical behavior
+    if profile is not None:
+        if str(profile).strip() == 'default':
+            _global_fallback_allowed = True
+        else:
+            try:
+                _global_fallback_allowed = _is_default_profile_home(
+                    _resolve_profile_home_param(profile)
+                )
+            except Exception:
+                # Conservative default: an unresolvable explicit profile is NOT the
+                # root profile — deny the global fallback rather than leak.
+                _global_fallback_allowed = False
+    if _global_fallback_allowed and _GLOBAL_LW_FILE.exists():
         try:
             p = valid_last_workspace(_GLOBAL_LW_FILE.read_text(encoding='utf-8').strip())
             if p:
                 return p
         except Exception:
             logger.debug("Failed to read global last workspace")
-    return _profile_default_workspace()
+    return _profile_default_workspace(profile=profile)
 
 
-def set_last_workspace(path: str) -> None:
+def set_last_workspace(path: str, profile: str | Path | None = None) -> None:
     try:
-        lw_file = _last_workspace_file()
+        lw_file = _last_workspace_file_for_profile(profile)
+        if lw_file is None:
+            # Fail-closed: an invalid profile name must not write the default
+            # profile's last_workspace.txt (#7168 re-gate round 4).
+            logger.debug("Refusing to set last workspace for invalid profile %r", profile)
+            return
         lw_file.parent.mkdir(parents=True, exist_ok=True)
         lw_file.write_text(str(path), encoding='utf-8')
     except Exception:
@@ -683,7 +853,15 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _trusted_workspace_roots() -> list[Path]:
+def _trusted_workspace_roots(profile: str | Path | None = None) -> list[Path]:
+    """Return the host directories workspace suggestions may traverse.
+
+    Saved-workspace roots follow the same trust rule as
+    :func:`resolve_trusted_workspace`: with an explicit *profile*, only
+    workspaces saved under THAT profile widen the boundary (plus the ambient
+    home / boot-default carve-outs); ``None`` keeps the historical ambient /
+    global saved-list behaviour.
+    """
     roots: list[Path] = []
 
     def add(candidate: str | Path | None) -> None:
@@ -702,24 +880,26 @@ def _trusted_workspace_roots() -> list[Path]:
 
     add(_home_path())
     add(_BOOT_DEFAULT_WORKSPACE)
-    for w in load_workspaces():
+    for w in load_workspaces(profile=profile):
         add(w.get("path"))
     roots.sort(key=lambda p: len(str(p)))
     return roots
 
 
-def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
+def list_workspace_suggestions(
+    prefix: str = "", limit: int = 12, profile: str | Path | None = None
+) -> list[str]:
     """Return workspace path suggestions under trusted roots only.
 
     Suggestions are limited to directories under one of:
       - Path.home()
       - the boot default workspace
-      - already-saved workspace roots
+      - already-saved workspace roots (scoped to *profile* when given)
 
     Arbitrary system prefixes return an empty list rather than an error so the
     UI can safely autocomplete while the user types.
     """
-    roots = _trusted_workspace_roots()
+    roots = _trusted_workspace_roots(profile=profile)
     if not roots:
         return []
 
@@ -815,7 +995,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     return suggestions[:limit]
 
 
-def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
+def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Path | None = None) -> Path:
     """Resolve and validate a workspace path.
 
     A path is trusted if it satisfies at least one of:
@@ -837,12 +1017,12 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     trusted (it was validated at server startup).
     """
     if path in (None, ""):
-        return _resolve_path(_BOOT_DEFAULT_WORKSPACE)
+        return _resolve_path(_BOOT_DEFAULT_WORKSPACE, profile) if profile is not None else _resolve_path(_BOOT_DEFAULT_WORKSPACE)
 
-    candidate = _resolve_path(path)
+    candidate = _resolve_path(path, profile) if profile is not None else _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
-    remote_candidate = _remote_terminal_workspace_candidate(path)
+    remote_candidate = _remote_terminal_workspace_candidate(path, profile=profile)
     if access_error:
         # For remote terminal profiles, workspace paths belong to the target
         # machine. Allow paths under terminal.cwd so session switching can
@@ -869,6 +1049,11 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
+        saved = load_workspaces(profile=profile)
+        saved_paths = {_resolve_path(w["path"], profile) for w in saved if w.get("path")}
+        if candidate in saved_paths:
+            return candidate
+    except TypeError:
         saved = load_workspaces()
         saved_paths = {_resolve_path(w["path"]) for w in saved if w.get("path")}
         if candidate in saved_paths:
@@ -898,15 +1083,22 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 def resolve_implicit_workspace_with_recovery(
     candidate: str | Path | None,
     fallback: str | Path | None | Callable[[], str | Path | None],
+    profile: str | Path | None = None,
 ) -> tuple[Path, bool]:
     """Resolve an implicit workspace, recovering only a genuinely missing path.
 
     The fallback still passes through :func:`resolve_trusted_workspace`. Existing
     but untrusted, inaccessible, or non-directory candidates are not recovery
     cases: their original validation error is preserved so fallback cannot widen
-    the workspace trust boundary.
+    the workspace trust boundary. When *profile* is given, both the trust
+    resolution and the recovery fallback are scoped to that profile.
     """
     try:
+        if profile is not None:
+            try:
+                return resolve_trusted_workspace(candidate, profile=profile), False
+            except TypeError:
+                pass
         return resolve_trusted_workspace(candidate), False
     except ValueError as original_error:
         if candidate in (None, ""):
@@ -917,19 +1109,49 @@ def resolve_implicit_workspace_with_recovery(
         # never prove target-side deletion. Config-read uncertainty also fails
         # closed by preserving the original validation error.
         try:
-            from api.config import get_config
+            from api.config import get_config, get_config_for_profile_home
 
-            terminal_cfg = get_config().get("terminal", {})
+            if profile is not None:
+                # Classify the backend from THIS profile's own config, never the
+                # ambient one: a remote profile without terminal.cwd must still be
+                # recognized as remote when loaded under a different ambient home.
+                terminal_cfg = get_config_for_profile_home(
+                    _resolve_profile_home_param(profile)
+                ).get("terminal", {})
+            else:
+                terminal_cfg = get_config().get("terminal", {})
         except Exception:
             logger.debug("Failed to classify terminal backend for workspace recovery", exc_info=True)
             raise original_error from None
         if _is_remote_terminal_backend(terminal_cfg):
             raise original_error from None
         try:
-            local_candidate = _resolve_path(candidate)
+            local_candidate = (
+                _resolve_path(candidate, profile=profile)
+                if profile is not None
+                else _resolve_path(candidate)
+            )
             local_candidate.stat()
         except FileNotFoundError:
-            fallback_value = fallback() if callable(fallback) else fallback
+            def _profile_bound_fallback():
+                if profile is not None and callable(fallback):
+                    # Profile-bound getter FIRST (#7168 re-gate round 3): the
+                    # production call sites pass profile-aware getters such as
+                    # get_last_workspace, so binding the explicit profile must
+                    # take precedence over any zero-argument compatibility call,
+                    # which would read ambient/global state.
+                    try:
+                        return fallback(profile)
+                    except TypeError:
+                        pass
+                return fallback() if callable(fallback) else fallback
+
+            fallback_value = _profile_bound_fallback()
+            if profile is not None:
+                try:
+                    return resolve_trusted_workspace(fallback_value, profile=profile), True
+                except TypeError:
+                    pass
             return resolve_trusted_workspace(fallback_value), True
         except (OSError, RuntimeError, ValueError):
             raise original_error from None
@@ -957,7 +1179,7 @@ def _strip_surrounding_quotes(path: str) -> str:
     return s
 
 
-def validate_workspace_to_add(path: str) -> Path:
+def validate_workspace_to_add(path: str, profile: str | Path | None = None) -> Path:
     """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
 
     When a user explicitly adds a new workspace path, we trust their intent — they
@@ -972,10 +1194,10 @@ def validate_workspace_to_add(path: str) -> Path:
     and users routinely paste those into the Add Space input.
     """
     path = _strip_surrounding_quotes(path)
-    candidate = _resolve_path(path)
+    candidate = _resolve_path(path, profile) if profile is not None else _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
-    remote_candidate = _remote_terminal_workspace_candidate(path)
+    remote_candidate = _remote_terminal_workspace_candidate(path, profile=profile)
     if access_error:
         # Remote terminal profiles validate workspace existence on the target
         # machine, not on the WebUI server. Permit target-side paths under
