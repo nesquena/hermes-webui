@@ -56,6 +56,11 @@ def _run_renderers(markdown: str) -> dict:
     js += "\n" + _extract_function(UI_JS, "_matchBacktickFenceLine")
     js += "\n" + _extract_function(UI_JS, "_isBacktickFenceClose")
     js += "\n" + _extract_function(UI_JS, "_renderUserFencedBlocks")
+    # MEDIA: token matchers renderMd depends on. Must be appended BEFORE
+    # renderMd so the extracted function can resolve them.
+    js += "\n" + _extract_function(UI_JS, "_mediaPathSrc")
+    js += "\n" + _extract_function(UI_JS, "_mediaTokenRe")
+    js += "\n" + _extract_function(UI_JS, "_unquoteMediaRef")
     js += "\n" + _extract_function(UI_JS, "renderMd")
     js += textwrap.dedent(
         r'''

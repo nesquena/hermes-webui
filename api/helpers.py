@@ -1421,3 +1421,400 @@ def clear_profile_cookie(handler) -> None:
     cookie[cookie_name]['samesite'] = 'Lax'
     cookie[cookie_name]['max-age'] = '0'
     handler.send_header('Set-Cookie', cookie[cookie_name].OutputString())
+
+# ── MEDIA: token path matching (shared) ──────────────────────────────────────
+# A MEDIA path may legitimately contain spaces:
+#   MEDIA:/home/u/vault/Meeting Notes/2026-07-29 - SDE Focus Group.md
+# A ``[^\s)\]]+`` class stops at the first space, which truncates the path.
+# Frontend ui.js/messages.js used to do this (the artifact card rendered the
+# wrong basename and the tail leaked into the bubble as prose); the same class
+# lives in the /api/media allow-list and the public-share inliner, where a
+# truncated capture silently fails to match the real on-disk path and the
+# artifact becomes unviewable.
+#
+# Widening cannot be unbounded: greedy space tolerance would swallow trailing
+# prose ("MEDIA:/tmp/a.png looks good") and glue an adjacent tag
+# ("MEDIA:/a.png MEDIA:/b.png") into one invalid path. The bare form is
+# therefore anchored on a file extension and tempered -- it crosses single
+# spaces only while still reaching a ``.ext``, never crosses a newline, and
+# carries a ``(?!MEDIA:)`` guard on each continuation token so the next token
+# is never absorbed. Extension-less paths still match via the no-space
+# fallback, so nothing that resolved before stops resolving.
+#
+# Keep this the single source of truth for MEDIA path shape on the Python side;
+# it mirrors ``_mediaPathSrc()`` in static/ui.js.
+_MEDIA_TOKEN_BARE = (
+    r"(?!MEDIA:)[^\s)\]]+?(?:[^\S\n](?!MEDIA:)[^\s)\]]+?)*?\.[A-Za-z0-9]+"
+)
+# Terminal sentence punctuation belongs to the PROSE, not to the ref:
+# `see MEDIA:/tmp/a.png.` is a sentence about a file, not a file named
+# `a.png.`. `.`/`!`/`?` only close the token when the NEXT character ends the
+# token anyway (whitespace, a closing delimiter, or end of input), so a dot that
+# is genuinely inside a name still belongs to the ref — `/tmp/a.tar.gz` and
+# `/tmp/v1.2/chart.png` keep matching whole. A real HTTP(S) query keeps its `?`
+# and `!` because those are followed by query characters, not by a boundary.
+# Mirrors ``_mediaPathSrc()`` in static/ui.js; keep the two in lockstep.
+# A `.`/`!`/`?` is sentence punctuation only when a REAL delimiter follows it —
+# whitespace or a closing delimiter. End-of-input deliberately does NOT count:
+# during streaming the text simply stops mid-token, and treating that as a
+# sentence end would capture `/tmp/a` out of `MEDIA:/tmp/a.png` on the last
+# chunk, so the streamed and settled renderings of one token would disagree.
+_MEDIA_TOKEN_SENTENCE_END = r"[.!?](?=[\s)\]}\"'*_,;:])"
+_MEDIA_TOKEN_BOUNDARY = (
+    r"(?=[\s)\]}\"'*_,;:]|" + _MEDIA_TOKEN_SENTENCE_END + r"|MEDIA:|$)"
+)
+# Explicit quoted forms. These win before every unquoted alternative so an
+# ambiguous path (spaces, a dotted directory before a space, an internal ``)``
+# or ``]``) has one unambiguous spelling that both languages agree on. A quoted
+# ref may hold any character except its own quote and a newline — a newline
+# always ends a MEDIA token. Mirrors the quoted alternatives in
+# ``_mediaPathSrc()`` (static/ui.js); keep the two in lockstep.
+_MEDIA_TOKEN_QUOTED = r"\"[^\"\n]+\"|'[^'\n]+'"
+
+
+def unquote_media_ref(ref: str) -> str:
+    """Strip one matching pair of surrounding quotes from a MEDIA: capture.
+
+    The capture groups in :func:`media_token_pattern` keep the quotes so the
+    matched span covers the full token (needed to replace it in the source
+    text). Every consumer that turns a capture into a filesystem path must call
+    this first, or a quoted ref reaches ``Path()`` with a literal ``"`` in it.
+
+    Mirrors ``_unquoteMediaRef()`` in static/ui.js.
+    """
+    value = str(ref or "").strip()
+    if len(value) >= 2 and value[0] in ("\"", "'") and value[-1] == value[0]:
+        return value[1:-1]
+    return value
+
+
+def is_external_media_url(ref: str) -> bool:
+    """True when an (already unquoted) MEDIA ref points at a REMOTE http(s) URL.
+
+    Scheme comparison is case-insensitive because URI schemes are
+    case-insensitive (RFC 3986 §3.1), so ``HTTPS://`` is as external as
+    ``https://``.
+
+    Deliberately HTTP(S)-only. ``file://`` is NOT reported here: a public share
+    must actively reject it (absolute and un-scoped, so it can point anywhere on
+    the host), and callers use this predicate to decide "leave the token alone",
+    which for ``file://`` would mean leaking the path into the share instead of
+    replacing it with a placeholder. Same for ``data:`` — the share boundary
+    handles those on their own terms.
+
+    This answers ONLY "does this token carry an http(s) scheme". It is not a
+    trust decision: an http(s) URL can still smuggle a local target in its
+    path, query, or fragment. A caller publishing to an untrusted audience must
+    additionally consult :func:`external_media_url_hides_local_target`.
+
+    Mirrors ``_isExternalMediaUrl()`` in static/ui.js.
+    """
+    value = unquote_media_ref(ref)
+    return bool(_re.match(r"(?i)^https?://", value))
+
+
+# Loopback and RFC 1918 / RFC 4193 private hosts. A share snapshot is rendered
+# by an anonymous browser, so a URL naming one of these resolves in the
+# VIEWER's network position, not ours — and for a viewer running Hermes
+# locally that is the authenticated origin itself.
+_PRIVATE_HOST_RE = _re.compile(
+    r"""(?ix) ^ (?:
+          localhost
+        | (?:127|10) \. \d{1,3} \. \d{1,3} \. \d{1,3}
+        | 192 \. 168 \. \d{1,3} \. \d{1,3}
+        | 172 \. (?:1[6-9]|2\d|3[01]) \. \d{1,3} \. \d{1,3}
+        | 169 \. 254 \. \d{1,3} \. \d{1,3}
+        | 0 \. 0 \. 0 \. 0
+        | \[? (?: ::1 | [fF][cCdD][0-9a-fA-F]{2} : .* | [fF][eE][89abAB][0-9a-fA-F] : .* ) \]?
+      ) $
+    """
+)
+
+# Substrings that mean "this URL leads back to a local or authenticated
+# target" once they appear in an http(s) URL's path, query, or fragment.
+_LOCAL_TARGET_MARKERS = (
+    "media:",       # a nested MEDIA: token the share renderer would restore
+    "file://",      # an absolute host path
+    "/api/media",   # our own authenticated media route
+)
+
+
+def _decode_url_component_bounded(value: str, *, rounds: int = 3) -> str:
+    """Percent-decode ``value`` up to ``rounds`` times, stopping when stable.
+
+    Bounded on purpose: a single decode misses ``%254d`` (``%4d`` after one
+    pass, ``M`` after two), and an unbounded loop is a DoS on crafted input.
+    Three passes covers realistic nesting with a fixed ceiling.
+    """
+    from urllib.parse import unquote as _unquote
+
+    current = str(value or "")
+    for _ in range(max(0, rounds)):
+        nxt = _unquote(current)
+        if nxt == current:
+            break
+        current = nxt
+    return current
+
+
+def external_media_url_hides_local_target(ref: str) -> bool:
+    """True when an http(s) MEDIA ref smuggles a LOCAL or AUTHENTICATED target.
+
+    :func:`is_external_media_url` looks only at the scheme, so it says "leave
+    this token alone" for a URL whose own path/query/fragment names a local
+    file or our authenticated media route. In a PUBLIC share that is a privacy
+    hole rather than a cosmetic one: the share renderer restores the preserved
+    token into an image URL, and shapes such as
+
+        MEDIA:https://cdn.test/i.png?src=MEDIA:/etc/shadow.png
+        MEDIA:http://127.0.0.1:8080/api/media?path=/home/u/.ssh/id_rsa
+
+    then either round-trip a host path into the published snapshot or issue a
+    same-origin ``/api/media`` request from the viewer's browser.
+
+    Reported when EITHER holds:
+
+    * the host is loopback/link-local/RFC 1918 — an anonymous viewer resolves
+      it in their own network position, so it is never a public asset; or
+    * the normalized path, query, or fragment contains a local-target marker
+      (a nested ``MEDIA:``, ``file://``, or our ``/api/media`` route).
+
+    The netloc is deliberately excluded from marker matching so an ordinary
+    public CDN host is never rejected for its name alone. Harmless public query
+    strings (``?w=800&fmt=webp``) contain no marker and are preserved exactly.
+
+    Callers treat a True result as "reject the WHOLE token", never as "rewrite
+    part of it" — a partial rewrite is what let the scanner resume inside a
+    refused token in the first place.
+
+    Mirrors ``_externalMediaUrlHidesLocalTarget()`` in static/ui.js.
+    """
+    from urllib.parse import urlsplit
+
+    value = unquote_media_ref(ref)
+    if not _re.match(r"(?i)^https?://", value):
+        return False
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        # Unparseable as a URL — fail CLOSED. A share must not preserve a token
+        # whose shape we cannot reason about.
+        return True
+
+    host = (parts.hostname or "").strip()
+    if host and _PRIVATE_HOST_RE.match(host):
+        return True
+    # An empty host on an http(s) URL is malformed (`http:///x`); fail closed.
+    if not host:
+        return True
+
+    # Only the parts a renderer can turn into a nested target. netloc excluded
+    # so a public host name is never a marker hit.
+    probe = "".join((parts.path or "", "?" + parts.query if parts.query else "",
+                     "#" + parts.fragment if parts.fragment else ""))
+    probe_decoded = _decode_url_component_bounded(probe).lower()
+    return any(marker in probe_decoded for marker in _LOCAL_TARGET_MARKERS)
+
+
+
+# ── MEDIA: token length ceiling (shared lexical contract) ────────────────────
+# The streaming JS parser buffers an unsettled MEDIA candidate in a per-parser
+# tail and caps that buffer. The cap is NOT a private implementation detail of
+# the streaming path: if streaming treats "buffer full" as "stream ended" and
+# finalizes the token, while settled `renderMd()` re-parses the same text with
+# no cap and sees ONE complete reference, the two renderings disagree — the
+# streamed view splits the ref into a media node plus stray prose.
+#
+# So the ceiling belongs to the GRAMMAR, in both languages: a MEDIA token may
+# not exceed MEDIA_TOKEN_MAX_LENGTH characters after the `MEDIA:` keyword. A
+# candidate that reaches the ceiling without a real delimiter is not a token at
+# all — it FAILS CLOSED and stays literal text until a genuine delimiter
+# arrives. That verdict is reachable identically from a streamed prefix and
+# from settled text, which is the property the streamed-vs-settled equality
+# tests pin.
+#
+# UNIT: **UTF-16 CODE UNITS**, in both languages. The choice is deliberate and
+# it is the unit that actually bounds the memory this cap exists to bound: the
+# unsettled candidate lives in a JavaScript string, JavaScript strings are
+# stored as UTF-16, and `String.prototype.length` counts code units. Measuring
+# in code points instead would let a 4096-character astral token occupy 8192
+# code units of the buffer the cap is meant to bound.
+#
+# Python `len()` counts CODE POINTS, so the two languages disagreed for any
+# token holding astral characters: a token of 2049 U+1F600 characters measures
+# 2049 in Python and 4098 in JavaScript, so Python admitted a token JavaScript
+# refused — for every astral token from 2049 through 4096 characters.
+# :func:`media_token_length` converts, so both languages return the same
+# verdict for ASCII, BMP, and astral input.
+#
+# Kept in lockstep with `_MEDIA_TAIL_MAX` in static/messages.js and
+# `MEDIA_TOKEN_MAX_LENGTH` in static/ui.js.
+MEDIA_TOKEN_MAX_LENGTH = 4096
+
+
+def media_token_length(ref: str) -> int:
+    """Length of *ref* in UTF-16 code units — the shared contract's unit.
+
+    Mirrors ``String.prototype.length``: a code point above U+FFFF needs a
+    surrogate pair and counts 2, everything else counts 1.
+
+    A lone surrogate counts 1, which is what JavaScript reports for one too.
+    Spelled as a sum rather than ``len(ref.encode("utf-16-le")) // 2`` because
+    that encode raises ``UnicodeEncodeError`` on a lone surrogate, and a lexical
+    predicate must always return a verdict. Cost is linear in the capture, which
+    the regex scan that produced the capture already paid.
+    """
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in str(ref or ""))
+
+
+def media_token_exceeds_max_length(ref: str) -> bool:
+    """True when a capture is too long to be a legal MEDIA token.
+
+    Measured on the RAW capture (quotes included), because the streaming buffer
+    is bounded by the raw characters it holds, not by the unquoted value, and in
+    UTF-16 code units, because that is the unit that buffer is stored in.
+
+    Mirrors ``_mediaTokenExceedsMaxLength()`` in static/ui.js.
+    """
+    return media_token_length(ref) > MEDIA_TOKEN_MAX_LENGTH
+
+
+def media_token_pattern(extra_exclude: str = "", exclude_urls: bool = False) -> str:
+    """Return the MEDIA: path-capture pattern (one capture group).
+
+    ``extra_exclude`` adds characters to the excluded set of the unquoted
+    alternatives (the share inliner also excludes ``>``). ``exclude_urls``
+    skips ``MEDIA:http(s)://...`` so external images pass through untouched.
+
+    The alternatives are ordered, and the order is load-bearing:
+
+    1. **Quoted** — the unambiguous spelling; may hold any character.
+    2. **Spaced run whose FINAL space-separated word carries the extension.**
+       The continuation is greedy up to the last ``.ext`` on the line, so
+       ``/tmp/v1.2 Reports/chart.png`` resolves whole instead of stopping at
+       the dotted directory ``/tmp/v1.2``. It is still bounded: each
+       continuation word must itself be extension-free, which is what stops
+       ``MEDIA:/tmp/a.png looks good`` from absorbing prose and keeps two
+       adjacent tags separate.
+    3. **No-space fallback** — legacy shape, any extension or none, so
+       extension-less paths that resolved before keep resolving.
+
+    The returned capture may be quoted; callers must run it through
+    :func:`unquote_media_ref` before treating it as a path.
+    """
+    # The URL guard is case-insensitive and sits inside an optional quote so a
+    # QUOTED external URL is skipped too. Spelling it `(?!https?://)` outside the
+    # capture (the previous shape) let two classes through, both of which the
+    # share inliner then resolved as LOCAL paths and replaced with the
+    # missing-media placeholder while the frontend rendered them as remote
+    # images: `MEDIA:"https://…"` (quote consumed before the guard could see the
+    # scheme) and `MEDIA:HTTPS://…` (schemes are case-insensitive per RFC 3986).
+    #
+    # Callers that need the URL rejected AFTER unquoting should also run
+    # `is_external_media_url()` on the unquoted capture — the guard here only
+    # keeps the pattern from matching in the first place.
+    url_guard = r"(?![\"']?(?i:https?)://)" if exclude_urls else ""
+    # One path character: no whitespace, and none of the delimiters that close
+    # a token (plus any caller-specific exclusions).
+    ch = r"[^\s)\]" + extra_exclude + r"]"
+    # FIRST character of an unquoted ref. A quote is excluded here — and only
+    # here — so an UNTERMINATED quoted ref cannot fall through to a bare branch.
+    #
+    # Without this, `MEDIA:"/tmp/bad.png` (no closing quote) fails the quoted
+    # alternative, falls through to the bare grammar, and captures the literal
+    # `"/tmp/bad.png` INCLUDING the leading quote. The streaming flush then
+    # activates that leading-quote fragment as a media node, and it reaches
+    # Path() with a `"` in it. A quoted ref may only activate media via the
+    # complete same-line quoted alternative above; anything else stays prose
+    # until a real delimiter, exactly as the settled parse yields.
+    #
+    # Interior quotes are still allowed (`ch` is unchanged), so a path that
+    # merely contains a quote keeps matching as it did.
+    ch_first = r"[^\s)\]\"'" + extra_exclude + r"]"
+    # A whole space-separated word with NO dot in it. Requiring the intermediate
+    # words to be dot-free is the bound: the run can cross `Reports/` and
+    # `Notes/` but stops dead at the first word carrying a `.ext`, so trailing
+    # prose after `a.png` is never absorbed.
+    #
+    # Spelled as a dot-free character class rather than a lookbehind to stay
+    # byte-comparable with the JS half, where `(?<!\.)` is a PARSE-TIME brick on
+    # engines without regex lookbehind (Safari < 16.4, some embedded WebViews) —
+    # see tests/test_5552_viewport_anchor_surrogate.py.
+    word_no_dot = r"(?!MEDIA:)[^\s)\]." + extra_exclude + r"]+"
+    # Final word carries the extension.
+    final_with_ext = r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+"
+    # Ambiguous prose shape: the FIRST word is already a complete dot-bearing
+    # filename, followed by same-line dot-free prose and then another filename:
+    #
+    #   MEDIA:/tmp/a.png see README.md
+    #
+    # The spaced branch used to absorb all of `/tmp/a.png see README.md` as one
+    # nonexistent ref. Reject that shape so the earlier complete `/tmp/a.png`
+    # wins and the rest remains prose. The continuation classes deliberately
+    # exclude `/`: `/tmp/v1.2 Reports/chart.png` therefore does NOT match this
+    # rejection and retains dotted-directory support. A genuinely ambiguous
+    # spaced filename can use the already-supported quoted form.
+    no_slash = r"[^\s)\]" + extra_exclude + r"/]"
+    word_no_dot_no_slash = (
+        r"(?!MEDIA:)[^\s)\]." + extra_exclude + r"/]+"
+    )
+    final_with_ext_no_slash = (
+        r"(?!MEDIA:)" + no_slash + r"+?\.[A-Za-z0-9]+"
+    )
+    dotted_first_then_dotted_prose = (
+        r"(?!MEDIA:)" + ch + r"+?\.[A-Za-z0-9]+"
+        + r"(?:[^\S\n]" + word_no_dot_no_slash + r")*?"
+        + r"[^\S\n]" + final_with_ext_no_slash
+        + _MEDIA_TOKEN_BOUNDARY
+    )
+    spaced = (
+        r"(?!(?:" + dotted_first_then_dotted_prose + r"))"
+        + r"(?!MEDIA:)" + ch_first + ch + r"*?"
+        + r"(?:[^\S\n]" + word_no_dot + r")*?"
+        + r"[^\S\n]" + final_with_ext
+        + _MEDIA_TOKEN_BOUNDARY
+    )
+    nospace = (
+        r"(?!MEDIA:)" + ch_first + ch + r"*?\.[A-Za-z0-9]+"
+        + _MEDIA_TOKEN_BOUNDARY
+    )
+    # One path character that is NOT terminal sentence punctuation. This is a
+    # TEMPERED GREEDY run, not a lazy one: it consumes as much as the old greedy
+    # `ch+` did — so `C:/tmp/live.png` and a URL's own `://` and `MEDIA:`-bearing
+    # query survive intact — but it refuses a `.`/`!`/`?` that is immediately
+    # followed by a token boundary, leaving that character to the prose.
+    #
+    # A lazy `ch+?` plus a boundary lookahead is WRONG here: `:` closes a token,
+    # so the lazy form stops at `C` in `C:/tmp/live.png`, and stops at the nested
+    # `MEDIA:` inside an external URL.
+    ch_not_sentence_end = r"(?:(?!" + _MEDIA_TOKEN_SENTENCE_END + r")" + ch + r")"
+    # Same run, but the FIRST character cannot be a quote (see ch_first): an
+    # unterminated quoted ref must not reach a bare branch.
+    ch_first_not_sentence_end = (
+        r"(?:(?!" + _MEDIA_TOKEN_SENTENCE_END + r")" + ch_first + r")"
+    )
+    # Extension-less legacy shape: greedy over path characters, but a trailing
+    # sentence `.`/`!`/`?` is left to the prose instead of being captured.
+    fallback = ch_first_not_sentence_end + ch_not_sentence_end + r"*"
+    # A real HTTP(S) URL is one tempered-greedy run, tried BEFORE the bare forms
+    # so `://host/...` (and any nested `MEDIA:` in its path/query) stays inside
+    # one token. `MEDIA:https://h/a.png?q=1.` keeps the query and leaves the final
+    # period to the sentence. Not emitted when the caller skips URLs entirely.
+    external_url = "" if exclude_urls else (
+        r"(?i:https?)://" + ch_not_sentence_end + r"+"
+    )
+    return (
+        r"MEDIA:" + url_guard + r"("
+        + _MEDIA_TOKEN_QUOTED
+        + ((r"|" + external_url) if external_url else "")
+        + r"|" + spaced
+        + r"|" + nospace
+        + r"|" + fallback
+        # Last resort: a token that reaches neither an extension nor a boundary
+        # (e.g. the final bytes of a still-streaming ref) keeps the historic
+        # greedy behavior so nothing that resolved before stops resolving. The
+        # leading-quote exclusion still applies, so an unterminated quoted ref
+        # cannot land here either.
+        + r"|" + ch_first + ch + r"*"
+        + r")"
+    )

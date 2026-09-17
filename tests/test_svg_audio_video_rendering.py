@@ -2,6 +2,27 @@
 import re
 
 
+def _extract_js_function(src, header):
+    """Return a JS function's full source, matched by brace depth.
+
+    Replaces fixed-character-window slicing, which drifts out of the function
+    whenever anything earlier in it grows — failing with no behavior change, and
+    able to slide PAST the expression under test so it passes for the wrong
+    reason.
+    """
+    start = src.index(header)
+    i = src.index('{', start)
+    depth = 1
+    i += 1
+    while depth and i < len(src):
+        if src[i] == '{':
+            depth += 1
+        elif src[i] == '}':
+            depth -= 1
+        i += 1
+    return src[start:i]
+
+
 def test_media_extension_regexes_exist():
     """Verify SVG/audio/video extension regexes are defined."""
     with open('static/ui.js', encoding="utf-8") as f:
@@ -86,14 +107,16 @@ def test_webm_prefers_video_when_audio_and_video_regexes_overlap():
     """Verify .webm is not shadowed by the audio regex."""
     with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
-    kind_start = src.find("function _mediaKindForName")
-    kind_body = src[kind_start:kind_start + 400]
+    # Extract whole function bodies by brace depth instead of slicing fixed
+    # windows (400 / 4500 chars). _inlineMediaHtmlForRef is ~6.6KB and the
+    # localKind branch sits past 4500, so an edit earlier in the function pushed
+    # the assertion target out of the window and failed with no behavior change.
+    kind_body = _extract_js_function(src, "function _mediaKindForName")
     assert "_VIDEO_EXTS.test(clean)" in kind_body
     assert "_AUDIO_EXTS.test(clean)" in kind_body
     assert kind_body.index("_VIDEO_EXTS.test(clean)") < kind_body.index("_AUDIO_EXTS.test(clean)"), \
         "_mediaKindForName must check video before audio so .webm renders as video"
-    inline_start = src.find("function _inlineMediaHtmlForRef")
-    inline_body = src[inline_start:inline_start + 4500]
+    inline_body = _extract_js_function(src, "function _inlineMediaHtmlForRef")
     assert "const kind=_AUDIO_EXTS.test(ref)?'audio':'video';" not in inline_body, \
         "Local MEDIA rendering must reuse _mediaKindForName instead of reintroducing audio-first .webm ordering"
     assert "if(localKind==='audio'||localKind==='video')" in inline_body
