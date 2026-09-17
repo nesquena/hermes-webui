@@ -295,6 +295,19 @@ function openWorkspacePanel(mode='browse'){
 }
 
 function closeWorkspacePanel(){
+  // #6709 (Greptile round 5): closing the panel must also end any open preview.
+  // The panel is the preview's only host, so a close path that leaves
+  // _previewCurrentPath set (the settings toggle and the mobile outside-tap
+  // drawer close both call this directly, never clearPreview()) keeps BOTH
+  // browse surfaces suppressed: renderFileTree() hides #fileTree and
+  // #wsEmptyState while a preview path is set. Reopening through
+  // openWorkspacePanel('browse') does not render the tree either, so the Files
+  // pane came back showing a stale preview with the tree unreachable.
+  // keepPanelOpen:true — this function owns the panel mode; clearPreview() must
+  // not bounce back into openWorkspacePanel('browse') on the way out.
+  if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
+    clearPreview({keepPanelOpen:true});
+  }
   _setWorkspacePanelMode('closed');
 }
 

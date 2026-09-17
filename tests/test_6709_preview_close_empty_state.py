@@ -25,6 +25,7 @@ Two coverage layers:
     isolated test server, proving the browser-side contract end to end.
 """
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -667,3 +668,144 @@ def test_clear_preview_defers_to_render_file_tree():
         "clearPreview must not restore display directly; renderFileTree() "
         "owns the tree/empty-state contract"
     )
+
+
+# ── Greptile round 5 (P1): close paths that bypass clearPreview() ────────────
+#
+# The settings "workspace panel open" toggle (panels.js) and the mobile
+# outside-tap drawer close call closeWorkspacePanel() WITHOUT clearPreview().
+# `_previewCurrentPath` therefore stays set, and renderFileTree() keeps BOTH
+# #fileTree and #wsEmptyState hidden while a preview path is set (`previewOpen`).
+# Reopening through openWorkspacePanel('browse') then leaves the panel in browse
+# mode with neither browse surface visible — a blank Files panel.
+#
+# Invariant under test: a panel that is open must show something — and if it
+# resolves to browse mode, one of the browse surfaces (tree or empty-state)
+# must be visible.
+
+def _extract_boot_function(name: str) -> str:
+    from tests.js_source_extract import extract_function
+
+    return extract_function(_read("static/boot.js"), name)
+
+
+_PANEL_MODE_SHIM = r"""
+var document={documentElement:{dataset:{}}};
+var localStorage={setItem:function(){},getItem:function(){return null;}};
+function _workspacePanelEls(){
+  const layout={classList:{toggle(){},add(){},remove(){}}};
+  const panel={classList:{toggle(){},add(){},remove(){},contains(){return false;}}};
+  const btn={classList:{toggle(){}},setAttribute(){},set disabled(v){},get disabled(){return false;}};
+  return {layout:layout,panel:panel,toggleBtn:btn,edgeToggleBtn:btn,collapseBtn:btn};
+}
+function _isCompactWorkspaceViewport(){ return false; }
+function _uiText(k,d){ return d||k; }
+function _setButtonTooltip(){}
+"""
+
+_PANEL_MODE_DRIVE = r"""
+const previewArea = $id('previewArea');
+const previewClasses = new Set();
+previewArea.classList = {
+  add(c){ previewClasses.add(c); },
+  remove(c){ previewClasses.delete(c); },
+  contains(c){ return previewClasses.has(c); },
+};
+S.entries = __ENTRIES__;
+S.session = {session_id:'s1', workspace:'/ws'};
+S.currentDir = '.';
+// open a preview exactly the way openFile() does
+previewClasses.add('visible');
+_previewCurrentPath = '/ws/file.txt';
+_previewCurrentMode = 'code';
+_workspacePanelMode = 'preview';
+renderFileTree();
+const during = {tree: store.fileTree.style.display, empty: store.wsEmptyState.style.display,
+                preview: _hasWorkspacePreviewVisible(), mode: _workspacePanelMode};
+// settings toggle / mobile outside-tap: close the panel WITHOUT clearPreview()
+closeWorkspacePanel();
+const afterClose = {tree: store.fileTree.style.display, empty: store.wsEmptyState.style.display,
+                    preview: _hasWorkspacePreviewVisible(), mode: _workspacePanelMode};
+// reopen the panel the way the settings toggle does
+openWorkspacePanel('browse');
+const afterReopen = {tree: store.fileTree.style.display, empty: store.wsEmptyState.style.display,
+                     preview: _hasWorkspacePreviewVisible(), mode: _workspacePanelMode,
+                     previewPath: _previewCurrentPath};
+console.log('REOPEN ' + JSON.stringify({during, afterClose, afterReopen}));
+"""
+
+
+def _close_then_reopen_harness(entries_json: str) -> str:
+    """Drive the REAL boot.js panel-mode functions through the settings/mobile
+    close → reopen path, with a #previewArea whose `.visible` class behaves like
+    the browser's."""
+    pre = _NODE_PREAMBLE
+    # The preamble's simplified panel stubs are replaced by the real bodies.
+    for name in (
+        "closeWorkspacePanel",
+        "openWorkspacePanel",
+        "syncWorkspacePanelUI",
+        "_hasWorkspacePreviewVisible",
+    ):
+        pre = re.sub(r"^function %s\([^)]*\)\{[^\n]*\}\n" % name, "", pre, flags=re.M)
+    fns = "\n".join(
+        _extract_boot_function(n)
+        for n in (
+            "_setWorkspacePanelMode",
+            "openWorkspacePanel",
+            "closeWorkspacePanel",
+            "_hasWorkspacePreviewVisible",
+            "syncWorkspacePanelUI",
+        )
+    )
+    drive = _PANEL_MODE_DRIVE.replace("__ENTRIES__", entries_json)
+    return (
+        pre
+        + _PANEL_MODE_SHIM
+        + "\n"
+        + _extract_render_file_tree()
+        + "\n"
+        + _extract_clear_preview()
+        + "\n"
+        + fns
+        + "\n"
+        + drive
+    )
+
+
+def _assert_panel_not_blank(after: dict, label: str):
+    assert after["mode"] != "closed", (label, after)
+    # An open panel must show something.
+    assert (
+        after["tree"] != "none" or after["empty"] != "none" or after["preview"]
+    ), (label, after)
+    # A panel that resolved to browse mode must show a browse surface.
+    if after["mode"] == "browse":
+        assert after["tree"] == "" or after["empty"] == "flex", (label, after)
+
+
+def test_settings_close_reopen_does_not_leave_blank_panel():
+    """Non-empty directory: close via the settings/mobile path (no clearPreview),
+    reopen in browse mode — the panel must not be blank."""
+    js = _close_then_reopen_harness(
+        '[{"name":"a.txt","type":"file","path":"/ws/a.txt"}]'
+    )
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    assert "REOPEN" in proc.stdout, proc.stdout
+    data = json.loads(proc.stdout.split("REOPEN ", 1)[1].strip())
+    # the preview really was open (guards against a harness that no-ops)
+    assert data["during"]["tree"] == "none", data
+    assert data["during"]["preview"] is True, data
+    _assert_panel_not_blank(data["afterReopen"], "nonempty")
+
+
+def test_settings_close_reopen_does_not_leave_blank_panel_empty_dir():
+    """Empty-directory variant: the placeholder must not stay suppressed."""
+    js = _close_then_reopen_harness("[]")
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    assert "REOPEN" in proc.stdout, proc.stdout
+    data = json.loads(proc.stdout.split("REOPEN ", 1)[1].strip())
+    assert data["during"]["empty"] == "none", data
+    _assert_panel_not_blank(data["afterReopen"], "empty")
