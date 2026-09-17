@@ -199,6 +199,8 @@ def test_custom_alias_route_resolves_exact_endpoint_and_credential(monkeypatch):
         "api_key": "east-secret",
         "key_env": "",
         "alias": "east",
+        "base_url_explicit": True,
+        "credential_explicit": True,
     }
     assert west["base_url"] == "https://west.example.test/v1"
     assert west["api_key"] == "west-secret"
@@ -229,8 +231,138 @@ def test_alias_runtime_fallback_supports_older_agent_loader(monkeypatch):
         "api_key": "local-secret",
         "key_env": "LOCAL_ALIAS_KEY",
         "alias": "local",
+        "base_url_explicit": True,
+        "credential_explicit": True,
     }
     assert config.resolve_model_alias_runtime(route, "different-model") is None
+
+
+def _named_custom_provider_config():
+    return {
+        "custom_providers": [{
+            "name": "West",
+            "base_url": "https://provider-west.example.test/v1",
+            "api_key": "provider-west-secret",
+        }],
+    }
+
+
+def test_alias_endpoint_and_credential_override_named_custom_provider(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-special",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "https://alias-west.example.test/v1",
+        "api_key": "alias-west-secret",
+        "base_url_explicit": True,
+        "credential_explicit": True,
+    }
+    runtime = {
+        "provider": "openrouter",
+        "base_url": "https://unrelated.example.test/v1",
+        "api_key": "unrelated-secret",
+        "credential_pool": object(),
+        "api_mode": "responses",
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, runtime)
+
+    assert bundle["provider"] == "custom"
+    assert bundle["base_url"] == "https://alias-west.example.test/v1"
+    assert bundle["api_key"] == "alias-west-secret"
+    assert bundle["credential_pool"] is None
+    assert bundle["api_mode"] is None
+    assert "provider-west-secret" not in str(bundle)
+    assert "unrelated-secret" not in str(bundle)
+
+
+def test_alias_endpoint_without_credential_never_borrows_custom_provider_key(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-keyless",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "https://alias-keyless.example.test/v1",
+        "api_key": "",
+        "base_url_explicit": True,
+        "credential_explicit": False,
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, {
+        "provider": "custom:west",
+        "base_url": "https://provider-west.example.test/v1",
+        "api_key": "provider-west-secret",
+    })
+
+    assert bundle["base_url"] == "https://alias-keyless.example.test/v1"
+    assert bundle["api_key"] == config.KEYLESS_CUSTOM_API_KEY
+    assert "provider-west-secret" not in str(bundle)
+
+
+def test_provider_only_alias_uses_named_custom_provider_connection(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-default",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "",
+        "api_key": "",
+        "base_url_explicit": False,
+        "credential_explicit": False,
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, {
+        "provider": "openrouter",
+        "base_url": "https://unrelated.example.test/v1",
+        "api_key": "unrelated-secret",
+    })
+
+    assert bundle["provider"] == "custom"
+    assert bundle["base_url"] == "https://provider-west.example.test/v1"
+    assert bundle["api_key"] == "provider-west-secret"
+    assert "unrelated-secret" not in str(bundle)
+
+
+def test_credential_only_alias_overrides_named_custom_provider_key(monkeypatch):
+    from api import config
+
+    configured = _named_custom_provider_config()
+    monkeypatch.setattr(config, "cfg", configured)
+    monkeypatch.setattr(config, "get_config", lambda: configured)
+    alias_route = {
+        "alias": "west-account-two",
+        "model": "shared-model",
+        "provider": "custom:west",
+        "base_url": "",
+        "api_key": "alias-account-secret",
+        "base_url_explicit": False,
+        "credential_explicit": True,
+    }
+
+    bundle = config.merge_model_alias_runtime_bundle(alias_route, {
+        "provider": "custom:west",
+        "base_url": "https://provider-west.example.test/v1",
+        "api_key": "provider-west-secret",
+        "credential_pool": object(),
+    })
+
+    assert bundle["base_url"] == "https://provider-west.example.test/v1"
+    assert bundle["api_key"] == "alias-account-secret"
+    assert bundle["credential_pool"] is None
+    assert "provider-west-secret" not in str(bundle)
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -287,6 +419,8 @@ def _canonical_runtime_route():
         "base_url": "https://east.example.test/v1",
         "api_key": "east-secret",
         "key_env": "",
+        "base_url_explicit": True,
+        "credential_explicit": True,
     }
 
 
@@ -303,7 +437,7 @@ def _start_run_kwargs():
     }
 
 
-def test_legacy_dispatch_receives_canonical_alias_endpoint_and_credential(monkeypatch):
+def test_legacy_dispatch_keeps_opaque_alias_lane_until_profile_scoped_resolution(monkeypatch):
     from api import routes
 
     captured = {}
@@ -320,9 +454,10 @@ def test_legacy_dispatch_receives_canonical_alias_endpoint_and_credential(monkey
     routes._start_run(session, **_start_run_kwargs())
 
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "custom"
-    assert captured["runtime_base_url"] == "https://east.example.test/v1"
-    assert captured["runtime_api_key"] == "east-secret"
+    assert captured["model_provider"] == "model-alias-canonical"
+    assert "runtime_base_url" not in captured
+    assert "runtime_api_key" not in captured
+    assert "east-secret" not in json.dumps(captured)
 
 
 def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatch):
@@ -344,8 +479,8 @@ def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatc
     assert captured["external_runtime_owned"] is True
     assert captured["model"] == "east"
     assert captured["model_provider"] is None
-    assert captured["runtime_api_key"] is None
-    assert captured["runtime_base_url"] is None
+    assert "runtime_api_key" not in captured
+    assert "runtime_base_url" not in captured
 
 
 def test_runner_dispatch_uses_alias_identity_in_start_run_contract(monkeypatch):

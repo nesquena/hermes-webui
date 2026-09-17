@@ -39,6 +39,8 @@ const LOCALES = {
     voice_mode_active: 'Voice mode on',
     voice_mode_off: 'Voice mode off',
     session_imported: 'Session imported',
+    sessions_source_webui: 'WebUI sessions ({0})',
+    sessions_source_cli: 'CLI sessions ({0})',
     import_failed: 'Import failed: ',
     import_invalid_json: 'Invalid JSON',
     image_pasted: 'Image pasted: ',
@@ -1791,6 +1793,8 @@ const LOCALES = {
     offline_stream_waiting: 'Connessione persa. In attesa di aggiornare…',
     _lang: 'it',
     _label: 'Italiano',
+    sessions_source_webui: 'Sessioni WebUI ({0})',
+    sessions_source_cli: 'Sessioni CLI ({0})',
     _speech: 'it-IT',
     // boot.js
     cancelling: 'Annullamento\u2026',
@@ -3550,6 +3554,8 @@ const LOCALES = {
     offline_stream_waiting: '接続が切断されました。更新を待っています…',
     _lang: 'ja',
     _label: '日本語',
+    sessions_source_webui: 'WebUIセッション ({0})',
+    sessions_source_cli: 'CLIセッション ({0})',
     _speech: 'ja-JP',
     // boot.js
     cancelling: 'キャンセル中…',
@@ -5337,6 +5343,8 @@ const LOCALES = {
     voice_mode_active: 'Голосовой режим включён',
     voice_mode_off: 'Голосовой режим выключен',
     session_imported: 'Сеанс импортирован',
+    sessions_source_webui: 'Сеансы WebUI ({0})',
+    sessions_source_cli: 'Сеансы CLI ({0})',
     import_failed: 'Не удалось импортировать: ',
     import_invalid_json: 'Неверный JSON',
     image_pasted: 'Изображение вставлено: ',
@@ -7052,6 +7060,8 @@ const LOCALES = {
     offline_stream_waiting: 'Conexión perdida. Esperando para actualizar…',
     _lang: 'es',
     _label: 'Español',
+    sessions_source_webui: 'Sesiones WebUI ({0})',
+    sessions_source_cli: 'Sesiones CLI ({0})',
     _speech: 'es-ES',
     // boot.js
     cancelling: 'Cancelando…',
@@ -8757,6 +8767,8 @@ const LOCALES = {
     offline_stream_waiting: 'Verbindung verloren. Warte auf Aktualisierung…',
     _lang: 'de',
     _label: 'Deutsch',
+    sessions_source_webui: 'WebUI-Sitzungen ({0})',
+    sessions_source_cli: 'CLI-Sitzungen ({0})',
     _speech: 'de-DE',
     // boot.js
     cancelling: 'Wird abgebrochen\u2026',
@@ -10456,6 +10468,8 @@ const LOCALES = {
     offline_stream_waiting: '连接已断开。正在等待刷新…',
     _lang: 'zh',
     _label: '\u7b80\u4f53\u4e2d\u6587',
+    sessions_source_webui: 'WebUI 会话 ({0})',
+    sessions_source_cli: 'CLI 会话 ({0})',
     _speech: 'zh-CN',
     // boot.js
     cancelling: '正在取消...',
@@ -12150,6 +12164,8 @@ const LOCALES = {
     offline_stream_waiting: '連線中斷。等待重新整理…',
     _lang: 'zh-Hant',
     _label: '繁體中文',
+    sessions_source_webui: 'WebUI 對話 ({0})',
+    sessions_source_cli: 'CLI 對話 ({0})',
     _speech: 'zh-TW',
     // boot.js
     cancelling: '正在取消……',
@@ -13911,6 +13927,8 @@ const LOCALES = {
     offline_stream_waiting: 'Conexão perdida. Aguardando para atualizar…',
     _lang: 'pt',
     _label: 'Português',
+    sessions_source_webui: 'Sessões WebUI ({0})',
+    sessions_source_cli: 'Sessões CLI ({0})',
     _speech: 'pt-BR',
     // boot.js
     cancelling: 'Cancelando…',
@@ -15489,6 +15507,8 @@ const LOCALES = {
     offline_stream_waiting: '연결이 끊겼습니다. 새로고침을 기다리는 중…',
     _lang: 'ko',
     _label: '한국어',
+    sessions_source_webui: 'WebUI 세션 ({0})',
+    sessions_source_cli: 'CLI 세션 ({0})',
     _speech: 'ko-KR',
     // boot.js
     cancelling: '취소 중\u2026',
@@ -17238,6 +17258,8 @@ const LOCALES = {
     offline_stream_waiting: 'Connexion perdue. En attente de rafraîchissement\u2026',
     _lang: 'fr',
     _label: 'Français',
+    sessions_source_webui: 'Sessions WebUI ({0})',
+    sessions_source_cli: 'Sessions CLI ({0})',
     _speech: 'fr-FR',
     cancelling: 'Annulation\u2026',
     cancel_failed: 'Échec de l\'annulation.',
@@ -18962,6 +18984,8 @@ const LOCALES = {
 
   cs: {
     _label: 'Čeština',
+    sessions_source_webui: 'Relace WebUI ({0})',
+    sessions_source_cli: 'Relace CLI ({0})',
     _lang: 'cs',
     _speech: 'cs-CZ',
     copy_relative_path: 'Kopírovat relativní cestu',
@@ -20692,6 +20716,8 @@ const LOCALES = {
     offline_stream_waiting: 'Bağlantı kesildi. Yenilenmesi bekleniyor\u2026',
     _lang: 'tr',
     _label: 'Türkçe',
+    sessions_source_webui: 'WebUI oturumları ({0})',
+    sessions_source_cli: 'CLI oturumları ({0})',
     _speech: 'tr-TR',
     // boot.js
     cancelling: 'İptal ediliyor\u2026',
@@ -22442,6 +22468,8 @@ const LOCALES = {
     offline_stream_waiting: 'Połączenie utracone. Oczekiwanie na odświeżenie…',
     _lang: 'pl',
     _label: 'Polski',
+    sessions_source_webui: 'Sesje WebUI ({0})',
+    sessions_source_cli: 'Sesje CLI ({0})',
     _speech: 'pl-PL',
     // boot.js
     cancelling: 'Anulowanie…',
@@ -24196,6 +24224,8 @@ const LOCALES = {
     offline_stream_waiting: 'Mất kết nối. Đang chờ làm mới…',
     _lang: 'vi',
     _label: 'Tiếng Việt',
+    sessions_source_webui: 'Phiên WebUI ({0})',
+    sessions_source_cli: 'Phiên CLI ({0})',
     _speech: 'vi-VN',
     // boot.js
     cancelling: 'Đang hủy…',

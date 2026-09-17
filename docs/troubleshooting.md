@@ -211,6 +211,16 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## 404 after login when password auth is enabled
+
+**Symptom.** After enabling password authentication (`HERMES_WEBUI_PASSWORD`), logging in redirects to `/sessions` and the browser shows a `404 not found` error instead of the chat interface.
+
+**Why.** The server-side redirect after login targets `/sessions` (plural), but that path was missing from the explicit SPA-shell allowlist in `handle_get()`. Without auth the bug is invisible because the SPA handles `/sessions` client-side and the server route is never hit — only the server-side post-login redirect exposes it.
+
+**Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

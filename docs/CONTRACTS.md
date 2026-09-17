@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/remote-workspaces.md`](remote-workspaces.md):
+  architecture contract for remote terminal workspaces (SSH/Docker), target-side
+  POSIX path preservation against macOS synthetic firmlink expansion, and
+  per-profile isolation boundaries.
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata

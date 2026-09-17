@@ -327,7 +327,11 @@ Alias resolution follows the format of the alias:
   and it is unchanged.
 
 Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
-receives the model, the provider id, and an opaque route id, never a base URL or key.
+receives the model, the provider id, and an opaque route id, never a base URL or key. An alias URL
+is authoritative over a configured `custom:<slug>` URL and is paired only with the alias credential
+(or the keyless placeholder when the alias declares none). Without an alias URL, the named custom
+provider supplies its configured endpoint and credential; an explicitly declared alias credential
+overrides only that credential.
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
