@@ -15340,7 +15340,11 @@ function _loadedCompactionMarkerRawIdxs(messages){
 // A settled compaction whose marker sits before the server-loaded tail must
 // remain visible at the top of that tail. Anchoring it to an old assistant/tool
 // turn can bury it inside a hidden worklog, which makes compaction look absent.
-function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx){
+// `currentSummaryFallback` is true when the session's current summary matches
+// no loaded marker and therefore renders as its own settled card. That card is
+// the newest compaction the user can see, so it owns the preserved task cards
+// and no marker card may attach them again.
+function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx,currentSummaryFallback=false){
   const preWindowMarkers=[];
   const inlineMarkers=[];
   const boundary=Number.isFinite(firstRenderedRawIdx)?firstRenderedRawIdx:-1;
@@ -15350,11 +15354,13 @@ function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx){
     if(rawIdx<boundary) preWindowMarkers.push(rawIdx);
     else inlineMarkers.push(rawIdx);
   }
-  const taskOwner=inlineMarkers.length
-    ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
-    :!preWindowMarkers.length
-      ?null
-      :{kind:'pre-window',rawIdx:preWindowMarkers[preWindowMarkers.length-1]};
+  const taskOwner=currentSummaryFallback
+    ?{kind:'current-summary',rawIdx:-1}
+    :inlineMarkers.length
+      ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
+      :!preWindowMarkers.length
+        ?null
+        :{kind:'pre-window',rawIdx:preWindowMarkers[preWindowMarkers.length-1]};
   return {preWindowMarkers,inlineMarkers,taskOwner};
 }
 function _insertCompactionCardNodes(entries,taskOwner,insertNode){
@@ -17039,7 +17045,17 @@ function renderMessages(options){
   // order; markers inside the window stay inline.
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const loadedCompactionRawIdxs=(!compressionState)?_loadedCompactionMarkerRawIdxs(S.messages):[];
-  const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx);
+  // A loaded marker that matches the current summary already renders as its
+  // own card. When none matches (referenceMessageRawIdx<0) the current summary
+  // is still authoritative and must stay visible even next to stale markers,
+  // so the settled fallback is decided here, before any card node is built,
+  // and takes part in the single preserved-task owner selection.
+  const showCurrentSummaryFallback=!!(!compressionState && referenceMessageRawIdx<0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary));
+  const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx,showCurrentSummaryFallback);
+  const referenceNodeOwnsTasks=!!(showCurrentSummaryFallback
+    && compactionPlacements.taskOwner
+    && compactionPlacements.taskOwner.kind==='current-summary'
+    && preservedCompressionTaskMessages.length);
   const _compactionCardEntry=(markerRawIdx,kind)=>{
     const markerMsg=S.messages[markerRawIdx];
     let raw='';
@@ -17065,8 +17081,8 @@ function renderMessages(options){
   };
   const preWindowCompactionCards=compactionPlacements.preWindowMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'pre-window'));
   const compactionCardNodes=compactionPlacements.inlineMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'inline'));
-  const referenceNode=(!compressionState && loadedCompactionRawIdxs.length===0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;const node=row.firstElementChild;if(node&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');return node;})()
+  const referenceNode=showCurrentSummaryFallback
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${referenceNodeOwnsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;const node=row.firstElementChild;if(node&&referenceNodeOwnsTasks) node.setAttribute('data-compaction-task-owner','1');return node;})()
     : null;
   let referenceNodePinnedAtTop=false;
   let preservedCompressionTaskOwnerNode=null;
@@ -17109,7 +17125,7 @@ function renderMessages(options){
     // Keep the settled compacted-context card immediately visible in a long,
     // tail-loaded conversation. Put it in flow (not inside an old tool turn).
     referenceNodePinnedAtTop=_pinSettledCompressionReferenceAtTop(inner,referenceNode,referenceMessageRawIdx);
-    if(referenceNodePinnedAtTop&&referenceNode?.parentElement&&preservedCompressionTaskMessages.length){
+    if(referenceNodePinnedAtTop&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
       preservedCompressionTaskOwnerNode=referenceNode;
     }
   }
@@ -17747,7 +17763,7 @@ function renderMessages(options){
     const referenceInserted=referenceNode&&referenceMessageRawIdx>=0
       ?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)
       :_insertCompressionLikeNode(referenceNode);
-    if(referenceInserted&&referenceNode?.parentElement&&preservedCompressionTaskMessages.length){
+    if(referenceInserted&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
       preservedCompressionTaskOwnerNode=referenceNode;
     }
   }

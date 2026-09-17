@@ -136,6 +136,20 @@ assert.deepStrictEqual(
   _selectCompactionCardPlacements([], 50),
   {{preWindowMarkers: [], inlineMarkers: [], taskOwner: null}},
 );
+// A current-summary fallback (no loaded marker matches the session summary)
+// owns the preserved tasks even when stale markers are still loaded.
+assert.deepStrictEqual(
+  _selectCompactionCardPlacements([3, 11, 49, 88], 50, true),
+  {{
+    preWindowMarkers: [3, 11, 49],
+    inlineMarkers: [88],
+    taskOwner: {{kind: 'current-summary', rawIdx: -1}},
+  }},
+);
+assert.deepStrictEqual(
+  _selectCompactionCardPlacements([], 50, true),
+  {{preWindowMarkers: [], inlineMarkers: [], taskOwner: {{kind: 'current-summary', rawIdx: -1}}}},
+);
 """
     _run_node(script)
 

@@ -1079,7 +1079,7 @@ def test_context_anchor_reference_uses_session_summary_fallback():
     assert "const referenceText=(()=>{" in src
     assert "if(!referenceMessage) return sessionCompressionSummary;" in src
     assert "return segment!==null?segment:raw;" in src
-    assert "loadedCompactionRawIdxs.length===0 && _shouldShowSettledCompressionReference(referenceText)" in src
+    assert "referenceMessageRawIdx<0 && _shouldShowSettledCompressionReference(referenceText)" in src
     assert "!_isContextCompactionText(referenceText)" in src
 
 
