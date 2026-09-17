@@ -121,6 +121,8 @@ def test_cache_only_mismatch_does_not_close_an_agent_owned_by_another_run(scene)
 @pytest.mark.parametrize("ownership", [
     "both", "missing-owner", "missing-run-session", "empty-run-session",
     "missing-both", "missing-run-entry",
+    "local-backend", "missing-backend", "empty-backend", "foreign-backend",
+    "gateway-backend",
 ])
 def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, ownership):
     """Cache-only Steer must prove ownership, not merely fail to refute it.
@@ -129,6 +131,11 @@ def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, owne
     missing stream owner or a missing active-run session is ambiguous and must
     fail closed with ``stream_dead`` without calling ``agent.steer()``. Only
     both identities present and equal to the requesting session may enqueue.
+
+    The active-run backend is revalidated the same way: only the explicit
+    local backend tag registered by ``_run_agent_streaming`` may enqueue on the
+    cached local agent. Gateway keeps its own terminal outcome; a missing,
+    empty, or foreign backend is ambiguous and fails closed.
     """
     agent, other, _ = scene
     agent.session_id = "original"
@@ -141,12 +148,25 @@ def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, owne
         config.ACTIVE_RUNS["run"]["session_id"] = ""
     elif ownership == "missing-run-entry":
         config.ACTIVE_RUNS.pop("run")
+    elif ownership == "local-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = streaming.WEBUI_LOCAL_CHAT_BACKEND
+    elif ownership == "missing-backend":
+        config.ACTIVE_RUNS["run"].pop("backend")
+    elif ownership == "empty-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = ""
+    elif ownership == "foreign-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = "foreign"
+    elif ownership == "gateway-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = "gateway"
     before = dict(config.SESSION_AGENT_CACHE)
     assert "run" in config.STREAMS
     result = steer()
-    if ownership == "both":
+    if ownership in ("both", "local-backend"):
         assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
         agent.steer.assert_called_once_with("updated guidance")
+    elif ownership == "gateway-backend":
+        assert result == {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": "run"}
+        agent.steer.assert_not_called()
     else:
         assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
         agent.steer.assert_not_called()
@@ -155,6 +175,31 @@ def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, owne
     agent._session_db.close.assert_not_called()
     assert config.SESSION_AGENT_CACHE == before
     assert "run" in config.STREAMS
+
+
+def test_local_worker_registers_the_backend_cache_only_steer_requires(monkeypatch):
+    """The in-process worker must tag its active run with the local backend.
+
+    Cache-only Steer only enqueues on that explicit tag, so a worker that
+    registered without it would make every cache-only Steer fail closed.
+    """
+    captured = {}
+
+    class _Registered(Exception):
+        pass
+
+    def register(stream_id, **metadata):
+        captured[stream_id] = metadata
+        raise _Registered()
+
+    monkeypatch.setattr(streaming, "peek_stream", lambda stream_id: queue.Queue())
+    monkeypatch.setattr(streaming, "register_active_run", register)
+    with pytest.raises(_Registered):
+        streaming._run_agent_streaming("original", "hi", "m", "/tmp", "run")
+    assert captured["run"]["session_id"] == "original"
+    assert captured["run"]["backend"] == streaming.WEBUI_LOCAL_CHAT_BACKEND
+    assert streaming.WEBUI_LOCAL_CHAT_BACKEND
+    assert streaming.WEBUI_LOCAL_CHAT_BACKEND != "gateway"
 
 
 def test_http_response_is_written_after_stream_lock_release(scene, monkeypatch):

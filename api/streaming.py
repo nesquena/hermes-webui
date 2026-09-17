@@ -67,6 +67,7 @@ from api.helpers import (
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
+from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
@@ -9192,6 +9193,7 @@ def _run_agent_streaming(
         model=model,
         provider=model_provider,
         ephemeral=bool(ephemeral),
+        backend=WEBUI_LOCAL_CHAT_BACKEND,
     )
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
@@ -13691,6 +13693,11 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     # stream owner AND the active-run session must equal the requesting
     # session. Missing metadata is ambiguous and fails closed (stream_dead);
     # an unfenced cache object is never steered on absent ownership.
+    #
+    # The active-run backend is revalidated the same way. With no registered
+    # worker, the backend tag is the only proof that an in-process runtime
+    # owns this run: Gateway resolves to its own outcome, the explicit local
+    # tag may enqueue, and a missing, empty, or foreign backend fails closed.
     result = {"accepted": False, "fallback": "stream_dead", "stream_id": None}
     with _cfg.STREAMS_LOCK:
         if active_stream_id in _cfg.STREAMS:
@@ -13700,11 +13707,12 @@ def _handle_chat_steer(handler, body: dict) -> bool:
             owned_stream = bool(owner) and owner == sid
             owned_run = bool(run.get("session_id")) and run["session_id"] == sid
             if owned_stream and owned_run and run.get("phase") != "cancelling":
-                if run.get("backend") == "gateway":
+                backend = run.get("backend")
+                if backend == "gateway":
                     # Gateway owns transport; a local cache object is never steered.
                     result = {"accepted": False, "fallback": "gateway_steer_queued",
                               "stream_id": active_stream_id}
-                else:
+                elif backend == WEBUI_LOCAL_CHAT_BACKEND:
                     try:
                         accepted = bool(agent.steer(text))
                     except Exception as exc:
