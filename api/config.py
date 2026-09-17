@@ -8369,6 +8369,17 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         0.0,
                         _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
                     )
+            elif prefer_cache and _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                # A prefer_cache caller (session load / model resolution) never
+                # wants the live catalog -- the prefer_cache branch below serves
+                # the warm cache, the on-disk cache, or a network-free minimal
+                # catalog instead. Letting it sit on the 60s legacy wait is what
+                # parks a cold first page load behind an out-of-band live
+                # rebuild (one provider probe per configured provider, seconds
+                # each) for tens of seconds -- past the WebUI client's 30s
+                # request timeout. Bound it by the same live-rebuild budget the
+                # session-visit refresh callers already tolerate.
+                wait_timeout = _LIVE_REBUILD_BUDGET_SECONDS
             _cache_build_cv.wait_for(
                 lambda: not _cache_build_in_progress,
                 timeout=wait_timeout

@@ -713,3 +713,57 @@ def test_boot_model_dropdown_clears_cached_ready_on_401():
     consumed_idx = body.index("if(_bootActiveProfileUnauthRedirectBudget.isConsumed()) return true;")
 
     assert status_idx < clear_idx < consumed_idx
+
+
+def test_prefer_cache_follower_does_not_wait_legacy_60s_behind_live_rebuild(tmp_path, monkeypatch):
+    """A session load must not queue behind an in-flight live catalog rebuild.
+
+    `/api/session` resolves its model state through
+    `get_available_models(prefer_cache=True)`. When a session-visit refresh has
+    already kicked off an out-of-band live rebuild, the prefer_cache caller used
+    to coalesce on `_cache_build_cv` with the 60s legacy timeout even though it
+    never needs the live catalog and has an on-disk / network-free fallback of
+    its own. The rebuild is unbounded work (one live provider probe per
+    configured provider), so a cold first page load could park the session load
+    for tens of seconds -- past the WebUI client's 30s request timeout.
+    """
+    import api.config as cfg
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    fingerprint = {"profile": "demo"}
+    timeout_waits = []
+    original_wait_for = threading.Condition.wait_for
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original_wait_for(self, predicate, timeout)
+        timeout_waits.append(timeout)
+        return False
+
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+
+    started_at = time.monotonic()
+    result = cfg.get_available_models(prefer_cache=True)
+    elapsed = time.monotonic() - started_at
+
+    assert result == stale_catalog
+    assert timeout_waits, "prefer_cache must coalesce on the in-flight build"
+    assert timeout_waits[0] is not None
+    assert 0.0 < timeout_waits[0] <= 0.05
+    assert elapsed < 0.5
