@@ -4490,7 +4490,8 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];_messagesOwnerSid=null;_forgetActiveSession();
+        const _deletedActiveSid=S.session.session_id;
+        S.session=null;S.messages=[];S.entries=[];_messagesOwnerSid=null;_forgetActiveSession(_deletedActiveSid);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
