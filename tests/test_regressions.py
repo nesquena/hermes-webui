@@ -1189,6 +1189,346 @@ def test_skills_slash_command_defined():
         "HANDLERS.skills registration missing from commands.js"
 
 
+def test_skills_dropdown_options_have_distinct_per_option_descriptions():
+    """/skills' dropdown must surface the write-approval subcommands (pending,
+    approve, reject, diff, approval, mode) the same way /goal and /reasoning
+    surface their own static subArgs -- otherwise they're only usable by typing
+    them from memory, with no discovery path in the chat box's autocomplete.
+
+    It must ALSO show what each subcommand actually does, not the same generic
+    /skills description six times over -- the pre-existing bug every other
+    static-subArgs command (e.g. /goal) still has, deliberately left alone here
+    as separate, larger follow-up work (fixing it for all of them touches the
+    shared getSlashAutocompleteMatches() dispatch, not just this one command).
+
+    Real execution via node, not a source-string check: proves the actual
+    getSlashAutocompleteMatches() output, and that /goal's existing behavior
+    (all its options sharing the parent desc) is unchanged.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    skills_entry = _js_block(src, "{name:'skills',", "\n  {name:'use',")
+    goal_entry = _js_block(src, "{name:'goal',", "\n  {name:'queue',")
+    get_options_fn = _js_block(src, "function _getSlashSubArgOptions(spec){", "\nfunction _activeSlashCommandOffset")
+    offset_fn = _js_block(src, "function _activeSlashCommandOffset(text){", "\nfunction _parseSlashAutocomplete")
+    parse_fn = _js_block(src, "function _parseSlashAutocomplete(text){", "\nasync function getSlashAutocompleteMatches")
+    autocomplete_fn = _js_block(src, "async function getSlashAutocompleteMatches(text){", "\nfunction _findComposerPathToken")
+
+    harness = textwrap.dedent(
+        """
+        function t(k){ return k; }
+        function getMatchingCommands(){ return []; }
+        function cmdSkills(){}
+        function cmdGoal(){}
+        const COMMANDS = [
+          %(skills_entry)s
+          %(goal_entry)s
+        ];
+
+        %(offset_fn)s
+        %(parse_fn)s
+        %(get_options_fn)s
+        %(autocomplete_fn)s
+
+        (async () => {
+          const skillsMatches = await getSlashAutocompleteMatches('/skills ');
+          const goalMatches = await getSlashAutocompleteMatches('/goal ');
+
+          const skillsDescByValue = Object.fromEntries(skillsMatches.map(m => [m.value, m.desc]));
+          const skillsDescSet = new Set(skillsMatches.map(m => m.desc));
+          const goalDescSet = new Set(goalMatches.map(m => m.desc));
+
+          console.log(JSON.stringify({
+            skillsCount: skillsMatches.length,
+            skillsAllDistinct: skillsDescSet.size === skillsMatches.length,
+            skillsPendingDesc: skillsDescByValue['pending'] || null,
+            skillsApproveDesc: skillsDescByValue['approve'] || null,
+            skillsDescEqualsParent: skillsMatches.some(m => m.desc === 'cmd_skills'),
+            goalCount: goalMatches.length,
+            goalAllShareParentDesc: goalDescSet.size === 1 && goalMatches[0].desc === 'cmd_goal',
+          }));
+        })();
+        """
+    ) % {
+        "skills_entry": skills_entry,
+        "goal_entry": goal_entry,
+        "offset_fn": offset_fn,
+        "parse_fn": parse_fn,
+        "get_options_fn": get_options_fn,
+        "autocomplete_fn": autocomplete_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["skillsCount"] == 6, "/skills must offer all six write-approval subcommands"
+    assert out["skillsAllDistinct"] is True, \
+        "each /skills subcommand must show its OWN description, not a repeated generic one"
+    assert out["skillsDescEqualsParent"] is False, \
+        "/skills options must not fall back to the parent command's own description"
+    assert out["skillsPendingDesc"] and out["skillsPendingDesc"] != out["skillsApproveDesc"], \
+        "pending and approve must have distinct, real descriptions"
+    # Unchanged commands (bare-string subArgs) keep sharing the parent desc -- this is the
+    # documented pre-existing limitation, not something this change was meant to fix.
+    assert out["goalCount"] == 4
+    assert out["goalAllShareParentDesc"] is True, \
+        "/goal's bare-string subArgs must keep its existing (shared-desc) behavior unchanged"
+
+
+def test_memory_dropdown_lists_write_approval_subcommands():
+    """/memory has no local COMMANDS entry (unlike /skills), so its dropdown must come
+    from SLASH_SUBARG_SOURCES -- the same fallback map /model and /personality already
+    use for commands with no local handler function. Without this, /memory pending etc.
+    are only usable by typing them from memory (no pun intended), with zero discovery
+    path in the chat box's autocomplete -- exactly the gap /skills had before its own
+    subArgs were added.
+
+    Real execution via node: proves the actual getSlashAutocompleteMatches() output for
+    a SLASH_SUBARG_SOURCES-sourced command, not a source-string check.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    subarg_sources = _js_block(src, "const SLASH_SUBARG_SOURCES={", "\n};") + "\n};"
+    get_options_fn = _js_block(src, "function _getSlashSubArgOptions(spec){", "\nfunction _activeSlashCommandOffset")
+    offset_fn = _js_block(src, "function _activeSlashCommandOffset(text){", "\nfunction _parseSlashAutocomplete")
+    parse_fn = _js_block(src, "function _parseSlashAutocomplete(text){", "\nasync function getSlashAutocompleteMatches")
+    autocomplete_fn = _js_block(src, "async function getSlashAutocompleteMatches(text){", "\nfunction _findComposerPathToken")
+
+    harness = textwrap.dedent(
+        """
+        function t(k){ return k; }
+        const COMMANDS = [];
+
+        %(subarg_sources)s
+        %(offset_fn)s
+        %(parse_fn)s
+        %(get_options_fn)s
+        %(autocomplete_fn)s
+
+        (async () => {
+          const memoryMatches = await getSlashAutocompleteMatches('/memory ');
+          const descByValue = Object.fromEntries(memoryMatches.map(m => [m.value, m.desc]));
+          const descSet = new Set(memoryMatches.map(m => m.desc));
+
+          console.log(JSON.stringify({
+            values: memoryMatches.map(m => m.value).sort(),
+            allDistinct: descSet.size === memoryMatches.length,
+            pendingDesc: descByValue['pending'] || null,
+            approveDesc: descByValue['approve'] || null,
+          }));
+        })();
+        """
+    ) % {
+        "subarg_sources": subarg_sources,
+        "offset_fn": offset_fn,
+        "parse_fn": parse_fn,
+        "get_options_fn": get_options_fn,
+        "autocomplete_fn": autocomplete_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["values"] == ["approval", "approve", "mode", "pending", "reject"], (
+        "/memory's dropdown must offer its five write-approval subcommands "
+        "(no 'diff' -- memory entries are reviewed inline)")
+    assert out["allDistinct"] is True, "each /memory subcommand must show its OWN description"
+    assert out["pendingDesc"] and out["pendingDesc"] != out["approveDesc"]
+
+
+def _js_block(source: str, start_marker: str, end_marker: str) -> str:
+    """Slice a JS source string between two exact markers (inclusive of start)."""
+    start = source.index(start_marker)
+    end = source.index(end_marker, start)
+    return source[start:end]
+
+
+def test_memory_command_routed_through_webui_agent_command_allowlist():
+    """/memory has no client-side handler at all in commands.js (unlike /skills'
+    local search), so it must be reachable via messages.js'
+    _AGENT_COMMANDS_RUN_ON_WEBUI allowlist -- otherwise it falls straight through
+    to plain chat text with no clue anything went wrong (/skills at least had a
+    visibly wrong search result pointing at the bug; /memory had nothing)."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    allowlist_line = _js_block(
+        src, "const _AGENT_COMMANDS_RUN_ON_WEBUI", "\n\n") or ""
+    assert "'memory'" in allowlist_line, \
+        "/memory must be in _AGENT_COMMANDS_RUN_ON_WEBUI so it reaches executeAgentCommand()"
+    # And commands.js must NOT have grown a competing local /memory handler --
+    # if it ever does, that handler (like cmdSkills) becomes solely responsible
+    # for reaching the write-approval store, same as this PR found for /skills.
+    commands_src = (REPO_ROOT / "static/commands.js").read_text()
+    assert "name:'memory'" not in commands_src, (
+        "a local /memory COMMANDS entry appeared -- it must dispatch write-approval "
+        "subcommands itself (like cmdSkills does) or /memory will silently stop "
+        "reaching handle_pending_subcommand()")
+
+
+def test_skills_write_approval_response_targets_owner_session_not_current():
+    """A `/skills approve <id>` reply landing after the user has switched sessions
+    must NOT be appended to whichever session happens to be open when the async
+    /api/commands/exec call resolves -- it must be dropped, the same owner-session
+    guard the delayed steer paths use (_steerOwnerIsCurrent). Real execution via a
+    node harness, not a mock of the guard itself: proves the actual message array
+    is left untouched, not just that a check function was called.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+
+        let resolveTransport;
+        function _runAgentCommandTransport(text){
+          return new Promise((resolve) => { resolveTransport = resolve; });
+        }
+
+        const S = { session: { session_id: 'sid-A' }, messages: [] };
+        let renderCount = 0;
+        function renderMessages(){ renderCount++; }
+
+        %(cmd_skills_fn)s
+
+        const returned = cmdSkills('approve abc123');
+
+        // User switches sessions before the /api/commands/exec response lands --
+        // loadSession() swaps in a fresh session object AND a fresh messages array.
+        S.session = { session_id: 'sid-B' };
+        S.messages = [];
+
+        resolveTransport('Approved 1 skill write(s).');
+
+        // Let the microtask queue drain so the async IIFE's .then chain runs.
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            returnedTrueSynchronously: returned === true,
+            newSessionMessages: S.messages.length,
+            renderCalledAfterSwitch: renderCount,
+          }));
+        }, 20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["returnedTrueSynchronously"] is True, \
+        "cmdSkills must return true synchronously so the caller doesn't treat it as a fallthrough"
+    assert out["newSessionMessages"] == 0, (
+        "the response for sid-A's command was appended to sid-B's (the now-current "
+        "session's) messages array -- it must be dropped instead")
+    assert out["renderCalledAfterSwitch"] == 0, \
+        "renderMessages() must not run for a response whose owner session is no longer current"
+
+
+def test_skills_write_approval_response_delivered_when_no_session_existed():
+    """A `/skills pending` reply must still be delivered when there was NO active
+    session at invocation time (e.g. right after deleting the last session) --
+    _steerOwnerIsCurrent(null) is always false (correct for steer, which always
+    needs a real session/stream), but a null ownerSid here means there was nothing
+    to have switched away FROM, so there is no real owner mismatch to guard against.
+    The prior fix (owner-session guard) over-applied that check and silently
+    dropped every response sent with no session, both for reserved subcommands and
+    for the plain local search branch. Real execution via node, not a mock of the
+    guard: proves the message is genuinely appended and rendered.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+
+        let resolveTransport;
+        function _runAgentCommandTransport(text){
+          return new Promise((resolve) => { resolveTransport = resolve; });
+        }
+
+        // No active session at invocation -- e.g. the last session was just deleted.
+        const S = { session: null, messages: [] };
+        let renderCount = 0;
+        function renderMessages(){ renderCount++; }
+
+        %(cmd_skills_fn)s
+
+        const returned = cmdSkills('pending');
+        resolveTransport('No pending skill writes.');
+
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            returnedTrueSynchronously: returned === true,
+            messageCount: S.messages.length,
+            lastMessageContent: S.messages.length ? S.messages[S.messages.length - 1].content : null,
+            renderCalled: renderCount,
+          }));
+        }, 20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["returnedTrueSynchronously"] is True
+    assert out["messageCount"] == 1, (
+        "the response must be delivered when there was no session to have switched "
+        "away from -- it must not be silently dropped")
+    assert out["lastMessageContent"] == "No pending skill writes."
+    assert out["renderCalled"] == 1
+
+
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     """Reload recovery must persist a durable per-session inflight snapshot.
     Without these helpers, loadSession() references loadInflightState() but a full

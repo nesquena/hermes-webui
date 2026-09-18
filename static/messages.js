@@ -1184,7 +1184,11 @@ const _sessionTitleProvisionalBySid = new Map();
 // their canonical command is registered on the backend (for example
 // /reload-mcp). Keep this intentionally narrow and include underscore variants
 // observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits']);
+// 'memory' added so /memory pending|approve|reject|approval reach the shared
+// write-approval store via /api/commands/exec instead of falling through to plain
+// chat text -- the same gap /skills had before its own fix (api/commands.py:
+// _run_memory_write_approval_command), just without a local search feature to shadow it.
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits', 'memory']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;

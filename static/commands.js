@@ -16,7 +16,22 @@ const COMMANDS=[
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
+  // subArgs lists canonical names only for the dropdown (discovery) -- deliberately
+  // excludes the apply/deny/drop aliases SKILLS_AGENT_SUBCOMMANDS accepts below, so the
+  // menu doesn't show three synonyms for "reject". Typing an alias still works either way.
+  // Each entry carries its own `desc` -- {value,desc} objects, not bare strings -- so
+  // the dropdown shows what THIS subcommand does instead of repeating cmd_skills' own
+  // description under all six (the bare-string form, still used by /goal and
+  // /reasoning below, has no per-option slot for that; see getSlashAutocompleteMatches).
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query',
+   subArgs:[
+     {value:'pending', desc:'List staged skill writes awaiting approval'},
+     {value:'approve', desc:'Apply a staged skill write by id'},
+     {value:'reject', desc:'Discard a staged skill write by id'},
+     {value:'diff', desc:'Show the diff for a staged skill write by id'},
+     {value:'approval', desc:'Turn the write-approval gate on or off'},
+     {value:'mode', desc:'Alias for approval on|off'},
+   ]},
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
@@ -38,6 +53,17 @@ const COMMANDS=[
 const SLASH_SUBARG_SOURCES={
   model:{desc:t('cmd_model'), subArgs:'models'},
   personality:{desc:t('cmd_personality'), subArgs:'personalities'},
+  // /memory has no local COMMANDS entry (unlike /skills) -- it's dispatched entirely via
+  // messages.js' generic _AGENT_COMMANDS_RUN_ON_WEBUI mechanism, so it needs its dropdown
+  // wired up here instead. No 'diff' -- memory entries are small enough to review inline
+  // (api/commands.py's _run_memory_write_approval_command has no diff subcommand either).
+  memory:{desc:t('cmd_memory'), subArgs:[
+    {value:'pending', desc:'List staged memory writes awaiting approval'},
+    {value:'approve', desc:'Apply a staged memory write by id'},
+    {value:'reject', desc:'Discard a staged memory write by id'},
+    {value:'approval', desc:'Turn the write-approval gate on or off'},
+    {value:'mode', desc:'Alias for approval on|off'},
+  ]},
 };
 
 function parseCommand(text){
@@ -524,15 +550,21 @@ async function getSlashAutocompleteMatches(text){
   if(!parsed) return [];
   if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
   const options=await _getSlashSubArgOptions(parsed.command.subArgs);
+  // Each option is either a bare string (/goal, /reasoning -- no per-option desc slot,
+  // falls back to the parent command's own desc as before) or a {value,desc} object
+  // (/skills -- shows what that specific subcommand does).
   return options
-    .filter(opt=>String(opt).toLowerCase().startsWith(parsed.query))
-    .map(opt=>({
-      name:parsed.command.name,
-      value:String(opt),
-      desc:parsed.command.desc,
-      source:'subarg',
-      parent:parsed.command.name,
-    }));
+    .filter(opt=>String((opt&&typeof opt==='object')?opt.value:opt).toLowerCase().startsWith(parsed.query))
+    .map(opt=>{
+      const isRich=opt&&typeof opt==='object';
+      return {
+        name:parsed.command.name,
+        value:String(isRich?opt.value:opt),
+        desc:(isRich&&opt.desc)?opt.desc:parsed.command.desc,
+        source:'subarg',
+        parent:parsed.command.name,
+      };
+    });
 }
 
 function _findComposerPathToken(text,cursor){
@@ -1125,15 +1157,48 @@ async function cmdTheme(args){
 }
 
 // Subcommands owned by the agent's own /skills write-approval handler
-// (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
-// fall through to the normal send path rather than be swallowed by the local search below.
+// (hermes_cli/write_approval_commands.py, dispatched here via /api/commands/exec ->
+// api/commands.py:_run_skills_write_approval_command). A plain `return false` fallthrough
+// does NOT reach that handler in a native WebUI session -- /api/chat/start hands the raw
+// text straight to AIAgent.run_conversation as a normal message (api/streaming.py), with
+// no slash-command interception; gateway/slash_commands.py and the interactive CLI's own
+// dispatch (hermes_cli/cli_commands_mixin.py) only run for their own session kinds. So
+// these subcommands are dispatched explicitly here, the same way /reload-skills and the
+// other _AGENT_COMMANDS_RUN_ON_WEBUI commands already are (see messages.js).
 // Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
-// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+// Keep in sync with handle_pending_subcommand() and api/commands.py's
+// _SKILLS_WRITE_APPROVAL_SUBCOMMANDS — a missing alias is silently swallowed here.
 const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
+
+// _steerOwnerIsCurrent(null) is always false -- correct for steer (a steer reply always needs
+// a real active session/stream) but wrong here: a null ownerSid means there was no session to
+// begin with (e.g. right after deleting the last one), so there is nothing to have "switched
+// away from". Only a session that existed and then changed should discard the response.
+function _skillsResponseOwnerStillValid(ownerSid){
+  return !ownerSid || _steerOwnerIsCurrent(ownerSid);
+}
 
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
-  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)) return false;
+  // Captured now, before either branch awaits anything: if the user switches sessions
+  // before the response lands, S.messages/renderMessages() would otherwise write the
+  // response into whatever session is current AT RESOLUTION time, not the one that
+  // issued the command. Same owner-session guard the delayed steer paths use.
+  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
+    (async()=>{
+      let out;
+      try{
+        out = await _runAgentCommandTransport('/skills '+args);
+      }catch(e){
+        out = `Skill write-approval command failed: ${e&&e.message||e}`;
+      }
+      if(!_skillsResponseOwnerStillValid(ownerSid)) return;
+      S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
+      renderMessages();
+    })();
+    return true;
+  }
   (async()=>{
     try{
       const data = await api('/api/skills');
@@ -1146,6 +1211,7 @@ function cmdSkills(args){
           (s.category||'').toLowerCase().includes(q)
         );
       }
+      if(!_skillsResponseOwnerStillValid(ownerSid)) return;
       if(!skills.length){
         const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
         S.messages.push(msg); renderMessages(); return;
