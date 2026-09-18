@@ -19,8 +19,19 @@ const COMMANDS=[
   // subArgs lists canonical names only for the dropdown (discovery) -- deliberately
   // excludes the apply/deny/drop aliases SKILLS_AGENT_SUBCOMMANDS accepts below, so the
   // menu doesn't show three synonyms for "reject". Typing an alias still works either way.
+  // Each entry carries its own `desc` -- {value,desc} objects, not bare strings -- so
+  // the dropdown shows what THIS subcommand does instead of repeating cmd_skills' own
+  // description under all six (the bare-string form, still used by /goal and
+  // /reasoning below, has no per-option slot for that; see getSlashAutocompleteMatches).
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query',
-   subArgs:['pending','approve','reject','diff','approval','mode']},
+   subArgs:[
+     {value:'pending', desc:'List staged skill writes awaiting approval'},
+     {value:'approve', desc:'Apply a staged skill write by id'},
+     {value:'reject', desc:'Discard a staged skill write by id'},
+     {value:'diff', desc:'Show the diff for a staged skill write by id'},
+     {value:'approval', desc:'Turn the write-approval gate on or off'},
+     {value:'mode', desc:'Alias for approval on|off'},
+   ]},
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
@@ -528,15 +539,21 @@ async function getSlashAutocompleteMatches(text){
   if(!parsed) return [];
   if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
   const options=await _getSlashSubArgOptions(parsed.command.subArgs);
+  // Each option is either a bare string (/goal, /reasoning -- no per-option desc slot,
+  // falls back to the parent command's own desc as before) or a {value,desc} object
+  // (/skills -- shows what that specific subcommand does).
   return options
-    .filter(opt=>String(opt).toLowerCase().startsWith(parsed.query))
-    .map(opt=>({
-      name:parsed.command.name,
-      value:String(opt),
-      desc:parsed.command.desc,
-      source:'subarg',
-      parent:parsed.command.name,
-    }));
+    .filter(opt=>String((opt&&typeof opt==='object')?opt.value:opt).toLowerCase().startsWith(parsed.query))
+    .map(opt=>{
+      const isRich=opt&&typeof opt==='object';
+      return {
+        name:parsed.command.name,
+        value:String(isRich?opt.value:opt),
+        desc:(isRich&&opt.desc)?opt.desc:parsed.command.desc,
+        source:'subarg',
+        parent:parsed.command.name,
+      };
+    });
 }
 
 function _findComposerPathToken(text,cursor){
