@@ -4653,6 +4653,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return window._fadeTextEffect===true;
   }
   function _shouldUseTransparentStreamFade(){
+    // The live prose fade belongs to the LIVE render path: the hybrid
+    // transparent_live_compact_settled mode streams transparently but settles
+    // compact, so the settled predicate (isTransparentStream) is false there.
+    // Prefer the live resolver; keep the settled predicate as the fallback for
+    // runtimes that only expose the older helper.
+    if(typeof isTransparentLiveMode==='function') return !!isTransparentLiveMode();
     return typeof isTransparentStream==='function'&&isTransparentStream();
   }
   function _shouldUseLiveProseFade(){
