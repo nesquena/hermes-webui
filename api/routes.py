@@ -6697,7 +6697,34 @@ def _repair_foreign_session_model_provider(
         return resolved_provider
 
     try:
-        catalog = get_available_models(prefer_cache=True)
+        # ROUTING-AUTHORITATIVE: this catalog lookup decides which backend a
+        # chat turn is sent to. It MUST NOT skip an in-flight rebuild
+        # (wait_for_inflight_rebuild stays True): during a rebuild the
+        # authoritative owner may not be published yet, and serving a stale
+        # snapshot here can silently route a poisoned session to the wrong
+        # provider. Display-only callers opt out via
+        # wait_for_inflight_rebuild=False; this one must not.
+        import inspect as _inspect
+
+        try:
+            _gam_accepts_rebuild_wait = (
+                "wait_for_inflight_rebuild"
+                in _inspect.signature(get_available_models).parameters
+            )
+        except (TypeError, ValueError):
+            # Builtins / C-callables can refuse introspection; assume the
+            # signature shape that predates wait_for_inflight_rebuild.
+            _gam_accepts_rebuild_wait = False
+        if _gam_accepts_rebuild_wait:
+            catalog = get_available_models(
+                prefer_cache=True, wait_for_inflight_rebuild=True
+            )
+        else:
+            # Stub/monkeypatched get_available_models without the new
+            # parameter (test doubles): the prefer_cache contract it does
+            # know is still cache-only, which keeps the repair semantically
+            # intact for those doubles.
+            catalog = get_available_models(prefer_cache=True)
     except Exception:
         return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
@@ -7453,6 +7480,7 @@ def _resolve_compatible_session_model_state(
     profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
+    wait_for_inflight_rebuild: bool = True,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -7476,7 +7504,7 @@ def _resolve_compatible_session_model_state(
     reverse proxies, even though the WebUI itself eventually responded.
 
     ``prefer_cached_catalog=True`` (ours-original) makes the catalog lookup
-    non-blocking: it resolves from the warm/disk cache or a network-free
+    cache-only: it resolves from the warm/disk cache or a network-free
     minimal catalog and NEVER triggers a live per-provider rebuild (the
     Copilot token-exchange HTTPS call that hangs a server-initiated wakeup
     turn, see rebase report §1/§3/model-resolve-hang). Human-initiated
@@ -7484,6 +7512,14 @@ def _resolve_compatible_session_model_state(
     already has a persisted model still resolves correctly because the
     persisted model wins over the catalog and the catalog is only consulted
     for the default-model backstop.
+
+    ``wait_for_inflight_rebuild`` (default True) controls whether the
+    cache-only lookup also JOINS an in-flight rebuild for the authoritative
+    result. Pure-display resolvers (``_resolve_effective_session_model_*_for_display``
+    on GET /api/session) pass False so they never queue behind the rebuild
+    lock. Routing-authoritative callers (the server-initiated wakeup, whose
+    resolved model/provider starts a real agent run) keep the default True:
+    they must route from the authoritative catalog, never a stale snapshot.
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
@@ -7551,15 +7587,33 @@ def _resolve_compatible_session_model_state(
         import inspect as _inspect
 
         try:
-            _gam_accepts_prefer_cache = (
-                "prefer_cache" in _inspect.signature(get_available_models).parameters
-            )
+            _gam_params = _inspect.signature(get_available_models).parameters
+            _gam_accepts_prefer_cache = "prefer_cache" in _gam_params
+            _gam_accepts_rebuild_wait = "wait_for_inflight_rebuild" in _gam_params
         except (TypeError, ValueError):
             # Builtins / C-callables can refuse introspection; assume the
             # zero-arg stub shape in that case.
             _gam_accepts_prefer_cache = False
+            _gam_accepts_rebuild_wait = False
         if _gam_accepts_prefer_cache:
-            catalog = get_available_models(prefer_cache=True)
+            # Cache-only resolution (display / wakeup paths). Whether the
+            # catalog lookup also joins an in-flight rebuild is controlled by
+            # the caller: pure-display GET /api/session resolvers pass
+            # wait_for_inflight_rebuild=False (never queue behind the
+            # builder), while routing-authoritative callers such as the
+            # server-initiated wakeup keep the default True so they route
+            # from the authoritative catalog (see get_available_models
+            # docstring).
+            if _gam_accepts_rebuild_wait:
+                catalog = get_available_models(
+                    prefer_cache=True,
+                    wait_for_inflight_rebuild=wait_for_inflight_rebuild,
+                )
+            else:
+                # Stub/monkeypatched get_available_models without the new
+                # parameter (test doubles): fall back to the prefer_cache
+                # contract it does know.
+                catalog = get_available_models(prefer_cache=True)
         else:
             catalog = get_available_models()
     else:
@@ -7914,8 +7968,12 @@ def _resolve_effective_session_model_for_display(session) -> str:
         # the models-cache lock and starved SSE/streaming -> BrokenPipe storm
         # (#multi-tab-streaming-interlock). The persisted session model is
         # authoritative; the catalog is only a default-model backstop, which
-        # the network-free minimal catalog already provides.
+        # the network-free minimal catalog already provides. Also passes
+        # wait_for_inflight_rebuild=False: this is pure display — the result
+        # never routes a run, so it must also skip the rebuild LOCK (the
+        # builder holds it across build_done.wait) and serve immediately.
         prefer_cached_catalog=True,
+        wait_for_inflight_rebuild=False,
     )
     return effective_model or original_model
 
@@ -7934,6 +7992,7 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
         # or the network-free minimal catalog.
         prefer_cached_catalog=True,
+        wait_for_inflight_rebuild=False,
     )
     return provider
 
@@ -23688,6 +23747,14 @@ def start_session_turn(
     # without the profile defaults the resolver would fall back to the global
     # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
     _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
+    # NOTE (Greptile #7568 re-review): this wakeup resolution is
+    # ROUTING-AUTHORITATIVE — the resolved model/provider flows into
+    # _start_chat_stream_for_session and starts a real agent run, unlike the
+    # pure-display GET /api/session resolvers. It therefore keeps the DEFAULT
+    # wait_for_inflight_rebuild=True: if a catalog rebuild is in flight it
+    # joins it and routes from the authoritative catalog, never a stale
+    # minimal snapshot. prefer_cached_catalog still guarantees it never
+    # TRIGGERS a rebuild itself.
     model, model_provider, normalized_model = _resolve_compatible_session_model_state(
         requested_model,
         requested_provider,

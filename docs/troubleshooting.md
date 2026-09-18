@@ -221,6 +221,20 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## Opening or switching sessions is slow while the model catalog rebuilds
+
+**Symptom.** Opening or switching to a session takes 5-7 seconds while a background model-catalog rebuild is running (routine during sustained agent activity, or on networks where a provider credential probe is slow). The slow-request log for `GET /api/session` shows the `t3_after_model_resolve` stage consuming multiple seconds, tracking the live-rebuild budget.
+
+**Why.** The session-open path resolves the display model through `get_available_models(prefer_cache=True)`, whose contract is cache-only ("never run or wait for the live provider probe"). It used to queue behind an in-flight catalog rebuild for up to the rebuild budget anyway. Rebuilds are far from free on some networks: every rebuild probes provider credentials, and e.g. the botocore IMDS fetch on a non-AWS network can blackhole for ~4.3s per probe. Any rebuild window therefore handed a multi-second stall to every concurrent session switch.
+
+**Diagnostic.** With slow-request logging enabled, look for `t3_after_model_resolve` in the `GET /api/session?...&resolve_model=1` stages. Values that match `_LIVE_REBUILD_BUDGET_SECONDS` (default 4s) are the signature.
+
+**Fix.** Update to a build containing the prefer_cache wait-gate fix (see PR #7568). Pure-display lookups (`GET /api/session` model resolution and the session-visit fallback) call `get_available_models(prefer_cache=True, wait_for_inflight_rebuild=False)`: they never start a rebuild, never wait for one that is in flight, and never queue on the rebuild lock; they serve the warm in-memory / disk cache or the network-free minimal catalog immediately. Routing-authoritative lookups — the server-initiated wakeup (`start_session_turn`) and the foreign-session provider repair on the chat/send path — still use `prefer_cache=True` so they never *trigger* a rebuild, but they keep `wait_for_inflight_rebuild=True` and join an in-flight rebuild so a stale snapshot can never route a turn to the wrong backend. On the pure display side nothing needs configuring. The `prefer_cache` + `force_refresh` combination is contradictory and rejected at entry. If your network blackholes the EC2 metadata address, setting `AWS_EC2_METADATA_DISABLED=true` in the WebUI service environment additionally removes the ~4.3s probe from the rebuild itself.
+
+**When to file a bug.** If session opens still stall for multiple seconds on a build with this fix and the slow-request stages show `t3_after_model_resolve` matching the rebuild budget, capture the stage log and file a bug.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
