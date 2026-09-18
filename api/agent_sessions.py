@@ -1,8 +1,10 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
 import sqlite3
+import sys
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -18,36 +20,65 @@ logger = logging.getLogger(__name__)
 _SOURCE_COLUMN_WARNED_DB_PATHS: set[str] = set()
 
 
+def state_db_file_uri(db_path, platform: str | None = None) -> str:
+    """Build the ``file:`` URI (no query string) for an absolute ``state.db`` path.
+
+    ``Path.as_uri()`` is not usable here: for a UNC share it emits
+    ``file://server/share/state.db`` and SQLite rejects any non-local URI
+    authority unless compiled with ``SQLITE_ALLOW_URI_AUTHORITY`` (the
+    CPython 3.11-3.13 Windows builds are not). SQLite instead accepts the
+    *empty*-authority spelling ``file:////server/share/state.db``, whose path
+    ``//server/share/...`` the Windows VFS opens as the UNC name. Drive-letter
+    paths keep the documented ``file:///C:/...`` form and POSIX paths are
+    unchanged. Only ``/`` survives unescaped, so ``?`` and ``#`` in path
+    components cannot leak into the query string.
+
+    ``platform`` defaults to the running interpreter; tests pass it explicitly
+    so the Windows shapes are checked from any host.
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        win = PureWindowsPath(str(db_path))
+        drive = win.drive
+        if drive.startswith("\\\\?\\"):
+            # Extended-length prefix: "\\?\C:" or "\\?\UNC\server\share".
+            drive = drive[4:]
+            if drive.upper().startswith("UNC\\"):
+                drive = "\\\\" + drive[4:]
+        parts = win.parts[1:]  # drop the anchor, keep the path components
+        if drive.startswith("\\\\"):
+            host_share = drive[2:].replace("\\", "/")
+            posix_path = "//" + "/".join((host_share, *parts))
+        else:
+            posix_path = "/" + "/".join((drive, *parts))
+        # ``:`` stays literal so the drive letter keeps SQLite's documented
+        # ``file:///C:/...`` shape (``Path.as_uri()`` leaves it unescaped too).
+        return "file://" + quote(posix_path, safe="/:")
+    posix_path = PurePosixPath(str(db_path)).as_posix()
+    return "file://" + quote(posix_path, safe="/")
+
+
+def state_db_readonly_uri(db_path, platform: str | None = None) -> str:
+    """Strict read-only (``mode=ro``) form of :func:`state_db_file_uri`."""
+    return state_db_file_uri(db_path, platform=platform) + "?mode=ro"
+
+
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
 
     Same rationale as the session-listing path (#5455): a write-capable handle
     on the multi-GB, WAL ``state.db`` while the agent streams into it adds
     needless checkpoint/lock surface. The read-only ``file:...?mode=ro`` URI
-    avoids that. Falls back to a writable connection (and warns) if the
-    read-only open fails, so callers never lose data on exotic filesystems.
+    avoids that. Read failures propagate; a reader never upgrades to a writer.
 
     The caller must ensure ``db_path`` exists — this raises ``FileNotFoundError``
-    for a missing path rather than letting the writable fallback below create an
-    empty, writable ``state.db`` there (a ghost DB in the agent's HOME). The
-    fallback is only for an *existing* DB whose read-only open fails on an exotic
-    filesystem, so a real read never loses data.
+    for a missing path rather than creating a ghost database.
 
     Callers own the returned connection (wrap it in ``contextlib.closing``).
     """
-    log = log or logger
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
-    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    try:
-        return sqlite3.connect(read_only_uri, uri=True)
-    except sqlite3.Error as exc:
-        log.warning(
-            "agent state.db read-only open failed for %s; falling back to writable connection: %s",
-            db_path,
-            exc,
-        )
-        return sqlite3.connect(str(db_path))
+    return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
 
 
 MESSAGING_SOURCES = {
@@ -549,21 +580,7 @@ def read_importable_agent_session_rows(
         return []
 
     log = log or logger
-    # Open read-only for this projection/listing path: it is a pure read, and
-    # holding a write-capable handle on the live (multi-GB, WAL) state.db while
-    # the agent streams into it adds needless checkpoint/lock surface (#5455).
-    # The defensive index self-heal below still runs, but through a separate
-    # short-lived writable connection on the rare missing-index path only.
-    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    try:
-        conn = sqlite3.connect(read_only_uri, uri=True)
-    except sqlite3.Error as exc:
-        log.warning(
-            "agent session listing read-only open failed for %s; falling back to writable connection: %s",
-            db_path,
-            exc,
-        )
-        conn = sqlite3.connect(str(db_path))
+    conn = open_state_db_readonly(db_path, log=log)
     with closing(conn):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -613,11 +630,7 @@ def read_importable_agent_session_rows(
         use_messages_join = messages_has_session_id
         count_col = 'id' if 'id' in message_cols else 'session_id'
 
-        # Defensive index prime (#3887). The normal candidate-ordering shape uses
-        # the agent's standard ``idx_messages_session ON messages(session_id,
-        # timestamp)`` index; without it, large cron-only scans degrade badly.
-        # Writable dbs self-heal by recreating the index. Read-only or locked dbs
-        # fall back to the pre-aggregated cron-only path below instead of failing.
+        # Index creation belongs to explicit drained maintenance, never a read.
         messages_index_present = False
         if messages_has_session_id and messages_has_timestamp:
             try:
@@ -625,21 +638,7 @@ def read_importable_agent_session_rows(
                 messages_index_present = any(str(row[1]) == "idx_messages_session" for row in cur.fetchall())
             except sqlite3.Error:
                 messages_index_present = False
-            if not messages_index_present:
-                # Self-heal via a separate writable connection so the common
-                # (index-present) path keeps its read-only handle. On a truly
-                # read-only/locked db this fails and we degrade to the
-                # pre-aggregated cron-only path below, exactly as before.
-                try:
-                    with closing(sqlite3.connect(str(db_path))) as _heal:
-                        _heal.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_messages_session "
-                            "ON messages(session_id, timestamp)"
-                        )
-                        _heal.commit()
-                    messages_index_present = True
-                except sqlite3.Error:
-                    pass  # read-only db / locked / older schema — degrade gracefully
+
 
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
@@ -665,7 +664,6 @@ def read_importable_agent_session_rows(
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
-        included = ()
         if include_sources:
             included = tuple(str(source) for source in include_sources if source)
             if included:
@@ -679,10 +677,16 @@ def read_importable_agent_session_rows(
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
 
+        # Without ``idx_messages_session`` the correlated ``MAX(mx.timestamp)``
+        # candidate ordering rescans ``messages`` once per session (seconds on
+        # a few thousand sessions). Every missing-index projection — default
+        # sidebar, gateway watcher, cron/webhook/kanban views — orders through
+        # one read-only pre-aggregation pass instead; the listing never creates
+        # the index itself (that is drained maintenance, see
+        # ``scripts/ensure_state_db_read_indexes.py``).
         use_preaggregated_candidate_order = (
             use_messages_join
             and messages_has_timestamp
-            and included == ("cron",)
             and not messages_index_present
         )
         if use_preaggregated_candidate_order:

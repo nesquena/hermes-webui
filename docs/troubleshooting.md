@@ -211,6 +211,36 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## Agent sessions list slowly (or the `state.db` read index is missing)
+
+**Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
+
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary (the listing returns empty for that profile) instead of silently reopening the file writable.
+
+**Diagnostic.**
+
+```bash
+sqlite3 "file:$HOME/.hermes/state.db?mode=ro" "PRAGMA index_list(messages)"
+```
+
+`idx_messages_session` should be listed. If it is not, the agent has not created it and WebUI will not create it for you.
+
+**Fix.** Create the covering read indexes in an explicit drained maintenance window: stop the agent (and any gateway/cron runner) writing to that `state.db`, then run:
+
+```bash
+python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confirm-drained
+```
+
+- `--confirm-drained` is mandatory: it is your assertion that no agent turn is running against the database. The tool does not verify it.
+- `--lock-file PATH` (optional) additionally holds an exclusive non-blocking lock on `PATH` (`flock` on POSIX, `msvcrt.locking` on Windows) for deployments that serialise agent turns on a lock file; a held lock makes the tool exit without touching the database. Without `--lock-file` no lock primitive is required, so the script runs on native Windows as well. On Windows the lock covers byte 0 of `PATH`; a new or empty lock file is initialised with one byte first (an existing lock file is never rewritten).
+- The tool opens the database `mode=rw` (never `rwc`): a mistyped path raises instead of creating an empty database. Indexes are created inside one `BEGIN IMMEDIATE` transaction and rolled back on any error.
+- It is idempotent and prints a JSON status per index (`created` / `existing`). An existing index with a different table, key shape or collation is reported as `Incompatible index` and never replaced; an index that is not covering (`EXPLAIN QUERY PLAN`) is reported as `Index is not covering`.
+- Windows UNC profiles (`HERMES_HOME=\\server\share\...`) are supported: readers and this tool build the empty-authority URI `file:////server/share/state.db` that the bundled SQLite accepts.
+
+**When to file a bug.** File a WebUI bug if the listing stays slow after the tool reports `existing` for `idx_messages_session`, if the tool reports `Incompatible index` on an untouched agent-created database, or if a read-only open fails on a local path. Include the tool's JSON output, the `PRAGMA index_list(messages)` result, and the sanitized error text.
+
+---
+
 ## 404 after login when password auth is enabled
 
 **Symptom.** After enabling password authentication (`HERMES_WEBUI_PASSWORD`), logging in redirects to `/sessions` and the browser shows a `404 not found` error instead of the chat interface.
