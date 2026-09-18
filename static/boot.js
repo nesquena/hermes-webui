@@ -3761,7 +3761,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
-      if(_rememberedActiveSession()===_savedLocalBeforeProfileSwitch) _forgetActiveSession();
+      // Name the pre-switch SID so the shared fallback slot is released only
+      // while it still holds exactly that value; otherwise the next fresh
+      // document re-adopts the other profile's session and self-heals again.
+      if(_rememberedActiveSession()===_savedLocalBeforeProfileSwitch) _forgetActiveSession(_savedLocalBeforeProfileSwitch);
     }catch(_){}
   }
   const savedLocal=_rememberedActiveSession();

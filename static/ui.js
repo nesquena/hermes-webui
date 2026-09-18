@@ -9460,6 +9460,10 @@ function autoReadLastAssistant(){
 const TAB_ID_KEY = 'hermes-webui-tab-id';
 const TAB_ID_RELEASED_BASE = 'hermes-webui-tab-released';
 const _TAB_RELEASED_TTL_MS = 24 * 60 * 60 * 1000;
+// Oldest inflight marker/state either reader (checkInflightOnBoot,
+// loadInflightState) still accepts. Scoped copies older than this can never be
+// recovered by anyone, which is what lets the GC collect crash/discard orphans.
+const _INFLIGHT_ACCEPT_WINDOW_MS = 10 * 60 * 1000;
 const INFLIGHT_KEY_BASE = 'hermes-webui-inflight'; // scoped base; unsuffixed form is legacy/ownerless
 const INFLIGHT_STATE_KEY_BASE = 'hermes-webui-inflight-state';
 const ACTIVE_SESSION_KEY_LEGACY = 'hermes-webui-session';
@@ -9500,11 +9504,40 @@ function _mirrorTabValue(key,value){
     else sessionStorage.setItem(key,String(value));
   }catch(_){}
 }
-function _restoreDocumentScopedState(id){
+// A reload keeps the browsing context's sessionStorage, so the new document
+// inherits its predecessor's TAB_ID_KEY. When that predecessor wrote a valid
+// release marker (non-persisted pagehide), this document is provably its
+// successor and the predecessor's scoped copies are dead duplicates of the
+// mirror about to be restored under the fresh id. Reclaim them BEFORE the
+// restore so ordinary reloads never accumulate snapshots until quota runs out;
+// the reclaimed values are handed to the restore as a fallback so a missing
+// mirror entry still migrates. A live original (Duplicate Tab copies
+// sessionStorage but never releases) has no marker and is left untouched;
+// malformed markers fail closed.
+function _reclaimReleasedPredecessor(id,predecessorId){
+  if(!id||!predecessorId||predecessorId===id) return null;
+  let releasedRaw=null;
+  try{ releasedRaw=localStorage.getItem(TAB_ID_RELEASED_BASE+'::'+predecessorId); }catch(_){ return null; }
+  if(releasedRaw==null||!Number.isFinite(Number(releasedRaw))) return null;
+  const reclaimed={};
+  for(const base of [ACTIVE_SESSION_KEY_LEGACY,ACTIVE_SESSION_TOMBSTONE_BASE,INFLIGHT_KEY_BASE,INFLIGHT_STATE_KEY_BASE]){
+    const key=base+'::'+predecessorId;
+    try{ reclaimed[base]=localStorage.getItem(key); }catch(_){ reclaimed[base]=null; }
+    try{ localStorage.removeItem(key); }catch(_){}
+  }
+  try{ localStorage.removeItem(TAB_ID_RELEASED_BASE+'::'+predecessorId); }catch(_){}
+  return reclaimed;
+}
+function _restoreDocumentScopedState(id,reclaimed){
   if(!id) return;
+  const fallback=reclaimed||{};
+  const mirrored=(mirrorKey,base)=>{
+    const value=sessionStorage.getItem(mirrorKey);
+    return value!=null?value:(fallback[base]!=null?fallback[base]:null);
+  };
   try{
-    const active=sessionStorage.getItem(TAB_ACTIVE_SESSION_MIRROR_KEY);
-    const tombstone=sessionStorage.getItem(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY);
+    const active=mirrored(TAB_ACTIVE_SESSION_MIRROR_KEY,ACTIVE_SESSION_KEY_LEGACY);
+    const tombstone=mirrored(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,ACTIVE_SESSION_TOMBSTONE_BASE);
     if(active){
       window.__hermesActiveSession=active;
       window.__hermesActiveSessionKnown=true;
@@ -9518,11 +9551,11 @@ function _restoreDocumentScopedState(id){
     }
   }catch(_){}
   try{
-    const marker=sessionStorage.getItem(TAB_INFLIGHT_MIRROR_KEY);
+    const marker=mirrored(TAB_INFLIGHT_MIRROR_KEY,INFLIGHT_KEY_BASE);
     if(marker!=null) localStorage.setItem(_scopedTabKey(INFLIGHT_KEY_BASE,id),marker);
   }catch(_){}
   try{
-    const raw=sessionStorage.getItem(TAB_INFLIGHT_STATE_MIRROR_KEY);
+    const raw=mirrored(TAB_INFLIGHT_STATE_MIRROR_KEY,INFLIGHT_STATE_KEY_BASE);
     if(raw!=null){
       const parsed=JSON.parse(raw);
       if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
@@ -9538,10 +9571,54 @@ function _restoreDocumentScopedState(id){
     }
   }catch(_){}
 }
-// GC is based only on an explicit, per-id pagehide record. Each release marker
-// has its own key, so concurrent documents never perform a shared-map
-// read-modify-write. Missing or malformed markers fail closed and retain state;
-// elapsed heartbeats are never used as proof that a live/frozen document died.
+// GC is based on an explicit, per-id pagehide record, plus an age backstop for
+// scoped inflight marker/state that no reader can accept any more. Each
+// release marker has its own key, so concurrent documents never perform a
+// shared-map read-modify-write. Missing or malformed markers fail closed and
+// retain state; elapsed heartbeats are never used as proof that a live/frozen
+// document died.
+//
+// Age backstop verdict per foreign owner. `true` only when every validated
+// inflight timestamp of that owner (marker `ts`, each state entry's
+// `updated_at`) is already older than the reader window, so neither
+// checkInflightOnBoot() nor loadInflightState() could ever accept the copies
+// again — including those of a crashed or discarded tab that never fired a
+// non-persisted pagehide. Marker and state are judged as one unit: a fresh
+// timestamp on either side (long-running stream still saving snapshots), or
+// any malformed/missing timestamp, pins the owner and both keys are retained.
+function _expiredInflightOwners(now,selfId){
+  const verdicts=new Map();
+  const note=(owner,expired)=>{
+    if(verdicts.get(owner)===false) return;
+    verdicts.set(owner,expired);
+  };
+  const stampExpired=(ts)=>(typeof ts==='number'&&Number.isFinite(ts)&&ts>0)
+    ? ((now-ts)>_INFLIGHT_ACCEPT_WINDOW_MS)
+    : false;
+  const markerPrefix=INFLIGHT_KEY_BASE+'::';
+  const statePrefix=INFLIGHT_STATE_KEY_BASE+'::';
+  for(let i=0;i<localStorage.length;i++){
+    const key=localStorage.key(i);
+    if(!key) continue;
+    let owner=null;
+    let isState=false;
+    if(key.indexOf(markerPrefix)===0) owner=key.slice(markerPrefix.length);
+    else if(key.indexOf(statePrefix)===0){ owner=key.slice(statePrefix.length); isState=true; }
+    if(!owner||owner===selfId) continue;
+    try{
+      const parsed=JSON.parse(localStorage.getItem(key));
+      if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)) throw new Error('malformed');
+      if(!isState){ note(owner,stampExpired(parsed.ts)); continue; }
+      // An empty map carries no timestamp: neutral, the marker decides.
+      for(const entry of Object.values(parsed)){
+        note(owner,!!entry&&typeof entry==='object'&&!Array.isArray(entry)&&stampExpired(entry.updated_at));
+      }
+    }catch(_){
+      note(owner,false);
+    }
+  }
+  return verdicts;
+}
 function _gcOrphanTabKeys(){
   try{
     const now=Date.now();
@@ -9551,7 +9628,10 @@ function _gcOrphanTabKeys(){
       ACTIVE_SESSION_KEY_LEGACY+'::',
       ACTIVE_SESSION_TOMBSTONE_BASE+'::',
     ];
+    const inflightPrefixes=statePrefixes.slice(0,2);
     const releasePrefix=TAB_ID_RELEASED_BASE+'::';
+    const selfId=(typeof window!=='undefined'&&window.__hermesTabId)||null;
+    const expiredInflight=_expiredInflightOwners(now,selfId);
     const doomed=[];
     for(let i=0;i<localStorage.length;i++){
       const key=localStorage.key(i);
@@ -9560,6 +9640,10 @@ function _gcOrphanTabKeys(){
       if(!prefix) continue;
       const owner=key.slice(prefix.length);
       if(!owner) continue;
+      if(inflightPrefixes.indexOf(prefix)!==-1&&expiredInflight.get(owner)===true){
+        doomed.push(key);
+        continue;
+      }
       const releasedRaw=localStorage.getItem(releasePrefix+owner);
       if(releasedRaw==null) continue;
       const releasedAt=Number(releasedRaw);
@@ -9602,10 +9686,13 @@ function _hermesTabId(){
   }
   // Deliberately overwrite (never adopt) any id inherited through copied
   // sessionStorage. Recovery values are mirrored separately and are re-stamped
-  // under this document's fresh identity before scoped access begins.
+  // under this document's fresh identity before scoped access begins. The
+  // inherited id is only used to reclaim a *released* predecessor's copies.
+  let predecessorId=null;
+  try{ predecessorId=sessionStorage.getItem(TAB_ID_KEY); }catch(_){}
   window.__hermesTabId=id;
   try{ sessionStorage.setItem(TAB_ID_KEY,id); }catch(_){}
-  _restoreDocumentScopedState(id);
+  _restoreDocumentScopedState(id,_reclaimReleasedPredecessor(id,predecessorId));
   _gcOrphanTabKeys();
   try{
     if(!window.__hermesTabReleaseBound){
@@ -9709,10 +9796,19 @@ function _forgetActiveSession(expectedSid){
   _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,null);
   _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,String(Date.now()));
   // The legacy key is shared, ownerless bootstrap state for brand-new and old
-  // clients. A matching SID (including expectedSid from a 404 self-heal) proves
-  // content equality, not deletion authority: another document may still rely
-  // on that same fallback. Never mutate it while forgetting document-local
-  // state; a stale fallback is advisory and each new document self-heals it.
+  // clients, so forgetting document-local state alone never touches it: a
+  // matching value proves content equality, not deletion authority. The one
+  // exception is a caller that names the SID it has just PROVEN dead
+  // (404 / delete / profile-switch self-heal). Leaving that SID in the shared
+  // slot would make every later fresh document re-adopt it, 404 again and
+  // loop. Remove it only when the slot still holds exactly that SID, so a
+  // concurrent tab that already moved the slot on is never affected.
+  if(typeof expectedSid!=='string'||!expectedSid) return;
+  try{
+    if(localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY)===expectedSid){
+      localStorage.removeItem(ACTIVE_SESSION_KEY_LEGACY);
+    }
+  }catch(_){}
 }
 if(typeof window!=='undefined'){
   window._rememberActiveSession=_rememberActiveSession;
@@ -9867,7 +9963,7 @@ function loadInflightState(sid, streamId){
   const tabId=_hermesTabId();
   if(!tabId||entry.tabId!==tabId) return null;
   if(streamId&&entry.streamId&&entry.streamId!==streamId) return null;
-  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000){
+  if(entry.updated_at&&Date.now()-entry.updated_at>_INFLIGHT_ACCEPT_WINDOW_MS){
     clearInflightState(sid);
     return null;
   }
@@ -11371,7 +11467,7 @@ async function checkInflightOnBoot(sid) {
     if (inflightSid !== sid) { clearInflight(); return; }
     if (S.activeStreamId && S.activeStreamId === streamId) return;
     // Only show banner if the in-flight entry is less than 10 minutes old
-    if (Date.now() - ts > 10 * 60 * 1000) { clearInflight(); return; }
+    if (Date.now() - ts > _INFLIGHT_ACCEPT_WINDOW_MS) { clearInflight(); return; }
     // Check if stream is still active
     const status = await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId || '')}`);
     if (status.active) {
