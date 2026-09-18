@@ -1199,6 +1199,88 @@ def test_skills_command_dropdown_lists_write_approval_subcommands():
         "/skills COMMANDS entry is missing its write-approval subArgs dropdown list"
 
 
+def _js_block(source: str, start_marker: str, end_marker: str) -> str:
+    """Slice a JS source string between two exact markers (inclusive of start)."""
+    start = source.index(start_marker)
+    end = source.index(end_marker, start)
+    return source[start:end]
+
+
+def test_skills_write_approval_response_targets_owner_session_not_current():
+    """A `/skills approve <id>` reply landing after the user has switched sessions
+    must NOT be appended to whichever session happens to be open when the async
+    /api/commands/exec call resolves -- it must be dropped, the same owner-session
+    guard the delayed steer paths use (_steerOwnerIsCurrent). Real execution via a
+    node harness, not a mock of the guard itself: proves the actual message array
+    is left untouched, not just that a check function was called.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+
+        let resolveTransport;
+        function _runAgentCommandTransport(text){
+          return new Promise((resolve) => { resolveTransport = resolve; });
+        }
+
+        const S = { session: { session_id: 'sid-A' }, messages: [] };
+        let renderCount = 0;
+        function renderMessages(){ renderCount++; }
+
+        %(cmd_skills_fn)s
+
+        const returned = cmdSkills('approve abc123');
+
+        // User switches sessions before the /api/commands/exec response lands --
+        // loadSession() swaps in a fresh session object AND a fresh messages array.
+        S.session = { session_id: 'sid-B' };
+        S.messages = [];
+
+        resolveTransport('Approved 1 skill write(s).');
+
+        // Let the microtask queue drain so the async IIFE's .then chain runs.
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            returnedTrueSynchronously: returned === true,
+            newSessionMessages: S.messages.length,
+            renderCalledAfterSwitch: renderCount,
+          }));
+        }, 20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["returnedTrueSynchronously"] is True, \
+        "cmdSkills must return true synchronously so the caller doesn't treat it as a fallthrough"
+    assert out["newSessionMessages"] == 0, (
+        "the response for sid-A's command was appended to sid-B's (the now-current "
+        "session's) messages array -- it must be dropped instead")
+    assert out["renderCalledAfterSwitch"] == 0, \
+        "renderMessages() must not run for a response whose owner session is no longer current"
+
+
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     """Reload recovery must persist a durable per-session inflight snapshot.
     Without these helpers, loadSession() references loadInflightState() but a full
