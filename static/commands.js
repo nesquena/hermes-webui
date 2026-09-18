@@ -53,6 +53,17 @@ const COMMANDS=[
 const SLASH_SUBARG_SOURCES={
   model:{desc:t('cmd_model'), subArgs:'models'},
   personality:{desc:t('cmd_personality'), subArgs:'personalities'},
+  // /memory has no local COMMANDS entry (unlike /skills) -- it's dispatched entirely via
+  // messages.js' generic _AGENT_COMMANDS_RUN_ON_WEBUI mechanism, so it needs its dropdown
+  // wired up here instead. No 'diff' -- memory entries are small enough to review inline
+  // (api/commands.py's _run_memory_write_approval_command has no diff subcommand either).
+  memory:{desc:t('cmd_memory'), subArgs:[
+    {value:'pending', desc:'List staged memory writes awaiting approval'},
+    {value:'approve', desc:'Apply a staged memory write by id'},
+    {value:'reject', desc:'Discard a staged memory write by id'},
+    {value:'approval', desc:'Turn the write-approval gate on or off'},
+    {value:'mode', desc:'Alias for approval on|off'},
+  ]},
 };
 
 function parseCommand(text){

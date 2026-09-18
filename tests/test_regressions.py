@@ -1284,6 +1284,76 @@ def test_skills_dropdown_options_have_distinct_per_option_descriptions():
         "/goal's bare-string subArgs must keep its existing (shared-desc) behavior unchanged"
 
 
+def test_memory_dropdown_lists_write_approval_subcommands():
+    """/memory has no local COMMANDS entry (unlike /skills), so its dropdown must come
+    from SLASH_SUBARG_SOURCES -- the same fallback map /model and /personality already
+    use for commands with no local handler function. Without this, /memory pending etc.
+    are only usable by typing them from memory (no pun intended), with zero discovery
+    path in the chat box's autocomplete -- exactly the gap /skills had before its own
+    subArgs were added.
+
+    Real execution via node: proves the actual getSlashAutocompleteMatches() output for
+    a SLASH_SUBARG_SOURCES-sourced command, not a source-string check.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    subarg_sources = _js_block(src, "const SLASH_SUBARG_SOURCES={", "\n};") + "\n};"
+    get_options_fn = _js_block(src, "function _getSlashSubArgOptions(spec){", "\nfunction _activeSlashCommandOffset")
+    offset_fn = _js_block(src, "function _activeSlashCommandOffset(text){", "\nfunction _parseSlashAutocomplete")
+    parse_fn = _js_block(src, "function _parseSlashAutocomplete(text){", "\nasync function getSlashAutocompleteMatches")
+    autocomplete_fn = _js_block(src, "async function getSlashAutocompleteMatches(text){", "\nfunction _findComposerPathToken")
+
+    harness = textwrap.dedent(
+        """
+        function t(k){ return k; }
+        const COMMANDS = [];
+
+        %(subarg_sources)s
+        %(offset_fn)s
+        %(parse_fn)s
+        %(get_options_fn)s
+        %(autocomplete_fn)s
+
+        (async () => {
+          const memoryMatches = await getSlashAutocompleteMatches('/memory ');
+          const descByValue = Object.fromEntries(memoryMatches.map(m => [m.value, m.desc]));
+          const descSet = new Set(memoryMatches.map(m => m.desc));
+
+          console.log(JSON.stringify({
+            values: memoryMatches.map(m => m.value).sort(),
+            allDistinct: descSet.size === memoryMatches.length,
+            pendingDesc: descByValue['pending'] || null,
+            approveDesc: descByValue['approve'] || null,
+          }));
+        })();
+        """
+    ) % {
+        "subarg_sources": subarg_sources,
+        "offset_fn": offset_fn,
+        "parse_fn": parse_fn,
+        "get_options_fn": get_options_fn,
+        "autocomplete_fn": autocomplete_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["values"] == ["approval", "approve", "mode", "pending", "reject"], (
+        "/memory's dropdown must offer its five write-approval subcommands "
+        "(no 'diff' -- memory entries are reviewed inline)")
+    assert out["allDistinct"] is True, "each /memory subcommand must show its OWN description"
+    assert out["pendingDesc"] and out["pendingDesc"] != out["approveDesc"]
+
+
 def _js_block(source: str, start_marker: str, end_marker: str) -> str:
     """Slice a JS source string between two exact markers (inclusive of start)."""
     start = source.index(start_marker)
