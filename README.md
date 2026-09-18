@@ -268,6 +268,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
 - Native OIDC stores the PKCE/state nonce flow in process memory. That works for the shipped single-process server, and it also works behind a load balancer when callbacks stay sticky to the same WebUI instance. Multi-instance deployments need session affinity, or the callback can land on a different process and fail state validation.
 - Signed HMAC HTTP-only cookie with 24h TTL
+- When authentication is enabled, unsafe browser requests require same-origin provenance plus a CSRF token bound to the current session. Native clients that send the exact opaque-origin value `Origin: null` without a Referer or explicit cross-site signal may skip host matching only while auth is enabled and the current session's CSRF token is present.
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
 - 20MB POST body size limit

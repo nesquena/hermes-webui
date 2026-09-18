@@ -1,8 +1,11 @@
 """Focused tests for the extension sidecar proxy contract."""
 
 from types import SimpleNamespace
+import hashlib
+import hmac
 import io
 import json
+import time
 import urllib.request
 
 import pytest
@@ -484,6 +487,67 @@ def test_extension_sidecar_proxy_post_requires_browser_provenance(monkeypatch):
     assert json.loads(handler.body.decode("utf-8")) == {
         "error": "Cross-origin mismatch - check reverse proxy headers"
     }
+
+
+@pytest.mark.parametrize(
+    ("method", "body"),
+    (("GET", b""), ("POST", b'{"ping":"pong"}')),
+)
+def test_extension_sidecar_proxy_rejects_null_origin_before_resolution(
+    method, body, monkeypatch
+):
+    from api import auth, routes
+
+    raw_token = "x" * 64
+    auth._sessions[raw_token] = time.time() + 60
+    signature = hmac.new(
+        auth._signing_key(), raw_token.encode(), hashlib.sha256
+    ).hexdigest()
+    cookie = f"{raw_token}.{signature}"
+    csrf_token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+
+    def fail_if_resolved(*_args, **_kwargs):
+        raise AssertionError("null-origin sidecar request reached proxy resolution")
+
+    monkeypatch.setattr(
+        "api.extensions.resolve_extension_sidecar_proxy_target",
+        fail_if_resolved,
+    )
+
+    try:
+        assert auth.verify_session(cookie)
+        assert csrf_token and auth.verify_csrf_token(cookie, csrf_token)
+
+        handler = FakeHandler(body)
+        handler.headers = {
+            "Origin": "null",
+            "Host": "webui.local",
+            "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+            auth.CSRF_HEADER_NAME: csrf_token,
+        }
+        if method == "POST":
+            handler.headers.update({
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            })
+
+        route = routes.handle_get if method == "GET" else routes.handle_post
+        result = route(
+            handler,
+            SimpleNamespace(
+                path="/api/extensions/templates/sidecar/v1/ping",
+                query="",
+            ),
+        )
+
+        assert result is None
+        assert handler.status == 403
+        assert json.loads(handler.body.decode("utf-8")) == {
+            "error": "Cross-origin mismatch - check reverse proxy headers"
+        }
+    finally:
+        auth._sessions.pop(raw_token, None)
 
 
 def test_extension_sidecar_proxy_get_allows_same_origin_browser_request_without_csrf_token(monkeypatch):

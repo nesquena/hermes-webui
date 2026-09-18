@@ -35,6 +35,19 @@ class _FakeHandler:
         pass
 
 
+def _post_logout(headers):
+    handler = _FakeHandler(
+        {
+            "Content-Length": "2",
+            "Content-Type": "application/json",
+            "Host": "127.0.0.1:8787",
+            **headers,
+        }
+    )
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/logout", query=""))
+    return handler
+
+
 def test_csrf_token_is_bound_to_auth_session():
     cookie_a = _signed_cookie("a" * 64)
     cookie_b = _signed_cookie("b" * 64)
@@ -67,6 +80,142 @@ def test_authenticated_same_origin_browser_post_requires_session_csrf_token(monk
         assert routes._check_csrf(_FakeHandler(headers_with_token))
     finally:
         auth._sessions.pop("c" * 64, None)
+
+
+def test_authenticated_null_origin_logout_accepts_valid_session_csrf_token(monkeypatch):
+    cookie = _signed_cookie("n" * 64)
+    token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    try:
+        handler = _post_logout(
+            {
+                "Origin": "null",
+                "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+                auth.CSRF_HEADER_NAME: token,
+            }
+        )
+
+        assert handler.status == 200
+        assert not auth.verify_session(cookie)
+    finally:
+        auth._sessions.pop("n" * 64, None)
+
+
+def test_null_origin_logout_requires_current_session_bound_token(monkeypatch):
+    current_cookie = _signed_cookie("q" * 64)
+    other_cookie = _signed_cookie("r" * 64)
+    expired_cookie = _signed_cookie("s" * 64)
+    logged_out_cookie = _signed_cookie("t" * 64)
+    expired_token = auth.csrf_token_for_session(expired_cookie)
+    logged_out_token = auth.csrf_token_for_session(logged_out_cookie)
+    auth._sessions["s" * 64] = time.time() - 1
+    auth.invalidate_session(logged_out_cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    try:
+        cases = {
+            "tokenless": (current_cookie, None),
+            "wrong-session token": (
+                current_cookie,
+                auth.csrf_token_for_session(other_cookie),
+            ),
+            "expired session": (expired_cookie, expired_token),
+            "logged-out session": (logged_out_cookie, logged_out_token),
+        }
+        for label, (cookie, token) in cases.items():
+            headers = {
+                "Origin": "null",
+                "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+            }
+            if token:
+                headers[auth.CSRF_HEADER_NAME] = token
+            handler = _post_logout(headers)
+
+            assert handler.status == 403, label
+            assert b"Session expired - reload the page" in handler.wfile.getvalue(), label
+    finally:
+        for raw_token in ("q", "r", "s", "t"):
+            auth._sessions.pop(raw_token * 64, None)
+
+
+def test_null_origin_logout_bypass_is_literal_and_not_cross_site(monkeypatch):
+    cookie = _signed_cookie("u" * 64)
+    token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    try:
+        cases = {
+            "cross-origin": {"Origin": "https://evil.example"},
+            "uppercase": {"Origin": "NULL"},
+            "leading whitespace": {"Origin": " null"},
+            "trailing whitespace": {"Origin": "null "},
+            "cross-site signal": {
+                "Origin": "null",
+                "Sec-Fetch-Site": "cross-site",
+            },
+            "cross-origin referer": {
+                "Origin": "null",
+                "Referer": "https://evil.example/form",
+            },
+            "referer only": {"Referer": "null"},
+        }
+        for label, provenance_headers in cases.items():
+            handler = _post_logout(
+                {
+                    **provenance_headers,
+                    "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+                    auth.CSRF_HEADER_NAME: token,
+                }
+            )
+
+            assert handler.status == 403, label
+            assert b"Cross-origin mismatch" in handler.wfile.getvalue(), label
+    finally:
+        auth._sessions.pop("u" * 64, None)
+
+
+def test_null_origin_logout_remains_rejected_when_auth_is_disabled(monkeypatch):
+    cookie = _signed_cookie("v" * 64)
+    token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+    try:
+        handler = _post_logout(
+            {
+                "Origin": "null",
+                "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+                auth.CSRF_HEADER_NAME: token,
+            }
+        )
+
+        assert handler.status == 403
+        assert b"Cross-origin mismatch" in handler.wfile.getvalue()
+    finally:
+        auth._sessions.pop("v" * 64, None)
+
+
+def test_null_origin_cannot_authorize_workspace_escape(monkeypatch):
+    cookie = _signed_cookie("w" * 64)
+    token = auth.csrf_token_for_session(cookie)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    try:
+        handler = _FakeHandler(
+            {
+                "Origin": "null",
+                "Host": "127.0.0.1:8787",
+                "Cookie": f"{auth.COOKIE_NAME}={cookie}",
+                auth.CSRF_HEADER_NAME: token,
+            }
+        )
+        handler.command = "POST"
+
+        routes._handle_escape_authorize(
+            handler,
+            SimpleNamespace(path="/api/escape/authorize", query=""),
+            body={},
+        )
+
+        assert handler.status == 403
+        assert b"browser origin required" in handler.wfile.getvalue()
+    finally:
+        auth._sessions.pop("w" * 64, None)
 
 
 def test_authenticated_allowed_public_origin_accepts_valid_csrf_token(monkeypatch):
