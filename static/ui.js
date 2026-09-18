@@ -12180,10 +12180,26 @@ function _transparentToolDetailHtml(tc, status){
   }).join('');
   return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
 }
+// Ownership guard for the Transparent-Stream per-turn controls (name-tag
+// chevron, "Trace: N tools" bar). In the hybrid transparent_live_compact_settled
+// mode isTransparentLiveMode() is true even for a settled turn that rendered as
+// a Compact Worklog; wiring the chevron there advertises a control that does
+// nothing (#6715 gate). Only the live turn or a turn that actually carries
+// transparent event rows owns these controls.
+function _transparentTurnOwnsControls(turn){
+  if(!turn) return false;
+  if(turn.id==='liveAssistantTurn'||turn.getAttribute('data-live-assistant-turn')==='1') return true;
+  return !!(turn.querySelector&&turn.querySelector('.transparent-event-row,[data-transparent-event-row="1"]'));
+}
 function _syncTransparentEventControls(turn){
   if(!turn||!isTransparentLiveMode()) return;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;
+  if(!_transparentTurnOwnsControls(turn)){
+    const stale=blocks.querySelector(':scope > .transparent-event-controls');
+    if(stale) stale.remove();
+    return;
+  }
   const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row,[data-transparent-event-row="1"]'));
   const mountedToolCount=rows.filter(row=>row.getAttribute('data-event-type')==='tool').length;
   // #5966: when this turn's earlier steps are capped (some prefix rows are not
@@ -12529,6 +12545,10 @@ const _transparentTurnCollapsedStates={}; // key: `${sid}:${turnMsgIdx}` → boo
 function _wireTransparentTurnToggle(turn){
   if(!turn) return;
   if(!isTransparentLiveMode()) return;
+  // Settled compact turns (hybrid mode) never own the chevron — see
+  // _transparentTurnOwnsControls. Bail before touching the role label so a
+  // cache-restored transcript keeps its plain, non-interactive name tag.
+  if(!_transparentTurnOwnsControls(turn)) return;
   const role=turn.querySelector('.msg-role.assistant');
   if(!role) return;
   turn.setAttribute('data-transparent-turn-toggle-bound','1');
