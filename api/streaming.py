@@ -74,7 +74,10 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _delete_session_sidecar_artifacts_locked,
     _is_empty_partial_activity_message,
+    _read_sidecar_revision,
+    _session_sidecar_authority,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -2461,6 +2464,44 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
         })
 
 
+def _cleanup_ephemeral_session_sidecar_locked(session, *, outcome: str) -> bool:
+    """Durably remove one hidden /btw sidecar without deleting a reincarnation.
+
+    LOCK CONTRACT (gate RED 09/09/2026, finding 1): the CALLER must already
+    hold the per-session agent lock ``_get_session_agent_lock(sid)``. Every
+    production caller holds that non-reentrant ``threading.Lock`` when it
+    reaches this helper (the cancel paths via ``with _agent_lock:`` in
+    ``_finalize_cancelled_turn`` callers, the completion path via its own
+    explicit acquisition). Acquiring it here used to self-deadlock the worker:
+    the session ephemeral meant to disappear then persisted on disk/sidebar
+    with the thread hung forever. Tests may call it unlocked only through
+    ``_cleanup_ephemeral_cancelled_turn``.
+    """
+    sid = str(getattr(session, 'session_id', '') or '').strip()
+    expected_path = SESSION_DIR / f'{sid}.json'
+    if Path(session.path).resolve() != expected_path.resolve():
+        raise ValueError(f"Ephemeral session path does not match SID {sid!r}")
+    expected_revision = None
+    if getattr(session, '_sidecar_revision_session_id_v1', None) == sid:
+        expected_revision = getattr(session, '_sidecar_revision_v1', None)
+    with _session_sidecar_authority(sid):
+        if expected_revision is None:
+            expected_revision = _read_sidecar_revision(expected_path)
+        deleted = _delete_session_sidecar_artifacts_locked(
+            sid,
+            expected_revision=expected_revision,
+            # Gate RED 09/09/2026 (finding 2): the hidden /btw ephemeral fence
+            # records in the SEPARATE hidden-cleanup log so /btw churn can
+            # never evict a user delete fence from the shared capacity.
+            tombstone_kind='hidden',
+        )
+    if not deleted:
+        raise RuntimeError(
+            f'Ephemeral session {sid!r} changed before {outcome} cleanup'
+        )
+    return True
+
+
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
     """Remove transient /btw session state after a cancel without saving it."""
     session.active_stream_id = None
@@ -2468,11 +2509,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
-    except Exception:
-        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+    _cleanup_ephemeral_session_sidecar_locked(session, outcome='cancelled')
 
 
 def _resolve_current_session_for_write(session):
@@ -11317,11 +11354,12 @@ def _run_agent_streaming(
                 })
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
-                try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # Gate RED 09/09/2026 (finding 1): the completion-path cleanup
+                # must hold the per-session agent lock like every other session
+                # writer — the helper no longer acquires it itself (it used to
+                # self-deadlock under the cancel path's already-held lock).
+                with _agent_lock:
+                    _cleanup_ephemeral_session_sidecar_locked(s, outcome='completed')
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
