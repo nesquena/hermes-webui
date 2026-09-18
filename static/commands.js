@@ -16,7 +16,11 @@ const COMMANDS=[
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
+  // subArgs lists canonical names only for the dropdown (discovery) -- deliberately
+  // excludes the apply/deny/drop aliases SKILLS_AGENT_SUBCOMMANDS accepts below, so the
+  // menu doesn't show three synonyms for "reject". Typing an alias still works either way.
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query',
+   subArgs:['pending','approve','reject','diff','approval','mode']},
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
