@@ -5457,7 +5457,7 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
+      const payload=Object.assign({effort:effort, session_id:S.session&&S.session.session_id},_reasoningEffortContext());
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
