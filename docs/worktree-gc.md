@@ -78,7 +78,8 @@ confirmed:
 7. No linked session records pending text, attachments, or a pending-start
    timestamp.
 8. A complete `/proc` scan finds no process whose canonical cwd equals or is
-   below the worktree path.
+   below the worktree path, and no process holding an open file descriptor
+   inside the worktree regardless of its cwd.
 9. The health endpoint responds successfully with `active_runs == 0`.
 
 The creation-time Hermes worktree lock PID is bookkeeping, not independent
@@ -90,6 +91,24 @@ configured target ref, lists registered worktrees, checks tracked and untracked
 status, and separately enumerates ignored paths with NUL-delimited output. It
 never reads ignored file contents. A present ignored path produces
 `KEEP_IGNORED_FILES` and an `ignored_count`.
+
+Before publishing any eligibility verdict, the classifier also:
+
+- strips every inherited `GIT_*` environment variable from its subprocesses and
+  re-adds only fixed audit values, so ambient settings such as `GIT_TRACE`
+  cannot make a read-only command write files; the report path stays the only
+  persistent output;
+- inspects index flags (`assume-unchanged`, `skip-worktree`) with bounded
+  NUL-delimited probes: masked entries produce `KEEP_UNCERTAIN` because they
+  can hide real modifications from `git status`;
+- counts submodule gitlinks: any gitlink produces `KEEP_UNCERTAIN`
+  (`submodules_present`) because top-level probes cannot see inside it;
+- rejects branch-exclusive merge commits unless the resulting tree is proven
+  identical to the target tree, because `git cherry` omits merge commits;
+- pins the branch, target, and worktree HEAD OIDs and revalidates them right
+  before publishing eligibility, so a ref moved during the audit downgrades
+  the verdict to `KEEP_UNCERTAIN` (`pin_revalidation_failed`) instead of
+  certifying stale evidence.
 
 Missing or invalid dates, unreadable or malformed sidecars, contradictory
 duplicate records, invalid workspace paths, an incomplete process scan, a

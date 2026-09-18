@@ -27,8 +27,11 @@ _GIT_REPORT_FIELDS = (
     "dirty",
     "untracked_count",
     "ignored_count",
+    "index_masked_count",
+    "submodule_count",
     "ancestor_of_target",
     "cherry_unique_count",
+    "branch_exclusive_merge_count",
     "reasons",
 )
 
@@ -37,6 +40,7 @@ _GIT_REPORT_FIELDS = (
 class ProcessCwd:
     pid: int
     cwd: str
+    open_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,7 @@ class ProcessScan:
             1
             for process in self.process_cwds
             if _path_is_within(Path(process.cwd), worktree)
+            or _process_holds_open_path_within(process, worktree)
         )
 
     def blocking_process_counts(
@@ -77,12 +82,19 @@ class ProcessScan:
                 counts[str(worktree)] = 0
         for process in self.process_cwds:
             cwd = _canonical_path(process.cwd)
-            if cwd is None:
-                continue
-            for ancestor in (cwd, *cwd.parents):
-                key = str(ancestor)
-                if key in counts:
-                    counts[key] += 1
+            if cwd is not None:
+                for ancestor in (cwd, *cwd.parents):
+                    key = str(ancestor)
+                    if key in counts:
+                        counts[key] += 1
+            for open_path in process.open_paths:
+                resolved = _canonical_path(open_path)
+                if resolved is None:
+                    continue
+                for ancestor in (resolved, *resolved.parents):
+                    key = str(ancestor)
+                    if key in counts:
+                        counts[key] += 1
         return counts
 
 
@@ -205,6 +217,45 @@ def _path_is_within(path: Path, parent: Path) -> bool:
     return True
 
 
+def _process_holds_open_path_within(
+    process: "ProcessCwd",
+    worktree: Path,
+) -> bool:
+    """A process with any open FD inside the worktree is still active there."""
+    return any(
+        _path_is_within(Path(open_path), worktree)
+        for open_path in process.open_paths
+    )
+
+
+def _read_process_open_paths(pid_dir: Path) -> tuple[str, ...] | None:
+    """Read open FD target paths for one process; ``None`` when unreadable.
+
+    Only FDs whose link target is an absolute path inside a filesystem are
+    kept; sockets, pipes, anon_inodes, and deleted entries are ignored.
+    """
+    fd_dir = pid_dir / "fd"
+    open_paths: list[str] = []
+    try:
+        fd_entries = list(os.scandir(fd_dir))
+    except OSError:
+        return None
+    for fd_entry in fd_entries:
+        try:
+            raw_target = os.readlink(fd_entry.path)
+        except OSError:
+            continue
+        if not raw_target.startswith("/"):
+            continue
+        canonical = _canonical_path(raw_target)
+        if canonical is None or canonical == Path(canonical.anchor):
+            continue
+        text = str(canonical)
+        if text not in open_paths:
+            open_paths.append(text)
+    return tuple(open_paths)
+
+
 def scan_process_cwds(proc_root: Path = Path("/proc")) -> ProcessScan:
     """Snapshot readable ``/proc/<pid>/cwd`` links without treating PID exit as failure."""
     root = Path(proc_root)
@@ -245,7 +296,16 @@ def scan_process_cwds(proc_root: Path = Path("/proc")) -> ProcessScan:
         if canonical is None:
             unreadable += 1
             continue
-        processes.append(ProcessCwd(pid=int(entry.name), cwd=str(canonical)))
+        open_paths = _read_process_open_paths(root / entry.name)
+        if open_paths is None:
+            open_paths = ()
+        processes.append(
+            ProcessCwd(
+                pid=int(entry.name),
+                cwd=str(canonical),
+                open_paths=open_paths,
+            )
+        )
 
     return ProcessScan(
         available=True,
@@ -825,7 +885,16 @@ def audit_managed_worktrees(
         if candidate.worktree_path is not None:
             blocked_processes = process_counts.get(candidate.worktree_path, 0)
             if blocked_processes:
-                active_reasons.append("process_cwd_in_worktree")
+                if any(
+                    _process_holds_open_path_within(
+                        process,
+                        Path(candidate.worktree_path),
+                    )
+                    for process in process_snapshot.process_cwds
+                ):
+                    active_reasons.append("process_fd_in_worktree")
+                else:
+                    active_reasons.append("process_cwd_in_worktree")
 
         if "session_scan_incomplete" in global_reasons:
             uncertain_reasons.append("session_scan_incomplete")
