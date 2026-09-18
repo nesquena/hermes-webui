@@ -5231,6 +5231,12 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .chat-activity-mode-btn{min-height:34px;padding:7px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;}
 #mainSettings .chat-activity-mode-btn:hover{border-color:var(--accent-bg-strong);color:var(--text);background:var(--hover-bg);}
 #mainSettings .chat-activity-mode-btn.active{border-color:var(--accent);color:var(--accent-text);background:var(--accent-bg);box-shadow:0 0 0 1px var(--accent-bg-strong);}
+/* Four mode labels do not fit four columns at tablet/intermediate widths
+   (long translations clip). Step down to two columns first; the 768px rule
+   below still collapses to a single stacked column on small screens. */
+@media (max-width: 1100px){
+  #mainSettings .chat-activity-mode-toggle{grid-template-columns:repeat(2,minmax(0,1fr));}
+}
 
 /* Responsive: tighten canvas on small screens. */
 @media (max-width: 768px){
