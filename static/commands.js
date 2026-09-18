@@ -1159,6 +1159,14 @@ async function cmdTheme(args){
 // _SKILLS_WRITE_APPROVAL_SUBCOMMANDS — a missing alias is silently swallowed here.
 const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
 
+// _steerOwnerIsCurrent(null) is always false -- correct for steer (a steer reply always needs
+// a real active session/stream) but wrong here: a null ownerSid means there was no session to
+// begin with (e.g. right after deleting the last one), so there is nothing to have "switched
+// away from". Only a session that existed and then changed should discard the response.
+function _skillsResponseOwnerStillValid(ownerSid){
+  return !ownerSid || _steerOwnerIsCurrent(ownerSid);
+}
+
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
   // Captured now, before either branch awaits anything: if the user switches sessions
@@ -1174,7 +1182,7 @@ function cmdSkills(args){
       }catch(e){
         out = `Skill write-approval command failed: ${e&&e.message||e}`;
       }
-      if(!_steerOwnerIsCurrent(ownerSid)) return;
+      if(!_skillsResponseOwnerStillValid(ownerSid)) return;
       S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
       renderMessages();
     })();
@@ -1192,7 +1200,7 @@ function cmdSkills(args){
           (s.category||'').toLowerCase().includes(q)
         );
       }
-      if(!_steerOwnerIsCurrent(ownerSid)) return;
+      if(!_skillsResponseOwnerStillValid(ownerSid)) return;
       if(!skills.length){
         const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
         S.messages.push(msg); renderMessages(); return;

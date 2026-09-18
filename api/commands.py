@@ -400,7 +400,12 @@ def _run_skills_write_approval_command(arg_string: str) -> str:
         logger.warning("write-approval runtime unavailable for /skills", exc_info=True)
         raise RuntimeError("Skill write-approval runtime unavailable") from exc
 
-    out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=_write_approval_setter('skills'))
+    # write_approval.py resolves the skill store via the legacy get_hermes_home() path, which
+    # reads process env / TLS rather than anything webui-request-scoped -- without this, a
+    # browser that has selected a non-root profile would read/write the WRONG profile's
+    # pending skill writes (no-op for the root/default profile, the common case).
+    with _bundle_profile_context("/api/commands/exec:skills"):
+        out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=_write_approval_setter('skills'))
     return out if out is not None else (
         "Unknown /skills subcommand. Use: pending, approve <id>, reject <id>, diff <id>, approval <on|off>.")
 
@@ -427,9 +432,14 @@ def _run_memory_write_approval_command(arg_string: str) -> str:
         logger.warning("write-approval runtime unavailable for /memory", exc_info=True)
         raise RuntimeError("Memory write-approval runtime unavailable") from exc
 
-    out = handle_pending_subcommand(
-        wa.MEMORY, arg_string.split(), memory_store=load_on_disk_store(),
-        set_mode_fn=_write_approval_setter('memory'))
+    # Both load_on_disk_store() and handle_pending_subcommand() resolve paths via the legacy
+    # get_hermes_home() path (process env / TLS, not anything webui-request-scoped) -- without
+    # this, a browser that has selected a non-root profile would read/write the WRONG
+    # profile's memory (no-op for the root/default profile, the common case).
+    with _bundle_profile_context("/api/commands/exec:memory"):
+        out = handle_pending_subcommand(
+            wa.MEMORY, arg_string.split(), memory_store=load_on_disk_store(),
+            set_mode_fn=_write_approval_setter('memory'))
     return out if out is not None else (
         "Unknown /memory subcommand. Use: pending, approve <id>, reject <id>, approval <on|off>.")
 
