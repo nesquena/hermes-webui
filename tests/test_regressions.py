@@ -1291,6 +1291,27 @@ def _js_block(source: str, start_marker: str, end_marker: str) -> str:
     return source[start:end]
 
 
+def test_memory_command_routed_through_webui_agent_command_allowlist():
+    """/memory has no client-side handler at all in commands.js (unlike /skills'
+    local search), so it must be reachable via messages.js'
+    _AGENT_COMMANDS_RUN_ON_WEBUI allowlist -- otherwise it falls straight through
+    to plain chat text with no clue anything went wrong (/skills at least had a
+    visibly wrong search result pointing at the bug; /memory had nothing)."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    allowlist_line = _js_block(
+        src, "const _AGENT_COMMANDS_RUN_ON_WEBUI", "\n\n") or ""
+    assert "'memory'" in allowlist_line, \
+        "/memory must be in _AGENT_COMMANDS_RUN_ON_WEBUI so it reaches executeAgentCommand()"
+    # And commands.js must NOT have grown a competing local /memory handler --
+    # if it ever does, that handler (like cmdSkills) becomes solely responsible
+    # for reaching the write-approval store, same as this PR found for /skills.
+    commands_src = (REPO_ROOT / "static/commands.js").read_text()
+    assert "name:'memory'" not in commands_src, (
+        "a local /memory COMMANDS entry appeared -- it must dispatch write-approval "
+        "subcommands itself (like cmdSkills does) or /memory will silently stop "
+        "reaching handle_pending_subcommand()")
+
+
 def test_skills_write_approval_response_targets_owner_session_not_current():
     """A `/skills approve <id>` reply landing after the user has switched sessions
     must NOT be appended to whichever session happens to be open when the async

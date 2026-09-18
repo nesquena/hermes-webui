@@ -102,11 +102,16 @@ def _install_fake_account_usage(monkeypatch, *, view=None, exc=None):
     return account_usage
 
 
+_FAKE_MEMORY_STORE = object()  # sentinel: proves _run_memory_write_approval_command passes
+                                # load_on_disk_store()'s *return value* through, not the function
+
+
 def _install_fake_write_approval(monkeypatch, *, result="ok", raise_exc=None):
-    """Fake hermes_cli.write_approval_commands + tools.write_approval, recording every
-    handle_pending_subcommand call. Mirrors _install_fake_codex_runtime_switch's
-    __path__ restore for hermes_cli (a real package elsewhere in this suite) and
-    _install_fake_mcp_tool's plain replacement for `tools` (never real here)."""
+    """Fake hermes_cli.write_approval_commands + tools.write_approval (+ tools.memory_tool's
+    load_on_disk_store, for the /memory path), recording every handle_pending_subcommand call.
+    Mirrors _install_fake_codex_runtime_switch's __path__ restore for hermes_cli (a real
+    package elsewhere in this suite) and _install_fake_mcp_tool's plain replacement for
+    `tools` (never real here)."""
     import sys
 
     calls = []
@@ -117,8 +122,11 @@ def _install_fake_write_approval(monkeypatch, *, result="ok", raise_exc=None):
     write_approval_any = cast(Any, write_approval)
     write_approval_any.SKILLS = "skills"
     write_approval_any.MEMORY = "memory"
+    memory_tool = ModuleType("tools.memory_tool")
+    cast(Any, memory_tool).load_on_disk_store = lambda: _FAKE_MEMORY_STORE
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
     monkeypatch.setitem(sys.modules, "tools.write_approval", write_approval)
+    monkeypatch.setitem(sys.modules, "tools.memory_tool", memory_tool)
 
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
     monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
@@ -458,6 +466,115 @@ def test_skills_write_approval_all_aliases_dispatch(monkeypatch, subcommand):
     assert calls[0][1] == [subcommand, "abc123"]
 
 
+def test_memory_pending_dispatches_to_write_approval_handler(monkeypatch):
+    """`/memory pending` must reach the shared write-approval store via
+    /api/commands/exec, same gap as /skills had -- /memory has no `cli_only` flag
+    and isn't in messages.js' _AGENT_COMMANDS_RUN_ON_WEBUI allowlist by default
+    either, so it fell through to plain chat text with no local feature even
+    shadowing it (unlike /skills, which at least had a wrong-but-visible answer)."""
+    calls = _install_fake_write_approval(monkeypatch, result="No pending memory writes.")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/memory pending')
+
+    assert output == "No pending memory writes."
+    assert len(calls) == 1
+    subsystem, args, memory_store, set_mode_fn = calls[0]
+    assert subsystem == "memory"
+    assert args == ["pending"]
+    assert memory_store is _FAKE_MEMORY_STORE, \
+        "must pass load_on_disk_store()'s object through, not None (unlike /skills)"
+    assert callable(set_mode_fn)
+
+
+@pytest.mark.parametrize("subcommand", [
+    "pending", "approve", "apply", "reject", "deny", "drop", "approval", "mode",
+])
+def test_memory_write_approval_all_aliases_dispatch(monkeypatch, subcommand):
+    """Every alias the agent's handler accepts must reach it. No `diff` here --
+    memory entries are small enough to review inline, so the shared dispatcher
+    never defines one for the memory subsystem (matches gateway's own /memory)."""
+    calls = _install_fake_write_approval(monkeypatch, result="handled")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command(f'/memory {subcommand} abc123')
+
+    assert output == "handled"
+    assert calls[0][1] == [subcommand, "abc123"]
+
+
+def test_memory_bare_command_reaches_handler(monkeypatch):
+    """A bare `/memory` (no args) must reach the handler too -- it shows gate
+    status + the pending list, exactly like gateway's own /memory. Unlike
+    /skills, there is no competing local feature to protect, so /memory has no
+    reserved-subcommand allowlist to gate a bare call out of."""
+    calls = _install_fake_write_approval(monkeypatch, result="memory.write_approval = off\n\nNo pending memory writes.")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/memory')
+
+    assert "write_approval" in output
+    assert calls[0][1] == []
+
+
+def test_memory_write_approval_runtime_unavailable_is_generic_error(monkeypatch):
+    """Mirrors the /skills case: an unimportable write-approval runtime must fail
+    as a sanitized RuntimeError (500), not an unhandled ImportError traceback."""
+    import sys
+
+    monkeypatch.delitem(sys.modules, "hermes_cli.write_approval_commands", raising=False)
+    monkeypatch.delitem(sys.modules, "tools.write_approval", raising=False)
+    monkeypatch.delitem(sys.modules, "tools.memory_tool", raising=False)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_write_approval(name, *a, **k):
+        if name in ("hermes_cli.write_approval_commands", "tools.write_approval",
+                    "tools.memory_tool", "tools"):
+            raise ImportError(f"no module named {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_write_approval)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError):
+        execute_agent_command('/memory pending')
+
+
+def test_memory_approval_toggle_uses_its_own_config_namespace(tmp_path):
+    """`_write_approval_setter` is shared between /skills and /memory -- prove
+    'memory' writes under its OWN top-level config key, not 'skills' (a copy-paste
+    subsystem-string bug here would silently cross-wire the two gates)."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    config_data = {}
+    orig_get_path = webui_config._get_config_path
+    orig_load = webui_config._load_yaml_config_file
+    orig_save = webui_config._save_yaml_config_file
+    orig_reload = webui_config.reload_config
+    try:
+        webui_config._get_config_path = lambda: tmp_path / "config.yaml"
+        webui_config._load_yaml_config_file = lambda path: config_data
+        webui_config._save_yaml_config_file = lambda path, data: None
+        webui_config.reload_config = lambda: None
+
+        _write_approval_setter('memory')(True)
+    finally:
+        webui_config._get_config_path = orig_get_path
+        webui_config._load_yaml_config_file = orig_load
+        webui_config._save_yaml_config_file = orig_save
+        webui_config.reload_config = orig_reload
+
+    assert config_data == {"memory": {"write_approval": True}}
+    assert "skills" not in config_data
+
+
 def test_skills_plain_query_not_routed_to_write_approval(monkeypatch):
     """A bare `/skills` or a real search query must NEVER reach write-approval --
     it stays a KeyError so execute_agent_command's caller falls through to the
@@ -519,7 +636,7 @@ def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
     persistence through), reading the RAW file (not `get_config()`, which may hand
     back a merged-with-defaults snapshot that must never be written back)."""
     from api import config as webui_config
-    from api.commands import _skills_write_approval_setter
+    from api.commands import _write_approval_setter
 
     config_data = {"skills": {"write_approval": False}}
     saved = []
@@ -535,7 +652,7 @@ def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
         webui_config._save_yaml_config_file = lambda path, data: saved.append((path, data.copy()))
         webui_config.reload_config = lambda: reloaded.append(True)
 
-        _skills_write_approval_setter()(True)
+        _write_approval_setter('skills')(True)
     finally:
         webui_config._get_config_path = orig_get_path
         webui_config._load_yaml_config_file = orig_load
@@ -553,7 +670,7 @@ def test_skills_approval_toggle_serializes_under_shared_cfg_lock(monkeypatch):
     concurrent config writer saving between this read and this write, discarding
     that other update). Uses the REAL `_cfg_lock`, not a mock of it."""
     from api import config as webui_config
-    from api.commands import _skills_write_approval_setter
+    from api.commands import _write_approval_setter
 
     state = {"active": 0, "max_active": 0}
     track_lock = threading.Lock()
@@ -573,7 +690,7 @@ def test_skills_approval_toggle_serializes_under_shared_cfg_lock(monkeypatch):
     monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
     monkeypatch.setattr(webui_config, "reload_config", lambda: None)
 
-    setter = _skills_write_approval_setter()
+    setter = _write_approval_setter('skills')
     errors = []
 
     def _call(enabled):
@@ -601,7 +718,7 @@ def test_skills_approval_toggle_reloads_after_releasing_lock(monkeypatch):
     itself contend for the real lock with a short timeout, proving it isn't already
     held when reload_config runs."""
     from api import config as webui_config
-    from api.commands import _skills_write_approval_setter
+    from api.commands import _write_approval_setter
 
     monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
     monkeypatch.setattr(webui_config, "_load_yaml_config_file", lambda path: {})
@@ -621,7 +738,7 @@ def test_skills_approval_toggle_reloads_after_releasing_lock(monkeypatch):
 
     monkeypatch.setattr(webui_config, "reload_config", _fake_reload)
 
-    _skills_write_approval_setter()(True)
+    _write_approval_setter('skills')(True)
 
     assert reload_acquired == [True], (
         "reload_config() could not acquire _cfg_lock -- it is still held, "
