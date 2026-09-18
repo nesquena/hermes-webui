@@ -5271,6 +5271,35 @@ function _bareModelId(modelId, providerId){
   }
   return m.trim();
 }
+function _bareModelIdCandidates(modelId, providerId){
+  // Ambiguity set for the custom no-provenance shape @custom:A:B:...: A:B can
+  // be an endpoint host:port (#1776 authority slug, e.g. a single-label LAN
+  // hostname `mymachine:11434`) or A can be a named slug whose model itself
+  // starts with a numeric segment (`my.gw` serving `11434:llama3:8b`). A
+  // single parse must guess; switch detection must not, so return BOTH bare
+  // readings and let callers stay silent when any candidate matches the served
+  // model. Mirror of api/streaming.py::_bare_model_id_candidates.
+  const primary=_bareModelId(modelId,providerId);
+  const out=primary?[primary.toLowerCase()]:[];
+  const provider=String(providerId||'').trim();
+  if(provider)return out;
+  const m=String(modelId||'').trim();
+  if(!m.toLowerCase().startsWith('@custom:'))return out;
+  const rest=m.slice('@custom:'.length);
+  const first=rest.indexOf(':');
+  if(first<0)return out;
+  const afterHost=rest.slice(first+1);
+  if(afterHost&&!out.includes(afterHost.toLowerCase()))out.push(afterHost.toLowerCase());
+  const second=afterHost.indexOf(':');
+  if(second>=0){
+    const port=afterHost.slice(0,second);
+    if(/^\d+$/.test(port)&&Number(port)>=1&&Number(port)<=65535){
+      const endpointModel=afterHost.slice(second+1);
+      if(endpointModel&&!out.includes(endpointModel.toLowerCase()))out.push(endpointModel.toLowerCase());
+    }
+  }
+  return out;
+}
 function _localModelSwitchText(msg, requestedModel){
   // Notice for a LOCAL fallback switch: the configured provider failed and
   // fallback_providers served the turn with another model. Gateway turns own
@@ -5283,7 +5312,9 @@ function _localModelSwitchText(msg, requestedModel){
   const requested=String(requestedModel||msg._requestedModel||'').trim();
   if(!used||!requested)return'';
   const usedId=_bareModelId(used,msg._usedProvider).toLowerCase();
+  const usedCandidates=_bareModelIdCandidates(used,msg._usedProvider);
   const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
+  const requestedCandidates=_bareModelIdCandidates(requested,msg._requestedProvider);
   if(!usedId||!requestedId)return'';
   const routeProvider=modelId=>{
     const match=String(modelId||'').trim().match(/^@(custom:[^:]+|[^:]+):/i);
@@ -5298,7 +5329,13 @@ function _localModelSwitchText(msg, requestedModel){
     mismatch(requestedRouteProvider,requestedProvider)
     ||mismatch(usedRouteProvider,usedProvider)
     ||mismatch(requestedProvider||requestedRouteProvider,usedProvider||usedRouteProvider);
-  if(usedId===requestedId&&!provenanceContradicts)return'';
+  // The @custom:A:B shape without provenance is ambiguous: A:B can be an
+  // endpoint host:port or a slug whose model starts with a numeric segment.
+  // No single parse can decide, so a switch is declared only when the served
+  // model matches NONE of the requested readings (and vice versa for the
+  // display-side comparison below).
+  const candidatesOverlap=(a,b)=>a.some(x=>b.includes(x));
+  if(candidatesOverlap(requestedCandidates,usedCandidates)&&!provenanceContradicts)return'';
   // _bareModelId removes only the @provider: routing notation. A remaining slash
   // namespace is identity-bearing, even when the other id has the same basename.
   const prefix=`${t('model_switched')||'Model switched'}: `;
