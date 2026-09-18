@@ -278,3 +278,122 @@ def test_routes_cannot_construct_raw_ai_agent():
         assert len(wrapped_bindings) == 1, owner.name
     assert len(chat_dispatches) == 1, "POST /api/chat must dispatch to the guarded sync handler"
     assert raw_imports == []
+
+# --- 2026-09-09 gate regressions (#6018): constructor-phase assignments -------
+
+
+class _InstalledOrderAgent:
+    """Mirror the installed Agent constructor order (rev d6ad555a16b7).
+
+    ``model`` and ``reasoning_config`` flow through _PASSTHROUGH_PARAMS and
+    land on the instance BEFORE ``base_url`` and ``provider`` are assigned.
+    """
+
+    _PASSTHROUGH_PARAMS = ("model", "reasoning_config")
+
+    def __init__(self, *, model, provider, base_url, reasoning_config):
+        # Installed order: model, reasoning_config, base_url, provider.
+        for name in self._PASSTHROUGH_PARAMS:
+            setattr(self, name, locals()[name])
+        self.base_url = base_url
+        self.provider = provider
+
+
+class _ProfileDefaultAgent(_InstalledOrderAgent):
+    """Same installed order, but the profile default route differs from the
+    session destination — reproducing the Gemini/Copilot-profile sandbox."""
+
+
+def test_constructor_max_survives_when_profile_route_differs():
+    # Gate must-fix 2 (2026-09-09): with a Gemini profile default and an
+    # OpenAI-Codex GPT-5.6 session destination, the constructor ``max`` was
+    # re-coerced against the missing-route profile resolution and landed on
+    # ``xhigh``. The constructor assignment must pass through untouched; the
+    # route fields are not on the instance yet.
+    guarded = _destination_aware_ai_agent_class(_ProfileDefaultAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert agent.reasoning_config["effort"] == "max"
+
+
+def test_constructor_ultra_survives_when_profile_route_differs():
+    # Same reproduction with the ultra product tier: it must survive the
+    # constructor phase verbatim for GPT-5.6 on the Codex lane.
+    guarded = _destination_aware_ai_agent_class(_ProfileDefaultAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "ultra"},
+    )
+    assert agent.reasoning_config["effort"] == "ultra"
+
+
+def test_constructor_phase_guard_matches_gemini_and_copilot_reproductions():
+    # The two sandbox reproductions from the gate: a profile whose default
+    # route differs from the session destination. Simulate by ensuring the
+    # guard does not fire while provider/base_url are still missing, then
+    # verifying the first post-construction write re-arms the guard.
+    guarded = _destination_aware_ai_agent_class(_ProfileDefaultAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert agent.reasoning_config["effort"] == "max"
+
+    # Post-construction writes (fallback / model switch) stay guarded even
+    # when they assign the same value that the constructor stored.
+    agent.model = "gpt-5.5"
+    agent.reasoning_config = {"enabled": True, "effort": "max"}
+    assert agent.reasoning_config["effort"] == "xhigh"
+
+
+def test_constructor_write_after_route_fields_preserves_max():
+    # Gate control (documented in the fix): assigning the SAME value AFTER the
+    # destination fields exist preserves max for a GPT-5.6 destination — this
+    # is the historical good control; the guard only clamps when the value is
+    # actually above the destination ceiling.
+    guarded = _destination_aware_ai_agent_class(_InstalledOrderAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert agent.reasoning_config["effort"] == "max"
+    agent.reasoning_config = {"enabled": True, "effort": "max"}
+    assert agent.reasoning_config["effort"] == "max"
+
+
+def test_constructor_regression_respects_installed_assignment_order():
+    # The exact installed order — model, reasoning_config, base_url, provider
+    # — with a deliberately different default profile route (gemini) and
+    # session destination (openai-codex gpt-5.6): the constructor-phase
+    # assignment must not be destination-coerced against the profile route.
+    from api import config as webui_config
+    from unittest.mock import patch
+
+    guarded = _destination_aware_ai_agent_class(_InstalledOrderAgent)
+
+    # The profile default route resolves to Gemini — any coercion run during
+    # the constructor phase would consult this route (model resolution falls
+    # back to the profile when provider/base_url are absent from the instance)
+    # and clamp max/ultra down to xhigh or below.
+    with patch.object(
+        webui_config,
+        "resolve_model_provider",
+        side_effect=RuntimeError("profile route must not be consulted"),
+    ):
+        agent = guarded(
+            model="gpt-5.6-sol",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            reasoning_config={"enabled": True, "effort": "max"},
+        )
+    assert agent.reasoning_config["effort"] == "max"
