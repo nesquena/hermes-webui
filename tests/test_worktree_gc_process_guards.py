@@ -18,6 +18,12 @@ def _proc_cwd(proc_root: Path, pid: int, cwd: Path) -> None:
     os.symlink(cwd, pid_dir / "cwd")
 
 
+def _proc_fd(proc_root: Path, pid: int, target: Path) -> None:
+    fd_dir = proc_root / str(pid) / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, fd_dir / "3")
+
+
 def test_process_scan_blocks_exact_and_descendant_cwds_but_not_prefix_lookalike(
     tmp_path,
 ):
@@ -39,6 +45,43 @@ def test_process_scan_blocks_exact_and_descendant_cwds_but_not_prefix_lookalike(
     assert scan.blocking_process_count(worktree) == 2
     assert scan.blocking_process_count(child) == 1
     assert scan.blocking_process_count(lookalike) == 1
+
+
+def test_process_with_open_fd_inside_worktree_but_foreign_cwd_is_active(tmp_path):
+    """A consumer holding an open FD in the worktree is active even elsewhere."""
+    proc_root = tmp_path / "proc"
+    worktree = tmp_path / "worktrees" / "feature"
+    foreign_cwd = tmp_path / "elsewhere"
+    open_file = worktree / "notes.txt"
+    worktree.mkdir(parents=True)
+    foreign_cwd.mkdir()
+    open_file.write_text("held open\n", encoding="utf-8")
+    _proc_cwd(proc_root, 401, foreign_cwd)
+    _proc_fd(proc_root, 401, open_file)
+
+    scan = scan_process_cwds(proc_root)
+
+    assert scan.available is True
+    assert scan.complete is True
+    assert scan.process_count == 1
+    assert scan.blocking_process_count(worktree) == 1
+    counts = scan.blocking_process_counts((worktree,))
+    assert counts == {str(worktree.resolve()): 1}
+
+
+def test_process_fds_pointing_outside_or_to_sockets_are_ignored(tmp_path):
+    proc_root = tmp_path / "proc"
+    worktree = tmp_path / "worktrees" / "feature"
+    elsewhere = tmp_path / "elsewhere"
+    worktree.mkdir(parents=True)
+    elsewhere.mkdir()
+    _proc_cwd(proc_root, 501, elsewhere)
+    _proc_fd(proc_root, 501, elsewhere / "file.txt")
+    (proc_root / "501" / "fd" / "4").symlink_to("socket:[12345]")
+
+    scan = scan_process_cwds(proc_root)
+
+    assert scan.blocking_process_count(worktree) == 0
 
 
 def test_process_that_disappears_during_scan_is_not_an_error(tmp_path, monkeypatch):

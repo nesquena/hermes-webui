@@ -7,6 +7,7 @@ import pytest
 
 from api.worktree_gc_inventory import (
     HealthProbe,
+    ProcessCwd,
     ProcessScan,
     audit_managed_worktrees,
     load_managed_worktree_sessions,
@@ -657,6 +658,40 @@ def test_linked_workspace_activity_blocks(tmp_path, overrides):
         "managed",
     ]
     assert "private.txt" not in json.dumps(report)
+
+
+def test_process_with_open_fd_but_foreign_cwd_blocks_as_active(tmp_path):
+    """Blocker 6: an open FD inside the worktree marks it active."""
+    state_dir = tmp_path / "state"
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+    worktree.mkdir()
+    held_file = worktree / "held.txt"
+    held_file.write_text("held open\n", encoding="utf-8")
+    _write_session(state_dir, "fd-consumer", worktree, repo)
+    backend = FakeGitBackend()
+
+    report = _audit(
+        state_dir,
+        repo,
+        backend,
+        process_scan=ProcessScan(
+            available=True,
+            complete=True,
+            process_cwds=(
+                ProcessCwd(
+                    pid=4242,
+                    cwd=str(tmp_path / "elsewhere"),
+                    open_paths=(str(held_file.resolve()),),
+                ),
+            ),
+        ),
+    )
+
+    assert backend.classify_calls == []
+    assert report["candidates"][0]["verdict"] == "KEEP_ACTIVE"
+    assert "process_fd_in_worktree" in report["candidates"][0]["reasons"]
 
 
 def test_linked_workspace_invalid_date_is_uncertain(tmp_path):
