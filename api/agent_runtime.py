@@ -179,6 +179,31 @@ def _reasoning_config_for_agent_destination(agent, value):
     return clamped
 
 
+def _agent_destination_fields_ready(agent) -> bool:
+    """True once the instance itself holds its route (provider + base_url).
+
+    The installed Agent constructor (revision d6ad555a16b7ad9a3324db3df1e1db7edec3e0a1)
+    stores ``model`` and ``reasoning_config`` through ``_PASSTHROUGH_PARAMS``
+    BEFORE assigning ``base_url`` and ``provider``. Until both route fields
+    exist on the instance, destination coercion would resolve the route from
+    the DEFAULT PROFILE instead of the session destination — e.g. a Gemini or
+    Copilot profile re-coercing a constructor ``max`` for OpenAI-Codex
+    GPT-5.6 down to ``xhigh``/``high``. The constructor value is already
+    destination-coerced by the WebUI caller and must pass through untouched;
+    later writes (fallback activation, /model switch) run with the full route
+    present and stay guarded. (#6018 gate 2026-09-09)
+    """
+    try:
+        instance_dict = getattr(agent, "__dict__", None)
+    except Exception:
+        return True
+    if not isinstance(instance_dict, dict):
+        # Slotted instances cannot be inspected reliably; treat any resolvable
+        # provider as ready rather than skip the guard on a technicality.
+        return getattr(agent, "provider", None) is not None
+    return "provider" in instance_dict and "base_url" in instance_dict
+
+
 @lru_cache(maxsize=1)
 def _destination_aware_ai_agent_class(agent_class):
     """Return a bounded-cached class guarding transition-time reasoning writes."""
@@ -192,7 +217,13 @@ def _destination_aware_ai_agent_class(agent_class):
 
         def __setattr__(self, name, value):
             if name == "reasoning_config":
-                value = _reasoning_config_for_agent_destination(self, value)
+                # Constructor-phase assignment (route fields not yet on the
+                # instance): the value was already coerced against the session
+                # destination by the caller — do NOT re-coerce it against the
+                # default profile. Every post-construction write keeps the
+                # destination guard. (#6018 gate 2026-09-09)
+                if _agent_destination_fields_ready(self):
+                    value = _reasoning_config_for_agent_destination(self, value)
             super().__setattr__(name, value)
 
     # Keep diagnostics and inspect.signature output aligned with the installed
