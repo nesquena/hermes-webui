@@ -84,6 +84,7 @@ function getModelLabel(modelId) {{ return String(modelId || 'Unknown'); }}
 let modelSwitchedTranslation = '';
 function t(key) {{ return key === 'model_switched' ? modelSwitchedTranslation : ''; }}
 eval(extractFunc('_bareModelId'));
+eval(extractFunc('_bareModelIdCandidates'));
 eval(extractFunc('_localModelSwitchText'));
 eval(extractFunc('_gatewayModelWarningText'));
 const cases = {{
@@ -107,6 +108,19 @@ const cases = {{
     {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:ollama.internal:11434:llama3:8b' }}),
   customSlugNumericTaggedSame: _localModelSwitchText(
     {{ _usedModel: '11434:llama3:8b', _requestedModel: '@custom:local:11434:llama3:8b' }}),
+  // Greptile P1 2026-09-17: single-label DNS host endpoint (mymachine:11434).
+  // The primary parse cannot recognize the host:port prefix; the candidate set
+  // must keep the same-model turn silent.
+  customSingleLabelHostPortNoProvenanceSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:mymachine:11434:llama3:8b' }}),
+  customSingleLabelHostPortNoProvenanceDifferent: _localModelSwitchText(
+    {{ _usedModel: 'qwen2.5:8b', _requestedModel: '@custom:mymachine:11434:llama3:8b' }}),
+  // Greptile P1 2026-09-18: dotted slug + numeric-leading model. The primary
+  // parse consumes 11434 as a port; the candidate set must keep it silent.
+  customDottedSlugNumericTaggedSame: _localModelSwitchText(
+    {{ _usedModel: '11434:llama3:8b', _requestedModel: '@custom:my.gw:11434:llama3:8b' }}),
+  customDottedSlugNumericTaggedDifferent: _localModelSwitchText(
+    {{ _usedModel: '11434:qwen2.5:8b', _requestedModel: '@custom:my.gw:11434:llama3:8b' }}),
   customHostPortNoProvenanceDifferent: _localModelSwitchText(
     {{ _usedModel: 'qwen2.5:8b', _requestedModel: '@custom:localhost:11434:llama3:8b' }}),
   customPrefixNoProvenanceDifferent: _localModelSwitchText(
@@ -195,6 +209,7 @@ function getModelLabel(modelId) {{
 }}
 function t(key) {{ return ''; }}
 eval(extractFunc('_bareModelId'));
+eval(extractFunc('_bareModelIdCandidates'));
 eval(extractFunc('_localModelSwitchText'));
 eval(extractFunc('_localModelSwitchTitle'));
 const cases = {{
@@ -274,6 +289,99 @@ def test_bare_model_id_preserves_colon_tag_after_the_routing_prefix():
     assert _local_model_switch("@ollama:llama3:8b", "@ollama:qwen2.5:8b") is True
     assert _local_model_switch("@custom:local:llama3:8b", "@custom:local:qwen2.5:8b") is True
     assert _local_model_switch("@ollama:llama3:8b", "llama3:8b") is False
+
+
+class TestAmbiguousCustomNoProvenanceShape:
+    """Greptile P1 pair (2026-09-17 / 2026-09-18) on ``@custom:A:B:model``.
+
+    Without provider provenance, ``A:B`` is intrinsically ambiguous: an
+    endpoint host:port (including single-label LAN hostnames like
+    ``mymachine:11434``) or a provider slug whose model itself starts with a
+    numeric segment (``my.gw`` serving ``11434:llama3:8b``). The switch
+    detector must compare the full candidate sets and only declare a switch
+    when NO reading of the requested id matches ANY reading of the served id.
+    """
+
+    def test_single_label_host_port_same_model_is_not_a_switch(self):
+        """P1 2026-09-17: the port must never surface as model identity."""
+        from api.streaming import _local_model_switch
+
+        assert _local_model_switch(
+            "@custom:mymachine:11434:llama3:8b", "llama3:8b"
+        ) is False
+        # Served side stamped with the port-eaten misparse stays silent too.
+        assert _local_model_switch(
+            "@custom:mymachine:11434:llama3:8b", "11434:llama3:8b"
+        ) is False
+
+    def test_single_label_host_port_real_switch_stays_a_switch(self):
+        from api.streaming import _local_model_switch
+
+        assert _local_model_switch(
+            "@custom:mymachine:11434:llama3:8b", "qwen2.5:8b"
+        ) is True
+
+    def test_dotted_slug_numeric_leading_model_is_not_a_switch(self):
+        """P1 2026-09-18: a dotted slug may serve a numeric-leading model id."""
+        from api.streaming import _local_model_switch
+
+        assert _local_model_switch(
+            "@custom:my.gw:11434:llama3:8b", "11434:llama3:8b"
+        ) is False
+        # And the endpoint-style reading of the same requested id equally
+        # matches the bare model, so no false switch either.
+        assert _local_model_switch(
+            "@custom:my.gw:11434:llama3:8b", "llama3:8b"
+        ) is False
+
+    def test_dotted_slug_numeric_leading_model_real_switch_stays_a_switch(self):
+        from api.streaming import _local_model_switch
+
+        assert _local_model_switch(
+            "@custom:my.gw:11434:llama3:8b", "11434:qwen2.5:8b"
+        ) is True
+
+    def test_candidate_set_exposes_both_readings(self):
+        """The candidate helper must carry the primary + alternate splits."""
+        from api.streaming import _bare_model_id_candidates
+
+        # Single-label host: the shared parser's right-peel primary and the
+        # slug-style/endpoint-style alternates are all present. (The JS mirror
+        # orders candidates differently; only the SET is contractual.)
+        assert set(_bare_model_id_candidates("@custom:mymachine:11434:llama3:8b")) == {
+            "11434:llama3:8b",
+            "llama3:8b",
+        }
+        # Dotted slug + numeric-leading model: primary consumes the port,
+        # slug-style reading keeps it.
+        assert set(_bare_model_id_candidates("@custom:my.gw:11434:llama3:8b")) == {
+            "llama3:8b",
+            "11434:llama3:8b",
+        }
+        # Non-custom ids keep the single primary reading.
+        assert _bare_model_id_candidates("@ollama:llama3:8b") == ["llama3:8b"]
+        assert _bare_model_id_candidates("llama3:8b") == ["llama3:8b"]
+        assert _bare_model_id_candidates("") == []
+
+    def test_22_08_regressions_stay_green(self):
+        """The original alignment cases must not regress."""
+        from api.streaming import _local_model_switch
+
+        assert _local_model_switch(
+            "@custom:localhost:11434:llama3:8b", "llama3:8b"
+        ) is False
+        assert _local_model_switch(
+            "@custom:192.168.1.5:11434:llama3:8b", "llama3:8b"
+        ) is False
+        assert _local_model_switch(
+            "@custom:ollama.internal:11434:llama3:8b", "llama3:8b"
+        ) is False
+        assert _local_model_switch(
+            "@custom:local:11434:llama3:8b", "11434:llama3:8b"
+        ) is False
+        assert _local_model_switch(
+            "@custom:localhost:11434:llama3:8b", "qwen2.5:8b"
+        ) is True
 
 
 def test_slash_namespace_is_never_equivalent_to_a_bare_model_id():
@@ -389,6 +497,14 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["customIpPortNoProvenanceSame"] == ""
     assert cases["customDnsPortNoProvenanceSame"] == ""
     assert cases["customSlugNumericTaggedSame"] == ""
+    assert cases["customSingleLabelHostPortNoProvenanceSame"] == ""
+    assert cases["customSingleLabelHostPortNoProvenanceDifferent"] == (
+        "Model switched: @custom:mymachine:11434:llama3:8b → qwen2.5:8b"
+    )
+    assert cases["customDottedSlugNumericTaggedSame"] == ""
+    assert cases["customDottedSlugNumericTaggedDifferent"] == (
+        "Model switched: @custom:my.gw:11434:llama3:8b → 11434:qwen2.5:8b"
+    )
     assert cases["customHostPortNoProvenanceDifferent"] == (
         "Model switched: @custom:localhost:11434:llama3:8b → qwen2.5:8b"
     )

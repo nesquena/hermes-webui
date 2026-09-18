@@ -2857,6 +2857,39 @@ def _bare_model_id(model_id) -> str:
     return model.strip()
 
 
+def _bare_model_id_candidates(model_id) -> list[str]:
+    """All plausible bare readings of an ambiguous ``@custom:A:B:...`` id.
+
+    ``A:B`` can be an endpoint host:port authority slug (``mymachine:11434``,
+    including single-label LAN hostnames the shared parser does not recognize)
+    or ``A`` can be a named provider slug whose model itself starts with a
+    numeric segment (``my.gw`` serving ``11434:llama3:8b``). A single parse must
+    guess which; switch detection must not. Returns the primary ``_bare_model_id``
+    reading plus the alternate split(s), lowercased, deduplicated. Mirror of
+    ``static/ui.js::_bareModelIdCandidates``.
+    """
+    primary = _bare_model_id(model_id)
+    out = [primary.lower()] if primary else []
+    model = str(model_id or "").strip()
+    if not model.lower().startswith("@custom:"):
+        return out
+    rest = model[len("@custom:"):]
+    first = rest.find(":")
+    if first < 0:
+        return out
+    after_host = rest[first + 1:]
+    if after_host and after_host.lower() not in out:
+        out.append(after_host.lower())
+    second = after_host.find(":")
+    if second >= 0:
+        port = after_host[:second]
+        if port.isdigit() and 1 <= int(port) <= 65535:
+            endpoint_model = after_host[second + 1:]
+            if endpoint_model and endpoint_model.lower() not in out:
+                out.append(endpoint_model.lower())
+    return out
+
+
 def _local_model_switch(requested_model, used_model) -> bool:
     """True only when a turn was demonstrably served by a different model.
 
@@ -2874,7 +2907,15 @@ def _local_model_switch(requested_model, used_model) -> bool:
     # _bare_model_id removes only the @provider: routing notation. Everything
     # left, including a slash namespace, is model identity: ``gpt-4`` and
     # ``my-local/gpt-4`` must therefore remain distinct in either direction.
-    return requested != used
+    # For ids without provider provenance the ``@custom:A:B`` shape is
+    # ambiguous (endpoint host:port or slug + numeric-leading model): compare
+    # the FULL candidate sets and declare a switch only when no reading of the
+    # requested id matches any reading of the served id.
+    requested_candidates = _bare_model_id_candidates(requested_model)
+    used_candidates = _bare_model_id_candidates(used_model)
+    if not requested_candidates or not used_candidates:
+        return False
+    return not (set(requested_candidates) & set(used_candidates))
 
 
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
