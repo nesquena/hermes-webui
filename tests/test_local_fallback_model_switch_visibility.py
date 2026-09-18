@@ -115,10 +115,20 @@ const cases = {{
     {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:mymachine:11434:llama3:8b' }}),
   customSingleLabelHostPortNoProvenanceDifferent: _localModelSwitchText(
     {{ _usedModel: 'qwen2.5:8b', _requestedModel: '@custom:mymachine:11434:llama3:8b' }}),
-  // Greptile P1 2026-09-18: dotted slug + numeric-leading model. The primary
-  // parse consumes 11434 as a port; the candidate set must keep it silent.
+  // Greptile P1 2026-09-18 follow-up: DOTTED A segment + valid port = the
+  // route hint identifies the endpoint (my.gw:11434), so the requested model
+  // is llama3:8b. Serving the DISTINCT 11434:llama3:8b is a real switch.
   customDottedSlugNumericTaggedSame: _localModelSwitchText(
     {{ _usedModel: '11434:llama3:8b', _requestedModel: '@custom:my.gw:11434:llama3:8b' }}),
+  customDottedHostPortServedBareSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:my.gw:11434:llama3:8b' }}),
+  // 22/08 counter-example intent (NON-dotted slug): frontier-gw is a named
+  // provider slug whose model genuinely starts with the numeric segment
+  // 11434 — serving 11434:llama3:8b is the SAME model, not a switch.
+  customNonDottedSlugNumericTaggedSame: _localModelSwitchText(
+    {{ _usedModel: '11434:llama3:8b', _requestedModel: '@custom:frontier-gw:11434:llama3:8b' }}),
+  customNonDottedSlugRealSwitch: _localModelSwitchText(
+    {{ _usedModel: 'qwen2.5:8b', _requestedModel: '@custom:frontier-gw:11434:llama3:8b' }}),
   customDottedSlugNumericTaggedDifferent: _localModelSwitchText(
     {{ _usedModel: '11434:qwen2.5:8b', _requestedModel: '@custom:my.gw:11434:llama3:8b' }}),
   customHostPortNoProvenanceDifferent: _localModelSwitchText(
@@ -297,9 +307,12 @@ class TestAmbiguousCustomNoProvenanceShape:
     Without provider provenance, ``A:B`` is intrinsically ambiguous: an
     endpoint host:port (including single-label LAN hostnames like
     ``mymachine:11434``) or a provider slug whose model itself starts with a
-    numeric segment (``my.gw`` serving ``11434:llama3:8b``). The switch
+    numeric segment (``frontier-gw`` serving ``11434:llama3:8b``). The switch
     detector must compare the full candidate sets and only declare a switch
-    when NO reading of the requested id matches ANY reading of the served id.
+    when NO reading of the requested id matches ANY reading of the served id —
+    except when the shared grammar itself commits: a dotted/localhost/IP host
+    with a valid port is an endpoint (the route hint identifies it), so the
+    slug-only alternate is dropped and cannot mask a genuine switch.
     """
 
     def test_single_label_host_port_same_model_is_not_a_switch(self):
@@ -322,24 +335,46 @@ class TestAmbiguousCustomNoProvenanceShape:
         ) is True
 
     def test_dotted_slug_numeric_leading_model_is_not_a_switch(self):
-        """P1 2026-09-18: a dotted slug may serve a numeric-leading model id."""
+        """P1 2026-09-18 counter-example intent: a NON-dotted slug may serve a
+        numeric-leading model id, and that reading must survive."""
         from api.streaming import _local_model_switch
 
         assert _local_model_switch(
-            "@custom:my.gw:11434:llama3:8b", "11434:llama3:8b"
+            "@custom:frontier-gw:11434:llama3:8b", "11434:llama3:8b"
         ) is False
         # And the endpoint-style reading of the same requested id equally
         # matches the bare model, so no false switch either.
         assert _local_model_switch(
-            "@custom:my.gw:11434:llama3:8b", "llama3:8b"
+            "@custom:frontier-gw:11434:llama3:8b", "llama3:8b"
         ) is False
 
     def test_dotted_slug_numeric_leading_model_real_switch_stays_a_switch(self):
         from api.streaming import _local_model_switch
 
         assert _local_model_switch(
-            "@custom:my.gw:11434:llama3:8b", "11434:qwen2.5:8b"
+            "@custom:frontier-gw:11434:llama3:8b", "11434:qwen2.5:8b"
         ) is True
+
+    def test_dotted_host_port_reading_cannot_mask_a_real_switch(self):
+        """Greptile P1 follow-up 2026-09-18: dotted host + valid port commits
+        the route hint to the endpoint reading, so a fallback serving the
+        DISTINCT model ``11434:llama3:8b`` must surface as a switch."""
+        from api.streaming import _local_model_switch
+
+        # Requested reads as endpoint my.gw:11434 + model llama3:8b; the
+        # slug-only candidate "11434:llama3:8b" is dropped.
+        assert _local_model_switch(
+            "@custom:my.gw:11434:llama3:8b", "11434:llama3:8b"
+        ) is True
+        # The same-model reading (bare llama3:8b) stays silent.
+        assert _local_model_switch(
+            "@custom:my.gw:11434:llama3:8b", "llama3:8b"
+        ) is False
+        # Non-dotted single-label host keeps both readings: the misparse
+        # candidate keeps the same-model turn silent.
+        assert _local_model_switch(
+            "@custom:mymachine:11434:llama3:8b", "11434:llama3:8b"
+        ) is False
 
     def test_candidate_set_exposes_both_readings(self):
         """The candidate helper must carry the primary + alternate splits."""
@@ -352,12 +387,23 @@ class TestAmbiguousCustomNoProvenanceShape:
             "11434:llama3:8b",
             "llama3:8b",
         }
-        # Dotted slug + numeric-leading model: primary consumes the port,
-        # slug-style reading keeps it.
-        assert set(_bare_model_id_candidates("@custom:my.gw:11434:llama3:8b")) == {
+        # NON-dotted slug + numeric-leading model: intrinsically ambiguous,
+        # both readings kept.
+        assert set(_bare_model_id_candidates("@custom:frontier-gw:11434:llama3:8b")) == {
             "llama3:8b",
             "11434:llama3:8b",
         }
+        # Dotted host + valid port: the grammar commits to host:port, the
+        # slug-only alternate is dropped.
+        assert set(_bare_model_id_candidates("@custom:my.gw:11434:llama3:8b")) == {
+            "llama3:8b",
+        }
+        # Dotted host + OUT-OF-RANGE port: the grammar cannot commit to an
+        # endpoint reading, so both readings are kept.
+        assert _bare_model_id_candidates("@custom:my.gw:99999:llama3:8b") == [
+            "llama3:8b",
+            "99999:llama3:8b",
+        ]
         # Non-custom ids keep the single primary reading.
         assert _bare_model_id_candidates("@ollama:llama3:8b") == ["llama3:8b"]
         assert _bare_model_id_candidates("llama3:8b") == ["llama3:8b"]
@@ -501,7 +547,19 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["customSingleLabelHostPortNoProvenanceDifferent"] == (
         "Model switched: @custom:mymachine:11434:llama3:8b → qwen2.5:8b"
     )
-    assert cases["customDottedSlugNumericTaggedSame"] == ""
+    # P1 2026-09-18 follow-up: dotted host + valid port commits to the
+    # endpoint reading, so the overlapping slug-only candidate can no longer
+    # mask the real switch.
+    assert cases["customDottedSlugNumericTaggedSame"] == (
+        "Model switched: @custom:my.gw:11434:llama3:8b → 11434:llama3:8b"
+    )
+    assert cases["customDottedHostPortServedBareSame"] == ""
+    # 22/08 counter-example intent preserved with a NON-dotted slug: the
+    # numeric-leading model id reading stays valid, same model = silent.
+    assert cases["customNonDottedSlugNumericTaggedSame"] == ""
+    assert cases["customNonDottedSlugRealSwitch"] == (
+        "Model switched: @custom:frontier-gw:11434:llama3:8b → qwen2.5:8b"
+    )
     assert cases["customDottedSlugNumericTaggedDifferent"] == (
         "Model switched: @custom:my.gw:11434:llama3:8b → 11434:qwen2.5:8b"
     )
