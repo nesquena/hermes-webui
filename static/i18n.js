@@ -248,6 +248,7 @@ const LOCALES = {
     cmd_usage: 'Toggle token usage display on/off',
     cmd_theme: 'Switch appearance (theme: system/dark/light, skin: default/ares/mono/graphite/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast/zeus/verdigris)',
     cmd_personality: 'Switch agent personality',
+    cmd_memory: 'Review pending memory writes / toggle the approval gate',
     cmd_skills: 'List available Hermes skills',
     cmd_use: 'Force a skill for the next message',
     available_commands: 'Available commands:',
