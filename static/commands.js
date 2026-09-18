@@ -1144,6 +1144,11 @@ const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','dro
 
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
+  // Captured now, before either branch awaits anything: if the user switches sessions
+  // before the response lands, S.messages/renderMessages() would otherwise write the
+  // response into whatever session is current AT RESOLUTION time, not the one that
+  // issued the command. Same owner-session guard the delayed steer paths use.
+  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
     (async()=>{
       let out;
@@ -1152,6 +1157,7 @@ function cmdSkills(args){
       }catch(e){
         out = `Skill write-approval command failed: ${e&&e.message||e}`;
       }
+      if(!_steerOwnerIsCurrent(ownerSid)) return;
       S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
       renderMessages();
     })();
@@ -1169,6 +1175,7 @@ function cmdSkills(args){
           (s.category||'').toLowerCase().includes(q)
         );
       }
+      if(!_steerOwnerIsCurrent(ownerSid)) return;
       if(!skills.length){
         const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
         S.messages.push(msg); renderMessages(); return;

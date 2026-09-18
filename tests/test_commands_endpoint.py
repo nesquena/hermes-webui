@@ -1,6 +1,7 @@
 """Tests for GET /api/commands -- exposes hermes-agent COMMAND_REGISTRY."""
 import io
 import json
+import pathlib
 import urllib.error
 import urllib.request
 import threading
@@ -515,7 +516,8 @@ def test_skills_write_approval_runtime_unavailable_is_generic_error(monkeypatch)
 def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
     """`/skills approval on|off`'s set_mode_fn must persist through the webui's own
     config module (there is no gateway session to route the gateway-side
-    persistence through), mirroring how /codex-runtime persists above."""
+    persistence through), reading the RAW file (not `get_config()`, which may hand
+    back a merged-with-defaults snapshot that must never be written back)."""
     from api import config as webui_config
     from api.commands import _skills_write_approval_setter
 
@@ -523,26 +525,107 @@ def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
     saved = []
     reloaded = []
 
-    orig_get_config = webui_config.get_config
     orig_get_path = webui_config._get_config_path
+    orig_load = webui_config._load_yaml_config_file
     orig_save = webui_config._save_yaml_config_file
     orig_reload = webui_config.reload_config
     try:
-        webui_config.get_config = lambda: config_data
         webui_config._get_config_path = lambda: tmp_path / "config.yaml"
+        webui_config._load_yaml_config_file = lambda path: config_data
         webui_config._save_yaml_config_file = lambda path, data: saved.append((path, data.copy()))
         webui_config.reload_config = lambda: reloaded.append(True)
 
         _skills_write_approval_setter()(True)
     finally:
-        webui_config.get_config = orig_get_config
         webui_config._get_config_path = orig_get_path
+        webui_config._load_yaml_config_file = orig_load
         webui_config._save_yaml_config_file = orig_save
         webui_config.reload_config = orig_reload
 
     assert config_data["skills"]["write_approval"] is True
     assert saved == [(tmp_path / "config.yaml", {"skills": {"write_approval": True}})]
     assert reloaded == [True]
+
+
+def test_skills_approval_toggle_serializes_under_shared_cfg_lock(monkeypatch):
+    """Two concurrent `/skills approval` calls must not interleave their
+    read-modify-write of config.yaml -- the exact race Greptile flagged (a
+    concurrent config writer saving between this read and this write, discarding
+    that other update). Uses the REAL `_cfg_lock`, not a mock of it."""
+    from api import config as webui_config
+    from api.commands import _skills_write_approval_setter
+
+    state = {"active": 0, "max_active": 0}
+    track_lock = threading.Lock()
+
+    def _load(path):
+        with track_lock:
+            state["active"] += 1
+            if state["active"] > state["max_active"]:
+                state["max_active"] = state["active"]
+        time.sleep(0.12)
+        with track_lock:
+            state["active"] -= 1
+        return {}
+
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
+    monkeypatch.setattr(webui_config, "_load_yaml_config_file", _load)
+    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
+    monkeypatch.setattr(webui_config, "reload_config", lambda: None)
+
+    setter = _skills_write_approval_setter()
+    errors = []
+
+    def _call(enabled):
+        try:
+            setter(enabled)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_call, args=(True,))
+    t2 = threading.Thread(target=_call, args=(False,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not t1.is_alive() and not t2.is_alive()
+    assert not errors
+    assert state["max_active"] == 1, "the shared _cfg_lock must serialize concurrent read-modify-writes"
+
+
+def test_skills_approval_toggle_reloads_after_releasing_lock(monkeypatch):
+    """`reload_config()` must run AFTER `_cfg_lock` is released, not while held --
+    the real `reload_config()` acquires that same non-reentrant lock internally, so
+    calling it from inside the `with` block would deadlock. Fakes reload_config to
+    itself contend for the real lock with a short timeout, proving it isn't already
+    held when reload_config runs."""
+    from api import config as webui_config
+    from api.commands import _skills_write_approval_setter
+
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
+    monkeypatch.setattr(webui_config, "_load_yaml_config_file", lambda path: {})
+    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
+
+    acquired = webui_config._cfg_lock.acquire(blocking=False)
+    assert acquired, "test setup: _cfg_lock must be free before the call"
+    webui_config._cfg_lock.release()
+
+    reload_acquired = []
+
+    def _fake_reload():
+        got = webui_config._cfg_lock.acquire(timeout=1)
+        reload_acquired.append(got)
+        if got:
+            webui_config._cfg_lock.release()
+
+    monkeypatch.setattr(webui_config, "reload_config", _fake_reload)
+
+    _skills_write_approval_setter()(True)
+
+    assert reload_acquired == [True], (
+        "reload_config() could not acquire _cfg_lock -- it is still held, "
+        "meaning reload_config() is being called INSIDE the locked block (deadlock risk)")
 
 
 @requires_agent_modules

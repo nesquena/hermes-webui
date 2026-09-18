@@ -401,15 +401,24 @@ def _run_skills_write_approval_command(arg_string: str) -> str:
 
 def _skills_write_approval_setter():
     """``set_mode_fn`` for '/skills approval on|off' -- persists `skills.write_approval` to the
-    same shared config.yaml `/codex-runtime` writes above, via the webui's own config module
-    (there is no gateway session here to route the equivalent gateway-side persistence through)."""
+    shared config.yaml via the webui's own config module (there is no gateway session here to
+    route the equivalent gateway-side persistence through).
+
+    Locked read-modify-write, same pattern as `api.config.set_hermes_default_model`: reads the
+    RAW file (not `get_config()`, which may return a merged-with-defaults snapshot that must
+    never be written back) under `_cfg_lock` so a concurrent config writer elsewhere can't save
+    between this read and this write and have its change discarded. `reload_config()` is called
+    AFTER releasing the lock -- it acquires `_cfg_lock` internally and the lock isn't reentrant.
+    """
 
     def _set_approval(enabled: bool) -> None:
         from api import config as webui_config
 
-        config_data = webui_config.get_config()
-        config_data.setdefault('skills', {})['write_approval'] = bool(enabled)
-        webui_config._save_yaml_config_file(webui_config._get_config_path(), config_data)
+        config_path = webui_config._get_config_path()
+        with webui_config._cfg_lock:
+            config_data = webui_config._load_yaml_config_file(config_path)
+            config_data.setdefault('skills', {})['write_approval'] = bool(enabled)
+            webui_config._save_yaml_config_file(config_path, config_data)
         webui_config.reload_config()
 
     return _set_approval
