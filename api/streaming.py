@@ -2834,6 +2834,112 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
     return None
 
 
+def _bare_model_id(model_id) -> str:
+    """Strip a routing hint without discarding identity-bearing model data.
+
+    The requested model is often carried with a WebUI routing hint
+    (``@openai-codex:gpt-5.6-sol``, or ``@custom:<slug>:model`` with two colons)
+    while the served model is stamped bare from ``agent.model``. Comparing the
+    raw strings would report a "switch" for what is the same model written two
+    different ways. Slash namespaces and colon tags after the hint are part of
+    the model identity. Returns '' for empty/None input so callers fail closed.
+    """
+    from api.config import _parse_provider_qualified_model_id
+
+    model = str(model_id or "").strip()
+    if not model:
+        return ""
+    qualified = _parse_provider_qualified_model_id(model)
+    if qualified:
+        # The shared parser identifies the complete routing prefix. Keep the
+        # complete bare model: later colons are model tags (for example ``:8b``).
+        model = qualified[0]
+    return model.strip()
+
+
+def _bare_model_id_candidates(model_id) -> list[str]:
+    """All plausible bare readings of an ambiguous ``@custom:A:B:...`` id.
+
+    ``A:B`` can be an endpoint host:port authority slug (``mymachine:11434``,
+    including single-label LAN hostnames the shared parser does not recognize)
+    or ``A`` can be a named provider slug whose model itself starts with a
+    numeric segment (``frontier-gw`` serving ``11434:llama3:8b``). A single
+    parse must guess which; switch detection must not — EXCEPT when the shared
+    grammar itself commits: when ``A:B`` passes
+    ``_custom_slug_rest_looks_like_host_port`` (dotted/localhost/IP host +
+    valid port), the route hint identifies the endpoint and the model is what
+    follows, so the slug-only alternate is dropped and cannot mask a genuine
+    switch (Greptile P1 follow-up 2026-09-18: ``@custom:my.gw:11434:llama3:8b``
+    served by the DISTINCT model ``11434:llama3:8b`` must surface). Returns the
+    primary ``_bare_model_id`` reading plus the surviving alternate split(s),
+    lowercased, deduplicated. Mirror of
+    ``static/ui.js::_bareModelIdCandidates``.
+    """
+    from api.config import _custom_slug_rest_looks_like_host_port
+
+    primary = _bare_model_id(model_id)
+    out = [primary.lower()] if primary else []
+    model = str(model_id or "").strip()
+    if not model.lower().startswith("@custom:"):
+        return out
+    rest = model[len("@custom:"):]
+    first = rest.find(":")
+    if first < 0:
+        return out
+    host = rest[:first]
+    after_host = rest[first + 1:]
+    second = after_host.find(":")
+    port = after_host[:second] if second >= 0 else ""
+    port_ok = bool(port) and port.isdigit() and 1 <= int(port) <= 65535
+    if port_ok and _custom_slug_rest_looks_like_host_port(f"{host}:{port}"):
+        # Grammar-confirmed endpoint reading: the shared parser routes this id
+        # as host:port + model, so switch detection must read it the same way.
+        # The slug-only reading (port consumed as a numeric-leading model
+        # segment) is dropped: it could otherwise mask a real switch.
+        endpoint_model = after_host[second + 1:]
+        if endpoint_model and endpoint_model.lower() not in out:
+            out.append(endpoint_model.lower())
+        return out
+    # Non-dotted host (or non-port second segment): still intrinsically
+    # ambiguous. Keep BOTH readings — slug-only alternate and endpoint
+    # alternate — and let callers stay silent when any candidate matches.
+    if after_host and after_host.lower() not in out:
+        out.append(after_host.lower())
+    if port_ok:
+        endpoint_model = after_host[second + 1:]
+        if endpoint_model and endpoint_model.lower() not in out:
+            out.append(endpoint_model.lower())
+    return out
+
+
+def _local_model_switch(requested_model, used_model) -> bool:
+    """True only when a turn was demonstrably served by a different model.
+
+    Backs the footer notice for *local* ``fallback_providers`` switches, which
+    produce no gateway routing metadata at all (so ``model_changed`` from
+    ``_normalize_gateway_routing_metadata`` never fires for them).
+
+    Fails closed: when either side is unknown, return False rather than claim a
+    switch that cannot be proven.
+    """
+    requested = _bare_model_id(requested_model).lower()
+    used = _bare_model_id(used_model).lower()
+    if not requested or not used:
+        return False
+    # _bare_model_id removes only the @provider: routing notation. Everything
+    # left, including a slash namespace, is model identity: ``gpt-4`` and
+    # ``my-local/gpt-4`` must therefore remain distinct in either direction.
+    # For ids without provider provenance the ``@custom:A:B`` shape is
+    # ambiguous (endpoint host:port or slug + numeric-leading model): compare
+    # the FULL candidate sets and declare a switch only when no reading of the
+    # requested id matches any reading of the served id.
+    requested_candidates = _bare_model_id_candidates(requested_model)
+    used_candidates = _bare_model_id_candidates(used_model)
+    if not requested_candidates or not used_candidates:
+        return False
+    return not (set(requested_candidates) & set(used_candidates))
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -12206,6 +12312,10 @@ def _run_agent_streaming(
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
                 _used_model = getattr(agent, 'model', None) or resolved_model or model
+                # The model the user actually asked for, captured BEFORE the run
+                # mutated agent.model. Same source the gateway path uses as
+                # requested_model, so both paths compare the same value.
+                _requested_model_for_switch = resolved_model or model
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -12224,6 +12334,16 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                                # Stamp the requested model alongside the served
+                                # one so the footer can surface a LOCAL fallback
+                                # switch. Gateway turns already carry their own
+                                # model_changed flag, so only stamp when there is
+                                # no gateway routing payload and the two models
+                                # genuinely differ (routing-notation-insensitive).
+                                if not _gateway_routing and _local_model_switch(
+                                    _requested_model_for_switch, _used_model
+                                ):
+                                    _dm['_requestedModel'] = _requested_model_for_switch
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -12613,6 +12733,13 @@ def _run_agent_streaming(
                 usage['ttft_ms'] = _ttft_ms
             if _used_model:
                 usage['used_model'] = _used_model
+                # Live counterpart of the stamped _requestedModel: lets the
+                # streaming footer surface a local fallback switch without
+                # waiting for a reload.
+                if not _gateway_routing and _local_model_switch(
+                    _requested_model_for_switch, _used_model
+                ):
+                    usage['requested_model'] = _requested_model_for_switch
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.

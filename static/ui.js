@@ -5208,6 +5208,143 @@ function _formatReasoningEffortLabel(effort){
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
+function _bareModelId(modelId, providerId){
+  // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix,
+  // then keep the complete bare model (including slash namespaces and tags).
+  // Older messages can lack provider provenance, so recognize both the ordinary
+  // @provider:model grammar and custom @custom:<slug>:<model> route hints.
+  let m=String(modelId||'').trim();
+  if(!m)return'';
+  const provider=String(providerId||'').trim();
+  const prefix=provider?`@${provider}:`:'';
+  if(prefix&&m.toLowerCase().startsWith(prefix.toLowerCase())){
+    m=m.slice(prefix.length);
+  }else if(!provider&&m.toLowerCase().startsWith('@custom:')){
+    let splitAt=m.indexOf(':','@custom:'.length);
+    const portSplit=m.indexOf(':',splitAt+1);
+    if(splitAt>=0&&portSplit>=0){
+      const host=m.slice('@custom:'.length,splitAt);
+      const port=m.slice(splitAt+1,portSplit);
+      const portNumber=Number(port);
+      const endpointHost=host.toLowerCase()==='localhost'||host.includes('.');
+      if(endpointHost&&/^\d+$/.test(port)&&portNumber>=1&&portNumber<=65535){
+        // Match the shared Python grammar's custom host:port provider shape.
+        splitAt=portSplit;
+      }
+    }
+    if(splitAt>=0)m=m.slice(splitAt+1);
+  }else if(!provider&&m.charAt(0)==='@'&&m.indexOf(':')>=0){
+    // A non-custom provider is one grammar segment. These compatibility paths
+    // are for messages that predate the persisted provider provenance fields.
+    m=m.slice(m.indexOf(':')+1);
+  }
+  return m.trim();
+}
+function _bareModelIdCandidates(modelId, providerId){
+  // Ambiguity set for the custom no-provenance shape @custom:A:B:...: A:B can
+  // be an endpoint host:port (#1776 authority slug, e.g. a single-label LAN
+  // hostname `mymachine:11434`) or A can be a named slug whose model itself
+  // starts with a numeric segment (`frontier-gw` serving `11434:llama3:8b`).
+  // A single parse must guess; switch detection must not — EXCEPT when the
+  // shared grammar itself commits: when A contains a dot (or is localhost/an
+  // IP) AND B is a valid port, the route hint identifies the endpoint and the
+  // model is what follows, so the slug-only alternate is dropped and cannot
+  // mask a genuine switch (Greptile P1 follow-up 2026-09-18). Non-dotted
+  // hosts keep BOTH readings and callers stay silent when any candidate
+  // matches. Mirror of api/streaming.py::_bare_model_id_candidates.
+  const primary=_bareModelId(modelId,providerId);
+  const out=primary?[primary.toLowerCase()]:[];
+  const provider=String(providerId||'').trim();
+  if(provider)return out;
+  const m=String(modelId||'').trim();
+  if(!m.toLowerCase().startsWith('@custom:'))return out;
+  const rest=m.slice('@custom:'.length);
+  const first=rest.indexOf(':');
+  if(first<0)return out;
+  const host=rest.slice(0,first);
+  const afterHost=rest.slice(first+1);
+  const second=afterHost.indexOf(':');
+  const port=second>=0?afterHost.slice(0,second):'';
+  const portNumber=Number(port);
+  const portOk=/^\d+$/.test(port)&&portNumber>=1&&portNumber<=65535;
+  const looksLikeHostPort=(host.toLowerCase()==='localhost')||host.includes('.');
+  if(portOk&&looksLikeHostPort){
+    // Grammar-confirmed endpoint reading (mirror of the Python
+    // _custom_slug_rest_looks_like_host_port gate, minus the IP check the
+    // dot test already covers for dotted hosts): drop the slug-only
+    // alternate so it cannot mask a real switch.
+    const endpointModel=afterHost.slice(second+1);
+    if(endpointModel&&!out.includes(endpointModel.toLowerCase()))out.push(endpointModel.toLowerCase());
+    return out;
+  }
+  // Intrinsically ambiguous: keep BOTH readings.
+  if(afterHost&&!out.includes(afterHost.toLowerCase()))out.push(afterHost.toLowerCase());
+  if(portOk){
+    const endpointModel=afterHost.slice(second+1);
+    if(endpointModel&&!out.includes(endpointModel.toLowerCase()))out.push(endpointModel.toLowerCase());
+  }
+  return out;
+}
+function _localModelSwitchText(msg, requestedModel){
+  // Notice for a LOCAL fallback switch: the configured provider failed and
+  // fallback_providers served the turn with another model. Gateway turns own
+  // their own warning via _gatewayModelWarningText, so stay silent there to
+  // keep one notice per turn. Fails closed: renders nothing unless both model
+  // identities are known, and keeps the warning on conflicting provenance.
+  if(!msg)return'';
+  if(msg._gatewayRouting)return'';
+  const used=String(msg._usedModel||'').trim();
+  const requested=String(requestedModel||msg._requestedModel||'').trim();
+  if(!used||!requested)return'';
+  const usedId=_bareModelId(used,msg._usedProvider).toLowerCase();
+  const usedCandidates=_bareModelIdCandidates(used,msg._usedProvider);
+  const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
+  const requestedCandidates=_bareModelIdCandidates(requested,msg._requestedProvider);
+  if(!usedId||!requestedId)return'';
+  const routeProvider=modelId=>{
+    const match=String(modelId||'').trim().match(/^@(custom:[^:]+|[^:]+):/i);
+    return match?match[1].toLowerCase():'';
+  };
+  const requestedRouteProvider=routeProvider(requested);
+  const usedRouteProvider=routeProvider(used);
+  const requestedProvider=String(msg._requestedProvider||'').trim().toLowerCase();
+  const usedProvider=String(msg._usedProvider||'').trim().toLowerCase();
+  const mismatch=(a,b)=>!!a&&!!b&&a!==b;
+  const provenanceContradicts=
+    mismatch(requestedRouteProvider,requestedProvider)
+    ||mismatch(usedRouteProvider,usedProvider)
+    ||mismatch(requestedProvider||requestedRouteProvider,usedProvider||usedRouteProvider);
+  // The @custom:A:B shape without provenance is ambiguous: A:B can be an
+  // endpoint host:port or a slug whose model starts with a numeric segment.
+  // No single parse can decide, so a switch is declared only when the served
+  // model matches NONE of the requested readings (and vice versa for the
+  // display-side comparison below).
+  const candidatesOverlap=(a,b)=>a.some(x=>b.includes(x));
+  if(candidatesOverlap(requestedCandidates,usedCandidates)&&!provenanceContradicts)return'';
+  // _bareModelId removes only the @provider: routing notation. A remaining slash
+  // namespace is identity-bearing, even when the other id has the same basename.
+  const prefix=`${t('model_switched')||'Model switched'}: `;
+  const requestedLabel=getModelLabel(requested);
+  const usedLabel=getModelLabel(used);
+  if(String(requestedLabel).toLowerCase()!==String(usedLabel).toLowerCase()){
+    return`${prefix}${requestedLabel} → ${usedLabel}`;
+  }
+  // A provider failover can keep the model family (@openrouter:anthropic/x
+  // served by @anthropic:x): the switch is real, but both display labels
+  // collapse to the same text and "x → x" would explain nothing. Fall back
+  // to provider-qualified (or bare) ids that preserve the distinction.
+  const qualify=(modelId,providerId)=>{
+    const m=String(modelId||'').trim();
+    const provider=String(providerId||'').trim();
+    return(m.charAt(0)!=='@'&&provider)?`@${provider}:${m}`:m;
+  };
+  return`${prefix}${qualify(requested,msg._requestedProvider)} → ${qualify(used,msg._usedProvider)}`;
+}
+function _localModelSwitchTitle(){
+  // Hover/assistive explanation for the LOCAL fallback notice: the label pair
+  // says what changed, this says why.
+  return t('model_switched_fallback_title')||'The configured provider failed; a fallback provider served this turn.';
+}
 function _reasoningEffortContext(){
   const transition=_profileTransitionReasoningContext;
   const session=S&&S.session;
@@ -7539,7 +7676,7 @@ function _gatewayModelWarningText(routing){
   if(!routing||!routing.model_changed)return'';
   const requested=getModelLabel(routing.requested_model||'requested model');
   const used=getModelLabel(routing.used_model||'served model');
-  return`Model switched: ${requested} → ${used}`;
+  return`${t('model_switched')||'Model switched'}: ${requested} → ${used}`;
 }
 function _latestGatewayRoutingForSession(session){
   if(!session)return null;
@@ -18092,7 +18229,8 @@ function renderMessages(options){
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const gatewayWarningText=_gatewayModelWarningText(routing);
+      const modelWarningText=gatewayWarningText||_localModelSwitchText(msg);
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -18111,6 +18249,13 @@ function renderMessages(options){
         const warning=document.createElement('span');
         warning.className='msg-model-warning-inline';
         warning.textContent=modelWarningText;
+        if(!gatewayWarningText){
+          // Local fallback: the visible pair says what changed; explain why on
+          // hover and to assistive tech. Gateway notices keep their own copy.
+          const why=_localModelSwitchTitle();
+          warning.title=why;
+          warning.setAttribute('aria-description',why);
+        }
         fragments.push(warning);
       }
       if(failoverText){
