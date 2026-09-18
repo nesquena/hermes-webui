@@ -28,10 +28,17 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits'})
+_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits', 'skills'})
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
+
+# '/skills' subcommands owned by hermes-agent's write-approval gate
+# (tools/write_approval.py) rather than the webui's own local skill search
+# (cmdSkills in static/commands.js). Kept in sync with SKILLS_AGENT_SUBCOMMANDS there.
+_SKILLS_WRITE_APPROVAL_SUBCOMMANDS = frozenset({
+    'pending', 'approve', 'apply', 'reject', 'deny', 'drop', 'diff', 'approval', 'mode',
+})
 
 
 def _parse_agent_command(command: str) -> tuple[str, str]:
@@ -219,6 +226,8 @@ def execute_agent_command(command: str) -> str:
         return _run_codex_runtime_command(arg_string)
     if canonical == 'credits':
         return _run_credits_command()
+    if canonical == 'skills':
+        return _run_skills_write_approval_command(arg_string)
 
     raise KeyError(canonical)
 
@@ -355,6 +364,55 @@ def _run_reload_skills_command() -> str:
     if removed_names:
         lines.append(f"Removed skills: {', '.join(sorted(removed_names))}")
     return "\n".join(lines)
+
+
+def _run_skills_write_approval_command(arg_string: str) -> str:
+    """Run a `/skills` write-approval subcommand (pending/approve/reject/diff/approval/mode,
+    plus the apply/deny/drop aliases) against hermes-agent's shared pending store
+    (tools/write_approval.py).
+
+    This is the WebUI-native counterpart to gateway/slash_commands.py's
+    `_handle_skills_command` and the interactive CLI's own wiring in
+    hermes_cli/cli_commands_mixin.py -- a WebUI chat turn goes through neither of
+    those (it posts to /api/chat/start -> AIAgent.run_conversation with no
+    slash-command interception at all), so it needs its own dispatch here.
+
+    Only ever called for the reserved subcommand names cmdSkills forwards
+    (static/commands.js); any other argument (a bare `/skills` or a search query)
+    raises KeyError so the caller's normal allowlist-miss handling applies --
+    this endpoint must never swallow a plain skill search.
+    """
+    args = arg_string.split()
+    sub = args[0].lower() if args else ""
+    if sub not in _SKILLS_WRITE_APPROVAL_SUBCOMMANDS:
+        raise KeyError('skills')
+
+    try:
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+    except Exception as exc:
+        logger.warning("write-approval runtime unavailable for /skills", exc_info=True)
+        raise RuntimeError("Skill write-approval runtime unavailable") from exc
+
+    out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=_skills_write_approval_setter())
+    return out if out is not None else (
+        "Unknown /skills subcommand. Use: pending, approve <id>, reject <id>, diff <id>, approval <on|off>.")
+
+
+def _skills_write_approval_setter():
+    """``set_mode_fn`` for '/skills approval on|off' -- persists `skills.write_approval` to the
+    same shared config.yaml `/codex-runtime` writes above, via the webui's own config module
+    (there is no gateway session here to route the equivalent gateway-side persistence through)."""
+
+    def _set_approval(enabled: bool) -> None:
+        from api import config as webui_config
+
+        config_data = webui_config.get_config()
+        config_data.setdefault('skills', {})['write_approval'] = bool(enabled)
+        webui_config._save_yaml_config_file(webui_config._get_config_path(), config_data)
+        webui_config.reload_config()
+
+    return _set_approval
 
 
 def _run_credits_command() -> str:
