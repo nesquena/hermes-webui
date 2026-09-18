@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import math
 import os
+from functools import lru_cache
 from pathlib import Path
 import stat
 import sys
@@ -24,6 +25,7 @@ from api.config import (
     PYTHON_EXE,
     _AGENT_DIR,  # noqa: F401
     _DEFAULT_STATE_HOME,
+    coerce_reasoning_effort_for_model,
 )
 from api.subprocess_utils import windows_hide_flags
 
@@ -129,6 +131,107 @@ _AGENT_MODULE_PATH: Path | None = None
 _AGENT_REVISION: str | None = None
 _AIAgent = None
 _RUNTIME_LOCK = threading.Lock()
+
+
+def _reasoning_config_for_agent_destination(agent, value):
+    """Clamp an Agent reasoning assignment against its current destination.
+
+    Hermes Agent re-resolves ``reasoning_config`` when a fallback activates and
+    when ``/model`` switches the live agent. Older Agent builds parse the global
+    preference at those chokepoints but do not apply the destination model and
+    provider ceiling. Intercepting the shared attribute assignment keeps both
+    transitions safe without patching the installed Agent checkout.
+    """
+    if not isinstance(value, dict) or value.get("enabled") is False:
+        return value
+    effort = value.get("effort")
+    if not effort:
+        return value
+    try:
+        coerced = coerce_reasoning_effort_for_model(
+            effort,
+            getattr(agent, "model", None),
+            provider_id=getattr(agent, "provider", None),
+            base_url=getattr(agent, "base_url", None),
+        )
+    except Exception:
+        # Transition-time capability uncertainty must fail closed for the two
+        # supra-ceiling tiers this PR adds. Preserve the established GPT-5
+        # landing where it can be identified without metadata; every other
+        # unresolved destination gets the universally safe ``high`` ceiling.
+        if str(effort).strip().lower() in {"max", "ultra"}:
+            bare_model = str(getattr(agent, "model", None) or "").lower().rsplit("/", 1)[-1]
+            fallback_effort = (
+                "xhigh"
+                if bare_model.startswith("gpt-5") and "gpt-5.6" not in bare_model
+                else "high"
+            )
+            clamped = dict(value)
+            clamped["effort"] = fallback_effort
+            return clamped
+        return value
+    if not coerced:
+        return None
+    if coerced == effort:
+        return value
+    clamped = dict(value)
+    clamped["effort"] = coerced
+    return clamped
+
+
+def _agent_destination_fields_ready(agent) -> bool:
+    """True once the instance itself holds its route (provider + base_url).
+
+    The installed Agent constructor (revision d6ad555a16b7ad9a3324db3df1e1db7edec3e0a1)
+    stores ``model`` and ``reasoning_config`` through ``_PASSTHROUGH_PARAMS``
+    BEFORE assigning ``base_url`` and ``provider``. Until both route fields
+    exist on the instance, destination coercion would resolve the route from
+    the DEFAULT PROFILE instead of the session destination — e.g. a Gemini or
+    Copilot profile re-coercing a constructor ``max`` for OpenAI-Codex
+    GPT-5.6 down to ``xhigh``/``high``. The constructor value is already
+    destination-coerced by the WebUI caller and must pass through untouched;
+    later writes (fallback activation, /model switch) run with the full route
+    present and stay guarded. (#6018 gate 2026-09-09)
+    """
+    try:
+        instance_dict = getattr(agent, "__dict__", None)
+    except Exception:
+        return True
+    if not isinstance(instance_dict, dict):
+        # Slotted instances cannot be inspected reliably; treat any resolvable
+        # provider as ready rather than skip the guard on a technicality.
+        return getattr(agent, "provider", None) is not None
+    return "provider" in instance_dict and "base_url" in instance_dict
+
+
+@lru_cache(maxsize=1)
+def _destination_aware_ai_agent_class(agent_class):
+    """Return a bounded-cached class guarding transition-time reasoning writes."""
+    if agent_class is None or getattr(
+        agent_class, "_webui_destination_reasoning_guard", False
+    ):
+        return agent_class
+
+    class DestinationAwareAIAgent(agent_class):
+        _webui_destination_reasoning_guard = True
+
+        def __setattr__(self, name, value):
+            if name == "reasoning_config":
+                # Constructor-phase assignment (route fields not yet on the
+                # instance): the value was already coerced against the session
+                # destination by the caller — do NOT re-coerce it against the
+                # default profile. Every post-construction write keeps the
+                # destination guard. (#6018 gate 2026-09-09)
+                if _agent_destination_fields_ready(self):
+                    value = _reasoning_config_for_agent_destination(self, value)
+            super().__setattr__(name, value)
+
+    # Keep diagnostics and inspect.signature output aligned with the installed
+    # Agent class; only the attribute-assignment guard differs.
+    DestinationAwareAIAgent.__name__ = agent_class.__name__
+    DestinationAwareAIAgent.__qualname__ = agent_class.__qualname__
+    DestinationAwareAIAgent.__module__ = agent_class.__module__
+    return DestinationAwareAIAgent
 
 
 class AgentRuntimeChangedError(RuntimeError):
@@ -423,12 +526,12 @@ def ensure_agent_runtime_current() -> None:
 
 
 def require_ai_agent_class():
-    """Import ``AIAgent`` after proving the loaded source revision is current."""
+    """Import the guarded ``AIAgent`` after proving its revision is current."""
     ensure_agent_runtime_current()
     from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
-    return AIAgent
+    return _destination_aware_ai_agent_class(AIAgent)
 
 
 def get_ai_agent_class():
