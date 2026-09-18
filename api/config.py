@@ -5302,6 +5302,20 @@ def _filter_reasoning_efforts_for_provider(
         return [eff for eff in normalized if eff != "ultra"]
     if zai_supports is False:
         return []
+    # ULTRA default-deny, model-scoped (gate 2026-09-09): ``ultra`` is the
+    # GPT-5.6 product tier. It survives ONLY for the GPT-5.6 family (every
+    # other model ceiling above has already fired) or when the operator
+    # explicitly allowlists it. Adaptive Claude — native, Bedrock, Azure
+    # Foundry, aggregators — plus DeepSeek, Grok, MiniMax and every other
+    # recognized family keep ``max`` as their wire ceiling and see ``ultra``
+    # stripped; coercion then degrades ultra down to ``max``. The
+    # unconditional ai-gateway strip above already mapped its ultra down, and
+    # ``max`` behavior everywhere is untouched. (#6018 gate 2026-09-09)
+    if "ultra" in normalized and not _is_gpt_5_6_family(bare):
+        operator_allow = set(_configured_model_reasoning_efforts(provider, model_id))
+        operator_allow.update(_provider_configured_reasoning_efforts(provider))
+        if "ultra" not in operator_allow:
+            normalized = [eff for eff in normalized if eff != "ultra"]
     # DEFAULT-DENY for custom/unrecognized providers: their native effort
     # ladders are unknown, so the supra-ceiling max/ultra tiers must not leak
     # through heuristic or metadata fallbacks — unless the operator explicitly

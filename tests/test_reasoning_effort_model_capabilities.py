@@ -8,6 +8,8 @@ GPT_5_6_MODELS = (
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
+    # Codex large-context alias (Brandon168, 2026-09-06): same family regex.
+    "gpt-5.6-luna-900k",
 )
 
 OPENAI_FAMILY_PROVIDERS = (
@@ -979,12 +981,17 @@ def test_pre_adaptive_claude_ceiling_follows_model_across_aggregators():
         assert cfg.coerce_reasoning_effort_for_model(
             "ultra", qualified, provider_id=prov
         ) == "xhigh"
-        # Control: adaptive Claude via the same aggregator keeps the top tiers
-        # — the ceiling is model-scoped, not lane-scoped.
+        # Control: adaptive Claude via the same aggregator keeps ``max`` — the
+        # ceiling is model-scoped, not lane-scoped. Since the 2026-09-09 gate,
+        # ``ultra`` is GPT-5.6-only and strips on every non-GPT-5.6 lane,
+        # coercing down to the wire ``max`` instead of leaking through.
         adaptive = cfg.resolve_model_reasoning_efforts(
             "anthropic/claude-opus-4.6", provider_id=prov
         )
-        assert "max" in adaptive and "ultra" in adaptive
+        assert "max" in adaptive and "ultra" not in adaptive
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "anthropic/claude-opus-4.6", provider_id=prov
+        ) == "max"
     # The same model-scoped ceiling holds on unknown/custom gateway lanes.
     assert cfg.coerce_reasoning_effort_for_model(
         "ultra", "claude-sonnet-4-5", provider_id="custom:some-gw"
@@ -1045,3 +1052,99 @@ def test_ai_gateway_status_reports_wire_max_for_stored_ultra(monkeypatch):
         assert "max" in status["supported_efforts"], alias
         assert "ultra" not in status["supported_efforts"], alias
         assert status["reasoning_effort"] == "max", alias
+
+
+# --- 2026-09-09 gate regressions (#6018): ultra is model-scoped ---------------
+
+
+def test_ultra_default_denied_on_non_gpt56_lanes():
+    # Gate must-fix 1 (2026-09-09): the uniform filter kept and wire-coerced
+    # ``ultra`` for providers whose transport never exposes the GPT-5.6/Codex
+    # product tier. Ultra must now strip from the ladder AND coerce down to
+    # the wire ``max`` on every non-GPT-5.6 lane, while ``max`` itself keeps
+    # its existing behavior on those same lanes.
+    negative_lanes = (
+        # Claude native + cloud-host lanes
+        ("claude-opus-4.6", "anthropic"),
+        ("claude-sonnet-4.7", "anthropic"),
+        ("claude-opus-4.6", "bedrock"),
+        ("anthropic/claude-opus-4.6", "aws-bedrock"),
+        ("claude-opus-4.6", "azure-foundry"),
+        # Non-OpenAI recognized families
+        ("deepseek-reasoner", "deepseek"),
+        ("deepseek-v4-flash", "deepseek"),
+        ("grok-5", "x-ai"),
+        ("grok-5", "xai-oauth"),
+        ("minimax-m3-pro", "minimax"),
+        # Aggregator lanes routing non-GPT-5.6 models
+        ("anthropic/claude-opus-4.6", "openrouter"),
+        ("anthropic/claude-opus-4.6", "nous"),
+    )
+    for model, prov in negative_lanes:
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=prov)
+        assert "ultra" not in efforts, f"{model} via {prov} must not expose ultra"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", model, provider_id=prov
+        ) == "max", f"ultra for {model} via {prov} must coerce to the wire max"
+        # Max behavior is unchanged on the same lane (Adaptive Claude/DeepSeek
+        # genuinely support max; that contract predates this gate).
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model, provider_id=prov
+        ) == "max", f"max for {model} via {prov} must stay preserved"
+
+
+def test_ultra_ai_gateway_strip_stays_unconditional():
+    # Gate must-fix 1 (control): the unconditional AI Gateway strip predates
+    # this gate — every routed model keeps ultra stripped and coerced to max,
+    # and adaptive Claude max stays intact behind every alias.
+    for alias in ("ai-gateway", "vercel", "vercel-ai-gateway"):
+        for model in ("anthropic/claude-opus-4.6", "deepseek/deepseek-reasoner"):
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=alias)
+            assert "ultra" not in efforts, (alias, model, efforts)
+            assert cfg.coerce_reasoning_effort_for_model(
+                "ultra", model, provider_id=alias
+            ) == "max", (alias, model)
+
+
+def test_ultra_survives_for_gpt56_on_supported_openai_lanes():
+    # Gate must-fix 1 (positive control): the GPT-5.6 family keeps ultra on
+    # the OpenAI/Codex lanes that expose the product tier.
+    for prov in ("openai-codex", "openai", "openai-api", "azure-foundry"):
+        for model in GPT_5_6_MODELS:
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=prov)
+            assert "ultra" in efforts, f"{model} via {prov} must keep ultra"
+            assert cfg.coerce_reasoning_effort_for_model(
+                "ultra", model, provider_id=prov
+            ) == "ultra"
+
+
+def test_ultra_operator_allowlist_overrides_model_scope():
+    # Gate must-fix 1 (operator authority): an explicit reasoning_efforts
+    # allowlist naming ultra re-authorizes it for a non-GPT-5.6 model, at both
+    # provider level and model level.
+    original = cfg.cfg.get("custom_providers")
+    cfg.cfg["custom_providers"] = [
+        {"name": "wide-gw", "reasoning_efforts": ["high", "max", "ultra"]},
+        {"name": "model-gw", "models": {"inkling2": {"reasoning_efforts": ["high", "ultra"]}}},
+    ]
+    try:
+        # Provider-level allowlist
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "some-model", provider_id="custom:wide-gw"
+        ) == "ultra"
+        # Model-level allowlist on a sibling gateway
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "inkling2", provider_id="custom:model-gw"
+        ) == "ultra"
+        # Unlisted sibling model on the same allowlisted gateway does not
+        # inherit ultra via the provider list? It does — provider-level is
+        # lane-wide authority; but the MODEL-level gateway keeps siblings
+        # denied (model-gw has no provider-level list).
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", "other-model", provider_id="custom:model-gw"
+        ) != "ultra"
+    finally:
+        if original is None:
+            cfg.cfg.pop("custom_providers", None)
+        else:
+            cfg.cfg["custom_providers"] = original
