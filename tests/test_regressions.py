@@ -1189,14 +1189,99 @@ def test_skills_slash_command_defined():
         "HANDLERS.skills registration missing from commands.js"
 
 
-def test_skills_command_dropdown_lists_write_approval_subcommands():
+def test_skills_dropdown_options_have_distinct_per_option_descriptions():
     """/skills' dropdown must surface the write-approval subcommands (pending,
     approve, reject, diff, approval, mode) the same way /goal and /reasoning
     surface their own static subArgs -- otherwise they're only usable by typing
-    them from memory, with no discovery path in the chat box's autocomplete."""
+    them from memory, with no discovery path in the chat box's autocomplete.
+
+    It must ALSO show what each subcommand actually does, not the same generic
+    /skills description six times over -- the pre-existing bug every other
+    static-subArgs command (e.g. /goal) still has, deliberately left alone here
+    as separate, larger follow-up work (fixing it for all of them touches the
+    shared getSlashAutocompleteMatches() dispatch, not just this one command).
+
+    Real execution via node, not a source-string check: proves the actual
+    getSlashAutocompleteMatches() output, and that /goal's existing behavior
+    (all its options sharing the parent desc) is unchanged.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
     src = (REPO_ROOT / "static/commands.js").read_text()
-    assert "subArgs:['pending','approve','reject','diff','approval','mode']" in src, \
-        "/skills COMMANDS entry is missing its write-approval subArgs dropdown list"
+    skills_entry = _js_block(src, "{name:'skills',", "\n  {name:'use',")
+    goal_entry = _js_block(src, "{name:'goal',", "\n  {name:'queue',")
+    get_options_fn = _js_block(src, "function _getSlashSubArgOptions(spec){", "\nfunction _activeSlashCommandOffset")
+    offset_fn = _js_block(src, "function _activeSlashCommandOffset(text){", "\nfunction _parseSlashAutocomplete")
+    parse_fn = _js_block(src, "function _parseSlashAutocomplete(text){", "\nasync function getSlashAutocompleteMatches")
+    autocomplete_fn = _js_block(src, "async function getSlashAutocompleteMatches(text){", "\nfunction _findComposerPathToken")
+
+    harness = textwrap.dedent(
+        """
+        function t(k){ return k; }
+        function getMatchingCommands(){ return []; }
+        function cmdSkills(){}
+        function cmdGoal(){}
+        const COMMANDS = [
+          %(skills_entry)s
+          %(goal_entry)s
+        ];
+
+        %(offset_fn)s
+        %(parse_fn)s
+        %(get_options_fn)s
+        %(autocomplete_fn)s
+
+        (async () => {
+          const skillsMatches = await getSlashAutocompleteMatches('/skills ');
+          const goalMatches = await getSlashAutocompleteMatches('/goal ');
+
+          const skillsDescByValue = Object.fromEntries(skillsMatches.map(m => [m.value, m.desc]));
+          const skillsDescSet = new Set(skillsMatches.map(m => m.desc));
+          const goalDescSet = new Set(goalMatches.map(m => m.desc));
+
+          console.log(JSON.stringify({
+            skillsCount: skillsMatches.length,
+            skillsAllDistinct: skillsDescSet.size === skillsMatches.length,
+            skillsPendingDesc: skillsDescByValue['pending'] || null,
+            skillsApproveDesc: skillsDescByValue['approve'] || null,
+            skillsDescEqualsParent: skillsMatches.some(m => m.desc === 'cmd_skills'),
+            goalCount: goalMatches.length,
+            goalAllShareParentDesc: goalDescSet.size === 1 && goalMatches[0].desc === 'cmd_goal',
+          }));
+        })();
+        """
+    ) % {
+        "skills_entry": skills_entry,
+        "goal_entry": goal_entry,
+        "offset_fn": offset_fn,
+        "parse_fn": parse_fn,
+        "get_options_fn": get_options_fn,
+        "autocomplete_fn": autocomplete_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["skillsCount"] == 6, "/skills must offer all six write-approval subcommands"
+    assert out["skillsAllDistinct"] is True, \
+        "each /skills subcommand must show its OWN description, not a repeated generic one"
+    assert out["skillsDescEqualsParent"] is False, \
+        "/skills options must not fall back to the parent command's own description"
+    assert out["skillsPendingDesc"] and out["skillsPendingDesc"] != out["skillsApproveDesc"], \
+        "pending and approve must have distinct, real descriptions"
+    # Unchanged commands (bare-string subArgs) keep sharing the parent desc -- this is the
+    # documented pre-existing limitation, not something this change was meant to fix.
+    assert out["goalCount"] == 4
+    assert out["goalAllShareParentDesc"] is True, \
+        "/goal's bare-string subArgs must keep its existing (shared-desc) behavior unchanged"
 
 
 def _js_block(source: str, start_marker: str, end_marker: str) -> str:
