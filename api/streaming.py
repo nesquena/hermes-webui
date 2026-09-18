@@ -2465,7 +2465,18 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
 
 
 def _cleanup_ephemeral_session_sidecar_locked(session, *, outcome: str) -> bool:
-    """Durably remove one hidden /btw sidecar without deleting a reincarnation."""
+    """Durably remove one hidden /btw sidecar without deleting a reincarnation.
+
+    LOCK CONTRACT (gate RED 09/09/2026, finding 1): the CALLER must already
+    hold the per-session agent lock ``_get_session_agent_lock(sid)``. Every
+    production caller holds that non-reentrant ``threading.Lock`` when it
+    reaches this helper (the cancel paths via ``with _agent_lock:`` in
+    ``_finalize_cancelled_turn`` callers, the completion path via its own
+    explicit acquisition). Acquiring it here used to self-deadlock the worker:
+    the session ephemeral meant to disappear then persisted on disk/sidebar
+    with the thread hung forever. Tests may call it unlocked only through
+    ``_cleanup_ephemeral_cancelled_turn``.
+    """
     sid = str(getattr(session, 'session_id', '') or '').strip()
     expected_path = SESSION_DIR / f'{sid}.json'
     if Path(session.path).resolve() != expected_path.resolve():
@@ -2473,14 +2484,17 @@ def _cleanup_ephemeral_session_sidecar_locked(session, *, outcome: str) -> bool:
     expected_revision = None
     if getattr(session, '_sidecar_revision_session_id_v1', None) == sid:
         expected_revision = getattr(session, '_sidecar_revision_v1', None)
-    with _get_session_agent_lock(sid):
-        with _session_sidecar_authority(sid):
-            if expected_revision is None:
-                expected_revision = _read_sidecar_revision(expected_path)
-            deleted = _delete_session_sidecar_artifacts_locked(
-                sid,
-                expected_revision=expected_revision,
-            )
+    with _session_sidecar_authority(sid):
+        if expected_revision is None:
+            expected_revision = _read_sidecar_revision(expected_path)
+        deleted = _delete_session_sidecar_artifacts_locked(
+            sid,
+            expected_revision=expected_revision,
+            # Gate RED 09/09/2026 (finding 2): the hidden /btw ephemeral fence
+            # records in the SEPARATE hidden-cleanup log so /btw churn can
+            # never evict a user delete fence from the shared capacity.
+            tombstone_kind='hidden',
+        )
     if not deleted:
         raise RuntimeError(
             f'Ephemeral session {sid!r} changed before {outcome} cleanup'
@@ -11340,7 +11354,12 @@ def _run_agent_streaming(
                 })
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
-                _cleanup_ephemeral_session_sidecar_locked(s, outcome='completed')
+                # Gate RED 09/09/2026 (finding 1): the completion-path cleanup
+                # must hold the per-session agent lock like every other session
+                # writer — the helper no longer acquires it itself (it used to
+                # self-deadlock under the cancel path's already-held lock).
+                with _agent_lock:
+                    _cleanup_ephemeral_session_sidecar_locked(s, outcome='completed')
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()

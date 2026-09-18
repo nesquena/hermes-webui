@@ -633,7 +633,11 @@ def test_hidden_ephemeral_cleanup_uses_complete_durable_delete_protocol(
     assert not session.path.exists()
     assert not backup.exists()
     assert all(not path.exists() for path in replay_artifacts)
-    assert sid in models._load_webui_deleted_session_tombstone()
+    # Gate RED 09/09/2026 (finding 2): hidden /btw cleanups fence in their own
+    # bounded log (_hidden_cleanup_sessions.json) so their churn can never
+    # evict a user delete fence from the shared user log capacity.
+    assert sid in models._load_webui_hidden_cleanup_tombstone()
+    assert sid not in models._load_webui_deleted_session_tombstone()
 
 
 def test_compactor_restore_refuses_tombstoned_sid(tmp_path, monkeypatch):

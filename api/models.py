@@ -494,10 +494,19 @@ def _delete_session_sidecar_artifacts_locked(
     session_dir: Path | None = None,
     expected_revision=None,
     record_tombstone: bool = True,
+    tombstone_kind: str = 'user',
 ) -> bool:
-    """Delete one SID's complete sidecar family while its authority is held."""
+    """Delete one SID's complete sidecar family while its authority is held.
+
+    ``tombstone_kind`` (gate RED 09/09/2026, finding 2): ``'user'`` records the
+    durable user delete fence in the shared log; ``'hidden'`` records the
+    anti-resurrection fence for hidden /btw/background cleanups in a SEPARATE
+    bounded log so hidden-cleanup churn can never evict a user delete fence.
+    """
     if not is_safe_session_id(sid):
         raise ValueError(f"Unsafe session_id {sid!r}")
+    if tombstone_kind not in ('user', 'hidden'):
+        raise ValueError(f"Unknown tombstone kind {tombstone_kind!r}")
     directory = Path(session_dir or SESSION_DIR)
     sidecar = directory / f'{sid}.json'
     if expected_revision is not None:
@@ -505,7 +514,10 @@ def _delete_session_sidecar_artifacts_locked(
             return False
     if record_tombstone:
         try:
-            _record_webui_deleted_session_tombstone(sid)
+            if tombstone_kind == 'hidden':
+                _record_webui_hidden_cleanup_tombstone(sid)
+            else:
+                _record_webui_deleted_session_tombstone(sid)
         except Exception as exc:
             raise SessionDeleteTombstoneError(
                 f"Failed to durably tombstone deleted WebUI session {sid!r}"
@@ -911,6 +923,14 @@ WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP = 500
 WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_VERSION = 1
 WEBUI_DELETED_SESSION_TOMBSTONE_CAP = 1000
 WEBUI_DELETED_SESSION_TOMBSTONE_VERSION = 1
+# Gate RED 09/09/2026 (finding 2): hidden /btw/background cleanups must never
+# evict a user delete fence from the shared tombstone log. They get their OWN
+# bounded log, with capacity independent of the user log, so churn on one side
+# can never displace entries on the other. The eviction rule stays FIFO/append
+# order within each log, mirroring _save_webui_deleted_session_tombstone.
+WEBUI_HIDDEN_CLEANUP_TOMBSTONE_CAP = 1000
+WEBUI_HIDDEN_CLEANUP_TOMBSTONE_VERSION = 1
+_WEBUI_HIDDEN_CLEANUP_TOMBSTONE_LOCK_SID = '_webui_hidden_cleanup_tombstones_global'
 
 
 def _webui_zero_message_orphan_tombstone_file() -> "Path":
@@ -1131,7 +1151,17 @@ def _webui_deleted_session_is_tombstoned(
     session_dir: Path | None = None,
     strict: bool = False,
 ) -> bool:
-    return sid in _load_webui_deleted_session_tombstone_ids(
+    # Gate RED 09/09/2026 (finding 2): the deleted-session fence is the union
+    # of the user delete log and the hidden-cleanup log. Hidden /btw/background
+    # cleanups record into their own bounded file so their churn can never
+    # evict user delete fences, while keeping their own anti-resurrection
+    # guarantee (state.db reconcile / compactor / discoverability refuse both).
+    if sid in _load_webui_deleted_session_tombstone_ids(
+        session_dir=session_dir,
+        strict=strict,
+    ):
+        return True
+    return sid in _load_webui_hidden_cleanup_tombstone_ids(
         session_dir=session_dir,
         strict=strict,
     )
@@ -1218,6 +1248,157 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
             _fsync_sidecar_directory(p.parent)
         except Exception:
             logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
+
+
+# ── Hidden /btw/background cleanup tombstones (gate RED 09/09/2026, finding 2) ──
+# Hidden ephemeral cleanups previously shared the single 1000-entry user delete
+# tombstone log. After >1000 hidden cleanups, a USER delete fence was silently
+# evicted from the shared log; if that session's state.db row cleanup had
+# previously failed, /api/session/recovery/repair-safe →
+# recover_missing_sidecars_from_state_db re-materialized the deleted transcript.
+# Hidden cleanups now record into their own bounded log so they can never
+# displace user fences, and readers OR both logs.
+
+
+def _webui_hidden_cleanup_tombstone_file(
+    session_dir: Path | None = None,
+) -> "Path":
+    return Path(session_dir or SESSION_DIR) / "_hidden_cleanup_sessions.json"
+
+
+def _load_webui_hidden_cleanup_tombstone_ids(
+    *,
+    session_dir: Path | None = None,
+    strict: bool = False,
+) -> list[str]:
+    p = _webui_hidden_cleanup_tombstone_file(session_dir)
+    if not p.exists():
+        return []
+    try:
+        raw = json.loads(p.read_text(encoding='utf-8'))
+        if not isinstance(raw, dict):
+            raise ValueError('hidden-cleanup tombstone must be an object')
+        if int(raw.get('version', 0)) != WEBUI_HIDDEN_CLEANUP_TOMBSTONE_VERSION:
+            raise ValueError('unsupported hidden-cleanup tombstone version')
+        ids = raw.get('ids', [])
+        if not isinstance(ids, list):
+            raise ValueError('hidden-cleanup tombstone ids must be a list')
+    except Exception:
+        if strict:
+            raise
+        logger.debug("Failed to load webui hidden-cleanup tombstone", exc_info=True)
+        return []
+    ordered = []
+    seen = set()
+    for value in ids:
+        sid = str(value or '').strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            ordered.append(sid)
+    return ordered
+
+
+def _load_webui_hidden_cleanup_tombstone(
+    *,
+    session_dir: Path | None = None,
+    strict: bool = False,
+) -> frozenset[str]:
+    return frozenset(
+        _load_webui_hidden_cleanup_tombstone_ids(
+            session_dir=session_dir,
+            strict=strict,
+        )
+    )
+
+
+@contextmanager
+def _webui_hidden_cleanup_tombstone_authority():
+    """Serialize the hidden-cleanup tombstone RMW across processes."""
+    with _cross_process_sidecar_file_authority(
+        _WEBUI_HIDDEN_CLEANUP_TOMBSTONE_LOCK_SID,
+        lock_domain='deleted-session-tombstone',
+    ):
+        yield
+
+
+def _save_webui_hidden_cleanup_tombstone(ids) -> None:
+    try:
+        ordered_ids = []
+        seen = set()
+        for value in ids or []:
+            sid = str(value or '').strip()
+            if sid and sid not in seen:
+                seen.add(sid)
+                ordered_ids.append(sid)
+    except TypeError as exc:
+        raise ValueError('hidden-cleanup tombstone ids are not iterable') from exc
+    if len(ordered_ids) > WEBUI_HIDDEN_CLEANUP_TOMBSTONE_CAP:
+        ordered_ids = ordered_ids[-WEBUI_HIDDEN_CLEANUP_TOMBSTONE_CAP:]
+    payload = {
+        "version": WEBUI_HIDDEN_CLEANUP_TOMBSTONE_VERSION,
+        "ids": ordered_ids,
+    }
+    p = _webui_hidden_cleanup_tombstone_file()
+    _tmp = None
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        _tmp = p.with_suffix(
+            f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
+        )
+        with open(_tmp, 'w', encoding='utf-8') as f:
+            _set_file_descriptor_mode(f.fileno(), 0o600)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(_tmp, p)
+        _fsync_sidecar_directory(p.parent)
+    except Exception:
+        logger.debug("Failed to save webui hidden-cleanup tombstone", exc_info=True)
+        if _tmp is not None:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+
+def _record_webui_hidden_cleanup_tombstone(sid: str) -> None:
+    sid = str(sid or "").strip()
+    if not sid:
+        return
+    with _webui_hidden_cleanup_tombstone_authority():
+        if sid in _load_webui_hidden_cleanup_tombstone(strict=True):
+            _fsync_sidecar_directory(SESSION_DIR)
+            return
+        ordered = _load_webui_hidden_cleanup_tombstone_ids(strict=True)
+        ordered.append(sid)
+        _save_webui_hidden_cleanup_tombstone(ordered)
+        if sid not in _load_webui_hidden_cleanup_tombstone(strict=True):
+            raise RuntimeError(f"Hidden-cleanup tombstone dropped new SID {sid!r}")
+
+
+def _clear_webui_hidden_cleanup_tombstone(sid: str) -> None:
+    sid = str(sid or "").strip()
+    if not sid:
+        return
+    with _webui_hidden_cleanup_tombstone_authority():
+        current = _load_webui_hidden_cleanup_tombstone(strict=True)
+        if sid not in current:
+            return
+        ordered = [
+            current_sid
+            for current_sid in _load_webui_hidden_cleanup_tombstone_ids(strict=True)
+            if current_sid != sid
+        ]
+        if ordered:
+            _save_webui_hidden_cleanup_tombstone(ordered)
+            return
+        try:
+            p = _webui_hidden_cleanup_tombstone_file()
+            p.unlink(missing_ok=True)
+            _fsync_sidecar_directory(p.parent)
+        except Exception:
+            logger.debug("Failed to remove empty webui hidden-cleanup tombstone", exc_info=True)
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
@@ -2490,6 +2671,11 @@ class Session:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
                 _clear_webui_deleted_session_tombstone(self.session_id)
+                # Gate RED 09/09/2026 (finding 2): a live save with real
+                # messages is proof of life against the hidden-cleanup fence
+                # too — clear it alongside the user delete fence so a
+                # re-created/re-imported sid is not shadowed.
+                _clear_webui_hidden_cleanup_tombstone(self.session_id)
             except Exception:
                 logger.debug(
                     "Failed to clear webui tombstone for %s",
@@ -6112,6 +6298,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
         _clear_webui_deleted_session_tombstone(s.session_id)
+        _clear_webui_hidden_cleanup_tombstone(s.session_id)
     except Exception:
         logger.debug(
             "Failed to clear webui tombstone for %s",
@@ -7863,11 +8050,12 @@ def import_cli_session(
     # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
     # If that sid was previously tombstoned as a webui zero-message orphan,
     # clear the tombstone entry so the freshly-imported session is visible
-    # on the next poll. Wrapped because a tombstone failure must never block
-    # an import.
+    # on the next poll. Wrapped because a tombstone failure must never
+    # block an import.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
         _clear_webui_deleted_session_tombstone(s.session_id)
+        _clear_webui_hidden_cleanup_tombstone(s.session_id)
     except Exception:
         logger.debug(
             "Failed to clear webui tombstone for %s",
@@ -8803,6 +8991,10 @@ def _load_cli_sessions_uncached(
     # (live {sid}.json) always beats a stale tombstone.
     try:
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
+        # Gate RED 09/09/2026 (finding 2): hidden-cleanup fences live in their
+        # own log; OR it in so a hidden-cleaned sid cannot be projected as an
+        # "Agent" ghost row from state.db either.
+        _deleted_webui_tombstone |= _load_webui_hidden_cleanup_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
     for row in read_importable_agent_session_rows(
