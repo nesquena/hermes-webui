@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **French voices are now selectable in the Edge TTS voice picker.** Settings → Preferences → TTS Engine → Voice now offers nine French neural voices: `fr-FR-RemyMultilingualNeural` (Rémy, male, multilingual) and `fr-FR-VivienneMultilingualNeural` (Vivienne, female, multilingual), plus the seven `fr-FR`/`fr-CA` voices the server allowlist already accepted (#4058) but the picker never exposed — Denise (`fr-FR-DeniseNeural`), Eloise (`fr-FR-EloiseNeural`), Henri (`fr-FR-HenriNeural`), Antoine (`fr-CA-AntoineNeural`), Jean (`fr-CA-JeanNeural`), Sylvie (`fr-CA-SylvieNeural`) and Thierry (`fr-CA-ThierryNeural`). The two multilingual voices are also added to the `/api/tts` server-side allowlist, so the picker and the allowlist are now in exact parity; a regression test (`tests/test_edge_tts_french_voices.py`) pins that every voice the picker renders is accepted by the server and reaches synthesis. (#7444)
+
 ### Fixed
 
 - **`/skills pending` and the other write-approval subcommands reach the agent again.** The WebUI's local `/skills` handler swallowed every argument into its own skill-name search, so the agent-owned write-approval subcommands never reached their handler — `/skills pending`, `/skills approve 3`, `/skills diff` and friends silently ran a name search instead of doing anything. Those subcommands now fall through to the normal send path using the existing opt-out contract that `/reasoning` already uses. Covers every alias the agent handler accepts, including `apply`, `deny` and `drop`, which a first pass missed. Thanks @totalitarian. (#7623)
