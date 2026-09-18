@@ -101,6 +101,41 @@ def _install_fake_account_usage(monkeypatch, *, view=None, exc=None):
     return account_usage
 
 
+def _install_fake_write_approval(monkeypatch, *, result="ok", raise_exc=None):
+    """Fake hermes_cli.write_approval_commands + tools.write_approval, recording every
+    handle_pending_subcommand call. Mirrors _install_fake_codex_runtime_switch's
+    __path__ restore for hermes_cli (a real package elsewhere in this suite) and
+    _install_fake_mcp_tool's plain replacement for `tools` (never real here)."""
+    import sys
+
+    calls = []
+
+    tools_pkg = ModuleType("tools")
+    tools_pkg.__path__ = []
+    write_approval = ModuleType("tools.write_approval")
+    write_approval_any = cast(Any, write_approval)
+    write_approval_any.SKILLS = "skills"
+    write_approval_any.MEMORY = "memory"
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.write_approval", write_approval)
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    write_approval_commands = ModuleType("hermes_cli.write_approval_commands")
+
+    def handle_pending_subcommand(subsystem, args, *, memory_store=None, set_mode_fn=None):
+        calls.append((subsystem, list(args), memory_store, set_mode_fn))
+        if raise_exc is not None:
+            raise raise_exc
+        return result
+
+    write_approval_commands_any = cast(Any, write_approval_commands)
+    write_approval_commands_any.handle_pending_subcommand = handle_pending_subcommand
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", write_approval_commands)
+    return calls
+
+
 def _get(path):
     """GET helper -- returns parsed JSON or raises HTTPError."""
     with urllib.request.urlopen(TEST_BASE + path, timeout=10) as r:
@@ -382,6 +417,144 @@ def test_codex_runtime_invalid_argument_returns_switch_message(monkeypatch):
 
     assert output == "bad arg: nope"
     assert calls == [("parse_args", "nope")]
+
+
+def test_skills_pending_dispatches_to_write_approval_handler(monkeypatch):
+    """`/skills pending` must reach the shared write-approval store, not the local
+    skill search -- this is the gap Greptile flagged as still-missing after the
+    return-false-only fix on PR #7623 (embedded WebUI sessions never routed slash
+    commands anywhere; /api/chat/start hands raw text straight to
+    AIAgent.run_conversation)."""
+    calls = _install_fake_write_approval(monkeypatch, result="No pending skills writes.")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/skills pending')
+
+    assert output == "No pending skills writes."
+    assert len(calls) == 1
+    subsystem, args, memory_store, set_mode_fn = calls[0]
+    assert subsystem == "skills"
+    assert args == ["pending"]
+    assert memory_store is None
+    assert callable(set_mode_fn)
+
+
+@pytest.mark.parametrize("subcommand", [
+    "pending", "approve", "apply", "reject", "deny", "drop", "diff", "approval", "mode",
+])
+def test_skills_write_approval_all_aliases_dispatch(monkeypatch, subcommand):
+    """Every alias the agent's handler accepts must reach it -- 'completes the
+    class' the same way the merged alias-expansion commit did for the browser-side
+    shadow check, now for the backend dispatch side too."""
+    calls = _install_fake_write_approval(monkeypatch, result="handled")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command(f'/skills {subcommand} abc123')
+
+    assert output == "handled"
+    assert calls[0][1] == [subcommand, "abc123"]
+
+
+def test_skills_plain_query_not_routed_to_write_approval(monkeypatch):
+    """A bare `/skills` or a real search query must NEVER reach write-approval --
+    it stays a KeyError so execute_agent_command's caller falls through to the
+    normal allowlist-miss handling (and the WebUI keeps doing its local search)."""
+
+    def _boom(*a, **k):
+        raise AssertionError("write-approval must not be touched for a plain search")
+
+    import sys
+    tools_pkg = ModuleType("tools")
+    tools_pkg.__path__ = []
+    write_approval = ModuleType("tools.write_approval")
+    cast(Any, write_approval).SKILLS = "skills"
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.write_approval", write_approval)
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    write_approval_commands = ModuleType("hermes_cli.write_approval_commands")
+    cast(Any, write_approval_commands).handle_pending_subcommand = _boom
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", write_approval_commands)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(KeyError):
+        execute_agent_command('/skills executive-triage')
+    with pytest.raises(KeyError):
+        execute_agent_command('/skills')
+
+
+def test_skills_write_approval_runtime_unavailable_is_generic_error(monkeypatch):
+    """If hermes-agent's write-approval modules can't be imported, the endpoint must
+    fail with a sanitized RuntimeError (500), not an unhandled ImportError leaking
+    a traceback -- matching every other agent-runtime dependency in this file."""
+    import sys
+
+    monkeypatch.delitem(sys.modules, "hermes_cli.write_approval_commands", raising=False)
+    monkeypatch.delitem(sys.modules, "tools.write_approval", raising=False)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_write_approval(name, *a, **k):
+        if name in ("hermes_cli.write_approval_commands", "tools.write_approval", "tools"):
+            raise ImportError(f"no module named {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_write_approval)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError):
+        execute_agent_command('/skills pending')
+
+
+def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
+    """`/skills approval on|off`'s set_mode_fn must persist through the webui's own
+    config module (there is no gateway session to route the gateway-side
+    persistence through), mirroring how /codex-runtime persists above."""
+    from api import config as webui_config
+    from api.commands import _skills_write_approval_setter
+
+    config_data = {"skills": {"write_approval": False}}
+    saved = []
+    reloaded = []
+
+    orig_get_config = webui_config.get_config
+    orig_get_path = webui_config._get_config_path
+    orig_save = webui_config._save_yaml_config_file
+    orig_reload = webui_config.reload_config
+    try:
+        webui_config.get_config = lambda: config_data
+        webui_config._get_config_path = lambda: tmp_path / "config.yaml"
+        webui_config._save_yaml_config_file = lambda path, data: saved.append((path, data.copy()))
+        webui_config.reload_config = lambda: reloaded.append(True)
+
+        _skills_write_approval_setter()(True)
+    finally:
+        webui_config.get_config = orig_get_config
+        webui_config._get_config_path = orig_get_path
+        webui_config._save_yaml_config_file = orig_save
+        webui_config.reload_config = orig_reload
+
+    assert config_data["skills"]["write_approval"] is True
+    assert saved == [(tmp_path / "config.yaml", {"skills": {"write_approval": True}})]
+    assert reloaded == [True]
+
+
+@requires_agent_modules
+def test_commands_exec_runs_skills_pending_end_to_end():
+    """Full HTTP round trip against the real hermes-agent write-approval store
+    (not a fake) -- proves the wiring works against the actual shared module, not
+    just a test double of it."""
+    status, body = _post('/api/commands/exec', {'command': '/skills pending'})
+    assert status == 200
+    assert 'output' in body
+    assert isinstance(body['output'], str)
+    assert 'not a supported' not in body['output'].lower()
 
 
 def test_reload_mcp_error_is_generic(monkeypatch):
