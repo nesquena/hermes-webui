@@ -1800,6 +1800,122 @@ def forget_bg_task_completion_dedup(session_id: str) -> None:
         _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
 
 
+def _claimable_webui_event(evt: object) -> bool:
+    """True when ``evt`` is a durable row only this WebUI host can deliver.
+
+    Deliberately narrow. ``platform='webui'`` is stamped by this project (see
+    ``api/streaming.py``'s ``HERMES_SESSION_PLATFORM`` binding) and is not a
+    messaging ``Platform`` the core gateway owns an adapter for, so these rows
+    are ours and nobody else's. ``origin_ui_session_id`` is the exact return
+    address ``_process_one`` routes on; without it we cannot place the event and
+    must leave the row alone rather than claim and drop it.
+
+    ``async_delegation`` rows are excluded: they have their own claim contract
+    (``claim_async_delegation_delivery``) and a separate delivery path.
+    """
+    if not isinstance(evt, dict) or evt.get("type") == "async_delegation":
+        return False
+    if str(evt.get("platform") or "").strip().lower() != "webui":
+        return False
+    return bool(str(evt.get("origin_ui_session_id") or "").strip())
+
+
+def recover_durable_webui_events(limit: int = 200) -> int:
+    """Deliver durable background events this host owns but never received.
+
+    Events published by a WebUI-hosted turn are written to the shared
+    ``background_events`` ledger in ``state.db``. The only consumer this host
+    drains is the in-process ``completion_queue``, so anything published before
+    a WebUI restart — or while this host was down — never reaches ``_process_one``.
+    The core gateway reads the same ledger, but cannot route ``platform='webui'``
+    (no adapter answers to it), so it leaves the rows ``pending`` and replays them
+    on every gateway restart until they age out at 48h. Permission prompts and
+    completion notices were lost that way.
+
+    Claim only rows ``_claimable_webui_event`` recognizes and hand each to the
+    normal delivery path; every other row is left untouched for the gateway.
+    Best-effort throughout: this runs on the startup path and must never be able
+    to keep the drain thread from starting.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        from tools.background_events import (
+            claim_event_delivery,
+            complete_event_delivery,
+            release_event_delivery,
+        )
+    except (ImportError, AttributeError):
+        # Cut-down vendoring or a core without the durable ledger: nothing to do.
+        return 0
+
+    import json
+    import sqlite3
+
+    try:
+        db_path = get_hermes_home() / "state.db"
+        # Read-only: the claim below is what mutates the row, under core's lock.
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+        try:
+            rows = conn.execute(
+                """SELECT event_json FROM background_events
+                   WHERE delivery_state='pending'
+                   ORDER BY created_at, ledger_id"""
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        # Missing table (older core), locked DB, or unreadable file.
+        logger.debug("durable webui event scan failed", exc_info=True)
+        return 0
+
+    recovered = 0
+    for (payload,) in rows:
+        if recovered >= limit:
+            logger.warning(
+                "durable webui event recovery stopped at the %d-event cap; "
+                "the remainder stay pending for the next start",
+                limit,
+            )
+            break
+        try:
+            evt = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if not _claimable_webui_event(evt):
+            continue
+        # Claim before processing: the ledger compares the queued body against
+        # the stored payload, so hand _process_one a copy and keep `evt` pristine.
+        try:
+            claim_id = claim_event_delivery(evt, "webui")
+        except Exception:
+            logger.debug("durable webui event claim failed", exc_info=True)
+            continue
+        if not claim_id:
+            continue
+        try:
+            _process_one(dict(evt))
+        except Exception:
+            logger.warning(
+                "durable webui event delivery failed; releasing the claim so a "
+                "later start can retry it",
+                exc_info=True,
+            )
+            try:
+                release_event_delivery(evt, claim_id)
+            except Exception:
+                logger.debug("durable webui event release failed", exc_info=True)
+            continue
+        try:
+            complete_event_delivery(evt, claim_id)
+        except Exception:
+            logger.debug("durable webui event ack failed", exc_info=True)
+        recovered += 1
+
+    if recovered:
+        logger.info("recovered %d durable webui background event(s)", recovered)
+    return recovered
+
+
 def start_drain_thread() -> bool:
     """Start the background drain thread idempotently. Returns True on first start."""
     global _DRAIN_THREAD
@@ -1812,6 +1928,12 @@ def start_drain_thread() -> bool:
             # Recovery is best-effort. A corrupt checkpoint or transient I/O
             # error must not disable notifications for newly spawned tasks.
             logger.warning("background process recovery failed", exc_info=True)
+        try:
+            recover_durable_webui_events()
+        except Exception:
+            # Same contract as the checkpoint recovery above: a ledger problem
+            # must not stop notifications for newly spawned tasks.
+            logger.warning("durable webui event recovery failed", exc_info=True)
         _DRAIN_STOP.clear()
         _DRAIN_THREAD = threading.Thread(
             target=_drain_loop,
