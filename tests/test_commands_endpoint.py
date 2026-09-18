@@ -466,6 +466,97 @@ def test_skills_write_approval_all_aliases_dispatch(monkeypatch, subcommand):
     assert calls[0][1] == [subcommand, "abc123"]
 
 
+def test_skills_write_approval_runs_inside_active_profile_context(monkeypatch):
+    """write_approval.py resolves the skill store via the legacy get_hermes_home() path
+    (process env / TLS), not anything webui-request-scoped -- without wrapping the call
+    in _bundle_profile_context, a browser that has selected a non-root profile would
+    silently read/write the WRONG profile's pending skill writes. Proves the ENTER/CALL/
+    EXIT ordering (the call happens strictly inside the context), not just that the
+    context manager was constructed somewhere."""
+    from contextlib import contextmanager
+
+    order = []
+    calls = _install_fake_write_approval(monkeypatch, result="ok")
+
+    @contextmanager
+    def fake_profile_context(purpose):
+        order.append(("enter", purpose))
+        yield
+        order.append(("exit", purpose))
+
+    import api.commands as commands_mod
+    monkeypatch.setattr(commands_mod, "_bundle_profile_context", fake_profile_context)
+    orig_len = len(calls)
+
+    import sys
+    write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
+    orig_handler = write_approval_commands.handle_pending_subcommand
+
+    def recording_handler(*a, **k):
+        order.append(("call", a[0]))
+        return orig_handler(*a, **k)
+
+    monkeypatch.setattr(write_approval_commands, "handle_pending_subcommand", recording_handler)
+
+    from api.commands import execute_agent_command
+    output = execute_agent_command('/skills pending')
+
+    assert output == "ok"
+    assert len(calls) == orig_len + 1
+    assert order == [("enter", "/api/commands/exec:skills"), ("call", "skills"),
+                      ("exit", "/api/commands/exec:skills")], order
+
+
+def test_memory_write_approval_runs_inside_active_profile_context(monkeypatch):
+    """Same as the /skills version above, for /memory -- both load_on_disk_store() and
+    handle_pending_subcommand() must run inside the active-profile context, since the
+    memory store path is resolved the same legacy, non-request-scoped way."""
+    from contextlib import contextmanager
+
+    order = []
+    calls = _install_fake_write_approval(monkeypatch, result="ok")
+
+    @contextmanager
+    def fake_profile_context(purpose):
+        order.append(("enter", purpose))
+        yield
+        order.append(("exit", purpose))
+
+    import api.commands as commands_mod
+    monkeypatch.setattr(commands_mod, "_bundle_profile_context", fake_profile_context)
+
+    import sys
+    write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
+    orig_handler = write_approval_commands.handle_pending_subcommand
+
+    def recording_handler(*a, **k):
+        order.append(("call_handler", a[0]))
+        return orig_handler(*a, **k)
+
+    monkeypatch.setattr(write_approval_commands, "handle_pending_subcommand", recording_handler)
+
+    memory_tool = sys.modules["tools.memory_tool"]
+    orig_load = memory_tool.load_on_disk_store
+
+    def recording_load():
+        order.append(("call_load_store", None))
+        return orig_load()
+
+    monkeypatch.setattr(memory_tool, "load_on_disk_store", recording_load)
+
+    from api.commands import execute_agent_command
+    output = execute_agent_command('/memory pending')
+
+    assert output == "ok"
+    assert len(calls) == 1
+    assert order == [
+        ("enter", "/api/commands/exec:memory"),
+        ("call_load_store", None),
+        ("call_handler", "memory"),
+        ("exit", "/api/commands/exec:memory"),
+    ], order
+
+
 def test_memory_pending_dispatches_to_write_approval_handler(monkeypatch):
     """`/memory pending` must reach the shared write-approval store via
     /api/commands/exec, same gap as /skills had -- /memory has no `cli_only` flag

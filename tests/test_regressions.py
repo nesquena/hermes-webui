@@ -1387,6 +1387,78 @@ def test_skills_write_approval_response_targets_owner_session_not_current():
         "renderMessages() must not run for a response whose owner session is no longer current"
 
 
+def test_skills_write_approval_response_delivered_when_no_session_existed():
+    """A `/skills pending` reply must still be delivered when there was NO active
+    session at invocation time (e.g. right after deleting the last session) --
+    _steerOwnerIsCurrent(null) is always false (correct for steer, which always
+    needs a real session/stream), but a null ownerSid here means there was nothing
+    to have switched away FROM, so there is no real owner mismatch to guard against.
+    The prior fix (owner-session guard) over-applied that check and silently
+    dropped every response sent with no session, both for reserved subcommands and
+    for the plain local search branch. Real execution via node, not a mock of the
+    guard: proves the message is genuinely appended and rendered.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+
+        let resolveTransport;
+        function _runAgentCommandTransport(text){
+          return new Promise((resolve) => { resolveTransport = resolve; });
+        }
+
+        // No active session at invocation -- e.g. the last session was just deleted.
+        const S = { session: null, messages: [] };
+        let renderCount = 0;
+        function renderMessages(){ renderCount++; }
+
+        %(cmd_skills_fn)s
+
+        const returned = cmdSkills('pending');
+        resolveTransport('No pending skill writes.');
+
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            returnedTrueSynchronously: returned === true,
+            messageCount: S.messages.length,
+            lastMessageContent: S.messages.length ? S.messages[S.messages.length - 1].content : null,
+            renderCalled: renderCount,
+          }));
+        }, 20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["returnedTrueSynchronously"] is True
+    assert out["messageCount"] == 1, (
+        "the response must be delivered when there was no session to have switched "
+        "away from -- it must not be silently dropped")
+    assert out["lastMessageContent"] == "No pending skill writes."
+    assert out["renderCalled"] == 1
+
+
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     """Reload recovery must persist a durable per-session inflight snapshot.
     Without these helpers, loadSession() references loadInflightState() but a full
