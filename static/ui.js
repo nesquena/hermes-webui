@@ -5244,10 +5244,14 @@ function _bareModelIdCandidates(modelId, providerId){
   // Ambiguity set for the custom no-provenance shape @custom:A:B:...: A:B can
   // be an endpoint host:port (#1776 authority slug, e.g. a single-label LAN
   // hostname `mymachine:11434`) or A can be a named slug whose model itself
-  // starts with a numeric segment (`my.gw` serving `11434:llama3:8b`). A
-  // single parse must guess; switch detection must not, so return BOTH bare
-  // readings and let callers stay silent when any candidate matches the served
-  // model. Mirror of api/streaming.py::_bare_model_id_candidates.
+  // starts with a numeric segment (`frontier-gw` serving `11434:llama3:8b`).
+  // A single parse must guess; switch detection must not — EXCEPT when the
+  // shared grammar itself commits: when A contains a dot (or is localhost/an
+  // IP) AND B is a valid port, the route hint identifies the endpoint and the
+  // model is what follows, so the slug-only alternate is dropped and cannot
+  // mask a genuine switch (Greptile P1 follow-up 2026-09-18). Non-dotted
+  // hosts keep BOTH readings and callers stay silent when any candidate
+  // matches. Mirror of api/streaming.py::_bare_model_id_candidates.
   const primary=_bareModelId(modelId,providerId);
   const out=primary?[primary.toLowerCase()]:[];
   const provider=String(providerId||'').trim();
@@ -5257,15 +5261,27 @@ function _bareModelIdCandidates(modelId, providerId){
   const rest=m.slice('@custom:'.length);
   const first=rest.indexOf(':');
   if(first<0)return out;
+  const host=rest.slice(0,first);
   const afterHost=rest.slice(first+1);
-  if(afterHost&&!out.includes(afterHost.toLowerCase()))out.push(afterHost.toLowerCase());
   const second=afterHost.indexOf(':');
-  if(second>=0){
-    const port=afterHost.slice(0,second);
-    if(/^\d+$/.test(port)&&Number(port)>=1&&Number(port)<=65535){
-      const endpointModel=afterHost.slice(second+1);
-      if(endpointModel&&!out.includes(endpointModel.toLowerCase()))out.push(endpointModel.toLowerCase());
-    }
+  const port=second>=0?afterHost.slice(0,second):'';
+  const portNumber=Number(port);
+  const portOk=/^\d+$/.test(port)&&portNumber>=1&&portNumber<=65535;
+  const looksLikeHostPort=(host.toLowerCase()==='localhost')||host.includes('.');
+  if(portOk&&looksLikeHostPort){
+    // Grammar-confirmed endpoint reading (mirror of the Python
+    // _custom_slug_rest_looks_like_host_port gate, minus the IP check the
+    // dot test already covers for dotted hosts): drop the slug-only
+    // alternate so it cannot mask a real switch.
+    const endpointModel=afterHost.slice(second+1);
+    if(endpointModel&&!out.includes(endpointModel.toLowerCase()))out.push(endpointModel.toLowerCase());
+    return out;
+  }
+  // Intrinsically ambiguous: keep BOTH readings.
+  if(afterHost&&!out.includes(afterHost.toLowerCase()))out.push(afterHost.toLowerCase());
+  if(portOk){
+    const endpointModel=afterHost.slice(second+1);
+    if(endpointModel&&!out.includes(endpointModel.toLowerCase()))out.push(endpointModel.toLowerCase());
   }
   return out;
 }

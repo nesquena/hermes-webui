@@ -2863,11 +2863,20 @@ def _bare_model_id_candidates(model_id) -> list[str]:
     ``A:B`` can be an endpoint host:port authority slug (``mymachine:11434``,
     including single-label LAN hostnames the shared parser does not recognize)
     or ``A`` can be a named provider slug whose model itself starts with a
-    numeric segment (``my.gw`` serving ``11434:llama3:8b``). A single parse must
-    guess which; switch detection must not. Returns the primary ``_bare_model_id``
-    reading plus the alternate split(s), lowercased, deduplicated. Mirror of
+    numeric segment (``frontier-gw`` serving ``11434:llama3:8b``). A single
+    parse must guess which; switch detection must not — EXCEPT when the shared
+    grammar itself commits: when ``A:B`` passes
+    ``_custom_slug_rest_looks_like_host_port`` (dotted/localhost/IP host +
+    valid port), the route hint identifies the endpoint and the model is what
+    follows, so the slug-only alternate is dropped and cannot mask a genuine
+    switch (Greptile P1 follow-up 2026-09-18: ``@custom:my.gw:11434:llama3:8b``
+    served by the DISTINCT model ``11434:llama3:8b`` must surface). Returns the
+    primary ``_bare_model_id`` reading plus the surviving alternate split(s),
+    lowercased, deduplicated. Mirror of
     ``static/ui.js::_bareModelIdCandidates``.
     """
+    from api.config import _custom_slug_rest_looks_like_host_port
+
     primary = _bare_model_id(model_id)
     out = [primary.lower()] if primary else []
     model = str(model_id or "").strip()
@@ -2877,16 +2886,29 @@ def _bare_model_id_candidates(model_id) -> list[str]:
     first = rest.find(":")
     if first < 0:
         return out
+    host = rest[:first]
     after_host = rest[first + 1:]
+    second = after_host.find(":")
+    port = after_host[:second] if second >= 0 else ""
+    port_ok = bool(port) and port.isdigit() and 1 <= int(port) <= 65535
+    if port_ok and _custom_slug_rest_looks_like_host_port(f"{host}:{port}"):
+        # Grammar-confirmed endpoint reading: the shared parser routes this id
+        # as host:port + model, so switch detection must read it the same way.
+        # The slug-only reading (port consumed as a numeric-leading model
+        # segment) is dropped: it could otherwise mask a real switch.
+        endpoint_model = after_host[second + 1:]
+        if endpoint_model and endpoint_model.lower() not in out:
+            out.append(endpoint_model.lower())
+        return out
+    # Non-dotted host (or non-port second segment): still intrinsically
+    # ambiguous. Keep BOTH readings — slug-only alternate and endpoint
+    # alternate — and let callers stay silent when any candidate matches.
     if after_host and after_host.lower() not in out:
         out.append(after_host.lower())
-    second = after_host.find(":")
-    if second >= 0:
-        port = after_host[:second]
-        if port.isdigit() and 1 <= int(port) <= 65535:
-            endpoint_model = after_host[second + 1:]
-            if endpoint_model and endpoint_model.lower() not in out:
-                out.append(endpoint_model.lower())
+    if port_ok:
+        endpoint_model = after_host[second + 1:]
+        if endpoint_model and endpoint_model.lower() not in out:
+            out.append(endpoint_model.lower())
     return out
 
 
