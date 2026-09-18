@@ -1189,6 +1189,16 @@ def test_skills_slash_command_defined():
         "HANDLERS.skills registration missing from commands.js"
 
 
+def test_skills_command_dropdown_lists_write_approval_subcommands():
+    """/skills' dropdown must surface the write-approval subcommands (pending,
+    approve, reject, diff, approval, mode) the same way /goal and /reasoning
+    surface their own static subArgs -- otherwise they're only usable by typing
+    them from memory, with no discovery path in the chat box's autocomplete."""
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    assert "subArgs:['pending','approve','reject','diff','approval','mode']" in src, \
+        "/skills COMMANDS entry is missing its write-approval subArgs dropdown list"
+
+
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     """Reload recovery must persist a durable per-session inflight snapshot.
     Without these helpers, loadSession() references loadInflightState() but a full
