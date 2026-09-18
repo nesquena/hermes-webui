@@ -941,33 +941,46 @@ def _index_marks_deleted_webui_session(session_dir: Path, sid: str) -> bool:
 
 
 def _durable_tombstone_marks_deleted_webui_session(session_dir: Path, sid: str) -> bool:
-    """Return True when the durable WebUI delete tombstone contains sid."""
+    """Return True when the durable WebUI delete tombstone contains sid.
+
+    Gate RED 09/09/2026 (finding 2): the delete fence is the UNION of the user
+    delete log (``_deleted_webui_sessions.json``) and the hidden-cleanup log
+    (``_hidden_cleanup_sessions.json``). Hidden /btw/background cleanups fence
+    in their own file so their churn can never evict a user delete fence; both
+    fences suppress state.db reconcile / backup-restore / compactor publication.
+    """
     if not sid or (session_dir / f"{sid}.json").exists():
         return False
     try:
         from api import models as _models
 
         if Path(_models.SESSION_DIR).resolve() == session_dir.resolve():
-            return sid in _models._load_webui_deleted_session_tombstone()
+            return _models._webui_deleted_session_is_tombstoned(sid)
     except Exception:
         pass
-    tombstone_path = session_dir / '_deleted_webui_sessions.json'
-    try:
-        raw = json.loads(tombstone_path.read_text(encoding='utf-8'))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return False
-    if not isinstance(raw, dict):
-        return False
-    try:
-        version = int(raw.get('version', 0))
-    except (TypeError, ValueError):
-        return False
-    if version != 1:
-        return False
-    ids = raw.get('ids')
-    if not isinstance(ids, list):
-        return False
-    return sid in {str(value).strip() for value in ids if str(value or '').strip()}
+    for tombstone_name in (
+        "_deleted_webui_sessions.json",
+        "_hidden_cleanup_sessions.json",
+    ):
+        tombstone_path = session_dir / tombstone_name
+        try:
+            raw = json.loads(tombstone_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        try:
+            version = int(raw.get('version', 0))
+        except (TypeError, ValueError):
+            continue
+        if version != 1:
+            continue
+        ids = raw.get('ids')
+        if not isinstance(ids, list):
+            continue
+        if sid in {str(value).strip() for value in ids if str(value or '').strip()}:
+            return True
+    return False
 
 
 def _marks_deleted_webui_session(session_dir: Path, sid: str) -> bool:

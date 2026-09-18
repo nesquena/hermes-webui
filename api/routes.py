@@ -8352,7 +8352,12 @@ def _session_index_marks_was_webui(sid: str) -> bool:
 
 def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
     try:
-        return sid in _load_webui_deleted_session_tombstone()
+        # Gate RED 09/09/2026 (finding 2): the delete fence is the union of the
+        # user delete log and the hidden-cleanup log — a hidden-cleaned sid
+        # must self-heal to 404 exactly like a user-deleted one.
+        if sid in _load_webui_deleted_session_tombstone():
+            return True
+        return sid in _load_webui_hidden_cleanup_tombstone()
     except Exception:
         return False
 
@@ -10592,6 +10597,7 @@ from api.models import (
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
+    _load_webui_hidden_cleanup_tombstone,
     _delete_session_recovery_artifacts_locked,
     _delete_session_sidecar_artifacts_locked,
     _read_bounded_session_metadata,
@@ -22863,7 +22869,12 @@ def _handle_btw(handler, body):
 
 
 def _delete_hidden_background_session_sidecar(sid: str) -> bool:
-    """Durably remove a hidden background sidecar and every recovery artifact."""
+    """Durably remove a hidden background sidecar and every recovery artifact.
+
+    Gate RED 09/09/2026 (finding 2): the anti-resurrection fence goes to the
+    HIDDEN-CLEANUP tombstone log, never the user delete log, so background
+    churn cannot evict user delete fences from the shared capacity.
+    """
     with _get_session_agent_lock(sid):
         with _session_sidecar_authority(sid):
             sidecar = SESSION_DIR / f'{sid}.json'
@@ -22871,6 +22882,7 @@ def _delete_hidden_background_session_sidecar(sid: str) -> bool:
             return _delete_session_sidecar_artifacts_locked(
                 sid,
                 expected_revision=revision,
+                tombstone_kind='hidden',
             )
 
 
