@@ -8513,11 +8513,13 @@ def get_available_models(
     probe; it serves the warm in-memory cache, then the last-known on-disk
     cache, and only as a last resort a network-free minimal
     catalog (config/auth derived). It NEVER runs the per-provider live
-    rebuild (the Copilot token-exchange HTTPS call et al.). This is the path
-    server-initiated wakeup turns (Option Z) and display/session-visit
-    lookups take so a cold catalog can never block the wakeup chat/start on
-    a flaky network. A normal human request leaves this False and keeps the
-    full live-discovery behaviour.
+    rebuild (the Copilot token-exchange HTTPS call et al.). Display,
+    session-visit, and server-initiated wakeup turns (Option Z) all use
+    this flag so they never *trigger* a live rebuild. Display and
+    session-visit additionally pass ``wait_for_inflight_rebuild=False`` so
+    they never join one either; wakeup keeps the default True because its
+    result starts a real agent run. A normal human request leaves
+    ``prefer_cache`` False and keeps the full live-discovery behaviour.
 
     ``force_refresh=True`` is an internal escape hatch for bounded freshness
     checks that need a real live rebuild while preserving the default cache
@@ -8526,12 +8528,13 @@ def get_available_models(
     ``wait_for_inflight_rebuild=True`` (default) makes this caller JOIN an
     in-flight catalog rebuild: it waits for the authoritative result instead
     of serving a stale snapshot. Callers that make *routing decisions* —
-    e.g. the foreign-session provider repair on the chat/send path — must
-    keep this True so a rebuild in flight cannot send the turn to a stale
-    backend. Display-only callers (session-open model resolution, the
-    session-visit fallback) pass False: they skip both the rebuild wait AND
-    the rebuild lock, serving the warm/disk cache or the minimal catalog
-    without ever queueing behind the builder.
+    the foreign-session provider repair on the chat/send path and the
+    server-initiated wakeup — must keep this True so a rebuild in flight
+    cannot send the turn to a stale backend. Display-only callers
+    (session-open model resolution, the session-visit fallback) pass False:
+    they skip both the rebuild wait AND the rebuild lock, serving the
+    warm/disk cache or the minimal catalog without ever queueing behind
+    the builder.
 
     ``prefer_cache`` and ``force_refresh`` are mutually exclusive: the first
     forbids live discovery ("never run or wait for the live provider probe"),
@@ -10066,9 +10069,10 @@ def get_available_models(
     # budget exactly).
     #
     # Routing-authoritative prefer_cache callers (the foreign-session
-    # provider repair on the chat/send path) keep wait_for_inflight_rebuild
-    # True: they must NOT get a stale snapshot while a rebuild is in flight,
-    # or a poisoned session could be routed to the wrong backend.
+    # provider repair on the chat/send path, and the server-initiated
+    # wakeup) keep wait_for_inflight_rebuild True: they must NOT get a
+    # stale snapshot while a rebuild is in flight, or a poisoned session
+    # could be routed to the wrong backend.
     should_wait = _cache_build_in_progress and wait_for_inflight_rebuild
     force_refresh_started_at = time.monotonic() if force_refresh else None
 
