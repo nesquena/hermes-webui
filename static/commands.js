@@ -1125,15 +1125,34 @@ async function cmdTheme(args){
 }
 
 // Subcommands owned by the agent's own /skills write-approval handler
-// (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
-// fall through to the normal send path rather than be swallowed by the local search below.
+// (hermes_cli/write_approval_commands.py, dispatched here via /api/commands/exec ->
+// api/commands.py:_run_skills_write_approval_command). A plain `return false` fallthrough
+// does NOT reach that handler in a native WebUI session -- /api/chat/start hands the raw
+// text straight to AIAgent.run_conversation as a normal message (api/streaming.py), with
+// no slash-command interception; gateway/slash_commands.py and the interactive CLI's own
+// dispatch (hermes_cli/cli_commands_mixin.py) only run for their own session kinds. So
+// these subcommands are dispatched explicitly here, the same way /reload-skills and the
+// other _AGENT_COMMANDS_RUN_ON_WEBUI commands already are (see messages.js).
 // Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
-// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+// Keep in sync with handle_pending_subcommand() and api/commands.py's
+// _SKILLS_WRITE_APPROVAL_SUBCOMMANDS — a missing alias is silently swallowed here.
 const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
 
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
-  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)) return false;
+  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
+    (async()=>{
+      let out;
+      try{
+        out = await _runAgentCommandTransport('/skills '+args);
+      }catch(e){
+        out = `Skill write-approval command failed: ${e&&e.message||e}`;
+      }
+      S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
+      renderMessages();
+    })();
+    return true;
+  }
   (async()=>{
     try{
       const data = await api('/api/skills');
