@@ -28,7 +28,8 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'reload-skills', 'codex-runtime', 'credits', 'skills'})
+_ALLOWED_AGENT_COMMANDS = frozenset(
+    {'reload-mcp', 'reload-skills', 'codex-runtime', 'credits', 'skills', 'memory'})
 _RELOAD_MCP_LOCK = threading.Lock()
 _RELOAD_SKILLS_LOCK = threading.Lock()
 _CODEX_RUNTIME_LOCK = threading.Lock()
@@ -36,6 +37,9 @@ _CODEX_RUNTIME_LOCK = threading.Lock()
 # '/skills' subcommands owned by hermes-agent's write-approval gate
 # (tools/write_approval.py) rather than the webui's own local skill search
 # (cmdSkills in static/commands.js). Kept in sync with SKILLS_AGENT_SUBCOMMANDS there.
+# '/memory' has no local webui feature to protect (unlike /skills' search), so it has
+# no equivalent allowlist -- every /memory invocation, including a bare one, is handed
+# straight to handle_pending_subcommand() same as gateway/slash_commands.py does.
 _SKILLS_WRITE_APPROVAL_SUBCOMMANDS = frozenset({
     'pending', 'approve', 'apply', 'reject', 'deny', 'drop', 'diff', 'approval', 'mode',
 })
@@ -228,6 +232,8 @@ def execute_agent_command(command: str) -> str:
         return _run_credits_command()
     if canonical == 'skills':
         return _run_skills_write_approval_command(arg_string)
+    if canonical == 'memory':
+        return _run_memory_write_approval_command(arg_string)
 
     raise KeyError(canonical)
 
@@ -394,15 +400,44 @@ def _run_skills_write_approval_command(arg_string: str) -> str:
         logger.warning("write-approval runtime unavailable for /skills", exc_info=True)
         raise RuntimeError("Skill write-approval runtime unavailable") from exc
 
-    out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=_skills_write_approval_setter())
+    out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=_write_approval_setter('skills'))
     return out if out is not None else (
         "Unknown /skills subcommand. Use: pending, approve <id>, reject <id>, diff <id>, approval <on|off>.")
 
 
-def _skills_write_approval_setter():
-    """``set_mode_fn`` for '/skills approval on|off' -- persists `skills.write_approval` to the
-    shared config.yaml via the webui's own config module (there is no gateway session here to
-    route the equivalent gateway-side persistence through).
+def _run_memory_write_approval_command(arg_string: str) -> str:
+    """Run a `/memory` write-approval subcommand (pending/approve/reject/approval/mode, plus the
+    apply/deny/drop aliases -- no `diff`, memory entries are small enough to review inline)
+    against hermes-agent's shared pending store (tools/write_approval.py).
+
+    WebUI-native counterpart to gateway/slash_commands.py's `_handle_memory_command`. Unlike
+    `/skills`, there is no competing local webui feature for `/memory` to shadow, so every
+    argument (including a bare `/memory`, which shows gate status + the pending list) is
+    handed straight through -- no reserved-subcommand allowlist/KeyError guard needed here.
+
+    Uses a freshly loaded on-disk memory store (same as gateway): there is no long-lived
+    agent session in a WebUI exec call either, and the store persists to the same
+    MEMORY.md/USER.md and honors the configured char limits regardless.
+    """
+    try:
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        from tools.memory_tool import load_on_disk_store
+    except Exception as exc:
+        logger.warning("write-approval runtime unavailable for /memory", exc_info=True)
+        raise RuntimeError("Memory write-approval runtime unavailable") from exc
+
+    out = handle_pending_subcommand(
+        wa.MEMORY, arg_string.split(), memory_store=load_on_disk_store(),
+        set_mode_fn=_write_approval_setter('memory'))
+    return out if out is not None else (
+        "Unknown /memory subcommand. Use: pending, approve <id>, reject <id>, approval <on|off>.")
+
+
+def _write_approval_setter(subsystem: str):
+    """``set_mode_fn`` for '/skills approval on|off' and '/memory approval on|off' -- persists
+    `<subsystem>.write_approval` to the shared config.yaml via the webui's own config module
+    (there is no gateway session here to route the equivalent gateway-side persistence through).
 
     Locked read-modify-write, same pattern as `api.config.set_hermes_default_model`: reads the
     RAW file (not `get_config()`, which may return a merged-with-defaults snapshot that must
@@ -417,7 +452,7 @@ def _skills_write_approval_setter():
         config_path = webui_config._get_config_path()
         with webui_config._cfg_lock:
             config_data = webui_config._load_yaml_config_file(config_path)
-            config_data.setdefault('skills', {})['write_approval'] = bool(enabled)
+            config_data.setdefault(subsystem, {})['write_approval'] = bool(enabled)
             webui_config._save_yaml_config_file(config_path, config_data)
         webui_config.reload_config()
 

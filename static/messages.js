@@ -5,7 +5,7 @@ const _AGENT_COMMAND_ALIASES = {
   'credits': 'credits'
 };
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','memory',
   'reload_mcp','reload_skills','codex_runtime','credits'
 ]);
 function _markSessionViewed(sid, messageCount) {
