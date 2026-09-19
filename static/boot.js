@@ -3076,8 +3076,8 @@ function applyBotName(){
   // bot_name or the profile identity; an empty label leaves the
   // default title untouched.
   const _instanceLabel=(window._instanceLabel||'').trim();
-  const _titledName=_instanceLabel ? (_instanceLabel+' \u2022 '+name) : name;
-  if(!S.session) document.title=_titledName;
+  if(!S.session) document.title=name;
+  if(_instanceLabel) document.title=_instanceLabel+' \u2022 '+document.title;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
   const logo=document.querySelector('.sidebar-header .logo');

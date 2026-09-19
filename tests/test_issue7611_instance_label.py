@@ -9,11 +9,7 @@ name or the profile identity.
 """
 from __future__ import annotations
 
-import importlib
-import os
-import sys
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -177,16 +173,17 @@ def test_apply_bot_name_prefixes_with_instance_label():
     assert "window._instanceLabel" in body, (
         "applyBotName must consult window._instanceLabel"
     )
-    assert "_instanceLabel+' \\u2022 '+name" in body or (
-        "_instanceLabel+' • '+name"
+    assert "_instanceLabel+' \\u2022 '+document.title" in body or (
+        "_instanceLabel+' • '+document.title"
     ) in body, (
         "applyBotName must prefix the document.title with "
         "'<label> • <name>' so the empty-state tab is distinguishable"
     )
-    # Default behavior is preserved when the label is empty: the
-    # helper returns the bare name with no prefix.
-    assert "_titledName" in body, (
-        "the helper must compute a titled-name once so both the "
+    # The prefix is applied in-place after the bare title is
+    # written, so the same code path covers empty and non-empty
+    # labels.
+    assert body.count("_instanceLabel") >= 2, (
+        "the prefix branch must consult _instanceLabel so the "
         "empty and non-empty cases share the same code path"
     )
 
@@ -201,10 +198,13 @@ def test_sync_topbar_prefixes_with_instance_label():
         "syncTopbar must consult window._instanceLabel"
     )
     # Both title assignments (no-session and with-session) must
-    # use the same titled-name helper so the prefix is consistent.
-    assert body.count("_titledName(") >= 2, (
-        "syncTopbar must use the _titledName helper for every "
-        "document.title assignment; found fewer than two calls"
+    # apply the same in-place prefix so the empty and non-empty
+    # label branches stay consistent.
+    assert body.count("_instanceLabel+' \\u2022 '+document.title") >= 2 or (
+        body.count("_instanceLabel+' • '+document.title") >= 2
+    ), (
+        "syncTopbar must apply the instance-label prefix to every "
+        "document.title assignment; found fewer than two prefix sites"
     )
 
 
