@@ -83,6 +83,12 @@ correct visible session target, not moving execution ownership.
 7. **404 self-heal is separate from lineage resolution.** Missing/deleted sessions
    should still use the stale-route recovery path. A present archived parent with
    a live continuation is not a 404; it is a canonicalization problem.
+8. **Metadata restore failures preserve recovery state unless this load owns a
+   definitive metadata 404.** A non-404 failure from the session metadata
+   request—including network, timeout, ambiguous 4xx, and 5xx errors—must
+   preserve the saved active-session ID and session URL. A definitive 404 from
+   that metadata request may independently clear only the saved-pointer or
+   route component whose current value still equals the requested ID.
 
 ## Entry Point Matrix
 
@@ -108,6 +114,9 @@ restore, direct session open, or URL parsing, answer:
 - Do sidebar collapse and `loadSession()` pick the same visible representative?
 - Is missing-session 404 recovery kept distinct from present-but-archived lineage
   canonicalization?
+- Does metadata restore preserve the saved ID and session URL for non-404
+  failures, and clear only matching recovery components after a definitive
+  metadata 404?
 - What regression proves route, query parameter, localStorage, and sidebar paths
   agree for compressed lineage rows?
 
