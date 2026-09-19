@@ -228,6 +228,13 @@ function createEnvironment() {
   globalThis._messageRenderableMessageCount = () => 2;
 
   globalThis._rearmActiveSessionStream = () => { rearmCalls += 1; };
+  // #6712: loadSession() consults the message-load failure record (a module-level
+  // Set in sessions.js) so a partially-loaded conversation is not reported as a
+  // successful load. The harness injects only the extracted functions, not
+  // module-level state, so provide it here — otherwise loadSession throws
+  // ReferenceError at its success return.
+  globalThis._loadMessagesFailedSids = new Set();
+  globalThis._loadMessagesFailedForSid = (sid) => globalThis._loadMessagesFailedSids.has(sid);
   globalThis.stopApprovalPolling = () => {};
   globalThis.hideApprovalCard = () => {};
   globalThis.stopSessionStream = () => {};

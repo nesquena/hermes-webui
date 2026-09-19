@@ -1292,7 +1292,17 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 }
 
 let _newSessionInFlight=null;
+// Profile-switch generation that owns the current _newSessionInFlight promise
+// (null = no switch context). Used to stop a caller under a different generation
+// from adopting a session created for an older profile.
+let _newSessionInFlightGen=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
+// Sids whose message body failed to load during the most recent loadSession().
+// Cleared when a load for that sid starts, set when its message fetch fails, and
+// read by loadSession()'s return value so a partially-loaded conversation is not
+// reported as a successful load.
+const _loadMessagesFailedSids=new Set();
+function _loadMessagesFailedForSid(sid){ return _loadMessagesFailedSids.has(sid); }
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
 function _rememberEmptyComposerModelOverride(model, modelProvider){
@@ -1393,11 +1403,30 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // A shared in-flight promise must not be handed to a caller working under a
+  // different profile generation. During a profile switch the cookie and the
+  // active profile have already changed while an earlier newSession() may still
+  // be running for the PREVIOUS profile; returning that promise would let the
+  // caller treat a session created for the old profile as its own result (the
+  // "rapid switches retain a session created for an older profile" case).
+  // Callers may pass the generation they belong to; the cached promise is reused
+  // only when it belongs to the same one.
+  const callerGen = (options && typeof options.profileSwitchGen === 'number')
+    ? options.profileSwitchGen
+    : null;
   if(_newSessionInFlight){
-    if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
-    return _newSessionInFlight;
+    const _inFlightGen = (typeof _newSessionInFlightGen === 'number') ? _newSessionInFlightGen : null;
+    const _sameOwner = (callerGen === null && _inFlightGen === null) || callerGen === _inFlightGen;
+    if(_sameOwner){
+      if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
+      return _newSessionInFlight;
+    }
+    // Different owner: await the previous run so it cannot interleave with the
+    // one we are about to start, then fall through and create ours.
+    try{ await _newSessionInFlight; }catch(_){}
   }
   _setNewSessionPending(true);
+  _newSessionInFlightGen = callerGen;
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
@@ -1502,6 +1531,24 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // #6712 (Greptile): a superseded switch must not install its session.
+    //
+    // The caller's generation checks sit AROUND newSession(), so they cannot
+    // stop the install that happens INSIDE it: once the POST resolves, this
+    // function unconditionally adopted data.session, the localStorage key, the
+    // URL and the session stream. During rapid profile switches the cookie and
+    // active profile have already moved on, so the completed request installed
+    // a session that belongs to the PREVIOUS profile — the newer switch then
+    // follows its empty-session fallback, leaves no replacement, and the
+    // browser is left holding profile-gated state it cannot load or stream.
+    //
+    // The session was still created server-side; this only declines to adopt
+    // it into the browser's active state, which is now owned by a newer switch.
+    if(callerGen!==null
+       && typeof _profileSwitchGeneration==='number'
+       && callerGen!==_profileSwitchGeneration){
+      return null;
+    }
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1585,6 +1632,7 @@ async function newSession(flash, options={}){
     return await _newSessionInFlight;
   }finally{
     _newSessionInFlight=null;
+    _newSessionInFlightGen=null;
     _setNewSessionPending(false);
   }
 }
@@ -1705,7 +1753,7 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
-      return;
+      return false;
     }
   }
   const forceReload = !!opts.force;
@@ -1743,6 +1791,9 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
+  // This load owns the outcome for `sid`: drop any failure recorded by a
+  // previous attempt so a now-successful load is not reported as failed.
+  if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.delete(sid);
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
@@ -1860,9 +1911,26 @@ async function loadSession(sid){
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
+      // #6712 F3: when this load belongs to a profile switch, the mismatch
+      // recovery must not drag the browser back to another profile. The
+      // recovery below calls _switchProfileForSessionLoad(), which issues its
+      // own profile switch — if a newer switch has already taken ownership, or
+      // the recovery would move AWAY from the profile this switch selected, the
+      // correct action is to abandon the load and let the owner decide. Without
+      // this, switch A's stale response could pull the browser back to A after
+      // switch B had already advanced the cookie.
+      if(opts.profileSwitchOwned){
+        const owns = typeof opts.switchGen !== 'number'
+          || typeof _profileSwitchGeneration === 'undefined'
+          || opts.switchGen === _profileSwitchGeneration;
+        if(!owns || !_isCurrentLoad()){
+          _rearmActiveSessionStream();
+          return false;
+        }
+      }
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return false;
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
@@ -1874,7 +1942,16 @@ async function loadSession(sid){
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
           _rearmActiveSessionStream();
-          return;
+          return false;
+        }
+        // #6712 F3: the recovery switched the active profile. If a newer
+        // profile switch has since taken ownership, retrying here would fight
+        // it; abandon instead.
+        if(opts.profileSwitchOwned
+           && typeof opts.switchGen === 'number'
+           && typeof _profileSwitchGeneration !== 'undefined'
+           && opts.switchGen !== _profileSwitchGeneration){
+          return false;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
@@ -2146,6 +2223,7 @@ async function loadSession(sid){
         return;
       }
       S.messages=inflightMessages;
+      if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     }
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
@@ -2260,6 +2338,7 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
@@ -2420,6 +2499,15 @@ async function loadSession(sid){
   if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
+  // Callers that need to distinguish a real load from a swallowed failure (e.g.
+  // the profile-switch resume path) rely on this result. S.session pointing at
+  // the requested session is necessary but NOT sufficient: the message body can
+  // still have failed to load (network error, server failure, SSE drop), and
+  // both message paths above keep a usable fallback (inflight projection, or the
+  // "Failed to load messages" notice) so the load continues to the tail. Report
+  // that as a failure so the caller can run its fresh-session rollback instead
+  // of treating a half-loaded conversation as a successful resume.
+  return !!(S.session && S.session.session_id === sid) && !_loadMessagesFailedForSid(sid);
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────

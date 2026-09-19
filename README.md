@@ -258,6 +258,12 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Optional custom endpoint fields on create -- Base URL and API key written into the profile's `config.yaml` at creation time, so Ollama, LMStudio, and other local endpoints can be configured without editing files manually
 - Seamless switching -- no server restart; reloads config, skills, memory, cron, models
 - Per-session profile tracking (records which profile was active at creation)
+- Opt-in "Resume recent session on profile switch" (off by default): switching
+  profiles opens the target profile's most recent session -- ordered by most
+  recently used -- instead of starting a fresh conversation. When the setting is
+  off, the target profile has no sessions, the load fails, or a newer switch
+  supersedes the running one, the switch falls back to the shipped fresh-session
+  path (#6712)
 
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost

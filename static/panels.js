@@ -6959,6 +6959,80 @@ function _openProfileSwitchSessionBrowser(){
   }catch(_){}
 }
 
+async function _resumeRecentSessionForProfileSwitch(switchGen, workspaceVisible) {
+  // Resume the target profile's most recent session for the opt-in
+  // profile_switch_resume_session setting.
+  //
+  // Returns true only when a session was genuinely loaded into the target
+  // profile. Every other outcome (setting off, no sessions, failed load,
+  // superseded switch) returns false so the caller runs its shipped
+  // newSession() path — the fresh-session rollback must never be skipped on an
+  // assumed success.
+  //
+  // Generation ownership (F3 from the gate review): the profile cookie has
+  // ALREADY moved by the time we run, so a superseded list/load here would
+  // otherwise act on the wrong profile. Checked between every await boundary —
+  // before the list request, after it, and after the load — because a newer
+  // switch can advance the cookie while our request is in flight. Ownership is
+  // also propagated into loadSession() so its 409 profile-mismatch recovery
+  // cannot drag the browser back to a stale profile.
+  if (!window._profileSwitchResumeSession) return false;
+  const _stillOwnsSwitch = () =>
+    typeof _profileSwitchGeneration === 'undefined' || switchGen === _profileSwitchGeneration;
+  if (!_stillOwnsSwitch()) return false;
+
+  let recentData;
+  try {
+    recentData = await api('/api/sessions?limit=1&order=recent');
+  } catch (_) {
+    return false;
+  }
+  // A newer switch may have taken over while the list request was in flight.
+  if (!_stillOwnsSwitch()) return false;
+
+  const rows = (recentData && recentData.sessions) || [];
+  const recentSid = rows.length > 0 ? rows[0] && rows[0].session_id : '';
+  if (!recentSid) return false;
+
+  let loaded = false;
+  try {
+    loaded = await loadSession(recentSid, {
+      switchGen,
+      // A cross-profile row must resolve rather than 409: the cookie is already
+      // the target profile, so a mismatch here means this switch no longer owns
+      // the navigation. Propagating switchGen lets the load path verify
+      // ownership instead of silently switching the browser to another profile.
+      profileSwitchOwned: true,
+    });
+  } catch (_) {
+    return false;
+  }
+  if (!_stillOwnsSwitch()) return false;
+  if (!loaded) return false;
+
+  // Belt-and-braces: the load reported success, so S.session must be the row we
+  // asked for. If it is not (a concurrent load won the slot), treat the resume
+  // as failed and let the caller start a fresh session for the target profile
+  // rather than leaving the previous profile's conversation on screen.
+  if (!S.session || S.session.session_id !== recentSid) return false;
+
+  // Retag the freshly loaded session as belonging to the target profile, the
+  // same way the in-place switch paths do (#3331 follow-up). `data.active`/
+  // `name` are not in scope inside this helper, so read the live profile state
+  // the switch itself updated (S.activeProfile), falling back to the loaded
+  // session's own recorded profile.
+  if (S.session) {
+    S.session.profile = (typeof S.activeProfile !== 'undefined' && S.activeProfile) || S.session.profile;
+  }
+
+  // Clear the up-front workspace skeleton; loadSession() paints the real tree
+  // for the resumed session's workspace.
+  if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') {
+    clearWorkspaceTreeSkeleton();
+  }
+  return true;
+}
+
 async function switchToProfile(name) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
@@ -7198,9 +7272,23 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
-      // Start a new session for the new profile so nothing gets cross-tagged.
+      // By default, start a new session for the new profile so nothing gets
+      // cross-tagged. When the opt-in profile_switch_resume_session setting is
+      // enabled, auto-resume the new profile's most recent session instead.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      const resumed = await _resumeRecentSessionForProfileSwitch(_switchGen, workspaceVisible);
+      // A newer switch can take ownership while the resume helper awaits. Bail
+      // out BEFORE creating anything: newSession() mints and installs a session
+      // from the shared state of whatever profile the cookie now points at, so a
+      // superseded switch reaching it would overwrite the session, URL,
+      // transcript and stream owned by the newer switch. Checking only after the
+      // call (as before) still let the stale session be created and adopted.
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!resumed) {
+        // Pass the switch generation so a newSession() still in flight for an
+        // older profile cannot be adopted as this switch's result.
+        await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, profileSwitchGen: _switchGen});
+      }
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
@@ -7216,14 +7304,14 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return false;
-      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
+      if (!resumed && typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
       // (#4662 Opus gate). No-op when a real tree already rendered.
       if ((!S.session || !S.session.workspace) && typeof clearWorkspaceTreeSkeleton === 'function') {
         clearWorkspaceTreeSkeleton();
       }
-      showToast(t('profile_switched_new_conversation', name));
+      showToast(t(resumed ? 'profile_switched' : 'profile_switched_new_conversation', name));
     } else {
       // No messages yet — refresh the list and topbar in place, then the
       // workspace tree. The loading skeletons shown up front (top of this
@@ -7235,23 +7323,40 @@ async function switchToProfile(name) {
       // newer one (Codex gate #4662). renderSessionList() is the slow fetch and
       // has its own internal generation guard, so awaiting it first is fine.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      // #4671: lift the embargo immediately before the switch-owned render (see above).
-      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
-      await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
-      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
-      syncTopbar();
-      // Refresh workspace file tree so the right panel shows the new
-      // profile's workspace, not the previous one (#1214).
-      if (S.session && S.session.workspace) {
-        const dirLoad = loadDir('.');
-        if (workspaceVisible) await dirLoad;
-      } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
-        // New profile has no bound workspace — clear the up-front skeleton so it
-        // doesn't strand (#4662 Opus gate).
-        clearWorkspaceTreeSkeleton();
+      // #6712 F4: the opt-in resume must also apply when switching from a
+      // blank/no-message state. Previously the resume block lived only in the
+      // sessionInProgress branch, so a switch from the empty state never
+      // attempted to resume even with the preference on — the advertised
+      // behaviour silently did nothing for exactly the user who has no current
+      // conversation to lose. Attempt it here too; the blank in-place refresh
+      // below stays the fallback when there is nothing to resume.
+      const resumedFromEmpty = await _resumeRecentSessionForProfileSwitch(_switchGen, workspaceVisible);
+      if (resumedFromEmpty) {
+        if (_switchGen !== _profileSwitchGeneration) return false;
+        if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+        await renderSessionList();
+        if (_switchGen !== _profileSwitchGeneration) return false;
+        syncTopbar();
+        showToast(t('profile_switched', name));
+      } else {
+        // #4671: lift the embargo immediately before the switch-owned render (see above).
+        if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+        await renderSessionList();
+        if (_switchGen !== _profileSwitchGeneration) return;
+        if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
+        syncTopbar();
+        // Refresh workspace file tree so the right panel shows the new
+        // profile's workspace, not the previous one (#1214).
+        if (S.session && S.session.workspace) {
+          const dirLoad = loadDir('.');
+          if (workspaceVisible) await dirLoad;
+        } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
+          // New profile has no bound workspace — clear the up-front skeleton so it
+          // doesn't strand (#4662 Opus gate).
+          clearWorkspaceTreeSkeleton();
       }
       showToast(t('profile_switched', name));
+      }
     }
 
     await _profileSwitchPanelLoad();
@@ -8758,6 +8863,8 @@ function _preferencesPayloadFromUi(){
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
+  const profileSwitchResumeCb=$('settingsProfileSwitchResume');
+  if(profileSwitchResumeCb) payload.profile_switch_resume_session=profileSwitchResumeCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
   // update_channel is NOT included here — it has its own dedicated write path
@@ -8933,6 +9040,14 @@ async function _autosavePreferencesSettings(payload){
     }
     if(payload&&payload.new_chat_on_workspace_switch!==undefined){
       window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
+    }
+    // Mirror the saved value into the runtime authority the same way the
+    // sibling setting above does. Without this the checkbox only took effect
+    // after a reload: turning it on stayed behaviourally off, and turning it
+    // off stayed behaviourally on, because switchToProfile() reads
+    // window._profileSwitchResumeSession and boot only seeds it once.
+    if(payload&&payload.profile_switch_resume_session!==undefined){
+      window._profileSwitchResumeSession=!!(saved&&saved.profile_switch_resume_session);
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -9489,6 +9604,15 @@ async function loadSettingsPanel(){
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const profileSwitchResumeCb=$('settingsProfileSwitchResume');
+    if(profileSwitchResumeCb){
+      profileSwitchResumeCb.checked=!!settings.profile_switch_resume_session;
+      // Seed the runtime authority on panel load too, so a value changed on
+      // another surface (or a stale boot mirror) cannot outlive what the
+      // checkbox shows. Mirrors the new_chat_on_workspace_switch handling.
+      window._profileSwitchResumeSession=profileSwitchResumeCb.checked;
+      profileSwitchResumeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateChannelSel=$('settingsUpdateChannel');
