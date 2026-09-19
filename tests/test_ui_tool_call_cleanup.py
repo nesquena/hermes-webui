@@ -448,8 +448,14 @@ class TestToolCallGroupingStatic:
         assert "savedState==='open'" in helper or 'savedState==="open"' in helper, (
             "Live Activity groups can still restore explicit live open state."
         )
-        assert "if(live && savedState==='open')" in helper or 'if(live && savedState==="open")' in helper, (
-            "Saved open state must be scoped to live groups so final L1 defaults collapsed."
+        assert "if((live||opts.restoreDisclosure) && savedState==='open')" in helper, (
+            "Only live groups and opted-in settled anchor groups restore explicit intent."
+        )
+        assert "let collapsed=opts.collapsed!==false" in helper, (
+            "Unchosen settled groups still default collapsed."
+        )
+        assert "if(opts.forceOpen) collapsed=false" in helper, (
+            "Transient settlement height preservation must outrank saved closed intent."
         )
         assert "savedState==='closed'" in helper or 'savedState==="closed"' in helper, (
             "A saved closed Activity group should still override the live expanded default."

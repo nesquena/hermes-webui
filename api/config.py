@@ -11183,6 +11183,77 @@ def active_run_cancel_is_stale(
         return False
 
 
+class RunAdmissionDrainingError(RuntimeError):
+    """Raised when this WebUI process is draining for a supervised restart."""
+
+
+# A fresh interpreter image owns a fresh token, including same-PID POSIX exec.
+_RESTART_DRAIN_GENERATION = uuid.uuid4().hex
+
+
+def _restart_drain_marker_path(pid: int | None = None) -> Path:
+    root = Path(
+        os.getenv("HERMES_WEBUI_RESTART_DRAIN_DIR")
+        or (_DEFAULT_STATE_HOME / "webui" / "restart-drain")
+    ).expanduser()
+    return root / f"{os.getpid() if pid is None else int(pid)}.json"
+
+
+def restart_drain_active() -> bool:
+    """Return whether this exact WebUI process generation is draining."""
+    path = _restart_drain_marker_path()
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    generation = marker.get("generation") if isinstance(marker, dict) else None
+    if not generation:
+        # Pre-generation markers belong to an older implementation. A marker
+        # at our PID can only survive into this image through replacement, so
+        # retire it instead of blocking this generation indefinitely.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return True
+        return False
+    if isinstance(generation, str) and generation != _RESTART_DRAIN_GENERATION:
+        return False
+    return True
+
+
+def enter_restart_drain(reason: str = "restart") -> None:
+    """Atomically create this process's drain marker.
+
+    Admission (local chat starts, gateway run starts, health-side capability
+    consumers) treats the marker as closed for new work from the moment it
+    exists, so the wait/re-exec window of a supervised restart cannot accept
+    turns that the replacement generation will never see.
+    """
+    # Serialize publication with run registration. Failure propagates to the
+    # scheduler: replacement must never proceed with admission still open.
+    with ACTIVE_RUNS_LOCK:
+        if restart_drain_active():
+            raise RunAdmissionDrainingError("A restart drain already owns admission")
+        path = _restart_drain_marker_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        try:
+            tmp.write_text(json.dumps({"pid": os.getpid(), "generation": _RESTART_DRAIN_GENERATION, "reason": str(reason or "restart"), "entered_at": time.time()}) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def exit_restart_drain() -> None:
+    """Remove this process's drain marker (rollback/failure cleanup)."""
+    try:
+        _restart_drain_marker_path().unlink(missing_ok=True)
+    except OSError:
+        logger.debug("failed to remove restart-drain marker", exc_info=True)
+
+
 def register_active_run(stream_id: str, **metadata) -> None:
     """Mark a WebUI agent worker as alive until its outer finally exits."""
     if not stream_id:
@@ -11193,6 +11264,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
     with ACTIVE_RUNS_LOCK:
+        if restart_drain_active():
+            raise RunAdmissionDrainingError("WebUI is draining for a supervised restart")
         ACTIVE_RUNS[stream_id] = entry
 
 

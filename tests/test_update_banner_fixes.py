@@ -857,6 +857,23 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert restart_calls == ['default', 'default']
         assert sleeps == [upd._AGENT_GATEWAY_RESTART_RETRY_DELAY_S]
 
+    def test_agent_gateway_restart_retry_in_progress_stays_fail_closed(self, monkeypatch):
+        import api.updates as upd
+
+        restart_results = iter([
+            {"status": "failed", "message": "Restart failed: first"},
+            {"status": "in_progress", "message": "Restart still running"},
+        ])
+        monkeypatch.setattr(upd, "restart_active_profile_gateway", lambda **kwargs: next(restart_results))
+        monkeypatch.setattr(upd.time, "sleep", lambda _delay: None)
+        monkeypatch.setattr(upd, "get_active_profile_gateway_running_pid", lambda *, profile=None: 101)
+
+        ok, result = upd._ensure_gateway_restart_for_agent_update()
+
+        assert ok is False
+        assert result["status"] == "in_progress"
+        assert result["retry_attempted"] is True
+
     def test_agent_gateway_restart_retry_busy_stays_fail_closed(self, monkeypatch):
         import api.updates as upd
 
@@ -1446,7 +1463,7 @@ class TestAgentUpdateRequiresGatewayRestart:
 
         def fake_gateway_restart(*, profile=None):
             gateway_restarts.append(profile)
-            return {'status': 'in_progress', 'message': 'Gateway service restart initiated (in progress)'}
+            return {'status': 'completed', 'message': 'Gateway service restart initiated (in progress)'}
 
         monkeypatch.setattr(upd, '_run_git', fake_run)
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
@@ -1459,7 +1476,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert result['stash_conflict'] is True
         assert result['target'] == 'agent'
         assert result['restart_scheduled'] is True
-        assert result['gateway_restart'] == 'in_progress'
+        assert result['gateway_restart'] == 'completed'
         assert gateway_restarts == ['default']
 
     def test_apply_update_agent_without_gateway_restart_result_fails(self, tmp_path, monkeypatch):
