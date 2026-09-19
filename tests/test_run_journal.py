@@ -62,7 +62,8 @@ def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
 
     append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
 
-    assert len(fsync_calls) == 1
+    # Round 17: terminal events fsync both JSONL and sidecar (2 calls total)
+    assert len(fsync_calls) == 2
 
 
 def test_run_journal_eager_fsync_mode_fsyncs_non_terminal_events(tmp_path, monkeypatch):
@@ -75,7 +76,8 @@ def test_run_journal_eager_fsync_mode_fsyncs_non_terminal_events(tmp_path, monke
 
     append_run_event("session_1", "run_1", "token", {"text": "ok"}, session_dir=tmp_path)
 
-    assert len(fsync_calls) == 1
+    # Round 17: eager mode fsyncs both JSONL and sidecar (2 calls total)
+    assert len(fsync_calls) == 2
 
 
 def test_run_journal_tolerates_malformed_lines(tmp_path):
@@ -166,9 +168,10 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
     import api.run_journal as run_journal
 
     original_read = run_journal._read_jsonl
+    original_try_sidecar = run_journal._try_summary_from_sidecar
 
-    def append_after_read(path):
-        events, malformed = original_read(path)
+    def append_after_any_read():
+        """Append cancel event after any read (sidecar or tail)."""
         append_run_event(
             "session_1",
             "run_1",
@@ -176,11 +179,31 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
             {"message": "Cancelled by user"},
             session_dir=tmp_path,
         )
-        return events, malformed
+
+    def append_after_read(path, **kwargs):
+        events, malformed, ok = original_read(path, **kwargs)
+        append_after_any_read()
+        return events, malformed, ok
+
+    def append_after_sidecar(path, session_id, run_id):
+        result, ok = original_try_sidecar(path, session_id, run_id)
+        if result is not None:
+            append_after_any_read()
+        return result, ok
 
     monkeypatch.setattr(run_journal, "_read_jsonl", append_after_read)
+    monkeypatch.setattr(run_journal, "_try_summary_from_sidecar", append_after_sidecar)
 
     first = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
+    # NOTE: no manual sidecar delete or cache clear here. The first call read
+    # the sidecar (terminal_state=completed) and a concurrent `cancel` was
+    # appended DURING that read, advancing the JSONL past the pre-read
+    # signature captured before the read. The cache must therefore REFUSE to
+    # store the stale `completed` result, so the second call re-reads and
+    # observes the new `interrupted-by-user` state. If the pre-read signature
+    # were captured AFTER the sidecar read (the r17 TOCTOU hole), the stale
+    # result would be cached under the post-append signature and the second
+    # call would wrongly return `completed`.
     second = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
 
     assert first["terminal_state"] == "completed"
@@ -194,9 +217,9 @@ def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_
     original_read = run_journal._read_jsonl
     appended = False
 
-    def append_after_missing_read(path):
+    def append_after_missing_read(path, **kwargs):
         nonlocal appended
-        events, malformed = original_read(path)
+        events, malformed, ok = original_read(path, **kwargs)
         if not appended:
             appended = True
             append_run_event(
@@ -206,7 +229,7 @@ def test_summary_cache_rejects_first_append_that_races_missing_journal_read(tmp_
                 {"session": {}},
                 session_dir=tmp_path,
             )
-        return events, malformed
+        return events, malformed, ok
 
     monkeypatch.setattr(run_journal, "_read_jsonl", append_after_missing_read)
 
