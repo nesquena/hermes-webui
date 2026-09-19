@@ -42,10 +42,15 @@ this module routes them to the same listener so the frontend's single
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import socket
+import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing
+from pathlib import Path
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -59,6 +64,218 @@ from api.process_event_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _admission_db_path() -> Any:
+    """Resolve the shared state.db via the WebUI-owned profile resolver.
+
+    The Agent source tree is NOT importable from WebUI CI (no `agent` package
+    on sys.path), so a top-level Agent-only import (`hermes_constants`) must
+    never appear at module scope. `api.profiles` is WebUI-owned and resolves
+    the same active HERMES_HOME lazily per request/thread, with a plain
+    HERMES_HOME fallback when the resolver is unavailable.
+    """
+    try:
+        from api.profiles import get_active_hermes_home
+
+        home = get_active_hermes_home()
+    except Exception:
+        home = None
+    if home is None:
+        import os
+
+        home = Path(os.getenv("HERMES_HOME") or "~/.hermes").expanduser()
+    return Path(home) / "state.db"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cross-process per-session wakeup admission guard (#7201 rework)
+# Two WebUI backends sharing HERMES_HOME can both restore the same pending
+# async delegation and race to admit a wakeup turn for one session. The
+# durable claim in hermes-agent (tools.async_delegation.claim_completion_delivery)
+# is the primary guard, but as a defense-in-depth measure we also guard the
+# *admission* (turn start) with a durable per-`session_id` permit in a
+# dedicated table:
+#   - keyed by session_id (NOT delegation_id): interactive/manual turns never
+#     carry a delegation id, so a delegation-id ledger cannot stop a backend B
+#     async wakeup from racing a backend A interactive turn on the same
+#     session (the exact #7201 double-admission);
+#   - owner lease + renewal: a crashed admitter's permit is reclaimed via TTL
+#     instead of stranding the session;
+#   - fencing held through final persistence: a metadata-write failure after a
+#     turn was accepted never revokes it (no double-reply retry);
+#   - non-consuming abstention: a machine wakeup that will abstain does so
+#     BEFORE touching the finite delivery-attempt budget;
+#   - bounded cleanup: stale/expired rows are pruned on every acquire.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ADMISSION_DB_LOCK = threading.Lock()
+# Per-resolved-DB-path idempotence: the table must be initialized once per
+# state.db identity, not once globally (a profile switch would otherwise raise
+# OperationalError "no such table" on the second home).
+_ADMISSION_TABLE_INITIALIZED: dict[str, bool] = {}
+_ADMISSION_PERMIT_TTL_SECONDS = 600.0
+_ADMISSION_PERMIT_RENEW_EVERY_SECONDS = 120.0
+
+
+def _initialize_admission_table() -> None:
+    """Create the webui_session_permits table if it doesn't exist (per path)."""
+    path = _admission_db_path()
+    path_key = str(path)
+    with _ADMISSION_DB_LOCK:
+        if _ADMISSION_TABLE_INITIALIZED.get(path_key):
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(path_key, timeout=10)) as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS webui_session_permits (
+                       session_id TEXT PRIMARY KEY,
+                       owner TEXT NOT NULL,
+                       admitted_at REAL NOT NULL,
+                       lease_until REAL NOT NULL,
+                       stream_id TEXT
+                   )"""
+            )
+            conn.commit()
+        _ADMISSION_TABLE_INITIALIZED[path_key] = True
+
+
+def _prune_expired_session_permits(conn) -> None:
+    """Bounded cleanup: drop expired permits (and abandoned rows) on acquire."""
+    now = time.time()
+    try:
+        conn.execute(
+            "DELETE FROM webui_session_permits WHERE lease_until < ?",
+            (now - 60.0,),
+        )
+        conn.commit()
+    except Exception:
+        logger.debug("session-permit pruning failed", exc_info=True)
+
+
+def _try_acquire_session_permit(session_id: str, owner: str) -> bool:
+    """Atomically claim the durable per-session admission permit.
+
+    Returns True if this process now owns the permit (or already did — the
+    same owner re-acquiring is idempotent, so a wakeup that fenced the permit
+    before claiming can pass through the shared turn funnel without tripping
+    its own guard). False means another live owner holds it.
+    """
+    _initialize_admission_table()
+    now = time.time()
+    lease_until = now + _ADMISSION_PERMIT_TTL_SECONDS
+    with _ADMISSION_DB_LOCK, closing(
+        sqlite3.connect(str(_admission_db_path()), timeout=10)
+    ) as conn:
+        _prune_expired_session_permits(conn)
+        try:
+            conn.execute(
+                """INSERT INTO webui_session_permits
+                   (session_id, owner, admitted_at, lease_until)
+                   VALUES (?, ?, ?, ?)""",
+                (session_id, owner, now, lease_until),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # A live owner holds the permit. If it is US (idempotent re-entry
+            # through the shared turn funnel), keep it and refresh the lease.
+            row = conn.execute(
+                """SELECT owner FROM webui_session_permits WHERE session_id=?""",
+                (session_id,),
+            ).fetchone()
+            if row and row[0] == owner:
+                conn.execute(
+                    """UPDATE webui_session_permits
+                       SET lease_until=?
+                       WHERE session_id=? AND owner=?""",
+                    (lease_until, session_id, owner),
+                )
+                conn.commit()
+                return True
+            # Safe stale-owner reclamation: if the incumbent lease is dead,
+            # steal it atomically (only the row whose lease_until is past can
+            # be taken, so a concurrent winner cannot double-admit).
+            cur = conn.execute(
+                """UPDATE webui_session_permits
+                   SET owner=?, admitted_at=?, lease_until=?, stream_id=NULL
+                   WHERE session_id=? AND lease_until < ?""",
+                (owner, now, lease_until, session_id, now),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+
+def _renew_session_permit(session_id: str, owner: str) -> None:
+    """Renew the lease while a long-running admission is still in flight."""
+    _initialize_admission_table()
+    with _ADMISSION_DB_LOCK, closing(
+        sqlite3.connect(str(_admission_db_path()), timeout=10)
+    ) as conn:
+        conn.execute(
+            """UPDATE webui_session_permits
+               SET lease_until=?
+               WHERE session_id=? AND owner=?""",
+            (time.time() + _ADMISSION_PERMIT_TTL_SECONDS, session_id, owner),
+        )
+        conn.commit()
+
+
+def _mark_session_permit_stream_id(session_id: str, owner: str, stream_id: str) -> None:
+    """Record the stream_id for an admitted session permit (best-effort)."""
+    _initialize_admission_table()
+    with _ADMISSION_DB_LOCK, closing(
+        sqlite3.connect(str(_admission_db_path()), timeout=10)
+    ) as conn:
+        conn.execute(
+            """UPDATE webui_session_permits
+               SET stream_id=?
+               WHERE session_id=? AND owner=?""",
+            (stream_id, session_id, owner),
+        )
+        conn.commit()
+
+
+def _release_session_permit(session_id: str, owner: str) -> None:
+    """Release the permit (idempotent; a lost race to another owner is fine)."""
+    _initialize_admission_table()
+    with _ADMISSION_DB_LOCK, closing(
+        sqlite3.connect(str(_admission_db_path()), timeout=10)
+    ) as conn:
+        conn.execute(
+            """DELETE FROM webui_session_permits WHERE session_id=? AND owner=?""",
+            (session_id, owner),
+        )
+        conn.commit()
+
+
+def _session_permit_owner() -> str:
+    """Stable per-process owner token for the durable permit ledger.
+
+    Combines hostname + pid + a per-process nonce so a crashed WebUI backend
+    can never be mistaken for a live one, while the same process renewing its
+    own lease always matches (renewal requires owner equality).
+    """
+    _owner_nonce = getattr(_session_permit_owner, "_nonce", None)
+    if _owner_nonce is None:
+        _owner_nonce = uuid.uuid4().hex[:12]
+        _session_permit_owner._nonce = _owner_nonce
+    return f"{socket.gethostname()}:{os.getpid()}:{_owner_nonce}"
+
+
+def _session_permit_holder(session_id: str) -> Optional[str]:
+    """Return the current permit owner for a session (None if unheld)."""
+    _initialize_admission_table()
+    with _ADMISSION_DB_LOCK, closing(
+        sqlite3.connect(str(_admission_db_path()), timeout=10)
+    ) as conn:
+        row = conn.execute(
+            """SELECT owner FROM webui_session_permits WHERE session_id=?""",
+            (session_id,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
@@ -1028,10 +1245,23 @@ def _start_async_delegation_wakeup_turn(
     evt: dict,
     claim,
     process_registry,
+    permit_owner: str,
 ) -> None:
-    """Start one autonomous delegation turn and ACK only after acceptance."""
+    """Start one autonomous delegation turn and ACK only after acceptance.
+
+    Cross-process admission guard (#7201 rework): the durable per-session
+    permit was already acquired (fenced) by the caller BEFORE the delivery
+    claim, so losing the admission race never consumed the attempt budget.
+    The permit is released idempotently here once the turn resolves — on
+    acceptance, on refusal, and on any failure — so a crashed admitter is
+    reclaimed by lease expiry, never stranded.
+    """
+
+    def _release_permit() -> None:
+        _release_session_permit(session_id, permit_owner)
 
     def _runner() -> None:
+        accepted = False
         try:
             from api.routes import start_session_turn
 
@@ -1046,19 +1276,40 @@ def _start_async_delegation_wakeup_turn(
             else:
                 status = int(raw_status)
             if 200 <= status < 300:
-                _record_async_delegation_accepted(
-                    evt,
-                    session_id=session_id,
-                    claim=claim,
-                )
+                stream_id = (resp or {}).get("stream_id")
+                accepted = True
+                # Fencing: once the turn is accepted, a metadata-write failure
+                # must NEVER turn it into a retry (that would double-reply).
+                # Metadata bookkeeping is best-effort here.
+                try:
+                    if stream_id:
+                        _mark_session_permit_stream_id(
+                            session_id, permit_owner, stream_id
+                        )
+                    _record_async_delegation_accepted(
+                        evt,
+                        session_id=session_id,
+                        claim=claim,
+                    )
+                except Exception:
+                    logger.warning(
+                        "async delegation %s accepted for session %s but "
+                        "metadata write failed (no retry; turn already running)",
+                        delegation_id,
+                        session_id,
+                        exc_info=True,
+                    )
                 logger.info(
                     "async delegation wakeup turn accepted for session %s "
                     "(stream_id=%s)",
                     session_id,
-                    (resp or {}).get("stream_id"),
+                    stream_id,
                 )
                 return
 
+            # Turn not accepted: release the durable claim and schedule a
+            # retry. The per-session permit is released by the finally below
+            # so the next wakeup (or another backend) can claim it.
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
                 process_registry, evt, keep_legacy_retrying=True
@@ -1077,15 +1328,24 @@ def _start_async_delegation_wakeup_turn(
                     (resp or {}).get("error"),
                 )
         except Exception:
-            release_async_delegation_delivery(evt, claim)
-            _retry_unclaimed_async_delegation_event(
-                process_registry, evt, keep_legacy_retrying=True
-            )
-            logger.warning(
-                "async delegation wakeup turn failed for session %s; durable retry scheduled",
-                session_id,
-                exc_info=True,
-            )
+            if not accepted:
+                # Only a turn that never started may be re-delivered.
+                release_async_delegation_delivery(evt, claim)
+                _retry_unclaimed_async_delegation_event(
+                    process_registry, evt, keep_legacy_retrying=True
+                )
+                logger.warning(
+                    "async delegation wakeup turn failed for session %s; durable retry scheduled",
+                    session_id,
+                    exc_info=True,
+                )
+        finally:
+            # Release the permit only when the turn was NOT accepted: an
+            # accepted turn keeps the permit until the streaming worker's
+            # teardown releases it (the permit fences the whole turn, so a
+            # second backend cannot start a wakeup while it is still running).
+            if not accepted:
+                _release_permit()
 
     threading.Thread(
         target=_runner,
@@ -1114,12 +1374,36 @@ def _process_async_delegation_event(
         )
         return
 
+    # Cross-process admission fence (#7201 rework): the durable per-session
+    # permit must be acquired BEFORE the claim so that losing the admission
+    # race never consumes the finite delivery-attempt budget — a machine
+    # wakeup that is going to abstain does so without touching the record.
+    owner = _session_permit_owner()
+    if not _try_acquire_session_permit(session_id, owner):
+        logger.info(
+            "session %s already has an active permit (owner %s); "
+            "abstaining without claiming delivery budget",
+            session_id,
+            _session_permit_holder(session_id) or "?",
+        )
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+    permit_held = True
+
     try:
         claim = claim_async_delegation_delivery(evt, "webui-background")
     except Exception:
+        _release_session_permit(session_id, owner)
+        permit_held = False
         _requeue_async_delegation_event(process_registry, evt)
         return
     if claim is None:
+        _release_session_permit(session_id, owner)
+        permit_held = False
         completion_queue = getattr(process_registry, "completion_queue", None)
         schedule_async_delegation_claim_retry(evt, completion_queue)
         return
@@ -1134,6 +1418,8 @@ def _process_async_delegation_event(
         # event will never format correctly), so it must stay on the bounded
         # one-shot path — never keep_legacy_retrying, or it would loop forever.
         release_async_delegation_delivery(evt, claim)
+        _release_session_permit(session_id, owner)
+        permit_held = False
         _retry_unclaimed_async_delegation_event(process_registry, evt)
         logger.warning(
             "async delegation completion could not be formatted for session %s",
@@ -1150,6 +1436,7 @@ def _process_async_delegation_event(
             evt=evt,
             claim=claim,
             process_registry=process_registry,
+            permit_owner=owner,
         )
     except Exception:
         # A post-format dispatch failure against a resolved target is transient
