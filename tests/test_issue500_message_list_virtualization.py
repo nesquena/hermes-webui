@@ -1141,3 +1141,184 @@ console.log(JSON.stringify({
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
     )
+
+
+def _post_process_anchor_hold_harness(
+    *,
+    touch_like: str = "false",
+    scroll_top: int = 1100,
+    scroll_height: int = 5000,
+    bump_generation: str = "false",
+) -> str:
+    """Fake-DOM harness for the desktop post-process anchor hold.
+
+    Models the real failure: three rendered rows, the reader scrolled up so the
+    first one straddles the viewport top, and a post-process pass that grows
+    content ABOVE the viewport by 64px (Prism highlight + the .code-copy-btn this
+    pass injects into every .pre-header). Runs the REAL
+    _captureMessageViewportAnchor / _restoreMessageViewportAnchor /
+    _beginPostProcessAnchorHold / _postProcessWithAnchorSuppression.
+    """
+    return """
+const GROWTH = 64;
+let growth = 0;
+let scrollTopValue = %(scroll_top)d;
+const scrollHistory = [];
+const rows = [0, 1, 2].map(i => ({
+  contentTop: 1000 + i * 300,
+  dataset: {
+    msgIdx: String(40 + i),
+    sessionMsgIdx: String(140 + i),
+    messageAnchorKey: 'k' + i,
+  },
+  getClientRects(){ return [{}]; },
+  getBoundingClientRect(){
+    const top = (this.contentTop + growth) - scrollTopValue;
+    return {top, bottom: top + 300, height: 300};
+  },
+}));
+const container = {
+  clientHeight: 600,
+  get scrollHeight(){ return %(scroll_height)d + growth; },
+  get scrollTop(){ return scrollTopValue; },
+  set scrollTop(v){ scrollHistory.push(Math.round(v)); scrollTopValue = v; },
+  getBoundingClientRect(){ return {top: 0, bottom: 600, height: 600}; },
+  querySelectorAll(sel){
+    if(sel === '[data-msg-idx]' || sel === '[data-message-anchor-key]') return rows;
+    return [];
+  },
+  querySelector(sel){
+    const m = /^\\[data-session-msg-idx="(\\d+)"\\]$/.exec(sel);
+    if(m) return rows.find(r => r.dataset.sessionMsgIdx === m[1]) || null;
+    const r = /^\\[data-msg-idx="(\\d+)"\\]$/.exec(sel);
+    if(r) return rows.find(x => x.dataset.msgIdx === r[1]) || null;
+    return null;
+  },
+  style: {},
+};
+function $(id){ return id === 'messages' ? container : null; }
+function getComputedStyle(){ return {overflowAnchor: 'none'}; }
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _lastScrollTop = 0;
+let _lastMessageClientHeight = 0;
+let _messageScrollInputGeneration = 7;
+const performance = { now(){ return 1000; } };
+function requestAnimationFrame(cb){ cb(); return 1; }
+function setTimeout(cb){ cb(); return 1; }
+function _deferClearProgrammaticScroll(){ _programmaticScroll = false; }
+function _recentMessageScrollIntent(){ return false; }
+function _recentMessageTouchScrollIntent(){ return false; }
+function _isTouchLikeMessageViewport(){ return %(touch_like)s; }
+function _suppressBrowserOverflowAnchor(){ return null; }
+function _messageSessionIndexForRawIdx(n){ return n; }
+let postProcessRan = false;
+function postProcessRenderedMessages(){
+  postProcessRan = true;
+  // Above-viewport growth: every rendered row is pushed down by GROWTH.
+  growth = GROWTH;
+  if(%(bump_generation)s) _messageScrollInputGeneration++;
+}
+const anchorOffset = () => Math.round(rows[0].getBoundingClientRect().top
+  - container.getBoundingClientRect().top);
+eval(extractFunc('_captureMessageViewportAnchor'));
+eval(extractFunc('_restoreMessageViewportAnchor'));
+eval(extractFunc('_beginPostProcessAnchorHold'));
+eval(extractFunc('_postProcessWithAnchorSuppression'));
+const offsetBefore = anchorOffset();
+_postProcessWithAnchorSuppression(container);
+console.log(JSON.stringify({
+  postProcessRan,
+  offsetBefore,
+  offsetAfter: anchorOffset(),
+  scrollHistory,
+  lastScrollTop: _lastScrollTop,
+}));
+""" % {
+        "touch_like": touch_like,
+        "scroll_top": scroll_top,
+        "scroll_height": scroll_height,
+        "bump_generation": bump_generation,
+    }
+
+
+def test_post_process_holds_desktop_anchor_against_above_viewport_growth():
+    """#5637 follow-up: the virtualize_transcript backward creep.
+
+    postProcessRenderedMessages() runs one frame AFTER the JS anchor restore and
+    grows rows above the viewport. Desktop `.messages` is overflow-anchor:none,
+    so without an explicit JS hold the reader slides backward by that growth on
+    EVERY render and the next capture bakes the drifted offset in (measured
+    +646px over 12 streamed appends on a 2000-message session).
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    metrics = json.loads(
+        _run_node(_extract_func_script(js) + _post_process_anchor_hold_harness())
+    )
+    assert metrics["postProcessRan"] is True
+    assert metrics["offsetBefore"] == -100
+    assert metrics["scrollHistory"] == [1164], (
+        "desktop must realign scrollTop by the +64px of above-viewport growth the "
+        "post-process introduced; got %r" % (metrics["scrollHistory"],)
+    )
+    assert metrics["offsetAfter"] == -100, (
+        "the anchor row must end where the reader left it, not %rpx lower"
+        % (metrics["offsetAfter"] + 100,)
+    )
+    assert metrics["lastScrollTop"] == 1164, (
+        "_lastScrollTop must be synced after the programmatic hold so sticky-unpin "
+        "cannot false-trigger (#1731)"
+    )
+
+
+def test_post_process_anchor_hold_is_inert_on_touch_viewports():
+    """Touch keeps the native overflow-anchor engine as its hold (#5637/#5392).
+
+    Adding a JS write there would stack with the browser's own compensation —
+    the mobile yank _postProcessWithAnchorSuppression exists to prevent.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    metrics = json.loads(
+        _run_node(
+            _extract_func_script(js)
+            + _post_process_anchor_hold_harness(touch_like="true")
+        )
+    )
+    assert metrics["postProcessRan"] is True
+    assert metrics["scrollHistory"] == [], (
+        "no JS scroll write may happen on a touch viewport; got %r"
+        % (metrics["scrollHistory"],)
+    )
+
+
+def test_post_process_anchor_hold_skips_tail_followers():
+    """A reader following the live tail is bound to the BOTTOM, not to a row."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    metrics = json.loads(
+        _run_node(
+            _extract_func_script(js)
+            # bottom = 1900 - 1100 - 600 = 200 <= 250 (readerAwayFromBottom idiom)
+            + _post_process_anchor_hold_harness(scroll_height=1900)
+        )
+    )
+    assert metrics["postProcessRan"] is True
+    assert metrics["scrollHistory"] == [], (
+        "a near-bottom tail follower must not be anchor-held; got %r"
+        % (metrics["scrollHistory"],)
+    )
+
+
+def test_post_process_anchor_hold_yields_to_reader_input():
+    """Reader input during the pass wins: the monotonic generation abandons the hold."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    metrics = json.loads(
+        _run_node(
+            _extract_func_script(js)
+            + _post_process_anchor_hold_harness(bump_generation="true")
+        )
+    )
+    assert metrics["postProcessRan"] is True
+    assert metrics["scrollHistory"] == [], (
+        "a scroll-input generation bump during the post-process must abandon the "
+        "hold; got %r" % (metrics["scrollHistory"],)
+    )
