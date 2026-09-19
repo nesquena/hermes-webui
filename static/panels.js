@@ -490,6 +490,20 @@ function _cronScheduleKindForInput(value) {
   return '';
 }
 
+function _cronScheduleEditableText(job) {
+  // Return the parser-compatible schedule value for the edit/duplicate forms.
+  // The agent stores canonical values in schedule.run_at (one-shot ISO) and
+  // schedule.expr (cron expression); schedule_display is derived human-readable
+  // text ("once at 2026-08-28 16:00") that the agent parser does not accept as
+  // input, so submitting it back makes the update fail (issue #7352).
+  const s = job && job.schedule;
+  if (s) {
+    if (typeof s.run_at === 'string' && s.run_at) return s.run_at;
+    if (typeof s.expr === 'string' && s.expr) return s.expr;
+  }
+  return (job && job.schedule_display) || '';
+}
+
 function _syncCronScheduleWarning() {
   const input = $('cronFormSchedule');
   const warning = $('cronFormScheduleOnceWarning');
@@ -1529,7 +1543,7 @@ function duplicateCurrentCron(){
   }
   _renderCronForm({
     name: dupName,
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleEditableText(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
@@ -1590,7 +1604,7 @@ function openCronEdit(job){
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
   _renderCronForm({
     name: job.name || '',
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleEditableText(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
