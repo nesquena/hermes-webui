@@ -511,7 +511,9 @@ to the active conversation rather than a global app setting.
 
 Session management:
     newSession()          POST /api/session/new, update S.session, save to localStorage
-    loadSession(sid)      GET /api/session?session_id=X, check INFLIGHT first, update S
+    loadSession(sid)      GET /api/session?session_id=X (initial load uses the
+                          bounded tail `msg_limit=30`; jump-to-start and outline
+                          jump pass `msg_limit=all`), check INFLIGHT first, update S
     deleteSession(sid)    POST /api/session/delete, handle active/inactive cases correctly
     renderSessionList()   GET /api/sessions, rebuild #sessionList DOM
 
@@ -1379,7 +1381,14 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /                          Returns full HTML app (index page)
     /index.html                Same as /
     /health                    {"status":"ok","sessions":N}
-    /api/session               ?session_id=X -> full session + messages. 400 if no ID.
+    /api/session               ?session_id=X -> session + messages. 400 if no ID.
+                               Bare (no msg_limit) keeps the historical full-transcript
+                               contract. Recovery paths request a bounded tail
+                               (`msg_limit=30`) and restore `_messages_truncated` /
+                               `_messages_offset` before persisting anchor-scene
+                               metadata. Outline jump and jump-to-start opt in to the
+                               full transcript via the explicit `msg_limit=all`
+                               escape hatch. See #7310 / #7625 / #7628.
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)

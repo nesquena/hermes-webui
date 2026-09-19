@@ -8977,9 +8977,11 @@ def _parse_msg_limit(raw):
     """Parse and clamp the ``?msg_limit=`` query value.
 
     Returns a positive int clamped to ``[1, _MAX_MSG_LIMIT]``, or ``None`` when
-    the value is absent/empty/malformed (the bare no-``msg_limit`` path, which
-    intentionally returns the full transcript for callers that need it).
-    Extracted from the handler so the clamp expression has direct test coverage.
+    the value is absent/empty/malformed.  ``?msg_limit=all`` also returns
+    ``None`` — an explicit escape hatch for the full-transcript paths the
+    frontend genuinely needs; the handler distinguishes it from a bare request
+    via :func:`_resolve_effective_msg_limit`.  Extracted from the handler so
+    the clamp expression has direct test coverage.
     """
     if not raw:
         return None
@@ -8988,6 +8990,26 @@ def _parse_msg_limit(raw):
     except (TypeError, ValueError):
         return None
     return max(1, min(value, _MAX_MSG_LIMIT))
+
+
+def _resolve_effective_msg_limit(raw_limit):
+    """Resolve the effective ``msg_limit`` for ``GET /api/session``.
+
+    Returns ``(effective_limit, explicit_all)``.
+
+    - numeric ``?msg_limit=N`` → clamped int (existing pagination).
+    - ``?msg_limit=all`` → ``(None, True)``: explicit full-transcript escape
+      hatch.  Frontend paths that address rows by absolute transcript index
+      (outline jump, jump-to-start) genuinely need everything; they pass
+      ``all`` instead of relying on the bare no-limit shape.
+    - any other bare shape (no limit) → ``(None, False)``: the historical
+      full-transcript contract is preserved (contract tests pin tool-row
+      preservation and the runtime-journal snapshot on this shape), so the
+      bounded-window fix is enforced at the frontend call sites instead.
+    """
+    explicit_all = str(raw_limit or "").strip().lower() == "all"
+    limit = _parse_msg_limit(raw_limit)
+    return limit, explicit_all
 
 
 # If a sidecar JSON file exceeds this threshold, the display-path tail
@@ -13002,8 +13024,10 @@ def _handle_session_get(handler, parsed) -> bool:
     # payload; the existing _messages_truncated signal covers the clamped
     # case (the client sees there are more rows than returned). Parsing +
     # clamping live in _parse_msg_limit so the expression has direct test
-    # coverage; None means the bare no-msg_limit path (full transcript).
-    msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
+    # coverage.  The frontend recovery paths request a bounded tail
+    # explicitly (msg_limit=30), and the two absolute-index paths opt in to
+    # the full transcript via msg_limit=all (#7310/#7625).
+    _raw_msg_limit = query.get("msg_limit", [None])[0]
     # ?msg_before=N — 0-based index into the full message array.
     # Returns messages before this index (for scroll-to-top lazy loading).
     # Combined with msg_limit for paging.
@@ -13012,6 +13036,9 @@ def _handle_session_get(handler, parsed) -> bool:
         msg_before = int(_msg_before) if _msg_before else None
     except (ValueError, TypeError):
         msg_before = None
+    msg_limit, _msg_limit_explicit_all = _resolve_effective_msg_limit(
+        _raw_msg_limit,
+    )
     # ?expand_renderable=1 is retained for compatibility with older
     # frontends. msg_limit now counts visible transcript rows by default, so
     # the flag no longer changes the server-side pagination semantics.
@@ -13221,9 +13248,13 @@ def _handle_session_get(handler, parsed) -> bool:
             _messages_offset = 0
         # Index of the first returned message in the full message array.
         # Frontend uses this as cursor for scroll-to-top paging.
+        # Session-level tool_calls windowing keys off whether the returned
+        # message array was actually truncated (msg_before paging, any
+        # effective msg_limit) rather than whether a limit parameter was
+        # present — the full-transcript shape returns everything, so the
+        # length comparison alone decides (#7310/#7625).
         _windowed_messages = (
             load_messages
-            and msg_limit is not None
             and (msg_before is not None or len(_truncated_msgs) < len(_all_msgs))
         )
         # Resolve effective context_length with model-metadata fallback so

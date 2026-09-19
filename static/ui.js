@@ -10168,7 +10168,11 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    // Bounded tail (msg_limit=30) — a bare reload used to pull and re-redact
+    // the ENTIRE transcript on every offline/bfcache recovery (#7310/#7625).
+    // truncation signal + _oldestIdx are read below, so the Load-earlier
+    // paging gate still works after the windowed refresh.
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
     S.session = data.session;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.messages = data.session.messages || [];
