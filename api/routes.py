@@ -24996,7 +24996,17 @@ def _handle_cron_update(handler, body):
                 updates[k] = v
     except ValueError as e:
         return bad(handler, str(e))
-    job = update_job(body["job_id"], updates)
+    # #7352: ``update_job`` re-parses the updated schedule through
+    # ``cron.jobs.parse_schedule``, which raises ``ValueError`` for
+    # display-form input like ``"once at 2026-08-28 16:05"`` (or any other
+    # user-typed garbage). That exception previously escaped to a 500
+    # because the earlier normalization try block didn't cover it. Return
+    # 400 with the parser message so the WebUI can surface a real
+    # validation error instead of an opaque Internal Server Error.
+    try:
+        job = update_job(body["job_id"], updates)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
     if not job:
         return bad(handler, "Job not found", 404)
     return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
