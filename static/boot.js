@@ -282,6 +282,15 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
+  // #6709 (gate round 6): the panel is the preview's only host, and a panel
+  // collapse is now presentation-only (see closeWorkspacePanel) — it keeps the
+  // preview alive: path, dirty flag, editor contents and the #previewArea
+  // `.visible` class. Reopening must therefore restore PREVIEW mode rather than
+  // expose a browse pane whose tree and empty-state are still suppressed by the
+  // retained preview path (renderFileTree() hides both while a preview path is
+  // set). Normalizing here fixes the blank Files pane at its root without
+  // destroying the user's unsaved draft.
+  if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -291,6 +300,22 @@ function openWorkspacePanel(mode='browse'){
 }
 
 function closeWorkspacePanel(){
+  // #6709 (gate round 6): this must stay PRESENTATION-ONLY. An earlier revision
+  // called clearPreview({keepPanelOpen:true}) here, which silently destroyed an
+  // in-progress edit: clearPreview() unconditionally resets _previewCurrentPath,
+  // _previewCurrentMode and _previewDirty and empties the editor surfaces, so a
+  // user who typed into Edit and then collapsed the panel via any of the
+  // ordinary controls (composer Files toggle, Settings workspace-panel toggle,
+  // mobile outside-tap drawer close) lost the orphaned textarea bytes with no
+  // confirm, and opening another file could overwrite the draft.
+  //
+  // Collapsing the panel must NOT clear the preview path, dirty flag, editor
+  // contents or visible-preview state. The blank-pane lifecycle that motivated
+  // the old teardown is instead fixed at its root by openWorkspacePanel(), which
+  // normalizes a browse reopen to `preview` while a preview is retained — so the
+  // retained preview is what the user sees, and the tree is never exposed in
+  // the suppressed state. Only the explicit preview-close action
+  // (handleWorkspaceClose → clearPreview()) tears a preview down.
   _setWorkspacePanelMode('closed');
 }
 
@@ -2228,11 +2253,26 @@ function clearPreview(opts={}){
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
-  const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
+  // Reconcile browse-state visibility from the refreshed model now that the
+  // preview is gone. renderFileTree() chooses between the rebuilt tree and
+  // the workspace empty-state placeholder (#703); without this call, a
+  // background refresh that emptied the directory while the preview was open
+  // would leave #wsEmptyState hidden (it was suppressed for the preview
+  // state) — closing the preview would reveal a blank panel. The renderer
+  // owns the tree/empty-state contract, so defer to it rather than
+  // duplicating placeholder rules here. Always call even when the panel is
+  // being closed: the tree visibility computed by renderFileTree (preview
+  // path is already cleared) is correct for browse mode and persists when
+  // the user reopens the panel later — openWorkspacePanel('browse') does
+  // not otherwise render the tree, so skipping the call here leaves both
+  // the tree and empty-state placeholder hidden on reopen.
+  if(typeof renderFileTree==='function'){
+    try{renderFileTree();}catch(_){}
+  }
 }
 $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead

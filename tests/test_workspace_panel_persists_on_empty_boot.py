@@ -34,6 +34,19 @@ INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
+def _boot_function(name: str) -> str:
+    """Extract a whole top-level function body from static/boot.js.
+
+    Character-window slicing (``BOOT_JS[idx:idx+N]``) is a time bomb: adding a
+    comment above the assertion target silently pushes it out of the window and
+    the test stops reaching the code it claims to check. Extract structurally
+    instead (brace matching) so the assertions are window-independent.
+    """
+    from tests.js_source_extract import extract_function
+
+    return extract_function(BOOT_JS, name)
+
+
 def _html_tag_by_id(element_id: str) -> str:
     marker = f'id="{element_id}"'
     idx = INDEX_HTML.find(marker)
@@ -51,8 +64,7 @@ class TestSyncStateNoSession:
     def test_preview_mode_without_session_force_closes(self):
         """A 'preview' panel needs file content from a session — close it
         when there's no session."""
-        idx = BOOT_JS.find("function syncWorkspacePanelState()")
-        body = BOOT_JS[idx:idx + 800]
+        body = _boot_function("syncWorkspacePanelState")
         assert "_workspacePanelMode==='preview'" in body, (
             "syncWorkspacePanelState must check _workspacePanelMode==='preview' "
             "before force-closing on no-session boot"
@@ -65,8 +77,7 @@ class TestSyncStateNoSession:
         """For 'browse' mode without a session, syncWorkspacePanelUI() should
         run so the panel renders its 'no workspace' or default-workspace state
         rather than being force-closed."""
-        idx = BOOT_JS.find("function syncWorkspacePanelState()")
-        body = BOOT_JS[idx:idx + 800]
+        body = _boot_function("syncWorkspacePanelState")
         # The else branch (browse / closed mode without session) calls UI sync
         assert "syncWorkspacePanelUI()" in body, (
             "syncWorkspacePanelState must call syncWorkspacePanelUI() in the "
@@ -140,8 +151,7 @@ class TestToggleStaysEnabledWithProfileWorkspace:
         """openWorkspacePanel('browse') must not return early when
         S._profileDefaultWorkspace is set, otherwise clicking the toggle
         won't open the panel even though canBrowse said it should."""
-        idx = BOOT_JS.find("function openWorkspacePanel(")
-        body = BOOT_JS[idx:idx + 600]
+        body = _boot_function("openWorkspacePanel")
         # The early-return guard should include the profile-workspace check
         assert "_profileDefaultWorkspace" in body, (
             "openWorkspacePanel must include S._profileDefaultWorkspace in its "
