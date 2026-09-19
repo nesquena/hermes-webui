@@ -398,7 +398,9 @@ _DEFAULT_EXPERIMENTAL_CONFIG = {
     # session call sites must continue using the existing JSON paths unless a
     # later PR deliberately enables and wires this flag.
     "unified_session_db": False,
+    "unified_session_metadata_mode": "off",
 }
+_UNIFIED_SESSION_METADATA_MODES = {"off", "shadow", "sync"}
 _DEFAULT_AGENT_PERSONALITIES = {
     # Mirrors the Hermes Agent CLI built-ins so WebUI's config-derived
     # /personality path is not empty for fresh profiles.
@@ -537,6 +539,31 @@ def is_unified_session_db_enabled(config_data: dict | None = None) -> bool:
     if not isinstance(experimental, dict):
         return False
     return experimental.get("unified_session_db") is True
+
+
+def get_unified_session_metadata_mode(config_data: dict | None = None) -> str:
+    """Return normalized unified lifecycle metadata mode.
+
+    Valid values are ``off``, ``shadow``, ``sync``. Invalid, missing, or
+    non-string values fail closed to ``off``. Whitespace is stripped and
+    comparison is case-insensitive.
+    """
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    experimental = active_cfg.get("experimental", {}) if isinstance(active_cfg, dict) else {}
+    if not isinstance(experimental, dict):
+        return "off"
+    raw = experimental.get("unified_session_metadata_mode", "off")
+    if not isinstance(raw, str):
+        return "off"
+    normalized = raw.strip().lower()
+    if normalized in _UNIFIED_SESSION_METADATA_MODES:
+        return normalized
+    return "off"
+
+
+def is_unified_session_metadata_shadow_enabled(config_data: dict | None = None) -> bool:
+    """True only when master flag is on and mode is ``shadow``."""
+    return is_unified_session_db_enabled(config_data) and get_unified_session_metadata_mode(config_data) == "shadow"
 
 
 def _refresh_config_cache(config_path: Path | None = None) -> None:
