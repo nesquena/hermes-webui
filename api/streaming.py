@@ -4577,12 +4577,24 @@ def _generated_title_language_mismatch(user_text: str, title: str, pinned_langua
 
     The conversation-based check does not also run in that case, because it
     measures against the wrong thing: it would reject the pinned title the
-    prompt just asked for. Blank or unresolvable pins keep the #3293
-    conversation-based validation exactly as it was.
+    prompt just asked for.
+
+    A nonblank pin the script map does not know is still a pin. The prompt
+    said "Write the title in <language>" and accepted the value verbatim, so
+    the conversation is the wrong yardstick there too, and applying it
+    discards compliant output: an English conversation with a Swahili or
+    Amharic pin produced a title the #3293 check read as drift. Those pins
+    validate the title against its own dominant script, which still rejects a
+    title that is half the requested language and half the conversation's,
+    while accepting one written wholly in a script this module cannot name.
+
+    Only a blank pin keeps the #3293 conversation-based validation.
     """
     pinned_script = _resolve_pinned_title_script(pinned_language)
     if pinned_script:
         return _script_drift(title, pinned_script)
+    if str(pinned_language or '').strip():
+        return _script_drift(title, _dominant_script(title))
     return _title_language_mismatch(user_text, title)
 
 

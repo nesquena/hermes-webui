@@ -461,9 +461,14 @@ def test_pinned_mode_keeps_trivial_echo_rejection(monkeypatch):
     assert aux_title is None and aux_status == "llm_invalid_aux"
 
 
-def test_unresolvable_pin_falls_back_to_conversation_check(monkeypatch):
-    """A pin that resolves to no script bucket cannot be validated against, so
-    the #3293 conversation-based check applies unchanged."""
+def test_unresolvable_pin_is_trusted_rather_than_measured_against_the_conversation(monkeypatch):
+    """A pin the script map does not know is still honoured by the prompt, so
+    the conversation check must not discard what comes back.
+
+    Nothing here can tell a real unmapped language from a fake one: the map is
+    the only language knowledge this module has. Trusting the pin is what keeps
+    an Amharic or Swahili title, and the cost is that a nonsense pin keeps its
+    title too."""
     from api import streaming
 
     monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Klingon"})
@@ -473,8 +478,8 @@ def test_unresolvable_pin_falls_back_to_conversation_check(monkeypatch):
         "How do I fix this error?", "Do it like this."
     )
 
-    assert title is None
-    assert status == "llm_language_mismatch_aux"
+    assert title == "修正方法"
+    assert status == "llm_stub"
 
 
 def test_english_pin_overrides_legacy_german_heuristic(monkeypatch):
@@ -637,3 +642,75 @@ def test_truly_unclassified_letters_count_as_other():
     counts = _script_counts("ᬅᬓ᭄ᬱᬭ")  # Balinese
     assert sum(counts.values()) >= 2
     assert _script_drift("ᬅᬓ᭄ᬱᬭ", "latin") is True
+
+
+def test_unmapped_pin_keeps_a_compliant_title(monkeypatch):
+    """A valid language the script map does not know must not have its
+    compliant title discarded.
+
+    The prompt takes any nonblank language verbatim ("Write the title in
+    Amharic"), so the model answers in Amharic while the conversation is in
+    English. Validating that against the conversation start is the #3293
+    check measuring the wrong thing, and it threw the title away."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Amharic"})
+    monkeypatch.setattr(
+        streaming, "generate_title_raw_via_aux",
+        _fake_transport("የስህተት መላ ፍለጋ", []),
+    )
+
+    title, status, _ = streaming._generate_llm_session_title_via_aux(
+        "How do I fix this error?", "Do it like this."
+    )
+
+    assert title == "የስህተት መላ ፍለጋ"
+    assert status == "llm_stub"
+
+
+def test_unmapped_pin_still_rejects_a_half_ignored_title(monkeypatch):
+    """Validation is retargeted, not switched off: a title split between the
+    requested language and the conversation's is still drift."""
+    from api.streaming import _generated_title_language_mismatch
+
+    # Ten Ethiopic letters against ten Latin: neither holds the 60% majority
+    # _dominant_script needs, so no script is expected and the split is drift.
+    assert _generated_title_language_mismatch(
+        "How do I fix this error?", "የስህተት መላ ፍለጋ Error Guide", "Amharic"
+    ) is True
+    # A title that merely ignores the pin is a different failure and is kept:
+    # a wholly Latin title has no drift from itself, and losing it is worse.
+    assert _generated_title_language_mismatch(
+        "How do I fix this error?", "Error Troubleshooting Guide", "Amharic"
+    ) is False
+
+
+def test_unmapped_pin_on_the_agent_route_too(monkeypatch):
+    """Both transports share the one validator, so the agent route behaves
+    identically."""
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: {"language": "Amharic"})
+    monkeypatch.setattr(
+        streaming, "generate_title_raw_via_agent",
+        lambda agent, user_text, assistant_text, pinned_language='': ("የስህተት መላ ፍለጋ", "llm_stub"),
+    )
+
+    title, _, _ = streaming._generate_llm_session_title_for_agent(
+        object(), "How do I fix this error?", "Do it like this."
+    )
+
+    assert title == "የስህተት መላ ፍለጋ"
+
+
+def test_blank_pin_keeps_the_conversation_check(monkeypatch):
+    """The unpinned path is untouched: a CJK title on an English conversation
+    is still drift."""
+    from api.streaming import _generated_title_language_mismatch
+
+    assert _generated_title_language_mismatch(
+        "How do I fix this error?", "エラーの修正方法", ""
+    ) is True
+    assert _generated_title_language_mismatch(
+        "How do I fix this error?", "Error Troubleshooting Guide", ""
+    ) is False
