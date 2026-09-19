@@ -3927,11 +3927,21 @@ function _normalizeConfiguredModelKey(modelId){
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
+  // A row synthesized from an ungrouped top-level OPTION (temporary/custom
+  // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
+  // even when the option carries provider identity, so that row's provider
+  // authority has to fall back to its badge provider (same fallback already
+  // used by _modelProviderForSelectedBadge below). Without it neither the
+  // same-normalized fast path nor the routed spellings can see the row as
+  // belonging to that provider (#7290).
+  const _entryProvider=(entry)=>String(
+    (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
+  ).toLowerCase();
   const matchingEntries=(entries||[]).filter(existing=>
     _normalizeConfiguredModelKey(existing.value)===normalized
   );
   if(matchingEntries.some(existing=>{
-    const entryProvider=String(existing.providerId||'').toLowerCase();
+    const entryProvider=_entryProvider(existing);
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
   // @provider:model is an equivalent routing spelling only when an existing
@@ -3940,12 +3950,29 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // different providers.
   const rawId=String(modelId||'');
   const prefix=provider?`@${provider}:`:'';
-  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
-  const routedId=rawId.slice(prefix.length);
-  return (entries||[]).some(entry=>
-    String(entry.providerId||'').toLowerCase()===provider
-    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
-  );
+  if(prefix&&rawId.toLowerCase().startsWith(prefix)){
+    const routedId=rawId.slice(prefix.length);
+    return (entries||[]).some(entry=>
+      _entryProvider(entry)===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    );
+  }
+  // Plain `provider/model` badge keys (produced by the backend alongside
+  // `@provider:model`) must dedupe the same way when an existing picker row
+  // belongs to that provider. For single-slash model ids the primary
+  // normalization already strips the prefix; this branch matters for
+  // slash-bearing model ids where the prefixed key keeps vendor hierarchy
+  // (e.g. commandcode/deepseek/deepseek-v4-flash vs deepseek/deepseek-v4-flash)
+  // and would otherwise leak as a duplicate selectable entry (#7290).
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const routedId=rawId.slice(slashPrefix.length);
+    return (entries||[]).some(entry=>
+      _entryProvider(entry)===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    );
+  }
+  return false;
 }
 
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
@@ -4388,7 +4415,15 @@ function renderModelDropdown(){
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      // Keep the option's own provider authority: _ensureModelOptionInDropdown
+      // stamps dataset.provider on the temporary options it adds, and that
+      // authority has to reach both places later comparisons read (the
+      // structural providerId and the configured badge lookup). Storing
+      // providerId:'' here let a badge-owned `@commandcode:model-a` row claim
+      // providerless authority and suppress another provider's
+      // same-normalized configured entries (#7290).
+      const optionProviderId=_getOptionProviderId(child);
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:optionProviderId,badge:_getConfiguredModelBadge(child.value,_badgeMap,optionProviderId),hiddenByDefault:false});
       _groupMeta.get(groupKey).modelCount++;
     }
   }
@@ -4399,6 +4434,10 @@ function renderModelDropdown(){
       name:esc(getModelLabel(modelId)),
       id:esc(modelId),
       group:'',
+      // Stamp the badge provider onto the appended row so its provider
+      // authority is structural here instead of depending on the badge
+      // fallback later (#7290).
+      providerId:String((badge&&badge.provider)||''),
       badge,
     });
   }
