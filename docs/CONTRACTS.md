@@ -100,6 +100,26 @@ Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.
 
+### Process-wakeup body compatibility
+
+Structured wakeup display is eligible only for a trusted user message whose
+`_source` is exactly `process_wakeup`; matching body text alone is not enough.
+The implemented completion and watch-match bodies use:
+
+- `Command: <command>` for legacy single-line commands.
+- `Command JSON: <JSON string>` on one physical line for commands containing
+  carriage return (`\r`) or line feed (`\n`). JSON escaping keeps
+  command-embedded physical `Output:` or `Matched output:` lookalikes from
+  becoming structural delimiters.
+
+The server and browser inverse parsers decode the explicit `Command JSON` field
+only when it is valid JSON whose value is a string. Malformed JSON and
+non-string values fail closed: they produce no structured body metadata and use
+the raw notice rendering unless authoritative server-stamped `_wakeup_meta` is
+already present. That metadata remains the preferred source for structured
+header fields; process output stays in the message body and is not duplicated
+into metadata. Without it, other wakeup body shapes keep the raw fallback.
+
 ## UI, UX, and theme contracts
 
 - [`DESIGN.md`](../DESIGN.md): design tokens and the current calm-console

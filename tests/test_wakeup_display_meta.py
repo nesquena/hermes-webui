@@ -33,6 +33,17 @@ def test_completion_round_trip():
     }
 
 
+def test_completion_multiline_command_round_trip():
+    command = "printf 'starting\\n'\n\nprintf 'finished\\n'"
+    meta = wakeup_display_meta(format_wakeup_prompt(_completion_evt(command=command)))
+    assert meta == {
+        "type": "completion",
+        "task_id": "proc_123",
+        "command": command,
+        "exit_code": 0,
+    }
+
+
 def test_completion_missing_exit_code_round_trips_as_question_mark():
     evt = _completion_evt()
     del evt["exit_code"]

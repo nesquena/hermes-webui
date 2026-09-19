@@ -16727,11 +16727,18 @@ function _parseProcessWakeupBody(text){
   // watch suppression note is intentionally NOT split out of the output — real
   // process output can contain the identical text, so stripping it would drop
   // legitimate content (#6350 review finding 2). It rides along in `output`.
-  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
-  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
-  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
-  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
-  return null;
+  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand( JSON)?: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
+  const completion=!!m;
+  if(!m) m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand( JSON)?: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
+  if(!m) return null;
+  let command=m[4];
+  if(m[3]){
+    if(command.includes('\r')) return null;
+    try { command=JSON.parse(command); } catch { return null; }
+    if(typeof command!=='string') return null;
+  }
+  if(completion) return {type:'completion',taskId:m[1],exitCode:m[2],command,output:m[5],pattern:null};
+  return {type:'watch_match',taskId:m[1],pattern:m[2],command,output:m[5],exitCode:null};
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
 // client parse; the output section only ever comes from the parse because the

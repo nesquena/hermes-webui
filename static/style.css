@@ -2363,6 +2363,7 @@
   .process-wakeup-cmd-row,.process-wakeup-pattern-row{margin-bottom:6px;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;}
   .process-wakeup-detail-key{font-size:10.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);flex:0 0 auto;}
   .process-wakeup-cmd-row code,.process-wakeup-pattern-row code{font-family:var(--font-mono);font-size:11.5px;color:var(--text);background:transparent;padding:0;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
+  .process-wakeup-cmd-row code{white-space:pre-wrap;}
   .process-wakeup-detail pre.process-wakeup-text{max-height:320px;overflow:auto;}
   /* Guarantee a >=44px disclosure touch target under the mobile breakpoint (#6350 review finding 3). */
   @media(max-width:700px){.process-wakeup-card>summary{min-height:44px;}}
