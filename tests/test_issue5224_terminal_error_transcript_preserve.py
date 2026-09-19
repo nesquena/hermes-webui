@@ -141,6 +141,10 @@ function buildRuntime() {
   globalThis._messageRenderWindowSize = 20;
   globalThis._streamFinalized = !!scenario.streamFinalized;
   globalThis._persistTimer = null;
+  // #2761: _restoreSettledSession reads the STREAM-OWNED continuation-sid
+  // binding that attachLiveStream() provides. The standalone extraction has no
+  // attachLiveStream scope, so mirror the closure default ('' = no rotation).
+  globalThis._streamCompressionContinuationSid = '';
   globalThis.api = async () => scenario.apiPayload || { session: null };
   globalThis.msgContent = undefined;
   globalThis._isPreservedCompressionTaskListMarkerOnlyText = () => false;
@@ -193,6 +197,117 @@ function buildRuntime() {
       action: scenario.action,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       terminalMarkerCount,
+      calls,
+    }));
+    return;
+  }
+
+  if (scenario.action === 'restore_two_stream_race') {
+    // Two-stream recovery (#6689 re-gate finding #1): stream A settles via
+    // _restoreSettledSession. While A's /api/session poll is in flight, a
+    // newer continuation turn B starts and takes stream ownership
+    // (S.activeStreamId -> 'stream-B'). A's late settle must be rejected as
+    // stale and must NOT clear B's stream id, replace S.session, or replace
+    // S.messages with A's archived transcript. Then B's own terminal settle
+    // must be honored ('restored'), not rejected as stale.
+    globalThis.api = async () => {
+      // B starts in the interval after A's active_stream_id is cleared but
+      // before A's done lands.
+      S.activeStreamId = 'stream-B';
+      return scenario.aPayload || { session: null };
+    };
+    const aStatus = await _restoreSettledSession({}, { status: true });
+    const afterA = {
+      status: aStatus,
+      activeStreamId: S.activeStreamId,
+      session: S.session ? { session_id: S.session.session_id } : null,
+      messages: Array.isArray(S.messages) ? S.messages.map((m) => ({ role: m.role, content: m.content })) : [],
+      calls: calls.slice(),
+    };
+    // Phase 2: B's own settle (B owns the stream now).
+    globalThis.streamId = 'stream-B';
+    globalThis._streamFinalized = false;
+    globalThis.api = async () => scenario.bPayload || { session: null };
+    const bStatus = await _restoreSettledSession({}, { status: true });
+    console.log(JSON.stringify({
+      action: scenario.action,
+      a: afterA,
+      b: {
+        status: bStatus,
+        session: S.session ? { session_id: S.session.session_id } : null,
+        messages: Array.isArray(S.messages) ? S.messages.map((m) => ({ role: m.role, content: m.content })) : [],
+        calls: calls.slice(),
+      },
+    }));
+    return;
+  }
+
+  if (scenario.action === 'restore_rotation_during_await') {
+    // #6689 re-gate (finding #2): the continuation session id rotates WHILE
+    // the /api/session poll for the archived parent session is in flight. The
+    // stale archived-parent payload must be discarded (no settle, no state
+    // mutation, no _streamFinalized), and the recovery must re-poll the
+    // CURRENT continuation id so ONLY the continuation payload settles.
+    let apiCalls = 0;
+    globalThis.api = async () => {
+      apiCalls += 1;
+      if (apiCalls === 1) {
+        // Rotation arrives during request #1 (archived parent) — as if the
+        // `compressed` SSE event landed mid-roundtrip.
+        _streamCompressionContinuationSid = 'session-cont-1';
+        return scenario.parentPayload || { session: null };
+      }
+      return scenario.contPayload || { session: null };
+    };
+    const status = await _restoreSettledSession({}, { status: true });
+    const messages = Array.isArray(S.messages) ? S.messages : [];
+    console.log(JSON.stringify({
+      action: scenario.action,
+      status,
+      apiCalls,
+      session: S.session ? { session_id: S.session.session_id } : null,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      streamFinalized: !!_streamFinalized,
+      calls,
+    }));
+    return;
+  }
+
+  if (scenario.action === 'restore_rotation_concurrent') {
+    // #6689 re-gate (finding #2, STALE-OLD reproduction): TWO recovery
+    // requests race. The archived-parent poll (A) is in flight when the
+    // continuation session id rotates, and a SECOND recovery request (B)
+    // for the continuation is in flight concurrently — the exact
+    // interleaving the maintainer's Codex reproduction ended with
+    // (STALE-OLD: the concurrent continuation request returned 'restored'
+    // but got suppressed by _streamFinalized, leaving the wrong archived
+    // session settled). A's stale archived-parent payload must be discarded
+    // by the post-await re-read, and the continuation payload must be the
+    // ONLY one to settle — the archived parent must never set
+    // _streamFinalized nor mutate S.session / S.messages.
+    let apiCalls = 0;
+    globalThis.api = async () => {
+      apiCalls += 1;
+      if (apiCalls === 1) {
+        // Rotation lands while A's archived-parent poll is in flight (the
+        // `compressed` SSE event lands mid-roundtrip).
+        _streamCompressionContinuationSid = 'session-cont-1';
+        return scenario.parentPayload || { session: null };
+      }
+      return scenario.contPayload || { session: null };
+    };
+    const aPromise = _restoreSettledSession({}, { status: true });
+    const bPromise = _restoreSettledSession({}, { status: true });
+    const [aStatus, bStatus] = await Promise.all([aPromise, bPromise]);
+    const messages = Array.isArray(S.messages) ? S.messages : [];
+    console.log(JSON.stringify({
+      action: scenario.action,
+      aStatus,
+      bStatus,
+      apiCalls,
+      session: S.session ? { session_id: S.session.session_id } : null,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      streamFinalized: !!_streamFinalized,
       calls,
     }));
     return;
@@ -421,3 +536,222 @@ def test_terminal_error_marker_is_single_instance_and_not_duplicated(driver_path
 
     assert outcome["terminalMarkerCount"] == 1, f"terminal marker should be deduped to one, got {outcome['terminalMarkerCount']}"
     assert outcome["messages"][-1]["content"].startswith("**Connection interrupted:**")
+
+
+def test_two_stream_recovery_newer_continuation_wins_over_stale_done(driver_path):
+    """Two-stream recovery (#6689 re-gate finding #1): a newer continuation
+    turn B starts in the interval after A's active_stream_id is cleared but
+    before A's done lands. A's late settle must be rejected as stale and must
+    NOT clear B's stream id, replace S.session, or clobber B's transcript;
+    B's own terminal event must be honored (not rejected as stale)."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_two_stream_race",
+        "state": {
+            "session": {"session_id": "session-5224", "message_count": 5},
+            "messages": [
+                {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                {"role": "assistant", "content": "B live answer segment", "_ts": "b1"},
+            ],
+            "activeStreamId": "stream-A",
+        },
+        "aPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "A stale archived answer", "_ts": "a1"},
+                ],
+            },
+        },
+        "bPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "B final answer", "_ts": "bFinal"},
+                ],
+            },
+        },
+        "activeSid": "session-5224",
+        "streamId": "stream-A",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    a = outcome["a"]
+    # A's late settle must be rejected as stale — the newer stream B owns the turn.
+    assert a["status"] == "stale", f"A must be rejected as stale, got {a['status']}"
+    # A must NOT clear B's stream id.
+    assert a["activeStreamId"] == "stream-B", (
+        f"A clobbered B's stream id: {a['activeStreamId']}"
+    )
+    # A must NOT replace S.session with its archived snapshot.
+    assert a["session"] == {"session_id": "session-5224"}
+    # A must NOT clobber B's live transcript with A's archived messages.
+    a_contents = [item["content"] for item in a["messages"]]
+    assert "B live answer segment" in a_contents, (
+        f"B's live transcript was clobbered by A: {a_contents}"
+    )
+    assert "A stale archived answer" not in a_contents, (
+        f"A replaced B's transcript with its archived snapshot: {a_contents}"
+    )
+    # B's own terminal event must be honored (not rejected as stale).
+    b = outcome["b"]
+    assert b["status"] == "restored", f"B's terminal settle must be honored, got {b['status']}"
+    b_contents = [item["content"] for item in b["messages"]]
+    assert "B final answer" in b_contents, (
+        f"B's final answer must land in the transcript: {b_contents}"
+    )
+
+
+def test_rotation_during_await_settles_only_continuation_payload(driver_path):
+    """Deferred-request regression (#6689 re-gate finding #2): the continuation
+    session id rotates WHILE the archived-parent /api/session poll is in flight
+    (the `compressed` SSE event lands mid-roundtrip). The stale archived-parent
+    payload must be discarded — no settle, no S.session / S.messages /
+    S.activeStreamId mutation, no _streamFinalized — and the recovery must
+    re-poll the CURRENT continuation id so ONLY the continuation payload
+    settles."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_rotation_during_await",
+        "state": {
+            "session": {"session_id": "session-2761", "message_count": 5},
+            "messages": [
+                {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                {"role": "assistant", "content": "Live pre-compression fragment", "_ts": "a1"},
+            ],
+            "activeStreamId": "stream-2761",
+        },
+        "parentPayload": {
+            "session": {
+                "session_id": "session-2761",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "ARCHIVED parent answer (must be discarded)", "_ts": "aParent"},
+                ],
+            },
+        },
+        "contPayload": {
+            "session": {
+                "session_id": "session-cont-1",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "CONTINUATION final answer", "_ts": "aCont"},
+                ],
+            },
+        },
+        "activeSid": "session-2761",
+        "streamId": "stream-2761",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    # The recovery must settle ('restored'), not give up or settle the archive.
+    assert outcome["status"] == "restored", f"got {outcome['status']}"
+    # Exactly two polls: the discarded archived-parent fetch + the retry
+    # against the current continuation id. The stale payload must NOT settle.
+    assert outcome["apiCalls"] == 2, (
+        f"expected archived-parent poll + continuation retry (2 calls), got {outcome['apiCalls']}"
+    )
+    # Only the continuation payload may settle: S.session is the continuation
+    # session and the archived-parent answer never lands in the transcript.
+    assert outcome["session"] == {"session_id": "session-cont-1"}, (
+        f"archived parent settled instead of continuation: {outcome['session']}"
+    )
+    contents = [item["content"] for item in outcome["messages"]]
+    assert "CONTINUATION final answer" in contents, (
+        f"continuation payload did not settle: {contents}"
+    )
+    assert "ARCHIVED parent answer" not in contents, (
+        f"stale archived-parent payload settled: {contents}"
+    )
+    # A legit settle finalizes the stream; the stale payload must not have been
+    # the one to do it (it never reached the mutation block).
+    assert outcome["streamFinalized"] is True
+
+
+def test_concurrent_continuation_request_never_settles_archived_parent(driver_path):
+    """#6689 re-gate (finding #2, STALE-OLD reproduction): the archived-parent
+    /api/session poll is in flight when the continuation session id rotates
+    AND a second recovery request for the continuation is already in flight —
+    the exact interleaving the maintainer's Codex reproduction ended with.
+    The stale archived-parent payload must be discarded by the post-await
+    re-read; ONLY the continuation payload may settle (never the archived
+    parent, which must not set _streamFinalized or mutate S.session /
+    S.messages)."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_rotation_concurrent",
+        "state": {
+            "session": {"session_id": "session-2761", "message_count": 5},
+            "messages": [
+                {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                {"role": "assistant", "content": "Live pre-compression fragment", "_ts": "a1"},
+            ],
+            "activeStreamId": "stream-2761",
+        },
+        "parentPayload": {
+            "session": {
+                "session_id": "session-2761",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "ARCHIVED parent answer (must be discarded)", "_ts": "aParent"},
+                ],
+            },
+        },
+        "contPayload": {
+            "session": {
+                "session_id": "session-cont-1",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Question about data?", "_ts": "u1"},
+                    {"role": "assistant", "content": "CONTINUATION final answer", "_ts": "aCont"},
+                ],
+            },
+        },
+        "activeSid": "session-2761",
+        "streamId": "stream-2761",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    # The archived parent never settles: S.session is the continuation and the
+    # archived answer never lands in the transcript.
+    assert outcome["session"] == {"session_id": "session-cont-1"}, (
+        f"archived parent settled instead of continuation: {outcome['session']}"
+    )
+    contents = [item["content"] for item in outcome["messages"]]
+    assert "CONTINUATION final answer" in contents, (
+        f"continuation payload did not settle: {contents}"
+    )
+    assert "ARCHIVED parent answer" not in contents, (
+        f"stale archived-parent payload settled: {contents}"
+    )
+    # Both concurrent requests resolve 'restored': one settles the
+    # continuation, the other is suppressed by _streamFinalized — never the
+    # archived parent.
+    assert outcome["aStatus"] == "restored", f"parent-side recovery: {outcome['aStatus']}"
+    assert outcome["bStatus"] == "restored", f"continuation-side recovery: {outcome['bStatus']}"
+    # Exactly three polls: (1) A's archived-parent poll — discarded by the
+    # post-await re-read; (2) B's continuation poll — settles; (3) A's retry
+    # against the current continuation id — suppressed by _streamFinalized.
+    # The archived parent is polled exactly once and never settles.
+    assert outcome["apiCalls"] == 3, (
+        f"expected archived-parent poll + continuation poll + retry (3 calls), "
+        f"got {outcome['apiCalls']}"
+    )
+    # The stream is finalized by the continuation settle (never the archive).
+    assert outcome["streamFinalized"] is True
