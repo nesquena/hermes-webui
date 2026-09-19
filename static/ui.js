@@ -9201,7 +9201,7 @@ function _playEdgeTtsChunked(text, btn){
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge'})
     })
     .then(function(r){
       if(!r.ok){
