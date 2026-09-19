@@ -9,6 +9,7 @@ SESSIONS_JS = Path("static/sessions.js").read_text(encoding="utf-8")
 UI_JS = Path("static/ui.js").read_text(encoding="utf-8")
 BOOT_JS = Path("static/boot.js").read_text(encoding="utf-8")
 PANELS_JS = Path("static/panels.js").read_text(encoding="utf-8")
+MESSAGES_JS = Path("static/messages.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:
@@ -427,15 +428,91 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);" in SESSIONS_JS
     assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
-    # The width hint is applied only when it stays within the server msg_limit
-    # ceiling; an over-ceiling hint would be clamped by the backend and could
-    # silently shrink an already-loaded transcript, so it falls back to the bare
-    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
-    # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
+    # The width hint is clamped to the server msg_limit ceiling and the request
+    # ALWAYS carries msg_limit. This used to fall back to a bare full-transcript
+    # request when the hint exceeded the ceiling, to avoid silently shrinking an
+    # already-loaded transcript (#6152/#6154 ceiling; Codex gate silent row-loss
+    # fix) — but that made every same-session refresh of a long conversation
+    # refetch and re-render the whole thing, a one-way ratchet once a session
+    # crossed the ceiling. The row-loss invariant is now upheld by re-prepending
+    # retained older rows instead (see the dedicated test below).
+    # #6177: the ceiling is read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    assert "const boundedReloadLimit = Math.min(requestedReloadLimit, reloadCeiling);" in SESSIONS_JS
+    # A non-finite/absent server-advertised ceiling falls back to the mirrored
+    # constant rather than poisoning the window with NaN.
+    assert "? Number(_msgLimitMax)" in SESSIONS_JS
+    assert ": _MSG_LIMIT_MAX;" in SESSIONS_JS
+    assert "const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
+    assert "const expandParam = '&expand_renderable=1';" in SESSIONS_JS
+    # The bare no-msg_limit refetch must not come back.
+    assert "&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
+
+
+def test_bounded_reload_window_reattaches_retained_older_rows():
+    """A bounded refresh must not drop already-loaded history (#6154 invariant).
+
+    The reload window is always clamped to the server ceiling now, so a session
+    holding more rows than the ceiling gets a window that starts LATER than its
+    current oldest row. Those older rows are not in the response; they must be
+    re-prepended rather than silently dropped.
+    """
+    ensure_start = SESSIONS_JS.index("async function _ensureMessagesLoaded(sid")
+    ensure_end = SESSIONS_JS.index("function _messageComparableText", ensure_start)
+    body = SESSIONS_JS[ensure_start:ensure_end]
+
+    # The pre-clear transcript and its absolute offset are both recovered:
+    # loadSession() resets S.messages/_oldestIdx before the fetch, so the
+    # snapshot stash is the only source on the destructive force-reload path.
+    assert "const _retainedPrefixSource = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)" in body
+    assert "? (Number(_pendingCarryForwardOldestIdx) || 0)" in body
+    assert ": (Number(_oldestIdx) || 0);" in body
+    assert "const _retainedPrefixBase = _retainedPrefixSource.slice();" in body
+
+    # The re-join itself, and its two bail-outs.
+    assert "const _windowOldestIdx = Number(data.session._messages_offset) || 0;" in body
+    assert "if (_windowOldestIdx > _retainedPrefixOldestIdx && _retainedPrefixBase.length) {" in body
+    assert "const _retainCount = _windowOldestIdx - _retainedPrefixOldestIdx;" in body
+    assert "|| (_retainedPrefixOldestIdx + _retainedPrefixBase.length) <= _serverMessageCount;" in body
+    assert "if (_retainCount <= _retainedPrefixBase.length && _priorSpanFitsServer) {" in body
+    assert "msgs = _retainedPrefixBase.slice(0, _retainCount).concat(msgs);" in body
+    assert "_oldestIdx = _retainedPrefixOldestIdx;" in body
+    assert "_messagesTruncated = _oldestIdx > 0;" in body
+
+    # Re-join must land before the transcript is swapped in, so the cache
+    # invalidation and S.messages assignment see the joined list.
+    join_pos = body.index("msgs = _retainedPrefixBase.slice(0, _retainCount).concat(msgs);")
+    replace_pos = body.index("S.messages = msgs;")
+    assert join_pos < replace_pos
+
+    # The stash is set and cleared in lockstep with the carry-forward snapshot.
+    assert "let _pendingCarryForwardOldestIdx = 0;" in SESSIONS_JS
+    assert "_pendingCarryForwardOldestIdx = (currentSid === sid && forceReload)" in SESSIONS_JS
+    assert "_pendingCarryForwardOldestIdx = 0;" in body
+
+
+def test_render_window_growth_is_capped_at_every_expansion_site():
+    """The auto-expanding render window must never grow to the whole transcript.
+
+    #6999 capped this on the reload path, but the two stream-completion sites in
+    messages.js still expanded to every loaded row, so one completed turn undid
+    the cap and the window ratcheted open permanently — seconds per render on a
+    multi-thousand-message session. All three sites share one bounded helper.
+    """
+    assert "function _expandMessageRenderWindowForLoadedMessages(){" in UI_JS
+    assert "const MESSAGE_RENDER_WINDOW_GROWTH_MULTIPLE=4;" in UI_JS
+    assert "return MESSAGE_RENDER_WINDOW_DEFAULT*MESSAGE_RENDER_WINDOW_GROWTH_MULTIPLE;" in UI_JS
+    assert "Math.min(_messageRenderableMessageCount(), _messageRenderWindowGrowthCap())" in UI_JS
+
+    # No expansion site may still assign the raw, uncapped renderable count.
+    uncapped = "_messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());"
+    assert uncapped not in MESSAGES_JS, (
+        "a stream-completion site still expands the render window to the full loaded "
+        "transcript; it must go through _expandMessageRenderWindowForLoadedMessages()"
+    )
+    assert MESSAGES_JS.count("_expandMessageRenderWindowForLoadedMessages();") == 2
+    assert "_expandMessageRenderWindowForLoadedMessages();" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
     load_end = SESSIONS_JS.index("// ── Handoff hint logic", load_start)
