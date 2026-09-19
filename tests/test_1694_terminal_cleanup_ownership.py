@@ -5,7 +5,10 @@ active pane. The owning session's persisted/runtime stream marker can be cleared
 but global pane state such as ``clearInflight()``, approval/clarify polling, and
 ``setBusy(false)`` must be gated to the session that owns the active pane/card.
 """
+import json
+import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 REPO_ROOT = Path(__file__).parent.parent
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
@@ -44,6 +47,112 @@ def _function_body(name: str) -> str:
     signature_end = MESSAGES_JS.find("){", start)
     assert signature_end >= 0, f"function body not found: {name}"
     return _body_from_brace(MESSAGES_JS, signature_end + 1, name)
+
+
+def _attach_live_stream_source(include_server_cursor=True):
+    """Execute the real attachLiveStream closure and return its EventSource URL."""
+    marker = "function attachLiveStream("
+    start = MESSAGES_JS.find(marker)
+    assert start >= 0, "attachLiveStream function not found"
+    signature_end = MESSAGES_JS.find("){", start)
+    assert signature_end >= 0, "attachLiveStream signature not found"
+    body = _body_from_brace(MESSAGES_JS, signature_end + 1, marker)
+    attach_source = MESSAGES_JS[start : signature_end + 2] + body + "}"
+    runtime_journal = (
+        "{run_id: streamId, last_seq: serverSeq, last_event_id: serverEventId}"
+        if include_server_cursor
+        else "undefined"
+    )
+    script = f"""
+import vm from 'node:vm';
+const captured = [];
+const sessionId = 'session-under-test';
+const streamId = 'stream-under-test';
+const serverSeq = 10491;
+const serverEventId = `${{streamId}}:${{serverSeq}}`;
+class FakeEventSource {{
+  constructor(url, options) {{
+    captured.push({{url: String(url), options}});
+    this.readyState = 0;
+  }}
+  addEventListener() {{}}
+  close() {{ this.readyState = 2; }}
+}}
+FakeEventSource.OPEN = 1;
+FakeEventSource.CONNECTING = 0;
+const noop = () => {{}};
+const sandbox = {{
+  console,
+  URL,
+  JSON,
+  Math,
+  Date,
+  encodeURIComponent,
+  setTimeout: () => 1,
+  clearTimeout: noop,
+  requestAnimationFrame: noop,
+  cancelAnimationFrame: noop,
+  EventSource: FakeEventSource,
+  location: {{href: 'https://webui.example.test/'}},
+  document: {{
+    hidden: false,
+    visibilityState: 'visible',
+    wasDiscarded: false,
+    baseURI: 'https://webui.example.test/',
+    addEventListener: noop,
+    removeEventListener: noop,
+  }},
+  S: {{
+    session: {{
+      session_id: sessionId,
+      active_stream_id: streamId,
+      pending_started_at: 1,
+      runtime_journal: {runtime_journal},
+    }},
+    activeStreamId: streamId,
+    messages: [],
+    busy: true,
+  }},
+  INFLIGHT: {{[sessionId]: {{
+    streamId,
+    messages: [],
+    toolCalls: [],
+    lastRunJournalSeq: 0,
+    lastRunJournalEventId: '',
+  }}}},
+  LIVE_STREAMS: {{}},
+  _STREAM_WAS_HIDDEN: {{}},
+  _STREAM_NOTIFICATION_BACKGROUND: {{}},
+  _streamHiddenTrackerBound: false,
+  _desktopBackgroundedForNotifications: false,
+  _bindStreamHiddenTracker: noop,
+  ensureLiveWorklogShell: noop,
+  closeOtherLiveStreams: noop,
+  closeLiveStream: noop,
+  resetTurnWorkspaceMutations: noop,
+  _resetStreamScrollFollow: noop,
+  _suspendSessionStreamForLiveChat: noop,
+  _dispatchExtensionTurnLifecycle: noop,
+  api: async () => ({{active: true}}),
+}};
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(attach_source)}, sandbox);
+sandbox.attachLiveStream(sessionId, streamId, [], {{reconnecting: true}});
+await new Promise(resolve => setImmediate(resolve));
+if (captured.length !== 1) throw new Error(`expected one EventSource, got ${{captured.length}}`);
+process.stdout.write(JSON.stringify(captured[0]));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module"],
+        cwd=REPO_ROOT,
+        input=script,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return json.loads(result.stdout)
 
 
 def test_terminal_handlers_use_session_owned_cleanup_helpers():
@@ -185,6 +294,24 @@ def test_active_reconnect_uses_run_journal_replay_cursor():
     assert "${_runJournalReplayParams()}" in active_block
     assert "after_seq" in _function_body("_runJournalReplayParams")
     assert "after_event_id" in _function_body("_runJournalReplayParams")
+
+
+def test_cold_active_reconnect_uses_server_runtime_journal_cursor_when_inflight_cursor_is_missing():
+    """A direct reload must put the server's current cursor on EventSource."""
+    event_source = _attach_live_stream_source()
+    query = parse_qs(urlsplit(event_source["url"]).query)
+    assert query["stream_id"] == ["stream-under-test"]
+    assert query["after_seq"] == ["10491"]
+    assert query["after_event_id"] == ["stream-under-test:10491"]
+
+
+def test_cold_active_reconnect_without_server_cursor_does_not_request_zero_replay():
+    """A missing cursor must omit replay rather than fall back to sequence zero."""
+    event_source = _attach_live_stream_source(include_server_cursor=False)
+    query = parse_qs(urlsplit(event_source["url"]).query)
+    assert "after_seq" not in query
+    assert "after_event_id" not in query
+    assert "replay" not in query
 
 
 def test_attach_live_stream_registers_one_source_per_session_stream():
