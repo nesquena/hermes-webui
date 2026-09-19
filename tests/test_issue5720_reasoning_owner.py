@@ -328,6 +328,10 @@ class FakeElement {
     walk(this);
     return out;
   }
+  contains(node){
+    while(node){if(node===this)return true;node=node.parentNode;}
+    return false;
+  }
   closest(selector){
     let node=this;
     while(node){ if(matchesSelector(node,selector)) return node; node=node.parentNode; }
@@ -467,6 +471,7 @@ eval(anchorsSrc);
 for(const name of [
   'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
   '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
+  '_anchorSceneToolRenderSignature','_anchorSceneDataRowKey','_anchorScenePlaceChildren',
   '_anchorSceneRowTimestampSeconds','_anchorSceneTransparentNodeForRow',
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',

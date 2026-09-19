@@ -1,4 +1,4 @@
-name: Conversation lifecycle (informational)
+name: Conversation lifecycle
 
 # Scoped to the code this browser gate actually exercises — the chat
 # render/streaming surface — so it doesn't spin up playwright+chromium on
@@ -13,6 +13,10 @@ on:
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_transparent_fade_mutations.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -24,6 +28,10 @@ on:
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_transparent_fade_mutations.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -32,7 +40,6 @@ jobs:
   live-to-final:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +52,18 @@ jobs:
             scenario: terminal-error
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+          - name: reconnect-scene-redraw
+            script: tests/browser_reconnect_scene_redraw.py
+            browsers: chromium
+          - name: live-scene-energy
+            script: tests/browser_live_scene_energy.py
+            browsers: chromium
+          - name: progress-animation
+            script: tests/browser_progress_animation.py
+            browsers: chromium
+          - name: transparent-fade-mutations
+            script: tests/browser_transparent_fade_mutations.py
+            browsers: chromium
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +88,7 @@ jobs:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
+          BROWSERS: ${{ matrix.browsers }}
         run: python ${{ matrix.script }}
 
       - name: Run settlement frame proof
