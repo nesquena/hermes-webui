@@ -258,17 +258,20 @@ def test_sweep_skips_a_run_file_that_changed_after_classification(tmp_path, monk
 
     The reclaim step re-checks the complete stat identity captured at
     classification time (device / inode / size / mtime / ctime); if anything
-    moved, the file was not quiescent and must be left in place.
+    moved, the file was not quiescent and must be left in place. The wrapper
+    forwards every kwarg the sweep passes (a stale signature would TypeError
+    into the error counter and pass vacuously), and the no-errors assertion
+    makes that failure mode impossible to miss.
     """
     path = _write_terminal_run(tmp_path, "sid-1", "run-1", age_days=30)
 
     real_reclaim = run_journal._reclaim_run_file
 
-    def _racing_reclaim(candidate, expected_signature):
+    def _racing_reclaim(candidate, expected_signature, **kwargs):
         # A writer lands one more row after classification, before the unlink.
         with open(candidate, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"seq": 99, "event": "metering", "payload": {}}) + "\n")
-        return real_reclaim(candidate, expected_signature)
+        return real_reclaim(candidate, expected_signature, **kwargs)
 
     monkeypatch.setattr(run_journal, "_reclaim_run_file", _racing_reclaim)
 
@@ -276,6 +279,98 @@ def test_sweep_skips_a_run_file_that_changed_after_classification(tmp_path, monk
 
     assert path.exists(), "stat-identity mismatch must abort the unlink"
     assert result["removed_files"] == 0
+    assert result["errors"] == 0, "the injected race must not surface as a sweep error"
+
+
+def test_reclaim_pins_the_session_dir_against_a_swap_race(tmp_path, monkeypatch):
+    """A dir swap in the check-then-use window must not reclaim outside the root.
+
+    Check-then-use race (Greptile review on PR #7642, round 2): containment is
+    validated, then the session directory is replaced with a symlink to an
+    external directory holding a same-name HARD LINK to the classified inode
+    (identical dev/ino/size/mtime/ctime, so a signature re-check cannot tell
+    them apart). A pathname-resolving unlink would follow the swapped path and
+    remove that external entry. The reclaim pins the session directory as an
+    open handle, so the unlink acts on the directory's inode and the external
+    entry survives.
+
+    The swap fires at ``_lock_for`` — the exact mid-reclaim moment, after the
+    containment check and first stat, before the re-check and unlink.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "swap-sid"
+    real = _write_terminal_run(session_dir, sid, "swap-run", age_days=90)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external_entry = outside / "swap-run.jsonl"
+    os.link(real, external_entry)  # same inode, separate directory entry
+
+    journal_dir = _journal_dir(session_dir, sid)
+    moved_away = tmp_path / "moved-away"
+    real_lock_for = run_journal._lock_for
+    state = {"swapped": False}
+
+    def _swapping_lock_for(path):
+        if not state["swapped"]:
+            # The race: swap the session dir for a symlink to the outside dir.
+            os.rename(journal_dir, moved_away)
+            os.symlink(outside, journal_dir)
+            state["swapped"] = True
+        return real_lock_for(path)
+
+    monkeypatch.setattr(run_journal, "_lock_for", _swapping_lock_for)
+
+    result = sweep_run_journal(
+        session_dir=session_dir, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0
+    )
+
+    assert external_entry.exists(), (
+        "the unlink must act on the pinned session directory, never on whatever "
+        "the swapped pathname resolves to"
+    )
+    assert not (moved_away / "swap-run.jsonl").exists(), (
+        "the classified entry is still reclaimed (from the pinned directory itself)"
+    )
+    assert result["removed_files"] == 1
+    assert result["errors"] == 0
+
+
+def test_reclaim_leaves_a_dir_swapped_before_the_reclaim_untouched(tmp_path, monkeypatch):
+    """A dir swapped to a symlink before the reclaim runs is refused (fail closed).
+
+    Companion to the race test above: when the swap is already in place as the
+    reclaim starts, the containment gate resolves the path outside the journal
+    root and refuses — nothing is removed, inside or outside the root.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "preswap-sid"
+    real = _write_terminal_run(session_dir, sid, "preswap-run", age_days=90)
+
+    outside = tmp_path / "preswap-outside"
+    outside.mkdir()
+    external_entry = outside / "preswap-run.jsonl"
+    os.link(real, external_entry)
+
+    journal_dir = _journal_dir(session_dir, sid)
+    moved_away = tmp_path / "preswap-moved"
+    real_reclaim = run_journal._reclaim_run_file
+
+    def _preswapped_reclaim(candidate, expected_signature, **kwargs):
+        os.rename(journal_dir, moved_away)
+        os.symlink(outside, journal_dir)
+        return real_reclaim(candidate, expected_signature, **kwargs)
+
+    monkeypatch.setattr(run_journal, "_reclaim_run_file", _preswapped_reclaim)
+
+    result = sweep_run_journal(
+        session_dir=session_dir, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0
+    )
+
+    assert external_entry.exists(), "nothing outside the root is ever touched"
+    assert (moved_away / "preswap-run.jsonl").exists(), "a refused reclaim removes nothing"
+    assert result["removed_files"] == 0
+    assert result["errors"] == 0
 
 
 def test_sweep_keeps_the_newest_terminal_run_even_when_it_exceeds_the_size_cap(tmp_path):

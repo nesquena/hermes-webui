@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -155,6 +156,13 @@ _SWEEP_THREAD_LOCK = threading.Lock()
 # Serializes sweep bodies: the maintenance tick and any explicit caller never
 # scan (and unlink) concurrently.
 _SWEEP_RUN_LOCK = threading.Lock()
+# dir_fd + O_NOFOLLOW primitives (Linux/macOS) — the same pattern
+# `api/workspace.py` uses. Where they are unavailable (Windows) the sweep
+# falls back to path-based ops with containment checks; the caps and the
+# terminal-only contract are identical either way.
+_DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 def _default_session_dir() -> Path:
@@ -894,7 +902,26 @@ def _stat_signature(st: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
-def _verify_terminal_header_at(path: Path, marker_pos: int, size: int) -> bool:
+def _read_run_span(path: Path, offset: int, length: int, file_fd: int | None) -> bytes | None:
+    """Read ``length`` bytes at ``offset`` from a run file; None on failure.
+
+    ``file_fd`` (fd mode) is the run file opened relative to the pinned session
+    directory handle, so the read cannot be redirected by a path swap;
+    otherwise the file is opened by path (fallback mode).
+    """
+    try:
+        if file_fd is not None:
+            return os.pread(file_fd, max(0, length), offset)
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            return fh.read(length)
+    except OSError:
+        return None
+
+
+def _verify_terminal_header_at(
+    path: Path, marker_pos: int, size: int, *, file_fd: int | None = None
+) -> bool:
     """Prove a top-level terminal journal row owns the marker at ``marker_pos``.
 
     Hunts backwards for the row start, requires it to begin at a line boundary
@@ -903,17 +930,15 @@ def _verify_terminal_header_at(path: Path, marker_pos: int, size: int) -> bool:
     file start — a nested ``"terminal":true`` inside a payload never is), then
     schema-matches the row header and cross-checks its ids against the path.
     Returns False when it cannot *prove* terminality (fail closed: a missed
-    reclaim is safe, a wrong one is not).
+    reclaim is safe, a wrong one is not). ``file_fd`` reads through a pinned
+    descriptor when given (fd mode).
     """
     hunt_start = max(0, marker_pos - _RETENTION_ROW_START_HUNT_BYTES - 1)
     # Read past the marker so the anchored header pattern can consume the
     # separator/comma that follows it within `_RETENTION_HEADER_MAX_BYTES`.
     read_end = min(size, marker_pos + len(_RETENTION_MARKER_BYTES) + 8)
-    try:
-        with path.open("rb") as fh:
-            fh.seek(hunt_start)
-            buf = fh.read(read_end - hunt_start)
-    except OSError:
+    buf = _read_run_span(path, hunt_start, read_end - hunt_start, file_fd)
+    if buf is None:
         return False
     search_end = marker_pos - hunt_start
     for _attempt in range(8):  # bounded: real headers sit immediately before the marker
@@ -946,7 +971,7 @@ def _verify_terminal_header_at(path: Path, marker_pos: int, size: int) -> bool:
     return False
 
 
-def _journal_file_is_terminal(path: Path, size: int) -> bool:
+def _journal_file_is_terminal(path: Path, size: int, *, file_fd: int | None = None) -> bool:
     """Return True when the run file provably contains a top-level terminal row.
 
     Walks the file backwards in bounded chunks, stopping at the first VERIFIED
@@ -954,7 +979,8 @@ def _journal_file_is_terminal(path: Path, size: int) -> bool:
     backward walk matters: a multi-megabyte single row (giant ``apperror``
     payload) carries its marker inside its header, so the scan must cross the
     row to reach it. Files whose terminal row sits deeper than the scan budget
-    return False and are left untouched.
+    return False and are left untouched. ``file_fd`` reads through a pinned
+    descriptor when given (fd mode).
     """
     if size <= 0:
         return False
@@ -966,11 +992,8 @@ def _journal_file_is_terminal(path: Path, size: int) -> bool:
     while remaining > 0 and pos > 0:
         span = min(_RETENTION_VERIFY_CHUNK_BYTES, remaining)
         span_start = max(0, pos - span)
-        try:
-            with path.open("rb") as fh:
-                fh.seek(span_start)
-                data = fh.read(pos - span_start)
-        except OSError:
+        data = _read_run_span(path, span_start, pos - span_start, file_fd)
+        if data is None:
             return False
         buf = data + carry
         data_len = len(data)
@@ -985,7 +1008,9 @@ def _journal_file_is_terminal(path: Path, size: int) -> bool:
                 abs_pos = carry_abs_start + (idx - data_len)
             else:
                 abs_pos = -1
-            if abs_pos >= 0 and _verify_terminal_header_at(path, abs_pos, size):
+            if abs_pos >= 0 and _verify_terminal_header_at(
+                path, abs_pos, size, file_fd=file_fd
+            ):
                 return True
             search_end = idx
         remaining -= pos - span_start
@@ -1066,11 +1091,31 @@ def resolve_run_journal_retention_caps() -> dict:
     }
 
 
+def _open_dir_no_follow(path: Path) -> int | None:
+    """Open a directory as a stable handle (``O_NOFOLLOW``); None when unavailable.
+
+    Returns an owned fd that pins the *inode* of ``path``: subsequent
+    fd-relative operations (``os.stat``/``os.unlink`` with ``dir_fd``) act on
+    that directory no matter what the pathname is later swapped to. ``None``
+    means the platform lacks dir_fd support (Windows), where the sweep falls
+    back to path-based operations with containment checks. A symlinked final
+    component is refused (``ELOOP``) — the journal only ever creates real
+    directories.
+    """
+    if not _DIR_FD_OK:
+        return None
+    try:
+        return os.open(str(path), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    except OSError:
+        return None
+
+
 def _reclaim_run_file(
     path: Path,
     expected_signature: tuple[int, int, int, int, int],
     *,
     journal_root_real: str | None = None,
+    dir_fd: int | None = None,
 ) -> int:
     """Unlink ``path`` if its stat identity still matches; return bytes freed (0 = skipped).
 
@@ -1079,30 +1124,43 @@ def _reclaim_run_file(
     recreation) between classification and reclaim aborts the unlink instead of
     destroying rows written after the file was judged quiescent.
 
-    ``journal_root_real`` (when given) is the resolved journal root and acts as
-    a final containment gate: the unlink is refused unless the path still
-    resolves inside it. This is deliberately redundant with the directory-walk
-    filter — the unlink is the irreversible step, so it re-validates at the
-    point of use rather than trusting an upstream check.
+    Containment is enforced against check-then-use races by *pinning* the
+    session directory: when ``dir_fd`` is given, every stat and the final
+    ``unlink`` run fd-relatively against that open handle, so a directory
+    swapped to a symlink after validation cannot redirect the removal (the
+    classic dir-swap race). ``journal_root_real`` remains as a path-level gate
+    for the fallback (no dir_fd) mode and as defence in depth.
     """
     if journal_root_real is not None and not _resolve_within(journal_root_real, path):
         return 0
-    try:
-        st = path.stat()
-    except OSError:
-        return 0
+    if dir_fd is not None:
+        try:
+            st = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return 0
+    else:
+        try:
+            st = path.stat()
+        except OSError:
+            return 0
     if _stat_signature(st) != expected_signature:
         return 0
     freed = 0
     with _lock_for(path):
         try:
-            st = path.stat()
+            if dir_fd is not None:
+                st = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+            else:
+                st = path.stat()
         except OSError:
             return 0
         if _stat_signature(st) != expected_signature:
             return 0
         try:
-            path.unlink()
+            if dir_fd is not None:
+                os.unlink(path.name, dir_fd=dir_fd)
+            else:
+                path.unlink()
             freed = int(st.st_size)
         except FileNotFoundError:
             return 0
@@ -1137,29 +1195,101 @@ def _sweep_run_journal_session(
     """Classify and (if eligible) reclaim terminal runs inside one session's journal dir.
 
     ``journal_root_real`` is the resolved journal root; every candidate file must
-    still resolve inside it, so a symlinked entry cannot redirect the sweep.
+    still resolve inside it (fallback mode), and the session dir itself is
+    PINNED as an open handle (``dir_fd``) for the whole pass so every stat,
+    classification read, and unlink acts on the directory's inode — a swap of
+    the pathname to a symlink after the containment check cannot redirect any
+    of them (check-then-use race, closed at the point of use).
     """
+    # Pin the session directory (O_NOFOLLOW). None on platforms without
+    # dir_fd support (Windows), where the path-based branch below still
+    # carries the containment checks.
+    session_fd = _open_dir_no_follow(session_journal_dir)
+    if session_fd is None and _DIR_FD_OK:
+        # Fail closed: dir_fd support exists but this directory could not be
+        # pinned (swapped to a symlink, removed, or unreadable). Never fall
+        # back to path-based reclaim for a directory we cannot pin — a swap
+        # raced in mid-sweep must leave the session untouched, not redirect
+        # the sweep at whatever the pathname now points to.
+        return
     try:
-        paths = sorted(session_journal_dir.glob("*.jsonl"))
+        _sweep_session_entries(
+            session_journal_dir, session_fd, caps, now, counters, journal_root_real
+        )
+    finally:
+        if session_fd is not None:
+            try:
+                os.close(session_fd)
+            except OSError:
+                pass
+
+
+def _sweep_session_entries(
+    session_journal_dir: Path,
+    session_fd: int | None,
+    caps: dict,
+    now: float,
+    counters: dict,
+    journal_root_real: str,
+) -> None:
+    """Body of one session sweep; runs with ``session_fd`` pinned when available."""
+    try:
+        if session_fd is not None:
+            names = sorted(os.listdir(session_fd))
+        else:
+            names = sorted(entry.name for entry in session_journal_dir.glob("*.jsonl"))
     except OSError:
         counters["errors"] += 1
         return
     entries: list[tuple[Path, os.stat_result, bool]] = []
-    for path in paths:
-        try:
-            if path.is_symlink():
-                # A run file that is itself a link could point anywhere; the
-                # journal only ever creates plain files.
-                continue
-            if not path.is_file():
-                continue
-            if not _resolve_within(journal_root_real, path):
-                continue
-            st = path.stat()
-        except OSError:
+    for name in names:
+        path = session_journal_dir / name
+        # Only journal run files, by name (fd listing returns every entry).
+        if session_fd is not None and not name.endswith(".jsonl"):
             continue
-        counters["files_scanned"] += 1
-        terminal = _journal_file_is_terminal(path, int(st.st_size))
+        # Run files opened fd-relatively (below) must be plain files with no
+        # symlinked final component; a symlinked entry could point anywhere.
+        file_fd: int | None = None
+        try:
+            if session_fd is not None:
+                file_fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=session_fd)
+                st = os.fstat(file_fd)
+                if not stat.S_ISREG(st.st_mode):
+                    try:
+                        os.close(file_fd)
+                    except OSError:
+                        pass
+                    file_fd = None
+                    continue
+            else:
+                if path.is_symlink():
+                    # A run file that is itself a link could point anywhere; the
+                    # journal only ever creates plain files.
+                    continue
+                if not path.is_file():
+                    continue
+                if not _resolve_within(journal_root_real, path):
+                    continue
+                st = path.stat()
+        except OSError:
+            if file_fd is not None:
+                try:
+                    os.close(file_fd)
+                except OSError:
+                    pass
+                file_fd = None
+            continue
+        try:
+            counters["files_scanned"] += 1
+            terminal = _journal_file_is_terminal(
+                path, int(st.st_size), file_fd=file_fd
+            )
+        finally:
+            if file_fd is not None:
+                try:
+                    os.close(file_fd)
+                except OSError:
+                    pass
         if terminal:
             counters["terminal_files"] += 1
         entries.append((path, st, terminal))
@@ -1199,6 +1329,7 @@ def _sweep_run_journal_session(
                     path,
                     _stat_signature(st),
                     journal_root_real=journal_root_real,
+                    dir_fd=session_fd,
                 )
                 if freed > 0:
                     reclaimed = True
