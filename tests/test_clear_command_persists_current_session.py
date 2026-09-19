@@ -154,9 +154,10 @@ def test_slash_clear_api_failure_keeps_visible_and_durable_history(cleanup_test_
 
 
 def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_sessions):
-    """A clear for session A may finish after the user has opened session B."""
-    session_a = "clear_race_a"
-    session_b = "clear_race_b"
+    """A clear for A cannot replace B while B's load is still unresolved."""
+    suffix = uuid.uuid4().hex
+    session_a = f"clear_race_a_{suffix}"
+    session_b = f"clear_race_b_{suffix}"
     cleanup_test_sessions.extend([session_a, session_b])
     _seed_session(session_a, "session A history")
     _seed_session(session_b, "session B must stay active")
@@ -170,20 +171,38 @@ def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_
             result = page.evaluate(
                 """async ({sessionA, sessionB}) => {
                     const realApi = window.api.bind(window);
+                    let delaySessionB = true;
                     window.api = (path, options) => {
-                      if (path !== '/api/session/clear') return realApi(path, options);
-                      return new Promise((resolve, reject) => {
-                        window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
-                      });
+                      if (path === '/api/session/clear') {
+                        return new Promise((resolve, reject) => {
+                          window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
+                        });
+                      }
+                      if (delaySessionB && String(path).startsWith('/api/session?') && String(path).includes(encodeURIComponent(sessionB))) {
+                        delaySessionB = false;
+                        return new Promise((resolve, reject) => {
+                          window.__releaseDelayedSessionB = () => realApi(path, options).then(resolve, reject);
+                        });
+                      }
+                      return realApi(path, options);
                     };
                     const clear = cmdClear();
                     await new Promise(resolve => requestAnimationFrame(resolve));
                     if (typeof window.__releaseDelayedClear !== 'function') {
                       throw new Error('clear request was not started');
                     }
-                    await loadSession(sessionB);
+                    const loadingB = loadSession(sessionB);
+                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    if (typeof window.__releaseDelayedSessionB !== 'function') {
+                      throw new Error('session B load was not started');
+                    }
                     await window.__releaseDelayedClear();
+                    // The clear response is now available while B is still loading.
+                    // Release B before awaiting cmdClear's sidebar refresh, which
+                    // may itself await the in-flight session-list refresh.
+                    await window.__releaseDelayedSessionB();
                     await clear;
+                    await loadingB;
                     return {
                       activeSessionId: S.session && S.session.session_id,
                       visibleText: document.getElementById('msgInner').innerText,
@@ -203,3 +222,43 @@ def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_
     assert "session B must stay active" in result["visibleText"]
     assert _server_session(session_a)["messages"] == []
     assert len(_server_session(session_b)["messages"]) == 2
+
+
+def test_slash_clear_holds_send_lock_until_durable_clear_finishes(cleanup_test_sessions):
+    """A follow-up send cannot overlap the in-flight durable clear request."""
+    session_id = f"clear_send_lock_{uuid.uuid4().hex}"
+    cleanup_test_sessions.append(session_id)
+    _seed_session(session_id, "history cleared before a follow-up")
+
+    pw = _browser_or_skip()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = browser.new_page()
+            _open_session(page, session_id)
+            result = page.evaluate(
+                """async () => {
+                    const realApi = window.api.bind(window);
+                    window.api = (path, options) => {
+                      if (path !== '/api/session/clear') return realApi(path, options);
+                      return new Promise((resolve, reject) => {
+                        window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
+                      });
+                    };
+                    document.getElementById('msg').value = '/clear';
+                    const clearing = send();
+                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    const inputWasCleared = document.getElementById('msg').value === '';
+                    document.getElementById('msg').value = 'follow-up after clear';
+                    await send();
+                    const lockHeld = _sendInProgress === true;
+                    await window.__releaseDelayedClear();
+                    await clearing;
+                    return {inputWasCleared, lockHeld, lockReleased: _sendInProgress === false};
+                }"""
+            )
+        finally:
+            browser.close()
+
+    assert result == {"inputWasCleared": True, "lockHeld": True, "lockReleased": True}
+    assert _server_session(session_id)["messages"] == []
