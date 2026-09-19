@@ -31,7 +31,7 @@ def test_sync_session_title_dedups_second_session_on_collision(tmp_path, monkeyp
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         state_sync.sync_session_title("sess-1", "Same Title", profile="default")
@@ -58,7 +58,7 @@ def test_sync_session_title_dedup_handles_numbered_base(tmp_path, monkeypatch):
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         state_sync.sync_session_title("sess-1", "Same Title #2", profile="default")
@@ -83,7 +83,7 @@ def test_sync_session_title_unique_titles_unchanged(tmp_path, monkeypatch):
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         state_sync.sync_session_title("sess-a", "Alpha Title", profile="default")
@@ -110,7 +110,7 @@ def test_sync_session_title_dedup_retry_never_clobbers_manual_rename(tmp_path, m
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         # sess-1 takes "Same Title" via the normal auto-title sync.

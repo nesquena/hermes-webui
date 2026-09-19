@@ -2436,13 +2436,15 @@ function t(key, ...args) {{
   return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }}
 async function api() {{ return apiData; }}
-function _showUpdateBanner() {{}}
+let bannerOptions=null;
+function _showUpdateBanner(_data, options) {{ bannerOptions=options; }}
 {format_fn}
 {instruction_fn}
 {error_fn}
 {check_fn}
 (async () => {{
   await checkUpdatesNow();
+  if(!bannerOptions || bannerOptions.force !== true) throw new Error('manual check must force banner display');
   if(state.checkUpdatesStatus.textContent.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('settings manual update must render pull guidance: '+state.checkUpdatesStatus.textContent);
   if(state.checkUpdatesStatus.style.color !== 'var(--accent)') throw new Error('manual update should stay in available state');
   apiData = {{ webui: {{ no_git: true, behind: 1 }}, agent: null }};
@@ -2647,7 +2649,112 @@ class TestUpdateCompareSource:
         up_to_date_idx = src.find("settings_up_to_date")
         assert up_to_date_idx != -1, "manual update up-to-date branch not found"
         block = src[up_to_date_idx:up_to_date_idx + 300]
-        assert "_showUpdateBanner(data)" in block
+        assert "_showUpdateBanner(data,{force:true})" in block
+
+    def test_update_banner_auto_notice_is_weekly_per_fingerprint(self):
+        src = read('static/ui.js')
+        declarations = "\n".join(
+            line.strip()
+            for line in src.splitlines()
+            if line.startswith('const UPDATE_BANNER_NOTICE_')
+        )
+        functions = "\n".join(
+            extract_js_function(src, name)
+            for name in [
+                '_formatUpdateTargetStatus',
+                '_formatManualUpdateInstruction',
+                '_updateBannerNoticeSignature',
+                '_readUpdateBannerNoticeRecord',
+                '_rememberUpdateBannerNoticeShown',
+                '_shouldShowUpdateBannerNotice',
+                '_showUpdateBanner',
+                'dismissUpdate',
+            ]
+        )
+        script = f"""
+const storage = {{}};
+const sessionItems = {{}};
+let now = 1700000000000;
+Date.now = () => now;
+global.localStorage = {{
+  getItem(k) {{ return Object.prototype.hasOwnProperty.call(storage,k) ? storage[k] : null; }},
+  setItem(k,v) {{ storage[k]=String(v); }},
+  removeItem(k) {{ delete storage[k]; }},
+}};
+global.sessionStorage = {{
+  getItem(k) {{ return Object.prototype.hasOwnProperty.call(sessionItems,k) ? sessionItems[k] : null; }},
+  setItem(k,v) {{ sessionItems[k]=String(v); }},
+  removeItem(k) {{ delete sessionItems[k]; }},
+}};
+const state = {{
+  hiddenSummaries: 0,
+  renderedLinks: 0,
+  updateBanner: {{
+    visible: false,
+    classList: {{
+      add(cls) {{ if(cls==='visible') state.updateBanner.visible=true; }},
+      remove(cls) {{ if(cls==='visible') state.updateBanner.visible=false; }},
+    }},
+  }},
+  updateMsg: {{ textContent: '' }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+}};
+global.window = {{ _whatsNewSummaryEnabled: false }};
+global.$ = (id) => state[id] || null;
+global.t = (key, fallback) => fallback || key;
+function _hideUpdateSummaryPanel() {{ state.hiddenSummaries += 1; }}
+function _renderUpdateWhatsNewLinks() {{ state.renderedLinks += 1; }}
+{declarations}
+{functions}
+const first = {{
+  webui: {{
+    behind: 2,
+    release_based: true,
+    current_version: 'v0.1.0',
+    latest_version: 'v0.2.0',
+    current_sha: 'aaa',
+    latest_sha: 'bbb',
+    compare_url: 'https://github.com/nesquena/hermes-webui/compare/aaa...bbb',
+  }},
+  agent: {{ behind: 0 }},
+}};
+const newer = {{
+  webui: {{
+    behind: 3,
+    release_based: true,
+    current_version: 'v0.1.0',
+    latest_version: 'v0.3.0',
+    current_sha: 'aaa',
+    latest_sha: 'ccc',
+    compare_url: 'https://github.com/nesquena/hermes-webui/compare/aaa...ccc',
+  }},
+  agent: {{ behind: 0 }},
+}};
+_showUpdateBanner(first);
+if(!state.updateBanner.visible) throw new Error('first automatic check should show banner');
+const storedAfterFirst = JSON.parse(storage[UPDATE_BANNER_NOTICE_STORAGE_KEY] || 'null');
+if(!storedAfterFirst || storedAfterFirst.shownAt !== now) throw new Error('first show should persist weekly marker');
+_showUpdateBanner(first);
+if(state.updateBanner.visible) throw new Error('same fingerprint inside seven days should suppress banner');
+if(state.hiddenSummaries !== 1) throw new Error('suppressed banner should hide stale summary panel');
+_showUpdateBanner(first,{{ force: true }});
+if(!state.updateBanner.visible) throw new Error('manual force should still show same fingerprint');
+state.updateBanner.visible = false;
+_showUpdateBanner(newer);
+if(!state.updateBanner.visible) throw new Error('new update fingerprint should show immediately');
+storage[UPDATE_BANNER_NOTICE_STORAGE_KEY] = JSON.stringify({{ signature: _updateBannerNoticeSignature(first), shownAt: now - UPDATE_BANNER_NOTICE_INTERVAL_MS - 1 }});
+state.updateBanner.visible = false;
+_showUpdateBanner(first);
+if(!state.updateBanner.visible) throw new Error('same fingerprint should show after seven days');
+delete storage[UPDATE_BANNER_NOTICE_STORAGE_KEY];
+window._updateData = first;
+dismissUpdate();
+if(sessionItems['hermes-update-dismissed'] !== '1') throw new Error('dismiss should preserve existing per-tab marker');
+if(!storage[UPDATE_BANNER_NOTICE_STORAGE_KEY]) throw new Error('dismiss should persist weekly marker for new tabs');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 class TestWhatsNewSummaryToggle:

@@ -15,6 +15,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _standalone_title_store(monkeypatch):
+    # Routing-only tests; real SQLite authority has a separate regression suite.
+    monkeypatch.setattr('api.state_sync._get_state_db', lambda **kwargs: None)
+
+
 from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
 
 

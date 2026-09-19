@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
 
@@ -79,6 +81,17 @@ def _ensure_state_db(profile=None):
     """
     db_path = _get_state_db_path(profile)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    # This DB is shared with the integration server and later test modules.
+    # Seed the Agent-owned schema before adding gateway-only fixture columns:
+    # a reduced messages table breaks SessionDB's indexes/triggers and causes
+    # strict title/clear writers to fail long after the gateway test has ended.
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        # Gateway read-only tests also run without the optional Agent package.
+        pass
+    else:
+        SessionDB(db_path=db_path).close()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -235,6 +248,28 @@ def _insert_message(conn, sid, role, content, timestamp):
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("profile", [None, "gateway-profile"])
+def test_gateway_fixture_supports_canonical_title_writes(tmp_path, monkeypatch, profile):
+    """A gateway fixture must remain usable by later strict canonical writers."""
+    SessionDB = pytest.importorskip("hermes_state").SessionDB
+    monkeypatch.setattr(f"{__name__}._get_test_state_dir", lambda: tmp_path)
+    conn = _ensure_state_db(profile)
+    try:
+        _insert_gateway_session(conn, session_id="fixture-title", title="Original")
+    finally:
+        conn.close()
+
+    db = SessionDB(db_path=_get_state_db_path(profile))
+    try:
+        db.set_session_title("fixture-title", "Canonical rename")
+        assert db.get_session_title("fixture-title") == "Canonical rename"
+        assert db.get_session_title_source("fixture-title") == "user"
+    finally:
+        db.close()
+    with sqlite3.connect(_get_state_db_path(profile)) as conn:
+        assert conn.execute("SELECT title FROM sessions WHERE id = 'fixture-title'").fetchone()[0] == "Canonical rename"
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 'fixture-title'").fetchone()[0] == 2
+
 def test_gateway_sessions_appear_when_enabled():
     """Gateway sessions from state.db appear in /api/sessions when show_cli_sessions is on."""
     conn = _ensure_state_db()
@@ -323,7 +358,7 @@ def test_active_cli_state_db_session_with_persisted_user_turn_is_visible_in_cli_
             "INSERT OR REPLACE INTO sessions "
             "(id, source, title, model, started_at, message_count, ended_at, end_reason) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ended_sid, 'cli', 'Untitled', 'openai/gpt-5', now + 10, 1, now + 11, 'cli-close'),
+            (ended_sid, 'cli', None, 'openai/gpt-5', now + 10, 1, now + 11, 'cli-close'),
         )
         conn.execute("DELETE FROM messages WHERE session_id = ?", (ended_sid,))
         _insert_message(conn, ended_sid, 'user', 'Ended CLI session', now + 11)
@@ -730,7 +765,7 @@ def test_default_title_cli_compression_chain_is_kept_by_lineage():
             conn,
             'cli_default_compress_root_001',
             source='cli',
-            title='Cli Session',
+            title='Untitled',
             started_at=t0,
             ended_at=t0 + 100,
             end_reason='compression',

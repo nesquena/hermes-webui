@@ -54,7 +54,8 @@ def test_regenerate_endpoint_persists_generated_title_without_reordering_sidebar
     next_endpoint_idx = ROUTES_PY.index('"/api/personality/set"', endpoint_idx)
     block = ROUTES_PY[endpoint_idx:next_endpoint_idx]
     assert "generate_session_title_for_session" in block
-    assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")' in block
+    assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate",' in block
+    assert 'expected_title=expected_title, expected_db=expected_db' in block
     assert "Read-only imported sessions cannot regenerate titles" in block
 
 
@@ -62,9 +63,9 @@ def test_regenerate_helper_persists_generated_title_and_publishes_sidebar_refres
     helper_idx = ROUTES_PY.index("def _persist_generated_session_title")
     queue_idx = ROUTES_PY.index("def _queue_generated_title_for_imported_session", helper_idx)
     helper_block = ROUTES_PY[helper_idx:queue_idx]
-    assert "mark_session_title_generated(session)" in helper_block
+    assert "_apply_generated_title(session, normalized_title, expected=expected_db" in helper_block
     assert "session.save(touch_updated_at=False)" in helper_block
-    assert "_sync_session_title_to_insights(session)" in helper_block
+    assert "_sync_session_title_to_insights(session)" not in helper_block
     assert "_publish_session_list_changed(" in helper_block
     assert "session_id=sid" in helper_block
 
