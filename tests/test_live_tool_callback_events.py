@@ -75,3 +75,89 @@ def test_tool_callback_events_keep_existing_frontend_event_contract():
     assert "upsertLiveToolCall(d,'complete')" in messages
     assert "data-live-tid" in ui
     assert "existing.replaceWith(replacement)" in ui
+
+
+# ── #7358: structured tool_complete must source is_error from the payload ──
+
+
+def test_tool_result_is_error_helper_is_defined():
+    """The structured ``tool_complete_callback`` signature is
+    ``(tool_call_id, name, args, function_result)`` and does not
+    receive the already-classified ``is_error`` bit the sibling
+    tool_progress_callback carries. The fix is a local helper
+    re-deriving a conservative failure flag from the structured
+    payload."""
+    src = _read("api/streaming.py")
+    assert "def _tool_result_is_error(" in src, (
+        "must add a module-level helper that classifies a structured "
+        "tool result, mirroring the Agent's own _detect_tool_failure() "
+        "shape on the four-arg structured callback path (#7358)"
+    )
+
+
+def test_tool_result_is_error_matches_is_error_true():
+    """The most explicit failure signal: ``is_error: true`` must
+    surface as a failure so clients that mirror agent-core's own
+    ``is_error`` shape correctly render Failed."""
+    from api.streaming import _tool_result_is_error
+    assert _tool_result_is_error({"is_error": True}) is True
+    # Mixed with other fields still wins on is_error.
+    assert _tool_result_is_error({"is_error": True, "output": "ok"}) is True
+
+
+def test_tool_result_is_error_matches_success_false():
+    """Tools that follow the ``{success, error, output}`` shape —
+    common in our own failure paths and in many third-party tools —
+    must surface success:false as a failure."""
+    from api.streaming import _tool_result_is_error
+    assert _tool_result_is_error({"success": False, "error": "HTTP 433"}) is True
+    assert _tool_result_is_error({"success": False}) is True
+
+
+def test_tool_result_is_error_keeps_default_for_ambiguous_shapes():
+    """Regression guard: the helper must not accidentally flip a
+    success card to Failed. The default is False for any shape that
+    is not one of the two explicit signals above, including an
+    informational ``error`` key or a custom ``status`` field. Native
+    clients (Hermex) currently render ``is_error == true`` with a
+    red icon, so a false positive is user-visible."""
+    from api.streaming import _tool_result_is_error
+    # Empty / non-dict inputs
+    assert _tool_result_is_error(None) is False
+    assert _tool_result_is_error("") is False
+    assert _tool_result_is_error("plain string result") is False
+    assert _tool_result_is_error([1, 2, 3]) is False
+    # Empty dict
+    assert _tool_result_is_error({}) is False
+    # Explicit success stays success
+    assert _tool_result_is_error({"success": True}) is False
+    assert _tool_result_is_error({"success": True, "error": "informational"}) is False
+    # ``is_error: false`` is not failure
+    assert _tool_result_is_error({"is_error": False}) is False
+    # Informational ``error`` key with success not explicitly false
+    # should NOT be classified as failure — only the two explicit
+    # signals are. This pins the conservative scope of the helper.
+    assert _tool_result_is_error({"error": "rate-limited retry succeeded"}) is False
+    # status is deliberately not classified.
+    assert _tool_result_is_error({"status": "error"}) is False
+
+
+def test_on_tool_complete_emits_is_error_from_payload():
+    """The structured callback's ``tool_complete`` SSE event must
+    carry an accurate ``is_error`` bit sourced from the result
+    payload, not the legacy hardcoded False. Otherwise WebUI and
+    native clients render the card as Completed even when the
+    underlying tool call failed (#7358)."""
+    src = _read("api/streaming.py")
+    block = _function_block(src, "on_tool_complete")
+
+    # The hardcoded ``is_error': False`` is gone; the value comes
+    # from the new helper.
+    assert "'is_error': False" not in block, (
+        "the hardcoded False is the bug; is_error must be sourced "
+        "from the structured payload via _tool_result_is_error()"
+    )
+    assert "_tool_result_is_error(function_result)" in block, (
+        "on_tool_complete must derive is_error from the structured "
+        "function_result via the new helper, not the hardcoded False"
+    )

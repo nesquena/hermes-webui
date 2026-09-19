@@ -7899,6 +7899,32 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
+def _tool_result_is_error(function_result) -> bool:
+    """#7358: the structured tool_complete callback signature is
+    ``(tool_call_id, name, args, function_result)`` and does not
+    receive the already-classified ``is_error`` bit that the sibling
+    tool_progress_callback carries. The Agent core computes that bit
+    with ``_detect_tool_failure()``, but the WebUI cannot import that
+    helper (it lives in the agent repo), so re-derive a conservative
+    failure flag from the structured payload.
+
+    Only the two most-explicit failure signals are matched:
+    ``is_error: true`` and ``success: false``. Other ambiguous
+    payload shapes (e.g. an ``error`` key that may be informational,
+    or a custom ``status`` field) are deliberately left to the
+    default ``False`` so the change cannot accidentally flip a
+    success card to failed. The gateway translator at
+    ``api/gateway_chat.py:508-518`` already classifies its own
+    payloads and is not affected by this helper.
+    """
+    if isinstance(function_result, dict):
+        if function_result.get('is_error') is True:
+            return True
+        if function_result.get('success') is False:
+            return True
+    return False
+
+
 def _truncate_tool_args(args, limit: int = 6) -> dict:
     """Truncate tool args for compact session persistence.
 
@@ -10441,7 +10467,17 @@ def _run_agent_streaming(
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
+                            # #7358: source the error bit from the
+                            # structured payload so the WebUI and
+                            # native clients (e.g. Hermex) render the
+                            # correct Completed/Failed card. The
+                            # sibling tool_progress_callback already
+                            # classifies this for its own event;
+                            # _tool_result_is_error() mirrors the
+                            # conservative shape of the Agent's own
+                            # _detect_tool_failure() on the
+                            # four-arg structured callback path.
+                            'is_error': _tool_result_is_error(function_result),
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
