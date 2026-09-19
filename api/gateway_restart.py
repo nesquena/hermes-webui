@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+__all__ = [
+    "restart_active_profile_gateway",
+    "_GATEWAY_RESTART_LOCK",
+    "_resolve_hermes_command",
+    "_consume_stream",
+]
+
 import logging
 import os
 import shutil
