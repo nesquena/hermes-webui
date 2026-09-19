@@ -3052,6 +3052,10 @@
     .composer-toolsets-wrap{display:block;}
   }
 
+  /* Mobile rightpanel scrim: hidden by default; only shown at phone width
+     (<=640px) when the panel is a fixed slide-over. See the media block below. */
+  .mobile-rightpanel-overlay{display:none;}
+
   @media(max-width:640px){
     /* Mobile PWA reflow guard (#3976): a one-frame GPU-promotion transform that
        _forceMobileViewportReflow() toggles via html.viewport-reflow to force a
@@ -3097,6 +3101,10 @@
       top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease;
       box-shadow:none!important;}
     .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
+    /* Dim scrim behind the slide-over panel: tap it to dismiss back to chat.
+       z-index 199 sits above the chat (z 10) but below the panel (z 200). */
+    .mobile-rightpanel-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:199;-webkit-tap-highlight-color:transparent;}
+    .mobile-rightpanel-overlay.visible{display:block;}
     .rightpanel .resize-handle{display:none;}
     .rightpanel .panel-header{row-gap:8px;}
     .rightpanel .panel-actions{align-items:center;gap:8px;}

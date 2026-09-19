@@ -259,6 +259,13 @@ function _setWorkspacePanelMode(mode){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // On a phone the panel is a slide-over; show a dim scrim behind it so the
+  // user sees it as a layer and can tap outside (the scrim) to dismiss back to
+  // chat. Without this the artifact just floats over the chat with no cue and
+  // feels impossible to close. Only at phone width (<=640px) is the panel a
+  // fixed slide-over — above that it's a normal column and needs no scrim.
+  const rpOverlay=$('mobileRightpanelOverlay');
+  if(rpOverlay)rpOverlay.classList.toggle('visible',open&&_isPhoneWidthViewport());
   syncWorkspacePanelUI();
 }
 
