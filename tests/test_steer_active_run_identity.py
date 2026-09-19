@@ -1,0 +1,228 @@
+"""Steer must use the active worker, not a compression-sensitive cache key."""
+import queue
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+from api import config, streaming
+from tests.test_real_steer import _make_handler, _captured_response
+
+
+@pytest.fixture
+def scene(monkeypatch):
+    agent = MagicMock()
+    agent.session_id = "compressed-child"
+    agent.steer.return_value = True
+    other = MagicMock()
+    other.session_id = "other-session"
+    monkeypatch.setattr(config, "SESSION_AGENT_CACHE", {"original": (agent, "sig")})
+    monkeypatch.setattr(config, "STREAMS", {"run": queue.Queue(), "other-run": queue.Queue()})
+    monkeypatch.setattr(config, "AGENT_INSTANCES", {"run": agent, "other-run": other})
+    monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {"run": "original", "other-run": "other-session"})
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {
+        "run": {"session_id": "original", "phase": "running", "backend": "legacy"},
+        "other-run": {"session_id": "other-session", "phase": "running", "backend": "legacy"},
+    })
+    sess = SimpleNamespace(active_stream_id="run")
+    monkeypatch.setattr(streaming, "get_session", lambda sid: sess)
+    return agent, other, sess
+
+
+def steer():
+    h = _make_handler()
+    streaming._handle_chat_steer(h, {"session_id": "original", "text": "updated guidance"})
+    return _captured_response(h)
+
+
+@pytest.mark.parametrize("cache", ["rotated", "missing", "different"])
+def test_active_worker_accepts_after_compression_without_cache_mutation(scene, cache):
+    agent, other, _ = scene
+    if cache == "missing":
+        config.SESSION_AGENT_CACHE.clear()
+    elif cache == "different":
+        config.SESSION_AGENT_CACHE["original"] = (other, "sig")
+    before = dict(config.SESSION_AGENT_CACHE)
+    assert steer() == {"accepted": True, "fallback": None, "stream_id": "run"}
+    agent.steer.assert_called_once_with("updated guidance")
+    other.steer.assert_not_called()
+    agent._session_db.close.assert_not_called()
+    other._session_db.close.assert_not_called()
+    agent.interrupt.assert_not_called()
+    assert config.SESSION_AGENT_CACHE == before
+
+
+@pytest.mark.parametrize("bad", ["owner", "run-owner", "missing-owner", "missing-run", "cancelling", "dead", "gateway"])
+def test_ambiguous_or_inactive_worker_is_never_steered_or_closed(scene, bad):
+    agent, other, _ = scene
+    # Matching cache must not bypass conflicting active-run ownership.
+    agent.session_id = "original"
+    if bad == "owner":
+        config.STREAM_SESSION_OWNERS["run"] = "other-session"
+    elif bad == "run-owner":
+        config.ACTIVE_RUNS["run"]["session_id"] = "other-session"
+    elif bad == "missing-owner":
+        config.STREAM_SESSION_OWNERS.pop("run")
+    elif bad == "missing-run":
+        config.ACTIVE_RUNS.pop("run")
+    elif bad == "cancelling":
+        config.ACTIVE_RUNS["run"]["phase"] = "cancelling"
+    elif bad == "dead":
+        config.STREAMS.pop("run")
+    elif bad == "gateway":
+        config.ACTIVE_RUNS["run"]["backend"] = "gateway"
+    assert steer()["accepted"] is False
+    agent.steer.assert_not_called()
+    other.steer.assert_not_called()
+    agent._session_db.close.assert_not_called()
+
+
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("invalid", [None, "owner", "run-owner", "missing-owner", "missing-run-owner", "dead", "cancelling"])
+def test_gateway_ownership_is_terminal_before_matching_local_cache(scene, registered, invalid):
+    agent, other, _ = scene
+    agent.session_id = "original"
+    config.ACTIVE_RUNS["run"]["backend"] = "gateway"
+    if not registered:
+        config.AGENT_INSTANCES.pop("run")
+    if invalid == "owner":
+        config.STREAM_SESSION_OWNERS["run"] = "other-session"
+    elif invalid == "run-owner":
+        config.ACTIVE_RUNS["run"]["session_id"] = "other-session"
+    elif invalid == "missing-owner":
+        config.STREAM_SESSION_OWNERS.pop("run")
+    elif invalid == "missing-run-owner":
+        config.ACTIVE_RUNS["run"].pop("session_id")
+    elif invalid == "dead":
+        config.STREAMS.pop("run")
+    elif invalid == "cancelling":
+        config.ACTIVE_RUNS["run"]["phase"] = "cancelling"
+    before = dict(config.SESSION_AGENT_CACHE)
+    expected = ({"accepted": False, "fallback": "gateway_steer_queued", "stream_id": "run"}
+                if invalid is None else
+                {"accepted": False, "fallback": "stream_dead", "stream_id": None})
+    assert steer() == expected
+    agent.steer.assert_not_called()
+    other.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    agent._session_db.close.assert_not_called()
+    assert config.SESSION_AGENT_CACHE == before
+
+
+def test_cache_only_mismatch_does_not_close_an_agent_owned_by_another_run(scene):
+    agent, other, _ = scene
+    config.AGENT_INSTANCES.pop("run")
+    config.SESSION_AGENT_CACHE["original"] = (other, "sig")
+    assert steer()["accepted"] is False
+    other._session_db.close.assert_not_called()
+    other.steer.assert_not_called()
+
+
+@pytest.mark.parametrize("ownership", [
+    "both", "missing-owner", "missing-run-session", "empty-run-session",
+    "missing-both", "missing-run-entry",
+    "local-backend", "missing-backend", "empty-backend", "foreign-backend",
+    "gateway-backend",
+])
+def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, ownership):
+    """Cache-only Steer must prove ownership, not merely fail to refute it.
+
+    With no registered worker and a matching cached agent on a live stream, a
+    missing stream owner or a missing active-run session is ambiguous and must
+    fail closed with ``stream_dead`` without calling ``agent.steer()``. Only
+    both identities present and equal to the requesting session may enqueue.
+
+    The active-run backend is revalidated the same way: only the explicit
+    local backend tag registered by ``_run_agent_streaming`` may enqueue on the
+    cached local agent. Gateway keeps its own terminal outcome; a missing,
+    empty, or foreign backend is ambiguous and fails closed.
+    """
+    agent, other, _ = scene
+    agent.session_id = "original"
+    config.AGENT_INSTANCES.pop("run")  # Cache-only compatibility path.
+    if ownership in ("missing-owner", "missing-both"):
+        config.STREAM_SESSION_OWNERS.pop("run")
+    if ownership in ("missing-run-session", "missing-both"):
+        config.ACTIVE_RUNS["run"].pop("session_id")
+    elif ownership == "empty-run-session":
+        config.ACTIVE_RUNS["run"]["session_id"] = ""
+    elif ownership == "missing-run-entry":
+        config.ACTIVE_RUNS.pop("run")
+    elif ownership == "local-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = streaming.WEBUI_LOCAL_CHAT_BACKEND
+    elif ownership == "missing-backend":
+        config.ACTIVE_RUNS["run"].pop("backend")
+    elif ownership == "empty-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = ""
+    elif ownership == "foreign-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = "foreign"
+    elif ownership == "gateway-backend":
+        config.ACTIVE_RUNS["run"]["backend"] = "gateway"
+    before = dict(config.SESSION_AGENT_CACHE)
+    assert "run" in config.STREAMS
+    result = steer()
+    if ownership in ("both", "local-backend"):
+        assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+        agent.steer.assert_called_once_with("updated guidance")
+    elif ownership == "gateway-backend":
+        assert result == {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": "run"}
+        agent.steer.assert_not_called()
+    else:
+        assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+        agent.steer.assert_not_called()
+    other.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    agent._session_db.close.assert_not_called()
+    assert config.SESSION_AGENT_CACHE == before
+    assert "run" in config.STREAMS
+
+
+def test_local_worker_registers_the_backend_cache_only_steer_requires(monkeypatch):
+    """The in-process worker must tag its active run with the local backend.
+
+    Cache-only Steer only enqueues on that explicit tag, so a worker that
+    registered without it would make every cache-only Steer fail closed.
+    """
+    captured = {}
+
+    class _Registered(Exception):
+        pass
+
+    def register(stream_id, **metadata):
+        captured[stream_id] = metadata
+        raise _Registered()
+
+    monkeypatch.setattr(streaming, "peek_stream", lambda stream_id: queue.Queue())
+    monkeypatch.setattr(streaming, "register_active_run", register)
+    with pytest.raises(_Registered):
+        streaming._run_agent_streaming("original", "hi", "m", "/tmp", "run")
+    assert captured["run"]["session_id"] == "original"
+    assert captured["run"]["backend"] == streaming.WEBUI_LOCAL_CHAT_BACKEND
+    assert streaming.WEBUI_LOCAL_CHAT_BACKEND
+    assert streaming.WEBUI_LOCAL_CHAT_BACKEND != "gateway"
+
+
+def test_http_response_is_written_after_stream_lock_release(scene, monkeypatch):
+    from api import helpers
+
+    def respond(handler, payload):
+        assert config.STREAMS_LOCK.acquire(blocking=False)
+        config.STREAMS_LOCK.release()
+        return payload
+
+    monkeypatch.setattr(helpers, "j", respond)
+    result = streaming._handle_chat_steer(None, {"session_id": "original", "text": "hint"})
+    assert result["accepted"] is True
+
+
+@pytest.mark.parametrize("behavior", ["reject", "raise", "unsupported"])
+def test_live_worker_reports_real_acceptance(scene, behavior):
+    agent, _, _ = scene
+    if behavior == "reject":
+        agent.steer.return_value = False
+    elif behavior == "raise":
+        agent.steer.side_effect = RuntimeError("fixture")
+    else:
+        agent.steer = None
+    assert steer()["accepted"] is False
+    agent.interrupt.assert_not_called()

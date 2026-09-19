@@ -153,6 +153,9 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+# Backend tag of the in-process WebUI runtime. Local workers register their
+# active run with it; cache-only Steer only enqueues on this explicit value.
+WEBUI_LOCAL_CHAT_BACKEND = "legacy"
 
 
 def _gateway_model_field(model: str | None) -> str:
@@ -272,7 +275,7 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
     ).strip().lower()
     if raw in _GATEWAY_CHAT_BACKENDS:
         return "gateway"
-    return "legacy"
+    return WEBUI_LOCAL_CHAT_BACKEND
 
 
 def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:

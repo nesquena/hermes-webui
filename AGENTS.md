@@ -67,6 +67,20 @@ Follow that checklist's safety rules:
   the manual verification performed.
 - For runtime, streaming, recovery, replay, compression, or sidebar metadata
   changes, name the state layer being mutated and prove the relevant invariant.
+- Active-run Steer resolves the stream-bound agent with explicit stream and
+  worker ownership before consulting the reusable session cache. Compression
+  may rotate the agent identity; steering must never evict or close an agent.
+  Keep HTTP response writes outside runtime registry locks. A Gateway-owned
+  active run must resolve to the Gateway outcome before any local cache fallback,
+  even when no in-process worker is registered for that stream. Stop publishes
+  cancellation and detaches stream/agent entries under the same stream lock
+  (STREAMS_LOCK -> ACTIVE_RUNS_LOCK); interrupt and session persistence remain
+  outside it. The retained cache-only path (no registered worker) revalidates
+  stream membership, owner, and active-run session/backend/phase and enqueues
+  agent.steer() under that same lock edge, so a Stop that claims cancellation
+  never strands guidance an earlier Steer response reported as accepted. Test
+  both Stop/Steer orderings — registered and cache-only — with deterministic
+  barriers.
 - For Docker build changes in `docker_init.bash`, mirror directory exclusions
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).

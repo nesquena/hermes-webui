@@ -67,6 +67,7 @@ from api.helpers import (
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
+from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
@@ -9192,6 +9193,7 @@ def _run_agent_streaming(
         model=model,
         provider=model_provider,
         ephemeral=bool(ephemeral),
+        backend=WEBUI_LOCAL_CHAT_BACKEND,
     )
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
@@ -13536,13 +13538,58 @@ def _run_agent_streaming(
 # ============================================================
 
 
+def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
+    """Deliver to a verified live worker; None retains cache-only compatibility.
+
+    Never perform HTTP writes or cache/database teardown under stream locks.
+    """
+    from api import config as cfg
+
+    with cfg.STREAMS_LOCK:
+        agent = cfg.AGENT_INSTANCES.get(stream_id)
+        owner = cfg.stream_owner_session_id(stream_id)
+        with cfg.ACTIVE_RUNS_LOCK:
+            run = dict(cfg.ACTIVE_RUNS.get(stream_id) or {})
+        # Gateway owns transport even when no in-process worker is registered.
+        # A reusable local cache entry must never override that authority.
+        if run.get("backend") == "gateway":
+            if (stream_id not in cfg.STREAMS
+                    or owner != sid or run.get("session_id") != sid
+                    or run.get("phase") == "cancelling"):
+                return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+            return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
+        if agent is None:
+            if ((owner and owner != sid)
+                    or (run.get("session_id") and run["session_id"] != sid)
+                    or run.get("phase") == "cancelling"):
+                return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+            return None
+        # A cache hit cannot override missing or conflicting worker ownership.
+        if (stream_id not in cfg.STREAMS
+                or owner != sid or run.get("session_id") != sid
+                or run.get("phase") == "cancelling"
+                or run.get("backend") == "gateway"):
+            return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+        if not callable(getattr(agent, "steer", None)):
+            return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
+        # steer() only stashes input; serializing it with stream teardown keeps
+        # cancel from detaching the selected worker before delivery.
+        try:
+            accepted = bool(agent.steer(text))
+        except Exception:
+            logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
+            return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
+        return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
     Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
-      - Look up the cached AIAgent for the session (PR #1051's
-        SESSION_AGENT_CACHE).
+      - Prefer the active stream's registered AIAgent, with explicit stream
+        and worker ownership; use the cache only for legacy cache-only runs.
       - Verify a stream is currently active for this session.
+      - Never evict or close an agent while delivering steering input.
       - Call agent.steer(text) — thread-safe, stashes text in
         _pending_steer for application at the next tool-result boundary.
 
@@ -13571,24 +13618,23 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
-    evicted_cached_entry = None
+    # A compression rotates agent.session_id without replacing the running
+    # worker. Resolve the stream-bound instance BEFORE consulting the reusable
+    # cache. Steer never owns cache eviction or agent/database teardown.
+    try:
+        session = get_session(sid)
+    except KeyError:
+        session = None
+    stream_id = getattr(session, "active_stream_id", None) or None
+    if stream_id:
+        result = _steer_bound_stream(sid, stream_id, text)
+        if result is not None:
+            return j(handler, result)
+
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
-        if cached:
-            agent = cached[0]
-            if not _cached_agent_matches_session(agent, sid):
-                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
-                logger.warning(
-                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
-                    sid,
-                    _cached_agent_session_identity(agent),
-                )
-                cached = None
-    if evicted_cached_entry is not None:
-        try:
-            _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
-        except Exception:
-            logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
+        if cached and not _cached_agent_matches_session(cached[0], sid):
+            cached = None
     if not cached:
         try:
             s = get_session(sid)
@@ -13634,22 +13680,50 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
+
+    # Cache-only compatibility: no registered worker for this stream. The
+    # liveness/ownership revalidation and the enqueue must share the same
+    # stream-ownership edge as Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). A Stop
+    # that claims cancellation between an unlocked check and agent.steer()
+    # would strand guidance this response still reports as accepted. steer()
+    # only stashes input; interrupt, persistence, and HTTP writes stay outside
+    # the lock, and the cached agent is never evicted or closed here.
+    #
+    # Ownership must be proven positively, not merely unrefuted: BOTH the
+    # stream owner AND the active-run session must equal the requesting
+    # session. Missing metadata is ambiguous and fails closed (stream_dead);
+    # an unfenced cache object is never steered on absent ownership.
+    #
+    # The active-run backend is revalidated the same way. With no registered
+    # worker, the backend tag is the only proof that an in-process runtime
+    # owns this run: Gateway resolves to its own outcome, the explicit local
+    # tag may enqueue, and a missing, empty, or foreign backend fails closed.
+    result = {"accepted": False, "fallback": "stream_dead", "stream_id": None}
     with _cfg.STREAMS_LOCK:
-        stream_alive = active_stream_id in _cfg.STREAMS
-    if not stream_alive:
-        # Active stream id is stale — stream has ended; caller falls back
-        return j(handler, {"accepted": False, "fallback": "stream_dead",
-                           "stream_id": None})
+        if active_stream_id in _cfg.STREAMS:
+            owner = _cfg.stream_owner_session_id(active_stream_id)
+            with _cfg.ACTIVE_RUNS_LOCK:
+                run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+            owned_stream = bool(owner) and owner == sid
+            owned_run = bool(run.get("session_id")) and run["session_id"] == sid
+            if owned_stream and owned_run and run.get("phase") != "cancelling":
+                backend = run.get("backend")
+                if backend == "gateway":
+                    # Gateway owns transport; a local cache object is never steered.
+                    result = {"accepted": False, "fallback": "gateway_steer_queued",
+                              "stream_id": active_stream_id}
+                elif backend == WEBUI_LOCAL_CHAT_BACKEND:
+                    try:
+                        accepted = bool(agent.steer(text))
+                    except Exception as exc:
+                        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+                        result = {"accepted": False, "fallback": "steer_error",
+                                  "stream_id": active_stream_id}
+                    else:
+                        result = {"accepted": accepted, "fallback": None,
+                                  "stream_id": active_stream_id}
 
-    try:
-        accepted = bool(agent.steer(text))
-    except Exception as exc:
-        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
-        return j(handler, {"accepted": False, "fallback": "steer_error",
-                           "stream_id": active_stream_id})
-
-    return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+    return j(handler, result)
 
 
 def cancel_stream(stream_id: str) -> bool:
@@ -13746,21 +13820,29 @@ def cancel_stream(stream_id: str) -> bool:
                 return False
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    if active_run_entry is None:
-        try:
-            with _live_config.ACTIVE_RUNS_LOCK:
-                active_run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
-        except Exception:
-            active_run_entry = None
-        if active_run_entry and not active_run_session_id:
-            active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+        if active_run_entry is None:
+            try:
+                with _live_config.ACTIVE_RUNS_LOCK:
+                    active_run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
+            except Exception:
+                active_run_entry = None
+            if active_run_entry and not active_run_session_id:
+                active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    # Mark the worker lifecycle registry immediately. The SSE maps may be popped
-    # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
-    # health polling sees during that detached window. Stamp cancelled_at so
-    # _clear_stale_stream_state() can eventually reclaim the session if the
-    # worker is stuck in C-level I/O and never reaches its finally (#6623).
-    update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+        # Mark the worker lifecycle registry immediately. The SSE maps may be popped
+        # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
+        # health polling sees during that detached window. Stamp cancelled_at so
+        # _clear_stale_stream_state() can eventually reclaim the session if the
+        # worker is stuck in C-level I/O and never reaches its finally (#6623).
+        update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+
+        # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
+        # Publish cancellation and detach ownership before releasing the edge;
+        # later Steer cannot enqueue into a turn already claimed by Stop.
+        if stream_present:
+            streams.pop(stream_id, None)
+            cancel_flags.pop(stream_id, None)
+            agent_instances.pop(stream_id, None)
 
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
@@ -13813,16 +13895,7 @@ def cancel_stream(stream_id: str) -> bool:
     # worker save and show cancel in the client while persistence says done.
     _emit_cancel_event = True
 
-    # ── Eager session lock release (fixes #653) ──────────────────────────
-    # Pop stream state now so the 409 guard in routes.py sees the session
-    # as idle and allows new /api/chat/start immediately after cancel,
-    # even if the agent thread is still blocked in a C-level syscall.
-    # The worker thread's finally block uses .pop(key, None) too, so a
-    # double-pop here is safe (no-op).
-    if stream_present:
-        streams.pop(stream_id, None)
-        cancel_flags.pop(stream_id, None)
-        agent_instances.pop(stream_id, None)
+    # Stream ownership was detached under streams_lock before interrupting.
     # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
     # still be appending tokens, and the streaming finally block handles cleanup
     # when the thread exits. We already snapshotted the buffers under streams_lock
