@@ -106,6 +106,7 @@ from api.helpers import (
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
+    close_if_body_unread,
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
@@ -381,14 +382,20 @@ class Handler(BaseHTTPRequestHandler):
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
-                return j(self, {'error': 'not found'}, status=404)
+                # Unknown route: the request body (if any) was never read, so a
+                # keep-alive connection must not be reused (#7550).
+                return j(self, {'error': 'not found'}, status=404,
+                         extra_headers=close_if_body_unread(self))
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                # A 500 raised before the body was read poisons a keep-alive
+                # connection the same way an unknown route does (#7550).
+                j(self, {'error': 'Internal server error'}, status=500,
+                  extra_headers=close_if_body_unread(self))
             except _CLIENT_DISCONNECT_ERRORS:
                 pass
             except Exception:
@@ -409,14 +416,20 @@ class Handler(BaseHTTPRequestHandler):
             if not _is_csp_report_post and not check_auth(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
-                return j(self, {'error': 'not found'}, status=404)
+                # Unknown route: the request body (if any) was never read, so a
+                # keep-alive connection must not be reused (#7550).
+                return j(self, {'error': 'not found'}, status=404,
+                         extra_headers=close_if_body_unread(self))
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                # A 500 raised before the body was read poisons a keep-alive
+                # connection the same way an unknown route does (#7550).
+                j(self, {'error': 'Internal server error'}, status=500,
+                  extra_headers=close_if_body_unread(self))
             except _CLIENT_DISCONNECT_ERRORS:
                 pass
             except Exception:

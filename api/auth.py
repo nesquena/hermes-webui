@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from api.config import STATE_DIR, get_config, load_settings
+from api.helpers import close_if_body_unread
 
 logger = logging.getLogger(__name__)
 
@@ -1091,6 +1092,30 @@ def _safe_login_inner_next(query: str | None) -> str:
     return path
 
 
+def _send_auth_rejection(handler, status, body, content_type, extra_headers=None) -> None:
+    """Write an auth rejection without poisoning a keep-alive connection.
+
+    Every rejection below answers before the request body is read. On a
+    keep-alive connection the unread body bytes are otherwise parsed as the
+    next request line, so the next request over that connection is answered
+    with a bogus ``501 Unsupported method`` (issue #7550).
+    ``close_if_body_unread`` adds ``Connection: close`` and flags the
+    connection for teardown whenever a body was advertised; requests without a
+    body keep keep-alive exactly as before.
+    """
+    handler.send_response(status)
+    if content_type:
+        handler.send_header('Content-Type', content_type)
+    for name, value in (extra_headers or {}).items():
+        handler.send_header(name, value)
+    for name, value in (close_if_body_unread(handler) or {}).items():
+        handler.send_header(name, value)
+    handler.send_header('Content-Length', str(len(body)))
+    handler.end_headers()
+    if body:
+        handler.wfile.write(body)
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -1113,39 +1138,31 @@ def check_auth(handler, parsed) -> bool:
     if parsed.path == '/api/auth/logout':
         if has_session:
             return True
-        body = b'{"error":"Authentication required"}'
-        handler.send_response(401)
-        handler.send_header('Content-Type', 'application/json')
-        handler.send_header('Content-Length', str(len(body)))
-        handler.end_headers()
-        handler.wfile.write(body)
+        _send_auth_rejection(
+            handler, 401, b'{"error":"Authentication required"}', 'application/json',
+        )
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
         if not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
-                body = b'{"error":"Profile access forbidden"}'
-                handler.send_response(403)
-                handler.send_header('Content-Type', 'application/json')
+                _send_auth_rejection(
+                    handler, 403, b'{"error":"Profile access forbidden"}',
+                    'application/json',
+                )
             else:
-                body = b'Profile access forbidden'
-                handler.send_response(403)
-                handler.send_header('Content-Type', 'text/plain; charset=utf-8')
-            handler.send_header('Content-Length', str(len(body)))
-            handler.end_headers()
-            handler.wfile.write(body)
+                _send_auth_rejection(
+                    handler, 403, b'Profile access forbidden',
+                    'text/plain; charset=utf-8',
+                )
             return False
         return True
     # Not authorized
     if parsed.path.startswith('/api/'):
-        body = b'{"error":"Authentication required"}'
-        handler.send_response(401)
-        handler.send_header('Content-Type', 'application/json')
-        handler.send_header('Content-Length', str(len(body)))
-        handler.end_headers()
-        handler.wfile.write(body)
+        _send_auth_rejection(
+            handler, 401, b'{"error":"Authentication required"}', 'application/json',
+        )
     else:
-        handler.send_response(302)
         # Pass the original path as ?next= so login.js redirects back after auth.
         # SECURITY/CORRECTNESS: the inner `?` and `&` MUST be percent-encoded
         # when stuffed into the outer `?next=` parameter, otherwise:
@@ -1191,9 +1208,7 @@ def check_auth(handler, parsed) -> bool:
             _inner = _safe_login_inner_next(parsed.query)
             if _inner:
                 _target += '?next=' + _urlparse.quote(_inner, safe='/')
-            handler.send_header('Location', _target)
-            handler.send_header('Content-Length', '0')
-            handler.end_headers()
+            _send_auth_rejection(handler, 302, b'', None, {'Location': _target})
             return False
         _path_with_query = parsed.path or '/'
         if parsed.query:
@@ -1201,9 +1216,7 @@ def check_auth(handler, parsed) -> bool:
         # safe='/' keeps path separators readable; everything else (including
         # `?`, `&`, `=`) gets percent-encoded.
         _next = _urlparse.quote(_path_with_query, safe='/')
-        handler.send_header('Location', 'login?next=' + _next)
-        handler.send_header('Content-Length', '0')
-        handler.end_headers()
+        _send_auth_rejection(handler, 302, b'', None, {'Location': 'login?next=' + _next})
     return False
 
 
