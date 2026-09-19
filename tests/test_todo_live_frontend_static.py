@@ -179,8 +179,10 @@ let persistCalls = 0;
 function persistInflightState(){ persistCalls++; }
 let refreshCalls = 0;
 function scheduleTodosRefresh(){ refreshCalls++; }
-const handler = new Function('e','S','INFLIGHT','activeSid','persistInflightState','scheduleTodosRefresh', body);
-function fire(payload){ handler({data: JSON.stringify(payload)}, S, INFLIGHT, activeSid, persistInflightState, scheduleTodosRefresh); }
+const source = {};
+function _bailOutOfTerminalEventsFromStaleStream(){ return false; }
+const handler = new Function('e','S','INFLIGHT','activeSid','persistInflightState','scheduleTodosRefresh','source','_bailOutOfTerminalEventsFromStaleStream', body);
+function fire(payload){ handler({data: JSON.stringify(payload)}, S, INFLIGHT, activeSid, persistInflightState, scheduleTodosRefresh, source, _bailOutOfTerminalEventsFromStaleStream); }
 function assert(cond, msg){ if(!cond) throw new Error(msg); }
 
 fire({session_id:'other', todos:[{id:'x', content:'wrong', status:'pending'}], ts:20});
@@ -198,7 +200,7 @@ fire({session_id:'s1', todos:[{id:'old', content:'old', status:'pending'}], ts:5
 assert(S.todos[0].id === 'a', 'older event must not roll back S.todos');
 assert(persistCalls === 1 && refreshCalls === 1, 'older event must not persist or refresh');
 
-handler({data:'not json'}, S, INFLIGHT, activeSid, persistInflightState, scheduleTodosRefresh);
+handler({data:'not json'}, S, INFLIGHT, activeSid, persistInflightState, scheduleTodosRefresh, source, _bailOutOfTerminalEventsFromStaleStream);
 assert(S.todos[0].id === 'a', 'malformed event must be swallowed');
 '''
     script_path = tmp_path / "todo_listener_test.js"
