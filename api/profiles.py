@@ -201,6 +201,34 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 _PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
 
 
+# #7048: explicit, origin-aware allowlist of root/parent .env keys that MAY fall
+# back into a named profile's agent runtime env. The root .env is the
+# deployment/operator layer ($HERMES_HOME/.env in the Docker two-container
+# setup); only the operator/runtime settings listed here are intended to be
+# shared across profiles (e.g. SEARXNG_URL and the non-secret FIRECRAWL_*
+# configuration: API/GATEWAY URLs and browser TTL). Everything else — server
+# auth secrets, provider credentials, and any *_API_KEY such as
+# FIRECRAWL_API_KEY (classified password=True by the agent's
+# hermes_cli/config_defaults.py) — stays at the root and is NEVER
+# blanket-inherited, preserving the named-profile isolation invariant. The
+# list is exact-match only: no prefix sweeping, so a future FIRECRAWL_* secret
+# cannot sneak in through a prefix. A profile that defines any of these keys
+# itself (even empty) still wins over the root fallback.
+_ROOT_ENV_SHARE_ALLOWLIST = frozenset({
+    'SEARXNG_URL',
+    # Non-secret Firecrawl operator settings (password=False upstream); the
+    # self-hosted URL needs no key and the cloud key stays operator-scoped.
+    'FIRECRAWL_API_URL',
+    'FIRECRAWL_GATEWAY_URL',
+    'FIRECRAWL_BROWSER_TTL',
+})
+
+
+def _root_env_key_allowlisted(key: str) -> bool:
+    """Return True when *key* is an explicitly allowlisted root .env setting."""
+    return key in _ROOT_ENV_SHARE_ALLOWLIST
+
+
 def _isolated_profile_opt_in() -> bool:
     """Return True only when isolated single-profile mode is EXPLICITLY enabled.
     Isolated mode is an intentional multi-user deployment posture (each user is
@@ -863,6 +891,156 @@ def _stringify_env_value(value) -> str:
     return str(value)
 
 
+# #7048: the operator's env as it was at import time — the baseline the
+# "launcher/process value" precedence layer is measured against. The live
+# ``os.environ`` is deliberately NOT used for that check: any WebUI turn may
+# have mirrored another profile's runtime env into the process env, and reading
+# those values as inherited operator settings is what let a profile skip the
+# root ``.env`` fallback (or inherit a sibling profile's value) during
+# overlapping turns.
+_INITIAL_ENV = dict(os.environ)
+
+
+def _context_local_env_values() -> dict[str, str]:
+    """Context-local env values set for the active profile turn (#7048).
+
+    Read lazily through ``api.config``: ``api.profiles`` and ``api.config``
+    import each other, so a module-level import would create a cycle.
+    """
+    try:
+        from api.config import _thread_ctx
+
+        env = getattr(_thread_ctx, 'env', None)
+        if isinstance(env, dict) and env:
+            return {str(k): v for k, v in env.items() if isinstance(v, str)}
+    except Exception:
+        pass
+    return {}
+
+
+def _env_provided_by_launcher(key: str) -> bool:
+    """True when ``key`` was already provided before profile env application.
+
+    Covers the two legitimate sources of a pre-existing value: the import-time
+    process baseline (``_INITIAL_ENV`` — what the operator exported when the
+    WebUI server started) and the context-local env of the active profile turn.
+    Everything else, including mutations another profile turn mirrored into
+    ``os.environ``, does not count — the root ``.env`` layer stays eligible for
+    those keys instead of being suppressed by an unrelated value (#7048).
+    """
+    if key in _INITIAL_ENV:
+        return True
+    return key in _context_local_env_values()
+
+
+# Dotenv grammar shared with the launcher (``ctl.sh`` ``_apply_env_file_safely``)
+# so the WebUI resolves exactly the value a ``hermes -p`` shell would (#7048).
+# A key must be a POSIX-style identifier, which also keeps
+# ``os.environ.update()`` safe: a malformed key (empty, containing ``=`` or
+# NUL) raises ``ValueError`` and would brick every turn of the profile.
+# Keys ``ctl.sh`` refuses to export (bash keeps them read-only). Skipped here as
+# well so both loaders resolve the same ``.env`` identically (#7048).
+_DOTENV_SHELL_RESERVED_KEYS = frozenset({'UID', 'GID', 'EUID', 'EGID', 'PPID'})
+
+_DOTENV_KEY_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_DOTENV_DOUBLE_QUOTED_RE = re.compile(r'"((?:[^"\\]|\\.)*)"(?:[ \t]*#.*)?[ \t]*$', re.DOTALL)
+_DOTENV_SINGLE_QUOTED_RE = re.compile(r"'([^']*)'(?:[ \t]*#.*)?[ \t]*$", re.DOTALL)
+_DOTENV_INLINE_COMMENT_RE = re.compile(r'[ \t]+#.*$', re.DOTALL)
+_DOTENV_ESCAPES = {'n': '\n', 'r': '\r', 't': '\t', '"': '"', '\\': '\\'}
+
+
+def _parse_dotenv_value(value: str) -> str:
+    """Resolve the value half of a dotenv assignment (``ctl.sh``-compatible).
+
+    Double quotes honour backslash escapes and allow trailing whitespace plus an
+    inline ``#`` comment after the closing quote; single quotes are literal (no
+    escape processing); an unquoted value is cut at the first whitespace-then-
+    ``#`` comment, while a bare ``#`` with no leading whitespace stays data. A
+    value whose quotes never close falls back to the unquoted rule (kept as
+    written) instead of dropping the key — the same result the launcher gives.
+    """
+    value = value.lstrip()
+    match = _DOTENV_DOUBLE_QUOTED_RE.match(value)
+    if match:
+        inner = match.group(1)
+        if '\\' not in inner:
+            return inner
+        out: list[str] = []
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == '\\' and i + 1 < len(inner):
+                nxt = inner[i + 1]
+                out.append(_DOTENV_ESCAPES.get(nxt, '\\' + nxt))
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return ''.join(out)
+    match = _DOTENV_SINGLE_QUOTED_RE.match(value)
+    if match:
+        return match.group(1)
+    return _DOTENV_INLINE_COMMENT_RE.sub('', value).rstrip()
+
+
+def _parse_dotenv_text(text: str) -> dict[str, str]:
+    """Parse dotenv text into a key/value dict (canonical module parser).
+
+    Handles blank lines, full-line ``#`` comments, the ``export KEY=value``
+    prefix (supported copy-pasted shell-rc syntax — a naive ``split('=', 1)``
+    would misparse the key as ``export KEY``; whitespace after ``export`` —
+    including a tab — is valid), quoting/escapes and inline comments via
+    ``_parse_dotenv_value``, and whitespace around ``=``.
+
+    Empty values are preserved on purpose: a profile that defines a key as
+    empty must be able to *suppress* root/process inheritance for that key
+    (#7048 precedence: profile-defined key, including empty, wins). Lines whose
+    key is not a valid identifier are skipped rather than exported.
+    """
+    values: dict[str, str] = {}
+    for raw_line in (text or '').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        # Strip an optional 'export' prefix (supported dotenv syntax).
+        rest = line[len('export'):]
+        if line.startswith('export') and rest[:1].isspace():
+            line = rest.strip()
+        if '=' not in line:
+            continue
+        raw_key, raw_value = line.split('=', 1)
+        key = ''.join(raw_key.split())
+        if not _DOTENV_KEY_RE.fullmatch(key) or key in _DOTENV_SHELL_RESERVED_KEYS:
+            continue
+        value = _parse_dotenv_value(raw_value)
+        if '\x00' in value:
+            continue
+        values[key] = value
+    return values
+
+
+def _root_env_path_for(home: Path) -> Optional[Path]:
+    """Return the root/parent .env a profile may inherit from, else None.
+
+    Any canonical profile home at ``*/profiles/<name>`` has a root layer
+    (``<base>/.env`` — the ``$HERMES_HOME/.env`` of the Docker two-container
+    deployment), and that includes ``*/profiles/default``: that directory is
+    still a profile home inside ``profiles/``, so its ``.env`` is a profile
+    layer and the parent ``.env`` is the root layer it may inherit from. A home
+    that is not inside a ``profiles/`` directory (a plain ``$HERMES_HOME``, whose
+    own ``.env`` is already the top layer) has no root fallback (#7048).
+    """
+    try:
+        home = Path(home).expanduser()
+        if home.parent.name == 'profiles':
+            root_candidate = home.parent.parent / '.env'
+            if root_candidate.exists():
+                return root_candidate
+    except Exception:
+        pass
+    return None
+
+
 def get_profile_runtime_env(home: Path) -> dict[str, str]:
     """Return env vars needed to run an agent turn for a profile home.
 
@@ -872,6 +1050,18 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     environment variables (matching ``hermes -p <profile>``), so streaming must
     apply the selected profile's terminal config and ``.env`` for the duration
     of that run.
+
+    Precedence for the resulting env dict (#7048):
+      1. profile-defined key — from the profile's ``.env``, INCLUDING an empty
+         value (empty deliberately suppresses inheritance below);
+      2. existing launcher/process value — keys present in the import-time
+         process baseline (``_INITIAL_ENV``) or in the active profile turn's
+         context-local env are never overridden by the root fallback. The live
+         ``os.environ`` does not count here: another profile's turn may have
+         mirrored its own values into the process env, and those must not read
+         as an inherited operator setting (#7048);
+      3. root/parent ``.env`` fallback — only explicitly allowlisted
+         operator/runtime settings (never credentials or server auth secrets).
     """
     home = Path(home).expanduser()
     env: dict[str, str] = {}
@@ -895,22 +1085,40 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     env_path = home / '.env'
     if env_path.exists():
         try:
-            for line in env_path.read_text(encoding='utf-8').splitlines():
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    k = k.strip()
-                    v = v.strip().strip('"').strip("'")
-                    if k and v:
-                        # #4589: never let a profile's own .env override an
-                        # operator/deployment posture (e.g. disable isolation via
-                        # HERMES_WEBUI_ISOLATED_PROFILE=0) on the runtime-env path
-                        # the same way _reload_dotenv() protects the live env.
-                        if k in _PROTECTED_ENV_KEYS:
-                            continue
-                        env[k] = v
+            for k, v in _parse_dotenv_text(env_path.read_text(encoding='utf-8')).items():
+                # #4589: never let a profile's own .env override an
+                # operator/deployment posture (e.g. disable isolation via
+                # HERMES_WEBUI_ISOLATED_PROFILE=0) on the runtime-env path
+                # the same way _reload_dotenv() protects the live env.
+                if k in _PROTECTED_ENV_KEYS:
+                    continue
+                env[k] = v
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
+
+    # #7048: root/parent .env fallback — explicit allowlist only, so a named
+    # profile inherits intended operator/runtime settings (SEARXNG_URL and the
+    # non-secret FIRECRAWL_* config keys) without blanket-inheriting
+    # credentials (incl. FIRECRAWL_API_KEY) or server auth secrets.
+    # Profile-defined keys (including empty) and existing launcher/process
+    # values always win over this fallback.
+    root_env_path = _root_env_path_for(home)
+    if root_env_path is not None and root_env_path != env_path and root_env_path.exists():
+        try:
+            for k, v in _parse_dotenv_text(root_env_path.read_text(encoding='utf-8')).items():
+                if not v:
+                    continue  # an empty root value carries no fallback
+                if not _root_env_key_allowlisted(k):
+                    continue  # never blanket-inherit credentials/auth secrets
+                if k in _PROTECTED_ENV_KEYS:
+                    continue  # defense-in-depth: posture keys stay operator-only
+                if k in env:
+                    continue  # profile-defined key (incl. empty) suppresses
+                if k in os.environ and _env_provided_by_launcher(k):
+                    continue  # launcher/process value wins over root fallback
+                env[k] = v
+        except Exception:
+            logger.debug("Failed to read root env from %s", root_env_path)
 
     return env
 
@@ -1087,15 +1295,72 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
+def _root_only_env_names_for_profile(
+    profile_home_path: Path,
+    safe_runtime_env: dict[str, str],
+) -> set[str]:
+    """Return root ``.env`` keys a named-profile turn must not inherit (#7048).
+
+    The ``.env`` next to ``profiles/`` is server/operator scope: a named profile
+    inherits only its explicitly allowlisted keys (plus whatever it defines
+    itself). When a turn mirrors its runtime env into the *process* env, every
+    other root key has to be scrubbed for the duration of that turn — otherwise
+    a key that only profile ``alpha`` defined would survive into a later profile
+    ``beta`` turn through the process env (overlapping alpha/beta turns on one
+    server process).
+
+    Shell-identity keys (``_BLOCKED_RUNTIME_ENV_KEYS``), protected posture keys
+    and ``HERMES_HOME`` are excluded: they are governed by the dedicated
+    context-local/process home machinery, not by the root-env mirror.
+    """
+    root_env_path = _root_env_path_for(Path(profile_home_path))
+    if root_env_path is None:
+        return set()
+    try:
+        root_values = _parse_dotenv_text(root_env_path.read_text(encoding='utf-8'))
+    except Exception:
+        logger.debug("Failed to read root env from %s", root_env_path)
+        return set()
+    profile_defined = set(safe_runtime_env or {})
+    root_only: set[str] = set()
+    for key, value in root_values.items():
+        if not value:
+            continue  # an empty root value carries no inherited default
+        if key in profile_defined:
+            continue  # the profile's own layer owns this key
+        if _root_env_key_allowlisted(key):
+            continue  # shared operator settings stay inherited
+        if key in _PROTECTED_ENV_KEYS or key in _BLOCKED_RUNTIME_ENV_KEYS:
+            continue  # posture/identity keys are handled elsewhere
+        if key == 'HERMES_HOME':
+            continue  # the profile home override has its own machinery
+        root_only.add(key)
+    return root_only
+
+
 def _apply_profile_env_to_process(
     process_env,
     safe_runtime_env: dict[str, str],
     *,
     secret_env_names: set[str],
+    root_only_env_names: Optional[set[str]] = None,
 ) -> dict[str, Optional[str]]:
-    scoped_keys = set(safe_runtime_env) | set(secret_env_names)
+    """Scope the process env to one profile turn; return the pre-turn values.
+
+    ``root_only_env_names`` are keys the root ``.env`` defines for the server
+    scope. A named profile does not inherit them (#7048), so they are dropped
+    from the process env for the duration of the turn — otherwise a key only
+    profile ``alpha`` defined would still be visible during a later ``beta``
+    turn. The returned map carries their pre-turn values, so the caller's
+    restore path puts them back.
+    """
+    root_scoped = set(root_only_env_names or ())
+    scoped_keys = set(safe_runtime_env) | set(secret_env_names) | root_scoped
     previous_env = {key: process_env.get(key) for key in scoped_keys}
     for key in secret_env_names:
+        if key not in safe_runtime_env:
+            process_env.pop(key, None)
+    for key in root_scoped:
         if key not in safe_runtime_env:
             process_env.pop(key, None)
     return previous_env
@@ -1284,6 +1549,14 @@ def profile_env_for_background_worker(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_skill_home_patch_lock = True
 
+        # #7048: keys the root .env defines for the server scope. A named
+        # profile does not inherit them, so any left in the process env by a
+        # previous turn (overlapping alpha/beta turns) must be dropped for this
+        # turn. Computed before the env lock: it only reads files.
+        root_only_env_names = _root_only_env_names_for_profile(
+            profile_home_path, safe_runtime_env
+        )
+
         with _ENV_LOCK:
             if scope_skill_modules and should_restore_skill_modules:
                 # Snapshot and patch before mutating process env so setup
@@ -1295,6 +1568,7 @@ def profile_env_for_background_worker(
                 os.environ,
                 safe_runtime_env,
                 secret_env_names=secret_env_names,
+                root_only_env_names=root_only_env_names,
             )
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
@@ -1553,25 +1827,23 @@ def _reload_dotenv(home: Path):
         return
     try:
         loaded_keys: set[str] = set()
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, v = line.split('=', 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k and v:
-                    # Operator/deployment-level keys are never overridable by a
-                    # profile's own .env (#4589 — prevents a contained user from
-                    # disabling their isolation via HERMES_WEBUI_ISOLATED_PROFILE=0).
-                    if k in _PROTECTED_ENV_KEYS:
-                        logger.warning(
-                            "Ignoring protected key %s in profile .env %s; "
-                            "operator/deployment env takes precedence",
-                            k, env_path,
-                        )
-                        continue
-                    os.environ[k] = v
-                    loaded_keys.add(k)
+        # Same dotenv grammar as the root/profile layers (#7048), which is the
+        # grammar ``ctl.sh`` itself uses: a ``.env`` that the launcher parses
+        # resolves to the same key/value here.
+        for k, v in _parse_dotenv_text(env_path.read_text(encoding="utf-8")).items():
+            if v:
+                # Operator/deployment-level keys are never overridable by a
+                # profile's own .env (#4589 — prevents a contained user from
+                # disabling their isolation via HERMES_WEBUI_ISOLATED_PROFILE=0).
+                if k in _PROTECTED_ENV_KEYS:
+                    logger.warning(
+                        "Ignoring protected key %s in profile .env %s; "
+                        "operator/deployment env takes precedence",
+                        k, env_path,
+                    )
+                    continue
+                os.environ[k] = v
+                loaded_keys.add(k)
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
