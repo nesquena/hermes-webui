@@ -241,6 +241,12 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Git detection -- branch name and dirty file count badge in workspace header
 - Right panel is drag-resizable
 - Syntax highlighted code preview (Prism.js)
+- Fullscreen preview mode -- expand the preview over the whole viewport from the
+  preview header (or Escape to exit), with the covered chrome made inert while it
+  is up (#6711)
+- Preview zoom (A- / A+) with a persisted per-user size that defaults to the app
+  font size; opening a preview no longer pins an inherited size, so changing the
+  app font size still rescales previews until you choose a zoom explicitly (#6711)
 
 ### Voice input
 - Microphone button in the composer (Web Speech API)

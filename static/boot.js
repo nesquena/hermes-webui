@@ -243,6 +243,47 @@ function _hasWorkspacePreviewVisible(){
   return !!(preview&&preview.classList.contains('visible'));
 }
 
+/**
+ * Reconcile the compact-viewport panel class with the runtime panel mode.
+ *
+ * `.mobile-open` is only ever written by `_setWorkspacePanelMode()`, so a
+ * breakpoint change while the panel is open leaves the two out of step: enter
+ * fullscreen on desktop (>900px) -> resize to phone width -> exit fullscreen.
+ * `_workspacePanelMode` still says 'preview' but `.mobile-open` was never
+ * added, so the restored mobile panel sits off-screen while every piece of
+ * runtime/persisted state claims it is open. Re-derive the class from the mode
+ * on every viewport change so the two can no longer drift.
+ */
+function _reconcileWorkspacePanelBreakpoint(){
+  const {panel}= _workspacePanelEls();
+  if(!panel) return;
+  const open=_workspacePanelMode!=='closed';
+  const before=panel.classList.contains('mobile-open');
+  if(_isCompactWorkspaceViewport()){
+    // Mirror _setWorkspacePanelMode() EXACTLY: the compact class tracks the
+    // runtime open/closed mode and nothing else. An earlier revision added
+    // `&& (hasPreview||!!S.session)` here, which diverged from the setter and
+    // hid the panel on compact while its mode and persisted state still said
+    // open — a browse panel with no session (the state
+    // syncWorkspacePanelState() deliberately preserves on fresh/empty-session
+    // boots) went off-screen and its controls announced it as closed.
+    // Do not reintroduce a second visibility predicate here: this function's
+    // only job is to re-derive the class the setter owns.
+    panel.classList.toggle('mobile-open',open);
+  }else{
+    panel.classList.remove('mobile-open');
+  }
+  // The compact class drives toggle labels + aria state (see
+  // syncWorkspacePanelUI, which reads `mobileOpen` on compact viewports).
+  // Changing it without re-syncing left the buttons describing the previous
+  // viewport — e.g. resizing desktop→compact with the panel open showed an
+  // "Show workspace panel" label and aria-pressed="false" next to a visible
+  // panel. Only re-sync when the class actually changed, so the common
+  // resize-without-breakpoint-change path stays cheap.
+  const after=panel.classList.contains('mobile-open');
+  if(after!==before && typeof syncWorkspacePanelUI==='function') syncWorkspacePanelUI();
+}
+
 function _setWorkspacePanelMode(mode){
   const {layout,panel}= _workspacePanelEls();
   if(!layout||!panel)return;
@@ -2230,6 +2271,13 @@ function clearPreview(opts={}){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  // Exit fullscreen if active — route through the single lifecycle helper so
+  // listeners, inline sizing, classes, and the button presentation all reset.
+  if(typeof setPreviewFullscreen==='function'&&document.documentElement.classList.contains('preview-fullscreen-active')){
+    setPreviewFullscreen(false);
+  }
+  // Hide zoom/fullscreen controls
+  if(typeof _showPreviewZoomControls==='function') _showPreviewZoomControls(false, false);
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
@@ -2438,6 +2486,15 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  // Escape exits preview fullscreen (before the command-dropdown handler,
+  // which is scoped to the composer and won't see a fullscreen panel anyway).
+  if(e.key==='Escape'&&document.documentElement.classList.contains('preview-fullscreen-active')){
+    if(typeof setPreviewFullscreen==='function'){
+      e.preventDefault();
+      setPreviewFullscreen(false);
+      return;
+    }
+  }
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
@@ -2611,6 +2668,10 @@ function applyEmptyStatePanelPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  // A breakpoint change while the panel is open must re-derive the compact
+  // class from the runtime mode, otherwise the two drift apart (see
+  // _reconcileWorkspacePanelBreakpoint) and the panel comes back off-screen.
+  if(typeof _reconcileWorkspacePanelBreakpoint==='function') _reconcileWorkspacePanelBreakpoint();
   if(!window.visualViewport) _forceMobileViewportReflow();
 });
 
@@ -2878,6 +2939,11 @@ function _applyFontSize(size){
   } else {
     delete document.documentElement.dataset.fontSize;
   }
+  // The preview's own size is derived from this mapping, and its edit textarea
+  // carries an inline size with no stylesheet rule to fall back on — so an open
+  // preview (and its editor) must be re-resolved here, or it keeps the previous
+  // app font size while the rest of the UI resizes.
+  if(typeof _refreshPreviewFontSize==='function') _refreshPreviewFontSize();
 }
 
 function _pickFontSize(size){
