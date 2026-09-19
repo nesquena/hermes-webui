@@ -824,3 +824,64 @@ def test_chat_start_rejects_invalid_request_profile(monkeypatch):
 
     assert result == {"error": "invalid profile"}
     assert errors == [("invalid profile", 400)]
+
+
+def test_switch_profile_returns_coerced_reasoning_contract_for_destination(tmp_path, monkeypatch):
+    """
+    /api/profile/switch must expose the DESTINATION profile's EFFECTIVE
+    reasoning status — computed through the same provider/model capability +
+    effort-coercion authority as GET /api/reasoning — never the raw
+    agent.reasoning_effort (#7206 re-gate).
+
+    The destination config stores agent.reasoning_effort: max for a pre-5.6
+    GPT-5 / openai default, a level the provider ceiling strips. The switch
+    response must report the coerced 'xhigh' (and a supported_efforts list
+    WITHOUT 'max') so the frontend reseeds the chip with the effort streaming
+    will actually send, instead of an override that is never applied.
+    """
+    import api.profiles as profiles
+
+    default_home = tmp_path / '.hermes'
+    default_home.mkdir()
+    target_home = default_home / 'profiles' / 'vops'
+    target_home.mkdir(parents=True)
+
+    (target_home / 'config.yaml').write_text(
+        'model:\n'
+        '  default: gpt-5\n'
+        '  provider: openai\n'
+        'agent:\n'
+        '  reasoning_effort: max\n',
+        encoding='utf-8',
+    )
+
+    orig_default = profiles._DEFAULT_HERMES_HOME
+    profiles._DEFAULT_HERMES_HOME = default_home
+    orig_active = profiles._active_profile
+    profiles._active_profile = 'default'
+    profiles._tls.profile = None
+
+    try:
+        result = profiles.switch_profile('vops', process_wide=False)
+        reasoning = result.get('reasoning')
+        assert reasoning is not None, (
+            "switch response must include the explicit reasoning contract"
+        )
+        # Effective (coerced) effort: 'max' is above the pre-5.6 GPT-5 ceiling.
+        assert reasoning['reasoning_effort'] == 'xhigh', reasoning
+        # Raw config value must never leak through the contract.
+        assert reasoning['reasoning_effort'] != 'max'
+        # Capability list must not advertise the stripped level.
+        assert 'max' not in reasoning['supported_efforts'], reasoning['supported_efforts']
+        assert reasoning['supports_reasoning_effort'] is True
+        assert reasoning['show_reasoning'] is True
+        # Shared coercion authority: identical to what GET /api/reasoning would
+        # report for the same destination model/provider.
+        from api.config import coerce_reasoning_effort_for_model
+        assert reasoning['reasoning_effort'] == coerce_reasoning_effort_for_model(
+            'max', 'gpt-5', provider_id='openai'
+        )
+    finally:
+        profiles._DEFAULT_HERMES_HOME = orig_default
+        profiles._active_profile = orig_active
+        profiles._tls.profile = None
