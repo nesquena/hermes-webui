@@ -344,8 +344,6 @@ def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypat
         "source_tag": "webui",
         "raw_source": "webui",
         "session_source": "webui",
-        "_lineage_root_id": "root_sid",
-        "_lineage_tip_id": "visible_tip",
     }
     duplicate_webui_projection = {
         "session_id": "state_projection_tip",
@@ -375,6 +373,14 @@ def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypat
 
     monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [webui_row])
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [duplicate_webui_projection, external_projection])
+    monkeypatch.setattr(
+        routes,
+        "_enrich_sidebar_lineage_metadata",
+        lambda rows: rows[0].update(
+            _lineage_root_id="root_sid",
+            _lineage_tip_id="visible_tip",
+        ),
+    )
 
     handler = _FakeHandler()
     routes.handle_get(handler, urlparse("http://example.com/api/sessions"))
