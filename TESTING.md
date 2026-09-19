@@ -2005,6 +2005,10 @@ Bridged CLI sessions:
 ---
 
 *Last updated: v0.51.792, July 1, 2026*
+
+Experimental Bot groups verification (bridge, real HTTP, responsive browser and
+official Hermes handler contract) is documented in
+[Bot groups](docs/bot-groups.md#verification). Its fixtures do not call a model.
 *Total automated tests collected: ~11,500 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
