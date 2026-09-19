@@ -3306,6 +3306,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
+    window._showSubagentSessions=s.show_subagent_sessions!==false;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
@@ -3463,6 +3464,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
+    window._showSubagentSessions=true;  // settings-load failed: default-on for backward compat (#6373)
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;
