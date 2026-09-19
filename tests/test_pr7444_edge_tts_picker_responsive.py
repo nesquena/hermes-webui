@@ -61,6 +61,13 @@ def _open_edge_voice_picker(page):
     page.wait_for_function(
         "() => typeof S !== 'undefined' && S._bootReady === true", timeout=15000
     )
+    # The isolated test server can legitimately present first-run onboarding.
+    # Dismiss it through the real UI path before opening Settings so it cannot
+    # occlude the picker while geometry, hit-testing, or screenshots are taken.
+    onboarding = page.locator("#onboardingOverlay")
+    if onboarding.is_visible():
+        page.locator("#onboardingSkipBtn").click()
+        onboarding.wait_for(state="hidden", timeout=15000)
     # Persist engine + voice BEFORE the settings panel loads, the way a user
     # who previously picked them would arrive at the screen.
     page.evaluate(
@@ -105,7 +112,7 @@ def test_edge_french_voice_picker_usable_across_viewports(label, width, height):
                 "sel => Array.from(sel.options).map(o => o.value)",
             )
             french = [v for v in values if v.startswith("fr-")]
-            assert sorted(french) == sorted(FRENCH_VOICES), values
+            assert french == FRENCH_VOICES, values
 
             # (2) The real population logic marked the saved voice selected.
             assert page.eval_on_selector(
@@ -122,6 +129,31 @@ def test_edge_french_voice_picker_usable_across_viewports(label, width, height):
             assert box["y"] + box["height"] <= height + 1, (label, box)
             assert box["width"] > 0 and box["height"] > 0, (label, box)
 
+            # Geometry alone can pass for a control hidden behind an overlay.
+            # Prove the collapsed select owns the hit-test at its center.
+            hit = page.eval_on_selector(
+                "#settingsTtsVoice",
+                """sel => {
+                    const rect = sel.getBoundingClientRect();
+                    const target = document.elementFromPoint(
+                        rect.left + rect.width / 2,
+                        rect.top + rect.height / 2
+                    );
+                    return {
+                        hitSelect: target === sel,
+                        targetId: target ? target.id : null,
+                        overlayVisible: getComputedStyle(
+                            document.getElementById('onboardingOverlay')
+                        ).display !== 'none',
+                    };
+                }""",
+            )
+            assert hit == {
+                "hitSelect": True,
+                "targetId": "settingsTtsVoice",
+                "overlayVisible": False,
+            }, (label, hit)
+
             # (4) Each French voice is selectable through the real element.
             for voice in FRENCH_VOICES:
                 picker.select_option(voice)
@@ -134,6 +166,42 @@ def test_edge_french_voice_picker_usable_across_viewports(label, width, height):
             if _SCREENSHOT_DIR:
                 out = Path(_SCREENSHOT_DIR)
                 out.mkdir(parents=True, exist_ok=True)
+                # Browser screenshots cannot capture the native popup of a
+                # collapsed <select>. For evidence only, render an explicit
+                # numbered view from the real populated French <option> labels.
+                page.eval_on_selector(
+                    "#settingsTtsVoice",
+                    """sel => {
+                        const proof = document.createElement('div');
+                        proof.id = 'pr7444FrenchVoiceEvidence';
+                        proof.style.cssText = [
+                            'margin-top:8px',
+                            'padding:10px 12px',
+                            'border:1px solid var(--border2)',
+                            'border-radius:6px',
+                            'background:var(--code-bg)',
+                            'color:var(--text)',
+                            'font-size:13px',
+                            'line-height:1.55',
+                        ].join(';');
+                        const title = document.createElement('strong');
+                        title.textContent = 'French Edge voices — picker order';
+                        proof.appendChild(title);
+                        const list = document.createElement('ol');
+                        list.style.cssText = 'margin:6px 0 0;padding-left:24px';
+                        const french = Array.from(sel.options).filter(
+                            option => option.value.startsWith('fr-')
+                        );
+                        for (const option of french) {
+                            const item = document.createElement('li');
+                            item.textContent = option.textContent;
+                            list.appendChild(item);
+                        }
+                        proof.appendChild(list);
+                        sel.insertAdjacentElement('afterend', proof);
+                    }""",
+                )
+                picker.scroll_into_view_if_needed()
                 field = page.locator(FIELD_SELECTOR)
                 field.screenshot(
                     path=str(out / f"pr-7444-edge-tts-picker-{label}.png")
