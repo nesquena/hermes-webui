@@ -3699,19 +3699,38 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._modelDropdownReady=null;
     throw e;
   });
-  const _startModelDropdown=()=>{
-    const ready=window._modelDropdownReady;
-    if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown();
+  // Mirrors whether the hydration cached at window._modelDropdownReady has
+  // SETTLED. Promise state is not synchronously observable, so the starters
+  // below keep this flag: while a hydration is still in flight the cached
+  // promise is returned to dedupe concurrent hydrations (boot + first open),
+  // but once it has settled it must NOT keep serving that first-paint snapshot
+  // forever — /api/models can grow after boot (provider overflow / extra_models
+  // added later, e.g. OpenRouter stealth/ox-alpha) and the composer picker
+  // would report "No models found" for those until a hard refresh (#7227).
+  let _modelCatalogHydrationSettled=false;
+  const _trackModelCatalogHydration=(next)=>{
+    Promise.resolve(next).then(
+      ()=>{ _modelCatalogHydrationSettled=true; },
+      ()=>{ _modelCatalogHydrationSettled=false; }
+    );
     window._modelDropdownReady=next;
     return next;
+  };
+  const _startModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    // An in-flight hydration dedupes (boot + first open join it). A settled one
+    // is dropped so opening the picker refetches the current /api/models payload.
+    if(ready&&typeof ready.then==='function'&&!_modelCatalogHydrationSettled) return ready;
+    window._modelDropdownReady=null;
+    _modelCatalogHydrationSettled=false;
+    return _trackModelCatalogHydration(_hydrateModelDropdown());
   };
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth});
-    window._modelDropdownReady=next;
-    return next;
+    return _trackModelCatalogHydration(
+      _hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth})
+    );
   };
   window._modelDropdownReady=null;
   window._startBootModelDropdown=_startBootModelDropdown;
