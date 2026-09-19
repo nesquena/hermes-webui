@@ -98,8 +98,7 @@ except ImportError:  # pragma: no cover - resource is Unix-only
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
-
-from api.auth import check_auth, reset_trusted_auth_request_state
+from api.auth import check_auth, hsts_header_value, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -112,7 +111,6 @@ from api.routes import handle_delete, handle_get, handle_patch, handle_post, han
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
-
 
 class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
@@ -327,6 +325,8 @@ class Handler(BaseHTTPRequestHandler):
         return _build_csp_report_only_policy(extra_connect_src, extra_frame_src)
 
     def end_headers(self) -> None:
+        if hsts_header := hsts_header_value(self):
+            self.send_header("Strict-Transport-Security", hsts_header)
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
