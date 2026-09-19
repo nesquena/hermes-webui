@@ -5920,6 +5920,54 @@ def agent_session_rows_existing(
         return frozenset(wanted)
 
 
+def agent_session_pinned_flags(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> dict[str, bool]:
+    """Return ``{session_id: pinned}`` for ids that have a row in the agent ``sessions`` table.
+
+    ``sessions.pinned`` is the pin record shared with Hermes Desktop and
+    ``hermes sessions pin``; the sidebar reconciles its cached flag from it.
+    Batched like ``agent_session_rows_existing``. Returns ``{}`` on any error,
+    when the DB is missing, or when the column is absent, so a transient
+    failure never flips a pin: ids absent from the result are left untouched.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return {}
+    db_path = _agent_state_db_path(profile=profile)
+    if db_path is None:
+        return {}
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            cols = {str(row[1]) for row in cur.fetchall()}
+            if 'id' not in cols or 'pinned' not in cols:
+                return {}
+            flags: dict[str, bool] = {}
+            ids = list(wanted)
+            chunk_size = 500
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cur.execute(
+                    f"SELECT id, pinned FROM sessions WHERE id IN ({placeholders})",
+                    chunk,
+                )
+                for row in cur.fetchall():
+                    flags[str(row[0]).strip()] = bool(row[1])
+            return flags
+    except Exception:
+        logger.debug(
+            "agent_session_pinned_flags probe failed for %d ids",
+            len(wanted),
+            exc_info=True,
+        )
+        return {}
+
+
 def agent_session_zero_message_sids(
     session_ids: list[str] | set[str] | frozenset[str],
     *,
@@ -7872,7 +7920,7 @@ def _load_cli_sessions_uncached(
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
             'updated_at': raw_ts,
-            'pinned': False,
+            'pinned': bool(row.get('pinned')),
             'archived': _archived,
             'project_id': _state_row_project_id(sid, _source),
             'profile': profile,
@@ -7944,7 +7992,7 @@ def _load_cli_sessions_uncached(
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
-                    'pinned': False,
+                    'pinned': bool(row.get('pinned')),
                     'archived': _archived,
                     'project_id': _cron_pid(),
                     'profile': profile_value,
@@ -8010,7 +8058,7 @@ def _load_cli_sessions_uncached(
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
-                    'pinned': False,
+                    'pinned': bool(row.get('pinned')),
                     'archived': _archived,
                     'project_id': _webhook_pid(),
                     'profile': profile_value,
@@ -8074,7 +8122,7 @@ def _load_cli_sessions_uncached(
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
-                    'pinned': False,
+                    'pinned': bool(row.get('pinned')),
                     'archived': _archived,
                     'project_id': _state_row_project_id(sid, _source),
                     'profile': profile_value,

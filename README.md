@@ -218,7 +218,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Sessions
 - Create, rename, duplicate, delete, search by title and message content
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
-- Pin/star sessions to the top of the sidebar (gold indicator)
+- Pin/star sessions to the top of the sidebar (gold indicator). Pins are stored in hermes-agent's `state.db` (`sessions.pinned`), the same record Hermes Desktop and `hermes sessions pin` use, so a pin made in any of them shows in all of them; the WebUI's per-session sidecar only caches the flag and is overwritten from `state.db` on every sidebar build, independent of the *Show CLI sessions* setting. Pinning returns `503` if that record cannot be written, so a pin is never reported as saved when Desktop cannot see it. Sessions that exist only in the WebUI (no `state.db` row) keep their pin in the sidecar.
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions
 - Session tags -- add #tag to titles for colored chips and click-to-filter
