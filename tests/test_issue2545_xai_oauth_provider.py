@@ -1,4 +1,6 @@
 import copy
+import sys
+import types
 
 import api.config as config
 import api.profiles as profiles
@@ -31,6 +33,22 @@ def test_xai_oauth_is_known_oauth_provider():
 
 
 def test_xai_oauth_provider_card_uses_oauth_status_and_models(monkeypatch, tmp_path):
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_pkg.__path__ = []
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models.list_available_providers = lambda: []
+    fake_models.provider_model_ids = lambda pid: (
+        ["grok-4.20"] if pid == "xai-oauth" else []
+    )
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda pid: {
+        "logged_in": pid == "xai-oauth",
+        "key_source": "oauth" if pid == "xai-oauth" else "none",
+    }
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+
     restore = _with_config(
         monkeypatch,
         tmp_path,
@@ -51,6 +69,7 @@ def test_xai_oauth_provider_card_uses_oauth_status_and_models(monkeypatch, tmp_p
         assert grok["display_name"] == "xAI Grok OAuth"
         assert grok["is_oauth"] is True
         assert grok["configurable"] is False
+        assert grok["has_key"] is True
         assert grok["key_source"] == "oauth"
         assert grok["models"] == [{"id": "grok-4.20", "label": "Grok 4.20"}]
         assert grok["models_total"] == 1
