@@ -33,6 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _load_session_block() -> str:
@@ -50,16 +51,16 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
+    assert "function _markSessionUnread(session)" in SESSIONS_JS
 
 
 def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
     body = _function_block("_acknowledgeSessionVisit", "function _sessionVisitHasUnreadState")
-    # Clears viewed count (which clears the stale completion-unread marker, #3020),
-    # syncs the polling snapshot, and repaints the sidebar from cache.
-    assert "_setSessionViewedCount(sid, messageCount);" in body
+    # New behavior tags explicit visit acknowledgments in UI-driven sync paths.
+    assert "_setSessionViewedCount(sid, messageCount" in body
     assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);" in body
     assert "renderSessionListFromCache" in body
 
@@ -112,6 +113,12 @@ def test_same_session_reselect_clears_stale_unread():
     )
 
 
+def test_session_action_menu_exposes_mark_as_unread():
+    block = _function_block("_openSessionActionMenu", "document.addEventListener('click'")
+    assert "t('session_mark_unread')" in block
+    assert "_markSessionUnread(session);" in block
+
+
 def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
     """Concern (a): the visit-ack must NOT loosen the completion paths' focus gate.
 
@@ -153,9 +160,297 @@ def _extract(name: str) -> str:
     raise AssertionError(f"could not brace-match {name}")
 
 
+def _extract_if_present(name: str) -> str:
+    marker = f"function {name}("
+    if marker not in SESSIONS_JS:
+        return ""
+    return _extract(name)
+
+
 def _run_node(script: str) -> dict:
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
+
+
+
+
+def _extract_message_function(name: str) -> str:
+    marker_options = [
+        f"async function {name}(",
+        f"function {name}(",
+    ]
+    for marker in marker_options:
+        if marker not in MESSAGES_JS:
+            continue
+        start = MESSAGES_JS.index(marker)
+        brace = MESSAGES_JS.index("{", start)
+        depth = 0
+        for idx in range(brace, len(MESSAGES_JS)):
+            ch = MESSAGES_JS[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return MESSAGES_JS[start:idx + 1]
+    raise AssertionError(f"function {name} not found in messages.js")
+
+
+def _extract_message_listener_body(event_name: str) -> str:
+    marker = f"source.addEventListener('{event_name}',e=>{{"
+    start = MESSAGES_JS.index(marker)
+    brace = MESSAGES_JS.index("{", start)
+    depth = 0
+    for idx in range(brace, len(MESSAGES_JS)):
+        ch = MESSAGES_JS[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[brace + 1 : idx]
+    raise AssertionError(f"listener for {event_name} not found")
+
+
+def _restore_settled_session_migration_script() -> str:
+    migrate = _extract("_migrateSessionCompletionUnreadToFinalSession")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    restore = _extract_message_function("_restoreSettledSession")
+    save_unread = save_unread.replace(
+        "function _saveSessionCompletionUnread() {",
+        "function _saveSessionCompletionUnread() { saves += 1;",
+    )
+    lines = [
+        "const _store = {};",
+        "const localStorage = {",
+        "  getItem: (k) => (k in _store ? _store[k] : null),",
+        "  setItem: (k, v) => { _store[k] = String(v); },",
+        "};",
+        "const SESSION_COMPLETION_UNREAD_KEY = 'u';",
+        "let _sessionCompletionUnread = null;",
+        "let saves = 0;",
+        "let S = {",
+        "  session: {",
+        "    session_id: 'old',",
+        "    message_count: 4,",
+        "  },",
+        "  messages: [{ role: 'assistant', content: 'old' }],",
+        "  activeStreamId: 'stream-restore',",
+        "};",
+        "let _streamFinalized = false;",
+        "let _persistTimer = null;",
+        "let _queueDrainSid = null;",
+        "let activeSid = 'old';",
+        "let streamId = 'stream-restore';",
+        "let apiRequests = [];",
+        "",
+        "function api(path) {",
+        "  apiRequests.push(path);",
+        "  return Promise.resolve({",
+        "    session: {",
+        "      session_id: 'final',",
+        "      message_count: 9,",
+        "      last_message_at: 123,",
+        "      messages: [{ role: 'assistant', content: 'final' }],",
+        "    },",
+        "  });",
+        "}",
+        "function _isActiveSession() { return true; }",
+        "function _isSessionCurrentPane() { return false; }",
+        "function _isSessionActivelyViewed() { return false; }",
+        "function _isSessionActivelyViewedForList() { return false; }",
+        "function _closeSource() {}",
+        "function _clearStreamEndRecovery() {}",
+        "function _clearAnchorProseIncrementalNode() {}",
+        "function _cancelThrottledSnapshotTimer() {}",
+        "function _cancelAnimationFramePendingStreamRender() {}",
+        "function _streamFadeCleanupReduceMotionListener() {}",
+        "function _smdEndParser() {}",
+        "function finalizeThinkingCard() {}",
+        "function _clearOwnerInflightState() {}",
+        "function _flushReasoningToAnchor() {}",
+        "function _clearApprovalForOwner() {}",
+        "function _clearClarifyForOwner() {}",
+        "function _scheduleAnchorRegistryCleanup() {}",
+        "function _markSessionCompletionUnread() {}",
+        "function _markSessionViewed() {}",
+        "function _rememberSessionListSource() {}",
+        "function _forgetObservedStreamingSession() {}",
+        "function renderSessionList() {}",
+        "function _setActivePaneIdleIfOwner() {}",
+        "function _carryForwardEphemeralTurnFields(_prev, next) { return next; }",
+        "function _attachProjectedAnchorSceneToLastAssistant() {}",
+        "function _filterRecoveryControlMessages(messages) { return messages; }",
+        "function _hydrateTodosFromSession() {}",
+        "function _replaceMarkerOnlyAssistantWithStreamError() { return null; }",
+        "function _mergeSettledToolCallsWithLiveMetadata(toolCalls) { return toolCalls; }",
+        "function _messageRenderableMessageCount() { return 100; }",
+        "let _currentMessageRenderWindowSize = 50;",
+        "function _isTerminalStreamErrorMarkerMessage() { return false; }",
+        "function syncTopbar() {}",
+        "function renderMessages() {}",
+        "",
+        get_unread,
+        save_unread,
+        migrate,
+        restore,
+        "",
+        "const unread = _getSessionCompletionUnread();",
+        "unread.old = {",
+        "  message_count: 3,",
+        "  completed_at: 7,",
+        "  source: 'completion',",
+        "  manual: true,",
+        "  manual_pending: true,",
+        "};",
+        "unread.final = {",
+        "  message_count: 6,",
+        "  completed_at: 9,",
+        "  source: 'completion',",
+        "  manual: false,",
+        "};",
+        "_saveSessionCompletionUnread();",
+        "saves = 0;",
+        "(async () => {",
+        "  const out = await _restoreSettledSession({}, {});",
+        "  const after = _getSessionCompletionUnread();",
+        "  console.log(JSON.stringify({",
+        "    out,",
+        "    out_saves: saves,",
+        "    old_present: Object.prototype.hasOwnProperty.call(after, 'old'),",
+        "    final_marker: after.final,",
+        "    active_sid: S.session.session_id,",
+        "    api_path: apiRequests[0],",
+        "  }));",
+        "})();",
+    ]
+    return "\n".join(lines)
+
+
+def _apperror_settlement_migration_script() -> str:
+    migrate = _extract("_migrateSessionCompletionUnreadToFinalSession")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    handler = _extract_message_listener_body("apperror")
+    save_unread = save_unread.replace(
+        "function _saveSessionCompletionUnread() {",
+        "function _saveSessionCompletionUnread() { saves += 1;",
+    )
+    lines = [
+        "const _store = {};",
+        "const localStorage = {",
+        "  getItem: (k) => (k in _store ? _store[k] : null),",
+        "  setItem: (k, v) => { _store[k] = String(v); },",
+        "};",
+        "const SESSION_COMPLETION_UNREAD_KEY = 'u';",
+        "let _sessionCompletionUnread = null;",
+        "let saves = 0;",
+        "let showToastCalled = 0;",
+        "let renderMessagesCalled = 0;",
+        "let renderSessionListCalled = 0;",
+        "let activeSid = 'old';",
+        "let streamId = 'stream-apperror';",
+        "let _persistTimer = null;",
+        "let _streamFinalized = false;",
+        "let _terminalStateReached = false;",
+        "const _allSessions = [];",
+        "let S = {",
+        "  session: {",
+        "    session_id: 'old',",
+        "    message_count: 4,",
+        "    messages: [{ role: 'user', content: 'x' }],",
+        "  },",
+        "  messages: [{ role: 'user', content: 'x' }],",
+        "};",
+        "let assistantText = '';",
+        "function t(key) { return key; }",
+        "function showToast() { showToastCalled += 1; }",
+        "function trackBackgroundError() {}",
+        "function _filterRecoveryControlMessages(messages) { return messages; }",
+        "function _markSessionViewed() {}",
+        "function _setActiveSessionUrl() {}",
+        "function _applyToAnchor() {}",
+        "function clearLiveToolCards() {}",
+        "function _scheduleAnchorRegistryCleanup() {}",
+        "function clearCompressionUi() {}",
+        "function finalizeThinkingCard() {}",
+        "function _clearApprovalForOwner() {}",
+        "function _clearClarifyForOwner() {}",
+        "function _clearOwnerInflightState() {}",
+        "function _clearStreamNotificationBackground() {}",
+        "function _clearStreamHidden() {}",
+        "function _closeSource() {}",
+        "function _setActivePaneIdleIfOwner() {}",
+        "function _clearAnchorProseIncrementalNode() {}",
+        "function _cancelThrottledSnapshotTimer() {}",
+        "function _cancelAnimationFramePendingStreamRender() {}",
+        "function _streamFadeCleanupReduceMotionListener() {}",
+        "function _smdEndParser() {}",
+        "function _bailOutOfTerminalEventsFromStaleStream() { return false; }",
+        "function _flushReasoningToAnchor() {}",
+        "function _streamRecoveryControlMessageText() { return false; }",
+        "function _carryForwardEphemeralTurnFields(_prev, next) { return next; }",
+        "function _attachProjectedAnchorSceneToLastAssistant() {}",
+        "function removeThinking() {}",
+        "function renderMessages() { renderMessagesCalled += 1; }",
+        "function renderSessionList() { renderSessionListCalled += 1; }",
+        "function _clearStreamEndRecovery() {}",
+        "const window = { _compressionUi: {} };",
+        get_unread,
+        save_unread,
+        migrate,
+        "function runApperror(e) {",
+        "  const source = {",
+        "    readyState: 1,",
+        "    close() { this.closed = true; },",
+        "  };",
+        handler,
+        "}",
+        "",
+        "const unread = _getSessionCompletionUnread();",
+        "unread.old = {",
+        "  message_count: 3,",
+        "  completed_at: 7,",
+        "  source: 'completion',",
+        "  manual: true,",
+        "  manual_pending: true,",
+        "};",
+        "unread.final = {",
+        "  message_count: 5,",
+        "  completed_at: 9,",
+        "  source: 'completion',",
+        "  manual: false,",
+        "};",
+        "_saveSessionCompletionUnread();",
+        "saves = 0;",
+        "runApperror({",
+        "  data: JSON.stringify({",
+        "    session_id: 'old',",
+        "    new_session_id: 'final',",
+        "    type: 'error',",
+        "    message: 'provider failed',",
+        "    details: 'detail',",
+        "    session: {",
+        "      session_id: 'final',",
+        "      message_count: 8,",
+        "      messages: [{ role: 'assistant', content: 'final message' }],",
+        "      last_message_at: 77,",
+        "    },",
+        "  }),",
+        "});",
+        "console.log(JSON.stringify({",
+        "  old_present: Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'old'),",
+        "  final_marker: _getSessionCompletionUnread().final,",
+        "  session_sid: S.session && S.session.session_id,",
+        "  message_len: S.messages.length,",
+        "  render_messages_called: renderMessagesCalled,",
+        "  render_list_called: renderSessionListCalled,",
+        "  show_toast_called: showToastCalled,",
+        "  saves,",
+        "}));",
+    ]
+    return "\n".join(lines)
 
 
 def test_acknowledge_visit_clears_completion_unread_marker():
@@ -212,6 +507,191 @@ console.log(JSON.stringify({{before, after, repaints, viewed: _getSessionViewedC
     assert out["snap"] == {"message_count": 5, "last_message_at": 10}, (
         "polling snapshot must be synced so a deferred list poll cannot re-flag the session"
     )
+
+
+def test_mark_session_unread_sets_completion_marker_and_repaints():
+    mark_unread = _extract("_markSessionUnread")
+    mark_completion = _extract("_markSessionCompletionUnread")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+let _sessionCompletionUnread = null;
+const _allSessions = [];
+let S = {{ session: {{ session_id: 'open', message_count: 7 }} }};
+let repaints = 0;
+let toast = '';
+function renderSessionListFromCache() {{ repaints += 1; }}
+function showToast(msg) {{ toast = msg; }}
+function t(key) {{ return key; }}
+{get_unread}
+{save_unread}
+{mark_completion}
+{mark_unread}
+_markSessionUnread({{session_id: 'open'}});
+console.log(JSON.stringify({{marker: _getSessionCompletionUnread().open, repaints, toast}}));
+"""
+    out = _run_node(script)
+    assert out["marker"]["message_count"] == 7
+    assert out["marker"]["manual"] is True
+    assert out["repaints"] == 1
+    assert out["toast"] == "session_marked_unread"
+
+
+def test_manual_marked_unread_survives_active_session_visit_ack():
+    mark_completion = _extract("_markSessionCompletionUnread")
+    mark_unread = _extract("_markSessionUnread")
+    ack = _extract("_acknowledgeSessionVisit")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    clear_unread = _extract("_clearSessionCompletionUnread")
+    sync = _extract("_syncSessionListSnapshotOnVisit")
+    set_viewed = _extract("_setSessionViewedCount")
+    get_counts = _extract("_getSessionViewedCounts")
+    save_counts = _extract("_saveSessionViewedCounts")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+const SESSION_VIEWED_COUNTS_KEY = 'v';
+let _sessionCompletionUnread = null;
+let _sessionViewedCounts = null;
+let repaints = 0;
+let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
+const _sessionListSnapshotById = new Map();
+const _sessionStreamingById = new Map();
+
+function _forgetObservedStreamingSession() {{}}
+function renderSessionListFromCache() {{ repaints += 1; }}
+const document = {{
+  visibilityState: 'visible',
+  hasFocus: () => true,
+}};
+function _isSessionActivelyViewedForList(sid) {{
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (document.visibilityState !== 'visible') return false;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}}
+function t(key) {{ return key; }}
+function showToast() {{}}
+{get_counts}
+{save_counts}
+{get_unread}
+{save_unread}
+{clear_unread}
+{mark_completion}
+{set_viewed}
+{sync}
+{ack}
+{mark_unread}
+
+_markSessionUnread({{session_id: 'open', message_count: 9}});
+
+// First active reconcile (non-explicit visit) flips the manual_pending flag but keeps marker.
+_acknowledgeSessionVisit('open', 9, 123, false);
+let markerAfterFirstAck = _getSessionCompletionUnread().open;
+
+// A second active-reconcile from polling should not consume manual intent.
+_setSessionViewedCount('open', 9);
+const markerAfterPassiveReconcile = _getSessionCompletionUnread().open;
+
+// An explicit visit acknowledgement on the same active session should consume
+// the remaining manual marker.
+_acknowledgeSessionVisit('open', 9, 123);
+const markerAfterSecondAck = _getSessionCompletionUnread().open;
+const counts = _getSessionViewedCounts();
+
+console.log(JSON.stringify({{
+  marker_present: !!markerAfterFirstAck,
+  marker_manual: markerAfterFirstAck && markerAfterFirstAck.manual,
+  marker_manual_pending: markerAfterFirstAck && markerAfterFirstAck.manual_pending,
+  marker_after_passive: markerAfterPassiveReconcile && markerAfterPassiveReconcile.manual,
+  marker_after_second_ack: !!markerAfterSecondAck,
+  viewed: counts.open,
+  repaints,
+}}));
+"""
+
+    out = _run_node(script)
+    assert out["marker_present"] is True
+    assert out["marker_manual"] is True
+    assert out["marker_manual_pending"] is False
+    assert out["marker_after_passive"] is True
+    assert out["marker_after_second_ack"] is False
+    assert out["viewed"] == 9
+    assert out["repaints"] >= 1
+
+
+def test_manual_marked_unread_passive_active_polls_do_not_clear_before_visit():
+    mark_completion = _extract("_markSessionCompletionUnread")
+    mark_unread = _extract("_markSessionUnread")
+    set_viewed = _extract("_setSessionViewedCount")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    get_counts = _extract("_getSessionViewedCounts")
+    save_counts = _extract("_saveSessionViewedCounts")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+const SESSION_VIEWED_COUNTS_KEY = 'v';
+let _sessionCompletionUnread = null;
+let _sessionViewedCounts = null;
+let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
+const _sessionStreamingById = new Map();
+function _forgetObservedStreamingSession() {{}}
+
+const document = {{
+  visibilityState: 'visible',
+  hasFocus: () => true,
+}};
+function _isSessionActivelyViewedForList(sid) {{
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (document.visibilityState !== 'visible') return false;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}}
+{get_counts}
+{save_counts}
+{get_unread}
+{save_unread}
+{mark_completion}
+{set_viewed}
+{mark_unread}
+
+_markSessionUnread({{session_id: 'open', message_count: 9}});
+// First implicit active reconcile from polling.
+_setSessionViewedCount('open', 9);
+// A second background tick should keep the manual unread marker alive.
+_setSessionViewedCount('open', 9);
+const unreadAfterPolls = _getSessionCompletionUnread();
+console.log(JSON.stringify({{
+  unread_present: !!unreadAfterPolls.open,
+  marker: unreadAfterPolls.open,
+  viewed: _getSessionViewedCounts()['open'],
+}}));
+"""
+
+    out = _run_node(script)
+    assert out["unread_present"] is True
+    assert out["marker"]["manual"] is True
+    assert out["marker"]["manual_pending"] is False
+    assert out["viewed"] == 9
 
 
 def test_visit_snapshot_prevents_deferred_poll_from_reflagging():
@@ -446,3 +926,97 @@ def test_visible_tab_message_load_still_syncs_viewed_count():
         "an actively-viewed session must still sync its viewed count to the "
         "loaded message count"
     )
+
+
+def _completion_rotation_script(*, final_exists: bool) -> str:
+    migrate = _extract_if_present("_migrateSessionCompletionUnreadToFinalSession")
+    mark_completed = _extract("_markSessionCompletedInList")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    sessions = "[{session_id: 'old'}]"
+    if final_exists:
+        sessions = "[{session_id: 'old'}, {session_id: 'final'}]"
+    final_marker = ""
+    if final_exists:
+        final_marker = "unread.final = {message_count: 8, completed_at: 99, source: 'completion'};"
+    save_unread = save_unread.replace(
+        "function _saveSessionCompletionUnread() {",
+        "function _saveSessionCompletionUnread() { saves += 1;",
+    )
+    return f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+let _sessionCompletionUnread = null;
+let _allSessions = {sessions};
+const _sessionStreamingById = new Map();
+const _sessionListSnapshotById = new Map();
+const _sessionListSourceById = new Map();
+let saves = 0;
+function _rememberSessionListSource() {{}}
+function _forgetObservedStreamingSession() {{}}
+function renderSessionListFromCache() {{}}
+{get_unread}
+{save_unread}
+{migrate}
+{mark_completed}
+const unread = _getSessionCompletionUnread();
+unread.old = {{message_count: 4, completed_at: 10, manual: true, manual_pending: true}};
+{final_marker}
+_saveSessionCompletionUnread();
+saves = 0;
+_markSessionCompletedInList({{session_id: 'final', message_count: 8, last_message_at: 20}}, 'old');
+console.log(JSON.stringify({{
+  old_present: Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), 'old'),
+  final_marker: _getSessionCompletionUnread().final,
+  saves,
+  session_ids: _allSessions.map((s) => s.session_id),
+}}));
+"""
+
+
+def test_live_completion_rotates_manual_unread_marker_to_final_sid():
+    out = _run_node(_completion_rotation_script(final_exists=False))
+    assert out["old_present"] is False
+    assert out["final_marker"]["manual"] is True
+    assert out["final_marker"]["manual_pending"] is True
+    assert out["saves"] == 1
+    assert out["session_ids"] == ["final"]
+
+
+def test_settled_rotation_merges_manual_state_with_newer_completion_metadata():
+    out = _run_node(_completion_rotation_script(final_exists=True))
+    assert out["old_present"] is False
+    assert out["final_marker"] == {
+        "message_count": 8,
+        "completed_at": 99,
+        "source": "completion",
+        "manual": True,
+        "manual_pending": True,
+    }
+    assert out["saves"] == 1
+    assert out["session_ids"] == ["final"]
+
+def test_restore_settled_session_migrates_completion_unread_to_final_sid():
+    out = _run_node(_restore_settled_session_migration_script())
+    assert out["old_present"] is False
+    assert out["final_marker"]["manual"] is True
+    assert out["final_marker"].get("manual_pending") is True
+    assert out["out_saves"] == 1
+    assert out["out"] is True
+    assert out["api_path"] == "/api/session?session_id=old"
+
+
+def test_apperror_event_migrates_completion_unread_to_final_sid():
+    out = _run_node(_apperror_settlement_migration_script())
+    assert out["old_present"] is False
+    assert out["final_marker"]["manual"] is True
+    assert out["final_marker"]["manual_pending"] is True
+    assert out["render_messages_called"] == 1
+    assert out["show_toast_called"] == 0
+    assert out["saves"] == 1
+    assert out["session_sid"] == "final"
+
