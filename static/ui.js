@@ -575,6 +575,24 @@ const _recycleResetAttrs=[
   'data-live-assistant-turn',
 ];
 let _scrollbarDragActive=false;
+// A native scroll is classified in rAF, after pointerup may have cleared the
+// live drag flag. Keep drag ownership latched only until that queued frame runs.
+let _scrollbarDragIntentQueued=false;
+// The latch above is armed by the SYNC scroll handler reading the live flag,
+// but `scroll` is dispatched asynchronously (UI Events), so a quick thumb drag
+// can deliver pointerdown → scrollTop change → pointerup → scroll → rAF: by the
+// time the scroll handler runs, pointerup already cleared the flag and nothing
+// latches. Carry a bounded, time-stamped drag intent from pointerdown AND
+// pointerup/pointercancel through the FIRST subsequent scroll classification
+// instead (see _markScrollbarDragIntent / _consumeScrollbarDragIntent).
+const SCROLLBAR_DRAG_INTENT_WINDOW_MS=250;
+let _scrollbarDragIntentUntil=-Infinity;
+// An OVERLAY scrollbar (macOS; Firefox keeps one even with scrollbar-width:thin,
+// Mozilla bug 1568939) is drawn INSIDE the client box, so a press on its thumb
+// reports offsetX<clientWidth and the gutter-only test never fires. Treat a
+// press whose target is the scroller itself within this band of its right edge
+// as a scrollbar hit too (content presses target .messages-inner, not #messages).
+const SCROLLBAR_DRAG_EDGE_BAND_PX=20;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
@@ -6013,6 +6031,53 @@ function _cancelMessageJumpScroll(){
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
+// Tail-jitter guard: while a pinned reader sits AT the tail, the browser itself
+// nudges scrollTop up by a few px with NO scrollHeight/clientHeight change and
+// with no scrollTop write from us (verified: not scrollTop, scrollIntoView,
+// focus, scrollTo or scrollBy — it is a layout-settle artifact of the rebuilt
+// transcript). The scroll listener's `top<_lastScrollTop-2` direction test read
+// that artifact as an upward user scroll and latched _messageUserUnpinned=true
+// on a reader who never touched anything. Auto-follow then stayed off for the
+// whole session, and later renders restored the SEMANTIC viewport anchor instead
+// of the tail — landing the reader in the middle of a long conversation. A drift
+// this small while still visually AT the bottom is never a deliberate move into
+// history; a real scroll-up always carries wheel/touch/key/scrollbar intent and
+// keeps unpinning through the branch below.
+const MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX=16;
+const MESSAGE_TAIL_JITTER_MAX_DELTA_PX=16;
+// Returns true when this scroll event is browser tail drift rather than a
+// reader decision. Defined at module scope (NOT inlined in the scroll listener)
+// so brace/`})();`-based test harnesses that slice the listener body keep
+// extracting the whole block. The typeof guards keep it inert in harnesses that
+// inject the listener without these helpers.
+function _isMessageTailJitter(top,bottomDistance,scrollbarDragIntent=false){
+  if(_lastScrollTop===null) return false;
+  const delta=_lastScrollTop-top;
+  if(!(delta>0&&delta<=MESSAGE_TAIL_JITTER_MAX_DELTA_PX)) return false;
+  if(bottomDistance>MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX) return false;
+  if(scrollbarDragIntent) return false;
+  if(typeof _scrollbarDragActive!=='undefined'&&_scrollbarDragActive) return false;
+  if(typeof _recentMessageWheelIntent==='function'&&_recentMessageWheelIntent()) return false;
+  if(typeof _recentMessageTouchScrollIntent==='function'&&_recentMessageTouchScrollIntent()) return false;
+  if(typeof _recentMessageKeyScrollIntent==='function'&&_recentMessageKeyScrollIntent()) return false;
+  if(typeof _recentNonMessageScrollIntent==='function'&&_recentNonMessageScrollIntent()) return false;
+  return true;
+}
+// Bounded scrollbar-drag intent that survives the async `scroll` dispatch:
+// stamped by pointerdown AND by pointerup/pointercancel, consumed by the FIRST
+// scroll event after it (whatever branch that event takes, so it can never leak
+// into a later frame's classification) and simply expiring when no scroll
+// follows. The sync scroll handler folds a fresh stamp into the
+// _scrollbarDragIntentQueued latch that the classification rAF reads. Module
+// scope + typeof call-site guards keep listener harnesses without it inert.
+function _markScrollbarDragIntent(){
+  _scrollbarDragIntentUntil=performance.now()+SCROLLBAR_DRAG_INTENT_WINDOW_MS;
+}
+function _consumeScrollbarDragIntent(){
+  const fresh=performance.now()<=_scrollbarDragIntentUntil;
+  _scrollbarDragIntentUntil=-Infinity;
+  return fresh;
+}
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
 // scrolls up, streaming stops auto-following until they return to the bottom or
 // click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
@@ -6228,6 +6293,9 @@ if(typeof document!=='undefined'){
 function _resetScrollDirectionTracker(){
   _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
+  _scrollbarDragActive=false;
+  _scrollbarDragIntentQueued=false;
+  _scrollbarDragIntentUntil=-Infinity;
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
   _messageUserUnpinned=false;
@@ -6254,6 +6322,9 @@ function _resetStreamScrollFollow(){
   // undo them and silently disable auto-follow for the new stream.
   _cancelBottomSettle();
   _clearNewMessageScrollCue();
+  _scrollbarDragActive=false;
+  _scrollbarDragIntentQueued=false;
+  _scrollbarDragIntentUntil=-Infinity;
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -6343,20 +6414,38 @@ if(typeof window!=='undefined'){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('pointerdown',(e)=>{
-    if(e.target===el&&e.offsetX>=el.clientWidth){
-      if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
-      _scrollbarDragActive=true;
-      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    if(e.target!==el) return;
+    // Transcript content lives in .messages-inner, so a press whose target is
+    // the scroller itself is never a message — only its margins or its
+    // scrollbar. A GUTTER scrollbar sits outside the client box (offsetX >=
+    // clientWidth); an OVERLAY scrollbar (macOS, Firefox thin — see
+    // SCROLLBAR_DRAG_EDGE_BAND_PX) sits INSIDE it, hugging the right edge, so
+    // also accept a press within that band of the edge, measured either
+    // scroller-relative (offsetX) or against the live bounding rect (clientX).
+    const band=typeof SCROLLBAR_DRAG_EDGE_BAND_PX==='number'?SCROLLBAR_DRAG_EDGE_BAND_PX:0;
+    let onScrollbar=e.offsetX>=el.clientWidth-band;
+    if(!onScrollbar&&band>0&&typeof e.clientX==='number'&&typeof el.getBoundingClientRect==='function'){
+      const right=el.getBoundingClientRect().right;
+      onScrollbar=e.clientX>=right-band&&e.clientX<=right;
     }
+    if(!onScrollbar) return;
+    if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+    _scrollbarDragActive=true;
+    if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
   },{passive:true});
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    // `scroll` is async: the drag's own scroll event may only be dispatched
+    // AFTER this release. Re-stamp so that first classification still owns it.
+    if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
+    if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('blur',()=>{ _scrollbarDragActive=false; },{passive:true});
@@ -6402,6 +6491,8 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
+    // Consume the pointerdown/pointerup stamp on the first scroll after it (never leaks).
+    const dragStamp=typeof _consumeScrollbarDragIntent==='function'&&_consumeScrollbarDragIntent();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
@@ -6409,8 +6500,11 @@ if(typeof window!=='undefined'){
     if(_freshProgrammaticScrollActive()) return;
     _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
+    if(_scrollbarDragActive||dragStamp) _scrollbarDragIntentQueued=true;
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
+      const dragIntent=typeof _scrollbarDragIntentQueued!=='undefined'&&_scrollbarDragIntentQueued;
+      if(typeof _scrollbarDragIntentQueued!=='undefined') _scrollbarDragIntentQueued=false;
       const top=el.scrollTop;
       const bottomDistance=el.scrollHeight-top-el.clientHeight;
       const nearBottom=bottomDistance<250;
@@ -6424,7 +6518,9 @@ if(typeof window!=='undefined'){
       // false and behavior is byte-identical.
       const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;
       _lastMessageClientHeight=el.clientHeight;
-      const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
+      // Tail drift (MESSAGE_TAIL_JITTER_*): tiny upward nudge at the bottom, no input intent.
+      const _tailJitter=typeof _isMessageTailJitter==='function'&&_isMessageTailJitter(top,bottomDistance,dragIntent);
+      const movedUp=!grew&&!_tailJitter&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
       // Suppress the post-render scroll artifact: right after renderMessages()
       // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
@@ -6447,6 +6543,7 @@ if(typeof window!=='undefined'){
         && typeof _recentNonMessageScrollIntent==='function'
         && typeof _recentMessageWheelIntent==='function'
         && typeof _recentMessageKeyScrollIntent==='function'
+        && !dragIntent
         && (typeof _scrollbarDragActive==='undefined' || !_scrollbarDragActive)
         && _recentMessageRenderArtifactWindow(1400)
         && !_recentMessageTouchScrollIntent()
