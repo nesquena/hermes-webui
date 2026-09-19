@@ -24,7 +24,10 @@ def test_models_dev_true_returns_full_efforts(monkeypatch):
 
     import api.config as cfg
 
-    assert cfg._models_dev_reasoning_efforts("grok-4.3", "xai-oauth") == list(
+    # Grok 4.6+ keeps the full ladder (xhigh is 4.6+ only per the xAI docs);
+    # pre-4.6 Grok ids are covered by
+    # test_models_dev_metadata_respects_grok_ceiling below (#6437).
+    assert cfg._models_dev_reasoning_efforts("grok-4.6", "xai-oauth") == list(
         cfg.VALID_REASONING_EFFORTS
     )
 
@@ -61,10 +64,32 @@ def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):
 
     import api.config as cfg
 
+    # xai-oauth routes to the same xAI backend as the API-key lane, so the Grok
+    # 4.x ceiling applies here too; the metadata lookup is still what decides
+    # whether reasoning is offered at all (#6437, PR #6497).
     assert cfg.resolve_model_reasoning_efforts(
         "@xai-oauth:grok-4.3", provider_id="xai-oauth"
-    ) == list(cfg.VALID_REASONING_EFFORTS)
+    ) == ["low", "medium", "high"]
     assert seen == [("xai-oauth", "grok-4.3")]
+
+
+def test_models_dev_metadata_respects_grok_ceiling(monkeypatch):
+    """Agent metadata yields to the Grok 4.x ceiling (#6437)."""
+    _install_fake_models_dev(
+        monkeypatch,
+        lambda provider, model: SimpleNamespace(supports_reasoning=True),
+    )
+
+    import api.config as cfg
+
+    assert cfg._models_dev_reasoning_efforts("grok-4.5", "xai-oauth") == [
+        "low",
+        "medium",
+        "high",
+    ]
+    assert cfg._models_dev_reasoning_efforts("grok-4.6", "xai-oauth") == list(
+        cfg.VALID_REASONING_EFFORTS
+    )
 
 
 def test_models_dev_false_suppresses_prefix_heuristic(monkeypatch):
@@ -150,5 +175,7 @@ display:
     status = cfg.get_reasoning_status()
 
     assert status["reasoning_effort"] == "medium"
-    assert status["supported_efforts"] == list(cfg.VALID_REASONING_EFFORTS)
+    # grok-4.3 < 4.6 caps at high: 'medium' stays valid, xhigh/max are not
+    # offered (#6437).
+    assert status["supported_efforts"] == ["low", "medium", "high"]
     assert status["supports_reasoning_effort"] is True

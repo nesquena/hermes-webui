@@ -5235,21 +5235,32 @@ function _reasoningEffortQuery(){
   return qs?('?'+qs):'';
 }
 
-function _applyReasoningOptions(supportedEfforts){
+function _applyReasoningOptions(supportedEfforts,toggleSupported){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  // The backend's supports_thinking_toggle flag decides whether an off switch
+  // exists AT ALL. Default true preserves prior behavior when the field is
+  // absent (older backend / unknown model).
+  const toggle=(typeof toggleSupported==='boolean')?toggleSupported:true;
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
-    // 'none' (turn thinking off) and '' (Default = clear override, provider
-    // default = thinking on) are meta-options outside the effort ladder. They
-    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
-    // zai, where the ladder is empty) still has an operable two-state control:
-    // Default (on) + None (off). Without the Default option the toggle is
-    // one-way off-only — the user can disable thinking but cannot re-enable it.
-    // (#6219 round-3)
-    if(effort==='none'||effort===''){
+    // '' (Default = clear override, provider default = thinking on) is a
+    // meta-option outside the effort ladder and is always shown, so a
+    // thinking-toggle-only model (GLM-4.5–5.1 on native zai, where the ladder is
+    // empty) still has an operable two-state control: Default (on) + None (off).
+    // Without the Default option the toggle is one-way off-only — the user can
+    // disable thinking but cannot re-enable it. (#6219 round-3)
+    if(effort===''){
       opt.style.display='';
+      return;
+    }
+    // 'none' (turn thinking off) only exists where the model HAS an off switch.
+    // Grok 4.x reports supports_thinking_toggle=false (xAI cannot disable
+    // reasoning on those ids), so offering "None" there would POST an effort the
+    // backend ignores — a dead control. (#6437 review)
+    if(effort==='none'){
+      opt.style.display=toggle?'':'none';
       return;
     }
     if(!supported.size){
@@ -5301,7 +5312,7 @@ function _applyReasoningChip(eff){
   }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
-  if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
+  if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts,toggleSupported);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
