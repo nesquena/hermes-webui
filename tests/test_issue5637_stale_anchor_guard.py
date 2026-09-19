@@ -116,6 +116,10 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
         "renderLiveAnchorActivityScene",
         "_freshProgrammaticScrollActive",
         "_recordNonMessageScrollIntent",
+        # The wheel/key/drag input handlers delegate the generation bump to this
+        # capture helper (catch-tail contract); extract the real one so reader
+        # input actually advances _messageScrollInputGeneration in the harness.
+        "_captureMessageScrollInputTail",
         "_captureMessageScrollSnapshot",
         "_messageScrollSnapshotInputChanged",
         "_abandonMessageScrollSnapshot",

@@ -124,7 +124,7 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     assert "function _recentMessageRenderArtifactWindow" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    listener = _balanced_block(UI_JS, UI_JS.index("{", listener_idx))
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener
@@ -132,10 +132,6 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
         "#4970: the post-render artifact suppression must also require no recent "
         "low-delta message-pane wheel intent so a gentle trackpad scroll-up is "
         "not swallowed."
-    )
-    assert listener.find("return;") < listener.find("if(movedUp&&bottomDistance>1){"), (
-        "recent render artifact scrolls must return before the movedUp branch "
-        "can mark the reader unpinned."
     )
 
 

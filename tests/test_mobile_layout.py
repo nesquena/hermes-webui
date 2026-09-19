@@ -1006,8 +1006,8 @@ def test_messages_touch_scrolling_hints_present():
         ".messages must enable -webkit-overflow-scrolling:touch for mobile momentum scroll"
     assert re.search(r'\.messages\{[^}]*touch-action:\s*pan-y', CSS), \
         ".messages must set touch-action:pan-y so vertical swipe gestures scroll the transcript"
-    assert re.search(r'\.messages\{[^}]*overscroll-behavior-y:\s*contain', CSS), \
-        ".messages must contain vertical overscroll so the transcript keeps the gesture"
+    assert re.search(r'\.messages\{[^}]*overscroll-behavior-y:\s*none', CSS), \
+        ".messages must suppress elastic overscroll so bottom follow cannot fight boundary bounce"
 
 
 def test_100dvh_viewport_height():

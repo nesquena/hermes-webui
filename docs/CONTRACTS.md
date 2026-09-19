@@ -46,6 +46,13 @@ contributor guidance; it does not change runtime behavior or CI gates.
   work under #3926. Use it to distinguish shipped wiring from historical slice
   boundaries before changing live SSE, replay, settlement, `INFLIGHT`, or
   `renderMessages()` paths.
+- [`docs/architecture/transcript-auto-follow-scroll.md`](architecture/transcript-auto-follow-scroll.md):
+  implemented contract for transcript auto-follow: the pinned/unpinned state
+  model, the input-tail capture and reader-resume re-pinning rules (including
+  one-consumption-per-input and reader input outranking queued restores), and
+  the `overscroll-behavior-y: none` rationale for `.messages`. Start here
+  before changing the scroll listener, the settle writer, or the queued
+  live-render restore paths.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session
