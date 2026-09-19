@@ -1060,6 +1060,249 @@ def test_load_session_discards_cursor_only_inflight_before_reattach():
     assert 0 <= guard_pos < inflight_branch_pos
 
 
+def test_user_only_inflight_must_not_seed_nonzero_replay_floor():
+    """#7640: a plain user row must not authorize a nonzero replay floor.
+
+    After a mid-stream SSE drop in transparent mode the client re-attaches with
+    `replay=1&after_seq=<cursor>`. When the cached INFLIGHT entry kept the
+    optimistic user row plus `lastRunJournalSeq` but lost the live assistant
+    projection, that cursor told the server to skip every journal event that
+    rebuilds the message body: only the tail (often just `stream_end`) came back
+    and the settled footer painted over a blank message until a manual reload.
+    """
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightCanSeedJournalReplay"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayFloorForInflight"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayEventIdForInflight"),
+            """
+const userOnly={
+  messages:[{role:'user', content:'a very long ttft prompt'}],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+assert.strictEqual(_inflightCanSeedJournalReplay(userOnly), false);
+assert.strictEqual(_runJournalReplayFloorForInflight(userOnly), 0);
+assert.strictEqual(_runJournalReplayEventIdForInflight(userOnly), '');
+// The floor helper reports, it does not mutate the recovery object.
+assert.strictEqual(userOnly.lastRunJournalSeq, 206);
+
+// A user row with a populated but assistant-less transcript is still user-only.
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({
+    messages:[{role:'user', content:'hi'}, {role:'assistant', content:''}],
+    lastRunJournalSeq:206,
+  }),
+  0
+);
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({
+    messages:[{role:'user', content:'hi'}, {role:'assistant', content:'   '}],
+    lastRunJournalSeq:206,
+  }),
+  0
+);
+
+// Positive inverse: any recoverable live output keeps the cursor.
+const recovering=[
+  {lastAssistantText:'partial answer'},
+  {lastReasoningText:'thinking...'},
+  {liveTurnHtml:'<div>projected turn</div>'},
+  {toolCalls:[{name:'read_file'}]},
+  {activityBurstAnchors:[{seq:12}]},
+  {anchorActivityScene:{activity_rows:[{kind:'tool'}]}},
+  {messages:[{role:'user', content:'p'}, {role:'assistant', content:'answer'}]},
+];
+for (const extra of recovering) {
+  const state={messages:[{role:'user', content:'p'}], ...extra};
+  state.lastRunJournalSeq=206;
+  state.lastRunJournalEventId='stream-e75e:206';
+  assert.strictEqual(
+    _runJournalReplayFloorForInflight(state),
+    206,
+    'recoverable live output must keep the cursor: '+JSON.stringify(extra)
+  );
+  assert.strictEqual(_runJournalReplayEventIdForInflight(state), 'stream-e75e:206');
+}
+
+// Degenerate inputs must stay on the zero floor.
+assert.strictEqual(_runJournalReplayFloorForInflight(null), 0);
+assert.strictEqual(_runJournalReplayFloorForInflight({}), 0);
+assert.strictEqual(_runJournalReplayFloorForInflight({lastRunJournalSeq:206, messages:[]}), 0);
+assert.strictEqual(
+  _runJournalReplayFloorForInflight({lastAssistantText:'partial', lastRunJournalSeq:-4}),
+  0
+);
+assert.strictEqual(_runJournalReplayEventIdForInflight({}), '');
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_reattach_discards_replay_cursor_without_live_assistant_state():
+    """#7640: validate the recovery object immediately before reattach.
+
+    Trusting the object's existence (rather than its contents) is what let a
+    cursor-only cache reach the wire as a replay floor. Reattach now drops the
+    cursor so the journal replays from zero, which is the path a manual reload
+    already proves out, while a cache that still holds live assistant output
+    keeps its cursor and avoids re-rendering the whole journal.
+    """
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightCanSeedJournalReplay"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayFloorForInflight"),
+            _function_decl(SESSIONS_JS, "_normalizeInflightReplayCursorForReattach"),
+            """
+const cursorOnly={
+  streamId:'stream-e75e',
+  reattach:true,
+  messages:[{role:'user', content:'a very long ttft prompt'}],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+assert.strictEqual(
+  _normalizeInflightReplayCursorForReattach(cursorOnly),
+  cursorOnly,
+  'must return the same object so the caller keeps mutating the live cache'
+);
+assert.strictEqual(cursorOnly.lastRunJournalSeq, 0);
+assert.strictEqual(cursorOnly.lastRunJournalEventId, '');
+assert.strictEqual(_runJournalReplayFloorForInflight(cursorOnly), 0);
+assert.strictEqual(
+  cursorOnly.messages.length,
+  1,
+  'the optimistic user row must survive so pending dedupe still works'
+);
+
+const recovering={
+  streamId:'stream-e75e',
+  reattach:true,
+  messages:[{role:'user', content:'p'}],
+  lastAssistantText:'partial answer',
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:'stream-e75e:206',
+};
+_normalizeInflightReplayCursorForReattach(recovering);
+assert.strictEqual(recovering.lastRunJournalSeq, 206);
+assert.strictEqual(recovering.lastRunJournalEventId, 'stream-e75e:206');
+
+const noCursor={streamId:'stream-e75e', messages:[{role:'user', content:'p'}]};
+_normalizeInflightReplayCursorForReattach(noCursor);
+assert.strictEqual(noCursor.lastRunJournalSeq, undefined);
+assert.strictEqual(_runJournalReplayFloorForInflight(noCursor), 0);
+
+assert.strictEqual(_normalizeInflightReplayCursorForReattach(null), null);
+assert.strictEqual(_normalizeInflightReplayCursorForReattach(undefined), undefined);
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_reattach_replay_params_from_a_cursor_only_cache_replay_from_zero():
+    """#7640: end-to-end wire contract for a cursor-only reattach.
+
+    Derives the replay params from the real floor helpers (node) and feeds them
+    to the real server cursor parser. Tying both halves together matters because
+    `api.routes._parse_run_journal_after_seq()` reads `after_event_id` BEFORE
+    `after_seq`: a fix that zeroed only the seq would still resume at the stale
+    event id and skip every journal event that rebuilds the message body.
+    """
+    assert NODE, "node not on PATH"
+    script = "\n".join(
+        [
+            "const assert=require('assert');",
+            _function_decl(SESSIONS_JS, "_inflightCanSeedJournalReplay"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayFloorForInflight"),
+            _function_decl(SESSIONS_JS, "_runJournalReplayEventIdForInflight"),
+            """
+const runId='stream-7640';
+const userOnly={
+  messages:[{role:'user', content:'a very long ttft prompt'}],
+  lastRunJournalSeq:206,
+  lastRunJournalEventId:runId+':205',
+};
+console.log(JSON.stringify({
+  after_seq:String(_runJournalReplayFloorForInflight(userOnly)),
+  after_event_id:String(_runJournalReplayEventIdForInflight(userOnly)||''),
+}));
+""",
+        ]
+    )
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    params = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # What the fixed client puts on the wire for a cache with no live projection.
+    assert params == {"after_seq": "0", "after_event_id": ""}
+
+    from api.routes import _parse_run_journal_after_seq
+
+    run_id = "stream-7640"
+    assert (
+        _parse_run_journal_after_seq(
+            {"after_seq": [params["after_seq"]], "after_event_id": [params["after_event_id"]]},
+            run_id,
+        )
+        == 0
+    )
+
+    # Precedence proof: dropping the seq alone would still resume at the stale id.
+    assert (
+        _parse_run_journal_after_seq(
+            {"after_seq": ["0"], "after_event_id": [f"{run_id}:205"]}, run_id
+        )
+        == 205
+    )
+    # ...and the pre-fix pair, for the record.
+    assert (
+        _parse_run_journal_after_seq(
+            {"after_seq": ["206"], "after_event_id": [f"{run_id}:205"]}, run_id
+        )
+        == 205
+    )
+
+
+def test_attach_and_reattach_use_the_validated_replay_floor():
+    """#7640 wiring guard: the validated floor is what reaches the wire.
+
+    The behavioral coverage for the floor helpers lives in
+    `test_user_only_inflight_must_not_seed_nonzero_replay_floor` and
+    `test_reattach_discards_replay_cursor_without_live_assistant_state`; this
+    test pins that `attachLiveStream()` and both `loadSession()` reattach paths
+    actually go through them instead of reading the raw cursor field.
+    """
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    init_pos = body.index("const _replayCursorInflight=")
+    init_block = body[init_pos : body.index(";", body.index("let _lastRunJournalEventId=", init_pos))]
+    assert "INFLIGHT[activeSid]" in init_block, "must still read the live cache"
+    assert "_runJournalReplayFloorForInflight(_replayCursorInflight)" in init_block
+    assert "_runJournalReplayEventIdForInflight(_replayCursorInflight)" in init_block
+    assert "INFLIGHT[activeSid].lastRunJournalSeq" not in init_block, (
+        "attachLiveStream must not read the raw cursor field anymore"
+    )
+    assert "INFLIGHT[activeSid].lastRunJournalEventId" not in init_block
+
+    load_body = re.sub(r"\s+", "", _function_body(SESSIONS_JS, "loadSession"))
+    assert load_body.count("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])") == 2, (
+        "both reattach paths must re-validate the recovery object"
+    )
+    first = load_body.index("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
+    first_attach = load_body.index("attachLiveStream(sid,activeStreamId", first)
+    assert first < first_attach, "validation must run before the stream is attached"
+    last = load_body.rindex("_normalizeInflightReplayCursorForReattach(INFLIGHT[sid])")
+    last_attach = load_body.rindex("attachLiveStream(sid,activeStreamId", 0, last)
+    assert last_attach < last
+
+
 def test_live_recovery_prefers_newer_durable_run_journal_snapshot():
     """Recovery chooses by stream identity and durable journal progress."""
     assert NODE, "node not on PATH"
@@ -1174,7 +1417,10 @@ assert.strictEqual(inflight.lastRunJournalEventId, 'run-a:7');
     assert "lastRunJournalEventId:String(stored.lastRunJournalEventId||'')" in load_body
     assert "lastRunJournalEventId:state.lastRunJournalEventId||''" in compact_body
     assert "inflight.lastRunJournalEventId||''" in attach_body
-    assert "INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId" in attach_body
+    # #7640: the cursor's event id is gated by the same validation as the seq —
+    # reading the raw field here let a cursor outlive its assistant projection.
+    assert "_runJournalReplayEventIdForInflight(_replayCursorInflight)" in attach_body
+    assert "INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId" not in attach_body
     assert "inflight.lastRunJournalEventId=raw" in attach_body
     assert "INFLIGHT[activeSid].streamId=streamId" in attach_body
     assert "INFLIGHT[activeSid].lastRunJournalEventId=''" in attach_body

@@ -1017,6 +1017,61 @@ function _inflightHasVisibleLiveState(inflight) {
   return false;
 }
 
+// #7640: a run-journal replay cursor is only safe when the recovery object can
+// still repaint the live assistant turn. `_inflightHasVisibleLiveState()` above
+// deliberately counts a plain user row (the optimistic row has to survive a
+// mid-turn reload), but such an object carries no assistant projection at all:
+// seeding `after_seq` from it tells the server to skip every journal event that
+// would rebuild the body, so the settled footer lands over a blank message until
+// a manual reload replays the journal from the zero floor. Only recoverable live
+// output may raise the replay floor.
+function _inflightCanSeedJournalReplay(inflight){
+  if(!inflight||typeof inflight!=='object') return false;
+  if(String(inflight.lastAssistantText||'').trim()) return true;
+  if(String(inflight.lastReasoningText||'').trim()) return true;
+  if(String(inflight.liveTurnHtml||'').trim()) return true;
+  if(Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+  if(Array.isArray(inflight.activityBurstAnchors)&&inflight.activityBurstAnchors.length) return true;
+  const anchorScene=inflight.anchorActivityScene;
+  if(anchorScene&&Array.isArray(anchorScene.activity_rows)&&anchorScene.activity_rows.length) return true;
+  if(Array.isArray(inflight.messages)){
+    return inflight.messages.some((msg)=>{
+      if(!msg||msg.role!=='assistant') return false;
+      const content=msg.content;
+      if(typeof content==='string') return Boolean(content.trim());
+      if(Array.isArray(content)) return content.length>0;
+      return Boolean(content);
+    });
+  }
+  return false;
+}
+
+function _runJournalReplayFloorForInflight(inflight){
+  if(!_inflightCanSeedJournalReplay(inflight)) return 0;
+  return Math.max(0,Number((inflight&&inflight.lastRunJournalSeq)||0)||0);
+}
+
+function _runJournalReplayEventIdForInflight(inflight){
+  if(!_runJournalReplayFloorForInflight(inflight)) return '';
+  return String((inflight&&inflight.lastRunJournalEventId)||'');
+}
+
+// #7640: re-validate the selected recovery object immediately before reattach
+// instead of trusting its existence. A cursor that outlived its assistant
+// projection is dropped here so it cannot reach the wire as a replay floor; the
+// replay then restarts from zero, which is the path a manual reload already
+// proves out. Normalising the object (not just the floor) also keeps a later
+// persist from resurrecting the stale cursor on the next reattach.
+function _normalizeInflightReplayCursorForReattach(inflight){
+  if(!inflight||typeof inflight!=='object') return inflight;
+  const seq=Math.max(0,Number(inflight.lastRunJournalSeq||0)||0);
+  if(seq>0&&!_inflightCanSeedJournalReplay(inflight)){
+    inflight.lastRunJournalSeq=0;
+    inflight.lastRunJournalEventId='';
+  }
+  return inflight;
+}
+
 function _serverLiveSnapshotToolId(tc){
   return String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
 }
@@ -2184,6 +2239,11 @@ async function loadSession(sid){
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (!_isCurrentLoad()) return;
+      // #7640: validate the selected recovery object at the moment of reattach
+      // rather than trusting its existence. A cache that kept `lastRunJournalSeq`
+      // but lost the live assistant projection would otherwise seed the replay
+      // floor and skip the journal range that rebuilds the message body.
+      _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
@@ -2313,6 +2373,8 @@ async function loadSession(sid){
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
+      // #7640: same reattach validation as the `reattach` branch above.
+      if(INFLIGHT[sid]) _normalizeInflightReplayCursorForReattach(INFLIGHT[sid]);
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
       updateSendBtn();

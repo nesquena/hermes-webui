@@ -2722,11 +2722,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _currentActivityBurstId=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentActivityBurstId)||0)||0;
   let _currentLiveSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
   let _assistantSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
-  let _lastRunJournalSeq=reconnecting
-    ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
+  // #7640: the replay floor is only as trustworthy as the recovery state behind
+  // it. A cache that kept the cursor but lost the live assistant projection must
+  // not raise `after_seq`: the server would then replay only the tail (often just
+  // `stream_end`), and the missing journal range never gets a chance to rebuild
+  // the body — the settled footer paints over a blank message until a reload.
+  // Fall back to the zero floor whenever the state cannot be validated.
+  const _replayCursorInflight=reconnecting?INFLIGHT[activeSid]:null;
+  let _lastRunJournalSeq=(typeof _runJournalReplayFloorForInflight==='function')
+    ? _runJournalReplayFloorForInflight(_replayCursorInflight)
     : 0;
-  let _lastRunJournalEventId=reconnecting
-    ? String((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId)||'')
+  let _lastRunJournalEventId=(typeof _runJournalReplayEventIdForInflight==='function')
+    ? _runJournalReplayEventIdForInflight(_replayCursorInflight)
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
