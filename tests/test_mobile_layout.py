@@ -1706,6 +1706,27 @@ def test_mobile_enter_newline_respects_hardware_keyboard_on_touch_devices():
         "mobile Enter newline override must skip touch devices that also expose a fine pointer"
 
 
+def test_mobile_enter_newline_survives_stylus_on_phone():
+    """A phone-sized touch device keeps Enter=newline even when a stylus
+    (S-Pen on Galaxy Ultra) or BT mouse exposes a fine pointer.
+
+    The fine pointer on a phone is not evidence of a physical keyboard; only
+    tablet-class screens should fall back to desktop Enter semantics."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function _isPhoneSizedTouchDevice()" in boot_js, \
+        "boot.js must define a phone-sized touch-device predicate (min screen side <=500px)"
+    assert "_isPhoneSizedTouchDevice()||!_hasFinePointerCoexisting()" in boot_js, \
+        "the mobile Enter override must apply on phone-sized touch devices even with a co-existing fine pointer"
+
+
+def test_touch_keyboard_viewport_keeps_phone_treatment_with_stylus():
+    """The virtual-keyboard inset must stay active on phone-sized touch devices
+    even when a stylus (S-Pen) or BT mouse exposes a fine pointer."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "if(_isPhoneSizedTouchDevice()) return true;" in boot_js, \
+        "_isTouchKeyboardViewport must keep virtual-keyboard treatment on phone-sized touch devices"
+
+
 def test_mobile_enter_newline_only_overrides_enter_default():
     """Mobile newline override must only apply when _sendKey is the default 'enter'."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
