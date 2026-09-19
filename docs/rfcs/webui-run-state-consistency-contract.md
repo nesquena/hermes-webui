@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-08-22
+- **Updated:** 2026-09-09
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -112,6 +112,16 @@ and 5; it does not mark every run-state boundary implemented.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
+   Journal-driven repair paths (`_recover_journaled_output_and_terminal_error`)
+   are replay too. A repair that can run more than once for the same stream
+   must replay idempotently with `dedupe_existing=True`; dedupe matching is
+   identity-scoped — same-stream rows at or after the current-turn boundary for
+   assistant content, and ownership-proven anchors for untagged tool cards — so
+   reuse never consumes the current turn's recovered rows, and an ownership
+   proof failure appends rather than suppresses. The full repair identity and
+   dedupe contract is documented in
+   [`turn-journal.md`](turn-journal.md) ("Recovery repair identity and dedupe
+   contract").
 6. **Compression is not current intent.** Automatic compression summaries and
    reference cards are recovery/handoff material. They must not be treated as a
    new user request, active-turn content, or the default visible explanation for
@@ -189,6 +199,7 @@ context reconstruction, or session metadata:
 | [#2355](https://github.com/nesquena/hermes-webui/issues/2355) / [#2357](https://github.com/nesquena/hermes-webui/pull/2357) | Auto-compression rotation could leave reference-only cards in the active conversation tail | 3, 6 |
 | [#2308](https://github.com/nesquena/hermes-webui/issues/2308) / [#2309](https://github.com/nesquena/hermes-webui/pull/2309) | Compressed sessions could resume stale agent tasks when the user starts an ordinary fresh chat | 6 |
 | [#2283](https://github.com/nesquena/hermes-webui/pull/2283) | Run event journal replay provides the foundation for ordered recovery | 5 |
+| [PR #7167](https://github.com/nesquena/hermes-webui/pull/7167) | Repeated `get_session()` cache-miss repairs re-replayed a dead stream's run journal without dedupe, accumulating duplicate recovered rows (1, 2, 4, ..., 512) that blanked the transcript | 5 |
 
 These references are evidence for the contract. This RFC does not make the
 linked implementation PRs dependent on this document, and it does not close the
