@@ -5,25 +5,23 @@ repository. Keep it project-specific and safe to publish. Do not put personal
 machine setup, private network details, credentials, tokens, or local-only
 workflow notes here.
 
-## Read first
+## Documentation by task
 
-Before making changes, read:
+Use the references that match the change; there is no blanket reading list for
+unrelated work. Keep subsystem-specific safety and contract requirements below.
 
-1. `README.md`
-2. `CONTRIBUTING.md`
-3. `docs/CONTRACTS.md`
-4. `CHANGELOG.md`
-
-For architecture, testing, or setup work, also read the matching reference:
-
+- `README.md` for product behavior, setup, usage, and the docs index
+- `CONTRIBUTING.md` for contribution scope, PR format, and review requirements
+- `docs/CONTRACTS.md` to find the contract/RFC for the subsystem being changed
+- `docs/GUIDELINES.md` for bug-class coverage, state ownership, and evidence standards
+- `CHANGELOG.md` for release-history questions; ordinary PRs do not edit it
 - `ARCHITECTURE.md` for design constraints and current module layout
-- `TESTING.md` for local verification commands and manual test guidance
+- `TESTING.md` for local verification commands and relevant manual checks
 - `docs/onboarding.md` for first-run onboarding behavior
 - `docs/troubleshooting.md` for diagnostic flows
 - `docs/rfcs/README.md` for larger RFCs and state/durability contracts
-
-For UI or UX work, read `docs/UIUX-GUIDE.md` and `DESIGN.md` before
-changing layout, interaction flow, themes, chat rendering, or composer chrome.
+- `docs/UIUX-GUIDE.md` and `DESIGN.md` for layout, interaction flow, themes,
+  chat rendering, and composer chrome
 
 ## Onboarding and reinstall support
 
@@ -73,45 +71,45 @@ Follow that checklist's safety rules:
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).
 
-## Before you open a PR — the change guidelines
+## Completion and verification
 
-Read [`docs/GUIDELINES.md`](docs/GUIDELINES.md) in full before non-trivial work. It is the
-distilled set of habits that get a change merged in one review round instead of several. The
-compressed form:
+A change is ready for review when:
 
-1. **Fix the class, not the instance.** A bug usually has siblings — other call sites, backends,
-   companion endpoints, layouts, exit paths. Find them all and fix the shared chokepoint, or name
-   the ones you left out of scope.
-2. **Trace one authoritative value end-to-end** (`input → normalize → decision → action → persist →
-   cleanup`); the code that *decides* and the code that *acts* must use the same resolved value.
-3. **When you can't confirm something, fail closed and say so.** Never take the permissive branch on
-   uncertainty; never report a failure as success. "Unknown" is not "allowed."
-4. **Enumerate the state-space before editing** — entry point, backend, item count (0/1/many), every
-   lifecycle exit (success/error/cancel/replace/teardown), auth on/off, concurrency, hostile input —
-   and cover each or mark it out of scope. Most redo rounds are one un-considered dimension.
-5. **Assume inputs and check-then-use gaps are adversarial** — validate at the point of use (hold a
-   handle, don't re-resolve a path), scope caches by complete identity, handle crafted input.
-6. **A test must fail before your fix and pass after it.** Assert observable behavior, not a source
-   string or a mock of the thing under test; use multiple items if selection is what's being tested.
-7. **Name the owner of every piece of state and prove it's released on every exit** (success, error,
-   cancel, replace, shrink, teardown) — not just the happy path.
-8. **Fallbacks/defaults are contracts — extend the mechanism, don't copy it.** Editing N parallel
-   blocks identically means you missed a chokepoint (e.g. new copy goes in the `en` locale only).
-9. **The diff is the task and nothing else.** Extras go in the PR description, not the diff; run the
-   affected + neighboring tests before opening.
-10. **A visible control costs attention on every visit** — place it by frequency of use and by where
-    mainstream chat apps put the equivalent, not by where your diff already is; verify with
-    before/after images at desktop and narrow widths.
+- The requested scope is implemented, with related call sites and lifecycle
+  paths covered or explicitly identified as out of scope; unrelated cleanup is absent.
+- Behavior changes have observable regression evidence where practical, including
+  proof that a bug-fix test fails before the fix and passes after it. Evidence covers
+  affected and neighboring tests, not only new tests.
+- State changes identify the authoritative value and its owner, use that value
+  through decision, action, and persistence, and account for cleanup on every exit.
+  Fallbacks and defaults extend the existing mechanism rather than duplicate it.
+- UI changes include before/after evidence at desktop and narrow widths and
+  cover relevant mobile interactions; controls fit their frequency of use.
+- Relevant docs are current. The PR body follows `CONTRIBUTING.md`, includes
+  `Contract Routing` (and `Contract Change` for intentional contract changes)
+  where required by `docs/CONTRACTS.md`, and reports actual commands, outcomes,
+  assumptions, and anything not verified. Mocks are not proof of external behavior.
 
-Show the work in the PR body: the siblings you found, proof the test failed before the fix, the
-verification run, before/after images for visible changes, and an explicit list of what you could
-not verify.
+Within the requested scope, you may run local tests with disposable fixtures,
+fix failures caused by the change, and rerun affected tests without asking for
+approval at each step. Use `./scripts/test.sh` for pytest as specified above.
+This permission applies only with confirmed isolated state and no live
+credentials or services; the runner manages Python dependencies but is not a
+network sandbox. It does not authorize modifying real state, handling credentials,
+restarting existing services, or exposing the app beyond localhost. Those actions
+require explicit human approval and the onboarding safety rules still apply.
+If verification is blocked, report the blocker rather than claim completion.
 
 ## Local state and secrets
 
 Hermes WebUI can read and write real agent state, sessions, workspaces,
 credentials, and cron data. Treat local validation as potentially destructive
 unless you have confirmed the active state directories.
+
+For authority, capability, identity, or containment checks, fail closed when
+safety cannot be confirmed: unknown is not allowed. Validate adversarial inputs
+at the point of use, account for check-then-use races, and scope caches by the
+complete identity so profiles and sessions cannot leak into each other.
 
 Prefer isolated trial state for experiments:
 

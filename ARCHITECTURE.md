@@ -56,6 +56,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
     api/
       __init__.py          Package marker
+      agent_compat.py      Resolver for Hermes Agent names moved to sibling modules (compatibility-only)
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
@@ -417,6 +418,39 @@ Older Hermes Agent versions that lack either capability continue through
 whose default `SessionDB()` path remains frozen at module import. Keep this fallback
 compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
 than a second WebUI implementation.
+
+### 4.9 Hermes Agent Moved-Name Compatibility
+
+Hermes Agent owns its module layout. Its September 2026 decomposition moved names the
+WebUI uses (for example `tools.approval.set_current_session_key` to
+`tools.approval_context`) into `<stem>_<topic>` sibling modules. The old paths resolve
+only through temporary PLUGIN-COMPAT `__getattr__` pointers that emit
+`HermesPluginCompatWarning` and are removed on schedule. The Agent's
+`compat_manifest.json` is the authoritative map of what moved where.
+
+WebUI code reaches a moved name only through
+`api.agent_compat.agent_attr(owner, name, home, default=...)`, which resolves in this
+order:
+
+1. the owner module's own namespace: pre-split Agents, and tests that stub the original
+   module in `sys.modules` or patch the name onto it;
+2. the `home` module: split Agents, with or without the old-path pointer (no warning);
+3. plain attribute access on the owner: non-module test doubles.
+
+It raises like the import it replaces (or returns `default`), so each call site keeps its
+existing fallback. Current users: approval session identity and MCP discovery
+(`streaming.py`), `/reload-mcp` (`commands.py`), MCP runtime status (`routes.py`), Claude
+Code credential linking (`oauth.py`), LM Studio reasoning options (`config.py`), and
+kanban connections and dispatch (`kanban_bridge.py`).
+
+Import names that are still native to their module directly. Never
+`from <old module> import <moved name>`, and never feature-detect a moved name with
+`hasattr`/`getattr` on the old module: once the pointers are removed those silently turn
+"moved" into "missing" behind the call sites' broad `except` blocks. When a later Agent
+split moves another name, route it through `agent_attr` and add pre-split and
+pointer-removed cases to `tests/test_agent_compat.py`. The resolver is
+compatibility-only: delete it, and import directly from the new homes, once the WebUI
+stops supporting Agents that predate the split.
 
 ---
 

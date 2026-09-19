@@ -1660,6 +1660,10 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
+    // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
+    // hold the previous profile's /api/skills payload, so drop them (and any reply
+    // still in flight) once the switch has succeeded.
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     if(data.default_model) window._defaultModel=data.default_model;
@@ -2424,7 +2428,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2434,6 +2438,7 @@ const _MESSAGING_SOURCE_LABELS = {
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
   matrix: 'Matrix',
+  signal: 'Signal',
 };
 
 function _isMessagingSession(session) {
@@ -2555,7 +2560,7 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  return filter === 'cli' ? t('sessions_source_cli', n) : t('sessions_source_webui', n);
 }
 
 function _clearSessionSourceTabCounts() {
@@ -2806,7 +2811,7 @@ function _showHandoffHint(sid, rounds) {
     </div>
     <div class="handoff-hint-actions">
       <button class="handoff-hint-action" type="button">View summary</button>
-      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint('${esc(sid)}')" title="Dismiss">
+      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint(${jsArg(sid)})" title="Dismiss">
         Close
       </button>
     </div>
@@ -7122,6 +7127,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   };
   const orphans=[];
   const renderableChildIds=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const childAttachOrderById=new Map();
+  let childAttachCursor=0;
   const attachQueueById=new Map();
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
@@ -7131,6 +7138,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    const childRawRole=[
+      child&&child.raw_source,
+      child&&child.source_tag,
+      child&&child.source,
+    ].map(source=>String(source||'').trim().toLowerCase()).find(Boolean)||'';
+    const childIsDelegatedSubagent=_isChildSession(child)&&childRawRole==='subagent';
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
@@ -7155,11 +7168,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       hiddenArchivedChildTree.add(child.session_id);
       continue;
     }
-    // Cross-surface rows (for example a WebUI continuation from a Telegram
-    // conversation) should remain top-level when there is no WebUI-owned parent
-    // row to stack under.  But if the parent is visible in this same sidebar
-    // render, attach normally — delegated subagent rows are also cross-source
-    // relative to their WebUI parent and should not be forced into orphans.
+    // Independent cross-surface rows (for example a WebUI continuation from a
+    // Telegram conversation) remain top-level instead of nesting under an
+    // external parent. Delegated subagents are also cross-source, but they are
+    // parent-owned work and should still attach to the visible parent row.
     const parentSourceMarker=String(parentRow&&(
       parentRow.session_source||parentRow.raw_source||parentRow.source_tag||parentRow.source
     )||'').toLowerCase();
@@ -7170,12 +7182,15 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentRow.session_source==='messaging'||
       (parentSourceMarker&&parentSourceMarker!=='webui'&&parentSourceMarker!=='subagent'&&parentSourceMarker!=='other'&&parentSourceMarker!=='fork')
     );
-    if(parentRow&&child._cross_surface_child_session&&parentIsExternal){
+    if(parentRow&&child._cross_surface_child_session&&parentIsExternal&&!childIsDelegatedSubagent){
       if(childRenderable) orphans.push({...child,_orphan_child_session:true});
       continue;
     }
     if(parentRow){
       const childCopy={...child};
+      if(!childAttachOrderById.has(childCopy.session_id)){
+        childAttachOrderById.set(childCopy.session_id, childAttachCursor++);
+      }
       if(parentSegment){
         childCopy._parent_segment_id=parentSegment.session_id;
         childCopy._parent_segment_title=_sessionDisplayTitle(parentSegment)||child.parent_title||'Untitled';
@@ -7202,6 +7217,23 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // branch above and still orphans as before.
       if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
       orphans.push({...child,_orphan_child_session:true});
+    }
+  }
+  const resolveReadOnlySession = typeof _isReadOnlySession === 'function'
+    ? _isReadOnlySession
+    : ((session) => !!(session && session.read_only));
+  for(const row of rows){
+    if(Array.isArray(row._child_sessions)&&row._child_sessions.length>1){
+      row._child_sessions.sort((a,b)=>{
+        const readOnlyCmp = Number(resolveReadOnlySession(a))-Number(resolveReadOnlySession(b));
+        if(readOnlyCmp!==0) return readOnlyCmp;
+        const aOrder = childAttachOrderById.get(a&&a.session_id) ?? Number.MAX_SAFE_INTEGER;
+        const bOrder = childAttachOrderById.get(b&&b.session_id) ?? Number.MAX_SAFE_INTEGER;
+        return aOrder-bOrder;
+      });
+    }
+    if(Array.isArray(row._child_sessions)){
+      row._child_session_count=row._child_sessions.length;
     }
   }
   return [...rows,...orphans];
@@ -8321,7 +8353,7 @@ function renderSessionListFromCache(){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
-      const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+      const sortedChildren=[...s._child_sessions];
       const openChildSession=async(childSession)=>{
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };

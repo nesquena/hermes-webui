@@ -249,6 +249,13 @@ def test_profile_goal_falls_back_when_session_db_path_is_frozen(monkeypatch, tmp
     """A context API alone cannot make an import-time SessionDB path profile-safe."""
     from api import goals as webui_goals
     native_goals = pytest.importorskip("hermes_cli.goals", reason="hermes-agent not installed")
+    # Ensure the agent dir is on sys.path before importing the sibling top-level
+    # `hermes_state` module. importorskip("hermes_cli.goals") can succeed from a
+    # cached sys.modules entry even after a prior shard test stripped the agent
+    # dir from sys.path, but the bare `import hermes_state` below is uncached and
+    # would then fail with ModuleNotFoundError under full-suite ordering (every
+    # other test in this file already does this prepend).
+    monkeypatch.syspath_prepend(str(Path(native_goals.__file__).resolve().parents[1]))
     import hermes_state
 
     frozen_db_path = tmp_path / "frozen-home" / "state.db"
@@ -390,7 +397,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(
         routes,
         "webui_gateway_chat_enabled",
@@ -512,7 +519,7 @@ def test_goal_endpoint_adapter_keeps_full_set_text_and_legacy_payload_status(mon
     monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
@@ -725,7 +732,7 @@ def test_goal_kickoff_forwards_explicit_model_pick_to_resolver(monkeypatch, tmp_
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
@@ -802,7 +809,7 @@ def test_goal_kickoff_defaults_explicit_model_pick_false(monkeypatch, tmp_path):
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
@@ -894,7 +901,7 @@ def test_goal_kickoff_stamps_explicit_pick_signature(monkeypatch, tmp_path):
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
@@ -966,7 +973,7 @@ def test_goal_kickoff_does_not_stamp_signature_without_explicit_pick(monkeypatch
         return model, provider, False
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)

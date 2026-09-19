@@ -38,12 +38,20 @@ from api.config import (
     _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
+    peek_stream,
     stream_owner_session_id,
     session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
+    apply_custom_provider_connection_authority,
+    merge_custom_provider_runtime_bundle,
+    CustomProviderRouteError,
+    CUSTOM_ROUTE_NO_CREDENTIAL,
+    CUSTOM_ROUTE_NO_ENDPOINT,
+    custom_provider_route_error,
+    raise_for_custom_provider_route,
     model_with_provider_context,
     warm_models_catalog_provenance_if_cold,
     load_settings,
@@ -189,17 +197,40 @@ def _compact_for_echo_compare(value: str) -> str:
 
 
 def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
-    """Remove ``suffix`` from ``value`` when they match after whitespace folding."""
+    """Remove ``suffix`` from ``value`` when they match after whitespace folding.
+
+    The search window is folded once and the cut point is then located by
+    walking backwards across the echo itself. The previous implementation
+    probed every candidate cut index and re-folded the whole remaining tail for
+    each probe, which is quadratic in the window size: a 6000-character final
+    message cost seconds of CPU, held under the GIL, stalling every other
+    stream in the process.
+
+    ``str.isspace`` is used for the backwards walk instead of the ``\\s``
+    pattern used by :func:`_compact_for_echo_compare`. The two agree on every
+    Unicode code point, so the folded view and the walk stay consistent.
+    """
     raw = str(value or '')
     candidate = _compact_for_echo_compare(suffix)
     if not raw or not candidate:
         return raw, False
     tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
     offset = len(raw) - len(tail)
-    for idx in range(len(tail) + 1):
-        if _compact_for_echo_compare(tail[idx:]) == candidate:
-            return raw[: offset + idx].rstrip(), True
-    return raw, False
+    compact_tail = _compact_for_echo_compare(tail)
+    if len(candidate) > len(compact_tail) or not compact_tail.endswith(candidate):
+        return raw, False
+    # Consume exactly as many non-whitespace characters as the folded suffix
+    # holds; ``idx`` then sits on the first character of the echo. Whitespace
+    # sitting between the kept text and the echo is removed by ``rstrip``,
+    # which is why this lands on the same result as the leftmost cut index the
+    # probing loop used to return.
+    remaining = len(candidate)
+    idx = len(tail)
+    while remaining and idx:
+        idx -= 1
+        if not tail[idx].isspace():
+            remaining -= 1
+    return raw[: offset + idx].rstrip(), True
 
 
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
@@ -247,7 +278,6 @@ def _cancel_event_payload(
 # (api/profiles.py:715).
 _ENV_LOCK = threading.Lock()
 
-_KEYLESS_CUSTOM_API_KEY = "dummy-key"
 _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
 _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -546,50 +576,121 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
 
-def _resolve_custom_provider_runtime_overrides(
+def _resolve_custom_provider_connection_authority(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
     profile_name: str | None = None,
-) -> tuple[str | None, str | None, str | None]:
-    """Return provider/key/base_url overrides for ``custom:*`` endpoints.
+    custom_provider_lookup: str | None = None,
+) -> tuple[str | None, str | None, str | None, bool]:
+    """Return ``(provider, api_key, base_url, custom_owned)`` for ``custom:*``.
 
-    Hermes Agent treats named custom providers as routing hints around an
-    OpenAI-compatible base URL.  Local OpenAI-compatible servers often run
-    without authentication, so a missing key should not fail before the first
-    request; pass a harmless placeholder to the SDK and let the endpoint accept
-    it or return its own auth error.
+    Thin profile-scoped wrapper around
+    :func:`api.config.apply_custom_provider_connection_authority`, which holds the
+    atomic-replacement rules (exact ``custom_providers[]`` row owns BOTH the
+    endpoint and the credential; keyed/``model:`` fallbacks only fill gaps, as one
+    same-record bundle).
 
-    ``profile_name`` binds the SESSION's own profile while
-    ``resolve_custom_provider_connection`` reads the endpoint AND the credential.
-    That helper resolves both from ONE ``get_config()``/env snapshot, so binding
-    the profile here keeps them from splitting across profiles: on a detached
-    worker thread (which doesn't inherit the request-profile TLS/env) an unbound
-    call would read the DEFAULT profile and pair a named profile's endpoint with
-    the default profile's API key (finding #3). No-op for the default/root
-    profile; when ``profile_name`` is None the ambient scope (if any) is used.
+    ``profile_name`` binds the SESSION's own profile while the connection is
+    resolved. That lookup reads the endpoint AND the credential from ONE
+    ``get_config()``/env snapshot, so binding the profile here keeps them from
+    splitting across profiles: on a detached worker thread (which doesn't inherit
+    the request-profile TLS/env) an unbound call would read the DEFAULT profile
+    and pair a named profile's endpoint with the default profile's API key
+    (finding #3). No-op for the default/root profile; when ``profile_name`` is
+    None the ambient scope (if any) is used.
+
+    ``custom_provider_lookup`` carries the session's pre-canonicalization
+    identity, so a provider already rewritten to plain ``"custom"`` by an earlier
+    resolve still selects its own named record on a retry.
+
+    ``custom_owned`` is True when a config-owned custom record supplied the
+    connection; see :func:`_resolve_runtime_connection_bundle` for why callers
+    must then clear the runtime-owned side fields.
     """
-    if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
-        return resolved_provider, resolved_api_key, resolved_base_url
+    lookup_provider = custom_provider_lookup or resolved_provider
+    if not (isinstance(lookup_provider, str) and lookup_provider.startswith("custom:")):
+        return resolved_provider, resolved_api_key, resolved_base_url, False
 
     from api import profiles as _profiles_api
     with _profiles_api.profile_scope_for_detached_worker(
         profile_name, "custom provider connection", logger_override=logger
     ):
-        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
-    if not resolved_api_key and _cp_key:
-        resolved_api_key = _cp_key
-    if not resolved_base_url and _cp_base:
-        resolved_base_url = _cp_base
-    if resolved_base_url:
-        # Route through the generic custom OpenAI-compatible client once the
-        # named provider has supplied the concrete endpoint. Keeping the
-        # provider as custom:<slug> would make Agent init synthesize invalid
-        # env-var hints like CUSTOM:SOMETHING-8000_API_KEY on keyless setups.
-        resolved_provider = "custom"
-        if not resolved_api_key:
-            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
-    return resolved_provider, resolved_api_key, resolved_base_url
+        return apply_custom_provider_connection_authority(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            lookup_provider=lookup_provider,
+            # Pass THIS module's binding so tests (and any future shim) that patch
+            # ``streaming.resolve_custom_provider_connection`` still take effect.
+            connection_resolver=resolve_custom_provider_connection,
+        )
+
+
+def _resolve_custom_provider_runtime_overrides(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    profile_name: str | None = None,
+    custom_provider_lookup: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Return provider/key/base_url overrides for ``custom:*`` endpoints.
+
+    Legacy three-value view of
+    :func:`_resolve_custom_provider_connection_authority`. Prefer
+    :func:`_resolve_runtime_connection_bundle` in agent-construction paths: the
+    three fields alone are NOT a complete constructor bundle, so a caller that
+    keeps the ambient runtime's ``credential_pool`` / ``api_mode`` / ACP
+    command+args beside them still sends a mixed-authority agent to the custom
+    endpoint.
+    """
+    return _resolve_custom_provider_connection_authority(
+        resolved_provider,
+        resolved_api_key,
+        resolved_base_url,
+        profile_name=profile_name,
+        custom_provider_lookup=custom_provider_lookup,
+    )[:3]
+
+
+# The constructor-routing fields AIAgent takes from the resolved runtime
+# provider. They travel together: a bundle that replaces the endpoint/credential
+# but leaves these behind builds an agent whose transport (ACP subprocess),
+# wire protocol (api_mode) or credential source (pool) still points at the
+# previous authority.
+_RUNTIME_BUNDLE_FIELDS = ('api_mode', 'acp_command', 'acp_args', 'credential_pool')
+
+
+def _resolve_runtime_connection_bundle(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    runtime_provider: dict | None,
+    profile_name: str | None = None,
+    custom_provider_lookup: str | None = None,
+) -> dict:
+    """Return the COMPLETE constructor-routing bundle for one send attempt.
+
+    Keys: ``provider``, ``base_url``, ``api_key`` plus every field in
+    :data:`_RUNTIME_BUNDLE_FIELDS`. Callers must apply the whole dict — that is
+    the point: the endpoint/credential and the transport/protocol/pool fields
+    are one authority, and the agent-cache signature must be derived from the
+    same dict so a bundle change always mints a new agent.
+    """
+    lookup_provider = custom_provider_lookup or resolved_provider
+    from api import profiles as _profiles_api
+
+    with _profiles_api.profile_scope_for_detached_worker(
+        profile_name, "custom provider connection", logger_override=logger
+    ):
+        return merge_custom_provider_runtime_bundle(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            runtime_provider,
+            lookup_provider=lookup_provider,
+            connection_resolver=resolve_custom_provider_connection,
+        )
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
@@ -621,6 +722,7 @@ def _runtime_preferred_base_url(
     runtime_provider: dict | None,
     resolved_provider: str | None,
     configured_base_url: str | None,
+    session_requested_provider: str | None = None,
 ) -> str | None:
     """Prefer the runtime-normalized base_url, but never override an explicit
     configured endpoint that points somewhere genuinely different.
@@ -646,7 +748,8 @@ def _runtime_preferred_base_url(
         return runtime_base_url
 
     provider_id = str(
-        resolved_provider
+        session_requested_provider
+        or resolved_provider
         or (runtime_provider or {}).get("provider")
         or ""
     ).strip().lower()
@@ -1405,6 +1508,41 @@ def _result_reports_compression_snapshot_stale(result) -> bool:
     )
 
 
+def _custom_provider_route_classification(error) -> dict:
+    """WebUI apperror classification for a terminal custom-provider route.
+
+    ``error`` is either a :class:`CustomProviderRouteError` or the verdict dict
+    :func:`custom_provider_route_error` read off a bundle — the retry paths hold
+    the verdict without ever raising, so both shapes classify identically.
+    """
+    if isinstance(error, dict):
+        reason = error.get('reason')
+        hint = error.get('hint') or ''
+        message = error.get('message') or ''
+    else:
+        reason = getattr(error, 'reason', None)
+        hint = getattr(error, 'hint', '') or ''
+        message = getattr(error, 'message', None) or str(error)
+    if reason == CUSTOM_ROUTE_NO_CREDENTIAL:
+        label = 'Provider credential unavailable'
+    elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
+        label = 'Provider endpoint unavailable'
+    else:
+        label = 'Provider not configured'
+    return {
+        'label': label,
+        'type': 'provider_unroutable',
+        # The STRUCTURED verdict (``custom_provider_endpoint_unresolved`` /
+        # ``custom_provider_no_credential``) travels beside the prose so the
+        # emitted apperror can carry it too. ``type`` alone says only "this route
+        # is unroutable"; which of the two settings to fix lives here, and the
+        # non-streaming /api/chat refusal already answers it as ``reason``.
+        'reason': reason,
+        'hint': hint,
+        'message': message,
+    }
+
+
 def _classify_provider_error(
     err_str: str,
     exc=None,
@@ -1427,6 +1565,12 @@ def _classify_provider_error(
     err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
+    if isinstance(exc, CustomProviderRouteError):
+        # An unroutable named ``custom:<slug>`` route. Classified BEFORE any text
+        # matching so it can never be read as a 401 — the auth branch would run
+        # credential self-heal, which re-resolves a provider and is exactly the
+        # re-routing this verdict exists to prevent.
+        return _custom_provider_route_classification(exc)
     _result_is_compression_snapshot_stale = (
         _result_reports_compression_snapshot_stale(result)
     )
@@ -1867,6 +2011,44 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
     return None
 
 
+def _active_turn_boundary(result_messages, previous_context, identity, msg_text):
+    """Index in ``result_messages`` where the current turn starts (0 = all current).
+
+    Proof: active-turn token/index authority, else the last prompt-matching user
+    row AT OR AFTER a content-matching previous-context prefix; else 0 (fail closed).
+    """
+    result_messages = list(result_messages or [])
+    if not result_messages:
+        return 0
+    checkpoint_idx = _find_active_turn_checkpoint_index(
+        result_messages, previous_context, identity, msg_text,
+    )
+    if checkpoint_idx is not None:
+        return checkpoint_idx
+    # A content-only prefix is NOT ownership proof: _message_identity ignores
+    # ids/timestamps, so a compacted current-only result can echo old context.
+    previous_context = list(previous_context or [])
+    candidate_start = 0
+    if (
+        previous_context
+        and len(result_messages) > len(previous_context)
+        and _messages_have_prefix(result_messages, previous_context)
+    ):
+        candidate_start = len(previous_context)
+    expected_text = identity.get('text') if isinstance(identity, dict) else None
+    expected = _normalize_user_text(expected_text if expected_text is not None else msg_text)
+    if expected:
+        for idx in range(len(result_messages) - 1, candidate_start - 1, -1):
+            message = result_messages[idx]
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'user'
+                and _normalize_user_text(_message_text(message.get('content'))) == expected
+            ):
+                return idx
+    return 0
+
+
 def _materialize_active_turn_user(identity, msg_text, source):
     checkpoint = identity.get('checkpoint') if isinstance(identity, dict) else None
     message = (
@@ -1986,8 +2168,9 @@ def _prepare_marker_clean_writeback(
     previous_context_messages,
     result_messages,
     active_turn_identity=None,
+    msg_text=None,
 ):
-    """Return marker-cleaned rows, next context rows, and nudge provenance."""
+    """Return marker-cleaned rows, next context rows, nudge provenance, boundary."""
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
@@ -2000,14 +2183,23 @@ def _prepare_marker_clean_writeback(
             cleaned,
             list(previous_context_messages or []),
             provenance,
+            0,
         )
     if cleaned:
+        # The boundary is resolved BEFORE any restoration and reused by every
+        # restore below, so the contract is decided once per settle.
+        boundary = _active_turn_boundary(
+            cleaned, previous_context_messages, active_turn_identity, msg_text,
+        )
         return (
             cleaned,
-            _restore_reasoning_metadata(previous_context_messages, cleaned),
+            _restore_reasoning_metadata_before_boundary(
+                previous_context_messages, cleaned, boundary,
+            ),
             provenance,
+            boundary,
         )
-    return [], list(previous_context_messages or []), provenance
+    return [], list(previous_context_messages or []), provenance, 0
 
 
 def _annotate_media_snapshots_for_settled_messages(messages) -> None:
@@ -2041,10 +2233,12 @@ def _settle_result_messages(
         result_messages,
         next_context_messages,
         verification_nudge_provenance,
+        current_turn_boundary,
     ) = _prepare_marker_clean_writeback(
         previous_context_messages,
         result_messages,
         active_turn_identity,
+        msg_text,
     )
     if result_messages:
         _assign_stable_message_ids(
@@ -2085,7 +2279,9 @@ def _settle_result_messages(
     session.messages = _merge_display_messages_after_agent_result(
         previous_display_for_writeback,
         previous_context_messages,
-        _restore_display_reasoning_metadata(previous_messages, result_messages),
+        _restore_display_reasoning_metadata(
+            previous_messages, result_messages, current_turn_boundary=current_turn_boundary,
+        ),
         msg_text,
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
@@ -2480,7 +2676,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
-from api.workspace import set_last_workspace
+from api.workspace import _resolve_path
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
@@ -2748,11 +2944,11 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 # the _run_agent_streaming thread (concurrent tool batches use
 # contextvars.copy_context() so children inherit this binding); binding the
 # context-local here makes the capture task/thread-local and race-immune.
-def _set_turn_session_identity(session_id: str):
+def _set_turn_session_identity(session_id: str, workspace: str = ""):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds three context-locals so every session-key / UI-owner consumer is
+    Binds four context-locals so every session-key / UI-owner consumer is
     covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
@@ -2763,6 +2959,18 @@ def _set_turn_session_identity(session_id: str):
         return address stamped onto ProcessSession.origin_ui_session_id and
         completion events by modern hermes-agent builds. Authoritative for
         wakeup routing when present (see ``_resolve_completion_target``).
+      * ``agent.runtime_cwd._SESSION_CWD`` — this turn's workspace, when
+        *workspace* is given. The WebUI runs the agent IN-PROCESS, so
+        ``os.getcwd()`` is the server's launch directory, not the workspace the
+        user selected. Anything resolving a default working directory from the
+        process therefore lands in the Hermes install tree: measured, every
+        conductor child spawned from a WebUI session recorded
+        ``workdir=~/.hermes/hermes-agent`` while the selected workspace was
+        ``~/workspace``, which also fed those children the install tree's own
+        contributor ``AGENTS.md`` as workspace doctrine. ``TERMINAL_CWD`` is
+        already set per turn for the same purpose but is a process-global that
+        concurrent turns overwrite; this contextvar is task-local, so it is
+        race-immune for exactly the reason the three bindings above are.
 
     It deliberately does NOT call ``gateway.session_context.set_session_vars``:
     that blanket setter also zeroes the platform/chat_id/user contextvars,
@@ -2773,7 +2981,10 @@ def _set_turn_session_identity(session_id: str):
     sid = str(session_id or "")
     tokens: dict = {}
     try:
-        from tools.approval import set_current_session_key
+        from api.agent_compat import agent_attr
+        set_current_session_key = agent_attr(
+            "tools.approval", "set_current_session_key", "tools.approval_context"
+        )
         tokens["approval"] = set_current_session_key(sid)
     except Exception:
         logger.debug("per-turn approval session-key bind failed", exc_info=True)
@@ -2787,6 +2998,16 @@ def _set_turn_session_identity(session_id: str):
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
+    if workspace:
+        # Bound via the ContextVar directly, not ``set_session_cwd``, so the
+        # reset below can use reset-token semantics like every sibling above.
+        # ``clear_session_cwd()`` would instead pin "" and mask the CLI/cron
+        # env fallback for a reused thread-pool worker.
+        try:
+            from agent.runtime_cwd import _SESSION_CWD as _SCWD
+            tokens["session_cwd"] = _SCWD.set(str(workspace))
+        except Exception:
+            logger.debug("per-turn _SESSION_CWD bind failed", exc_info=True)
     return tokens
 
 
@@ -2801,6 +3022,13 @@ def _reset_turn_session_identity(tokens) -> None:
     """
     if not tokens:
         return
+    tok = tokens.get("session_cwd")
+    if tok is not None:
+        try:
+            from agent.runtime_cwd import _SESSION_CWD as _SCWD
+            _SCWD.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_CWD reset failed", exc_info=True)
     tok = tokens.get("ui_session_id")
     if tok is not None:
         try:
@@ -2818,7 +3046,10 @@ def _reset_turn_session_identity(tokens) -> None:
     tok = tokens.get("approval")
     if tok is not None:
         try:
-            from tools.approval import reset_current_session_key
+            from api.agent_compat import agent_attr
+            reset_current_session_key = agent_attr(
+                "tools.approval", "reset_current_session_key", "tools.approval_context"
+            )
             reset_current_session_key(tok)
         except Exception:
             logger.debug("per-turn approval session-key reset failed", exc_info=True)
@@ -3280,7 +3511,7 @@ def _resolve_image_input_mode(cfg: dict, active_provider: str = "", active_model
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = ""):
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = "", profile: str | Path | None = None):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -3300,7 +3531,7 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
-    workspace_root = Path(workspace).expanduser().resolve()
+    workspace_root = _resolve_path(workspace, profile=profile)
     # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
     # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
     # design). The pre-existing `path.relative_to(workspace_root)` guard would
@@ -3820,6 +4051,71 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     return stripped.strip()
 
 
+_TITLE_ATTACHMENT_SUFFIX_RE = re.compile(
+    r'(?:\n\n|\r\n\r\n)\[Attached files(?: for this steer)?: [^\]]+\]\s*$'
+)
+
+
+def _strip_title_attachment_suffix(text) -> str:
+    """Remove one exact WebUI-generated terminal attachment suffix."""
+    return _TITLE_ATTACHMENT_SUFFIX_RE.sub('', str(text or ''))
+
+
+def _strip_title_input_metadata(text) -> str:
+    """Remove only internal title metadata from one selected text value."""
+    value = _strip_title_attachment_suffix(text)
+    return _strip_workspace_prefix(value).strip()
+
+
+def _title_structured_text_parts(
+    content, allowed_types, *, normalize_types: bool = False
+) -> list[str]:
+    """Sanitize accepted structured title parts without mutating the content."""
+    parts = []
+    workspace_prefix_stripped = False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get('type') or '').lower() if normalize_types else part.get('type')
+        if part_type not in allowed_types:
+            continue
+        text = (
+            str(part.get('text') or '')
+            if not normalize_types
+            else _message_content_part_text(part)
+        )
+        if text.strip() and not workspace_prefix_stripped:
+            text = _strip_title_input_metadata(text)
+            workspace_prefix_stripped = bool(text)
+        parts.append(text)
+    return parts
+
+
+def _title_input_text(content) -> str:
+    """Extract raw title text using the same content rules as title_from."""
+    if content is None:
+        return ''
+    if isinstance(content, list):
+        return ' '.join(
+            _title_structured_text_parts(content, ('text',), normalize_types=False)
+        ).strip()
+    return _strip_title_input_metadata(str(content))
+
+
+_TITLE_MIXED_PART_TYPES = ('', 'text', 'input_text', 'output_text')
+
+
+def _title_exchange_input_text(content) -> str:
+    """Extract sanitized first/latest-exchange title input text."""
+    if isinstance(content, list):
+        return '\n'.join(
+            _title_structured_text_parts(
+                content, _TITLE_MIXED_PART_TYPES, normalize_types=True
+            )
+        ).strip()
+    return _strip_title_input_metadata(str(content or '').strip())
+
+
 def _looks_like_current_user_turn(msg, msg_text) -> bool:
     """Match the current human turn even if an internal workspace tag leaked mid-text.
 
@@ -3841,11 +4137,21 @@ def _looks_like_current_user_turn(msg, msg_text) -> bool:
     return any(" ".join(str(candidate or '').split()) == needle for candidate in candidates)
 
 
-def _first_exchange_snippets(messages):
+def _first_exchange_snippets(messages, *, scan_past_consecutive_users: bool = False):
     """Return (first_user_text, first_assistant_text) snippets for title generation.
 
     Prefer the first substantive assistant answer in the opening exchange,
     skipping empty placeholders and assistant tool-call preambles.
+
+    ``scan_past_consecutive_users`` (opt-in) keeps scanning past consecutive
+    opening user rows (queued first turns) until the first COMPLETE user+assistant
+    pair — needed by the manual "Regenerate title" path (#7543), which otherwise
+    aborted at the second user row with an empty assistant snippet and silently
+    persisted the local fallback. It defaults False so the automatic in-stream
+    background-title path keeps its exact prior behavior (a transcript with no
+    assistant text before the second user row yields an empty assistant snippet,
+    which _background_title_generation_inputs treats as "not yet eligible" — the
+    stream teardown then emits stream_end on its synchronous path unchanged).
     """
     user_text = ''
     asst_text = ''
@@ -3854,12 +4160,15 @@ def _first_exchange_snippets(messages):
             continue
         role = m.get('role')
         if role == 'user':
-            candidate = _message_text(m.get('content'))
-            if not user_text and candidate:
+            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
+            if candidate and not user_text:
                 user_text = candidate
-                continue
-            if user_text and candidate:
+            elif user_text and candidate and not scan_past_consecutive_users:
+                # Legacy/default behavior: a second populated user row before any
+                # assistant text ends the opening exchange (asst_text stays empty).
                 break
+            # When scan_past_consecutive_users is set, keep going past consecutive
+            # user rows (#7543) until the first user+assistant pair.
         elif role == 'assistant' and user_text:
             candidate = _message_text(m.get('content'))
             # Skip tool-call preambles *only* when content is empty or looks
@@ -3895,9 +4204,13 @@ def _latest_exchange_snippets(messages):
                 continue
             if candidate:
                 asst_text = candidate
-        elif role == 'user' and not user_text:
-            candidate = _message_text(m.get('content'))
-            if candidate:
+        elif role == 'user':
+            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
+            if not candidate:
+                user_text = ''
+                asst_text = ''
+                break
+            if not user_text:
                 user_text = candidate
         if user_text and asst_text:
             break
@@ -3930,14 +4243,51 @@ def _get_title_refresh_interval() -> int:
 
 def _is_provisional_title(current_title: str, messages) -> bool:
     """Heuristic: title equals first-message substring placeholder."""
-    derived = title_from(messages, '') or ''
-    if not derived:
+    first_user_text = ''
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        first_user_text = _title_input_text(message.get('content'))
+        if first_user_text:
+            break
+    if not first_user_text:
         return False
+    sanitized_derived = title_from([{'role': 'user', 'content': first_user_text}], '') or ''
+    raw_derived = title_from(messages or [], '') or ''
+    if not sanitized_derived:
+        return False
+
+    def _normalize_candidate(value):
+        return re.sub(r'\s+', ' ', str(value or '')[:64]).strip()
+
     current = re.sub(r'\s+', ' ', str(current_title or '')).strip()
-    candidate = re.sub(r'\s+', ' ', str(derived[:64] or '')).strip()
-    if not current or not candidate:
+    candidates = (
+        _normalize_candidate(sanitized_derived),
+        _normalize_candidate(raw_derived),
+    )
+    if not current:
         return False
-    return current == candidate
+    return any(candidate and current == candidate for candidate in candidates)
+
+
+def _background_title_generation_inputs(session):
+    """Return sanitized first-exchange inputs when background title generation is eligible."""
+    messages = getattr(session, 'messages', None) or []
+    title = getattr(session, 'title', '')
+    invalid_existing_title = _looks_invalid_generated_title(title)
+    eligible_title = (
+        title == 'Untitled'
+        or title == 'New Chat'
+        or not title
+        or _is_provisional_title(title, messages)
+        or invalid_existing_title
+    )
+    if not eligible_title or (
+        getattr(session, 'llm_title_generated', False) and not invalid_existing_title
+    ):
+        return None
+    user_text, assistant_text = _first_exchange_snippets(messages)
+    return (user_text, assistant_text) if user_text and assistant_text else None
 
 
 def _detect_title_language(text: str) -> str:
@@ -4436,12 +4786,12 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         if 'max_output_tokens' in codex_kwargs:
                             codex_kwargs['max_output_tokens'] = max_tokens
                         resp = agent._run_codex_stream(codex_kwargs)
-                        assistant_message, _ = agent._normalize_codex_response(resp)
-                        raw = (assistant_message.content or '') if assistant_message else ''
+                        normalized = agent._get_transport('codex_responses').normalize_response(resp)
+                        raw = (normalized.content or '') if normalized else ''
                         if not raw:
                             empty_status = 'llm_empty'
                     elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
-                        from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+                        from agent.anthropic_adapter import build_anthropic_kwargs
                         ant_kwargs = build_anthropic_kwargs(
                             model=agent.model,
                             messages=api_messages,
@@ -4453,10 +4803,10 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                             base_url=getattr(agent, '_anthropic_base_url', None),
                         )
                         resp = agent._anthropic_messages_create(ant_kwargs)
-                        assistant_message, _ = normalize_anthropic_response(
+                        normalized = agent._get_transport().normalize_response(
                             resp, strip_tool_prefix=getattr(agent, '_is_anthropic_oauth', False)
                         )
-                        raw = (assistant_message.content or '') if assistant_message else ''
+                        raw = (normalized.content or '') if normalized else ''
                         if not raw:
                             empty_status = 'llm_empty'
                     else:
@@ -4537,7 +4887,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '') -> tuple[Optional[str], str, str]:
     """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
 
     When use_agent_model is False (default), the auxiliary client resolves
@@ -4545,6 +4895,11 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
     prevents the session's chat model (e.g. a Chinese model) from overriding
     the dedicated title model.  When True, the agent's attrs are passed through
     (legacy fallback behaviour).
+
+    conversation_id republishes the webui session id as the Agent's ambient
+    conversation context for the duration of the aux call, so OpenCode relay
+    targets receive the same ``x-opencode-session`` sticky key as the session's
+    main turns (#7470). The context is reset in all exit paths.
     """
     if use_agent_model and agent:
         provider = getattr(agent, 'provider', '')
@@ -4554,13 +4909,30 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
-    raw, status = generate_title_raw_via_aux(
-        user_text,
-        assistant_text,
-        provider=provider,
-        model=model,
-        base_url=base_url,
-    )
+    ctx_token = None
+    if conversation_id:
+        try:
+            from agent.portal_tags import set_conversation_context
+            ctx_token = set_conversation_context(str(conversation_id))
+        except Exception:
+            # Older/absent agent runtime: proceed without conversation context
+            # (previous behaviour) rather than failing title generation.
+            ctx_token = None
+    try:
+        raw, status = generate_title_raw_via_aux(
+            user_text,
+            assistant_text,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+        )
+    finally:
+        if ctx_token is not None:
+            try:
+                from agent.portal_tags import reset_conversation_context
+                reset_conversation_context(ctx_token)
+            except Exception:
+                pass
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -4710,9 +5082,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             source = llm_status
@@ -4808,9 +5180,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
@@ -4865,7 +5237,12 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     if prefer_latest:
         user_text, assistant_text = _latest_exchange_snippets(messages)
     else:
-        user_text, assistant_text = _first_exchange_snippets(messages)
+        # Manual "Regenerate title" (#7543): scan past consecutive opening user
+        # rows to the first complete user+assistant pair, so a transcript that
+        # opens with queued user turns still reaches the aux LLM instead of
+        # silently persisting the local fallback. The automatic in-stream path
+        # keeps the default (no scan-past) so its stream teardown is unchanged.
+        user_text, assistant_text = _first_exchange_snippets(messages, scan_past_consecutive_users=True)
     if not user_text:
         return None, 'empty_user_message', ''
     from api import profiles as profiles_api
@@ -4873,7 +5250,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
         if not _aux_title_generation_enabled():
             return None, 'title_generation_disabled', ''
-        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '')
     if next_title:
         return next_title, llm_status, raw_preview
     fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
@@ -5673,17 +6050,31 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         for m in arr or []:
             if isinstance(m, dict):
                 mid = m.get('id')
-                # bool is an int subclass; exclude it so a stray True/False id
-                # can never seed the counter.
-                if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
+                if _is_stable_message_id(mid) and mid > seed:
                     seed = mid
     stamped = 0
     for m in result_messages:
-        if isinstance(m, dict) and m.get('id') is None:
+        # Invalid ids (True, 1.0, "3", 0, -1) are re-minted, never kept: they
+        # compare equal to minted integers and would forge successor identity.
+        if isinstance(m, dict) and not _is_stable_message_id(m.get('id')):
             seed += 1
             m['id'] = seed
             stamped += 1
     return stamped
+
+
+def _is_stable_message_id(value) -> bool:
+    """Stable-id contract: a positive ``int`` only (no bool/float/str/0/<0)."""
+    return type(value) is int and value > 0
+
+
+def _stable_id_counts(messages) -> dict:
+    """Count how many rows carry each valid stable id (1 == sole owner)."""
+    counts: dict = {}
+    for m in messages:
+        if isinstance(m, dict) and _is_stable_message_id(m.get('id')):
+            counts[m['id']] = counts.get(m['id'], 0) + 1
+    return counts
 
 
 _POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS = 4096
@@ -5876,6 +6267,13 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     `timestamp` can be re-stamped with the current time on every new assistant
     response, making prior messages appear to "move" in time.
     """
+    return _restore_reasoning_metadata_before_boundary(previous_messages, updated_messages)
+
+
+def _restore_reasoning_metadata_before_boundary(
+    previous_messages, updated_messages, current_turn_boundary=None,
+):
+    """Boundary-aware core: rows at/after ``current_turn_boundary`` get nothing historical."""
     if not previous_messages or not updated_messages:
         return updated_messages
     updated_messages = list(updated_messages)
@@ -5896,7 +6294,9 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         return projected
 
     safe_pos = 0
-    while safe_pos < len(prev_safe):
+    # Rows at/after the active-turn boundary belong to the current turn: never
+    # carry historical ids/metadata onto them (same-content successor forgery).
+    while safe_pos < len(prev_safe) and (current_turn_boundary is None or safe_pos < current_turn_boundary):
         prev_idx, _ = prev_safe[safe_pos]
         prev_msg = previous_messages[prev_idx]
         cur_msg = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
@@ -5928,23 +6328,59 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
-def _restore_display_reasoning_metadata(previous_messages, updated_messages):
+def _restore_display_reasoning_metadata(previous_messages, updated_messages, *, current_turn_boundary=None):
     """Restore display-only thinking rows for visible transcript persistence."""
-    updated_messages = _restore_reasoning_metadata(previous_messages, updated_messages)
+    updated_messages = _restore_reasoning_metadata_before_boundary(
+        previous_messages, updated_messages, current_turn_boundary,
+    )
     if not previous_messages or not updated_messages:
         return updated_messages
     prev_safe = _api_safe_message_positions(previous_messages)
     safe_indices = {idx for idx, _ in prev_safe}
+    # Stable-id ownership (#context-message-stable-id) must be one-to-one:
+    # an id reused by another API-safe row in either projection proves nothing.
+    prev_ids = _stable_id_counts(previous_messages[idx] for idx in safe_indices)
+    updated_ids = _stable_id_counts(
+        updated_messages[idx] for idx, _ in _api_safe_message_positions(updated_messages)
+    )
     inserted_reasoning_only = 0
     for prev_idx, prev_msg in enumerate(previous_messages):
         if _is_empty_partial_activity_message(prev_msg):
             continue
         if prev_idx in safe_indices or not _is_reasoning_only_assistant_message(prev_msg):
             continue
-        safe_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx) + inserted_reasoning_only
+        anchor_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx)
+        # A historical reasoning-only row never restores into the current-turn slice.
+        if current_turn_boundary is not None and anchor_pos >= current_turn_boundary:
+            continue
+        safe_pos = anchor_pos + inserted_reasoning_only
         existing = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
         if isinstance(existing, dict) and _is_reasoning_only_assistant_message(existing):
             continue
+        # Restore only in front of the row's own API-safe successor. A compacted
+        # result has no aligned slot; inserting past its end would append the
+        # historical row after the new reply and re-add it every turn.
+        if anchor_pos >= len(prev_safe) or not isinstance(existing, dict):
+            continue
+        successor = previous_messages[prev_safe[anchor_pos][0]]
+        # Stable ids (#context-message-stable-id) win over content identity:
+        # repeated prompts ("continue") make a distinct current row look like
+        # the historical successor and misplace every anchor before it.
+        successor_id = successor.get('id')
+        existing_id = existing.get('id')
+        if 'id' in successor or 'id' in existing:
+            if not (
+                _is_stable_message_id(successor_id)
+                and _is_stable_message_id(existing_id)
+                and successor_id == existing_id
+                and prev_ids.get(successor_id) == 1
+                and updated_ids.get(successor_id) == 1
+            ):
+                continue
+        else:
+            anchor_key = _message_identity(successor)
+            if anchor_key is None or anchor_key != _message_identity(existing):
+                continue
         updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))
         inserted_reasoning_only += 1
     return updated_messages
@@ -8418,16 +8854,69 @@ def _attempt_credential_self_heal(
 def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     """Return the cache-signature component for runtime credentials.
 
-    Credential-pool providers can legitimately hand WebUI a different runtime
-    token on each request (round-robin pools, OAuth refresh, auth self-heal).
-    The AIAgent object is also where cross-turn memory-provider state lives, so
-    using the volatile token itself in the cache signature silently defeats the
-    per-session agent cache and drops warmed Hindsight prefetch results.
+    Credential-pool providers and callable key_cmd sources can legitimately
+    hand WebUI a different runtime token on each request (round-robin pools,
+    OAuth refresh, auth self-heal). The AIAgent object is also where cross-turn
+    memory-provider state lives, so using a volatile token in the cache
+    signature silently defeats the per-session agent cache and drops warmed
+    Hindsight prefetch results.
     """
     if credential_pool is not None:
         return 'credential-pool'
+    if not isinstance(resolved_api_key, str) and callable(resolved_api_key):
+        # key_cmd credentials are resolved by the client at request time; do
+        # not mint or stringify a potentially secret token for cache identity.
+        return 'dynamic-credential'
     import hashlib as _hashlib
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
+
+
+def _compute_agent_cache_signature(
+    resolved_model: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    resolved_provider: str | None,
+    runtime_bundle: dict | None,
+    max_iterations_cfg=None,
+    max_tokens_cfg=None,
+    fallback_resolved=None,
+    toolsets=None,
+    reasoning_config=None,
+    main_request_overrides=None,
+    _main_request_overrides=None,
+    prefill_context=None,
+    profile_home: str | None = None,
+    safe_profile_runtime_env: dict | None = None,
+) -> str:
+    """Return the SHA256 signature identifying an agent's constructor routing state."""
+    import hashlib as _hashlib
+    import json as _json
+    _bundle = runtime_bundle if isinstance(runtime_bundle, dict) else {}
+    _credential_pool = _bundle.get('credential_pool')
+    _env = safe_profile_runtime_env if isinstance(safe_profile_runtime_env, dict) else {}
+    _main_request_overrides = main_request_overrides if main_request_overrides is not None else _main_request_overrides
+    _sig_blob = _json.dumps([
+        resolved_model or '',
+        _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
+        resolved_base_url or '',
+        resolved_provider or '',
+        _bundle.get('api_mode') or '',
+        _bundle.get('acp_command') or '',
+        _bundle.get('acp_args') or [],
+        bool(_credential_pool),
+        max_iterations_cfg or '',
+        max_tokens_cfg or '',
+        fallback_resolved or {},
+        sorted(toolsets) if toolsets else [],
+        reasoning_config or {},
+        _main_request_overrides or {},
+        _public_prefill_context_status(prefill_context),
+        profile_home or '',
+        _env.get('TERMINAL_ENV', '') or '',
+        _env.get('TERMINAL_SSH_HOST', '') or '',
+        _env.get('TERMINAL_SSH_USER', '') or '',
+    ], sort_keys=True)
+    return _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
 
 def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
@@ -8680,7 +9169,7 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
-    q = STREAMS.get(stream_id)
+    q = peek_stream(stream_id)
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
@@ -9148,12 +9637,22 @@ def _run_agent_streaming(
         # captures THIS session, not a concurrent turn's process-global env).
         # Co-located with the existing env-restore lifecycle: set here, reset
         # in the outer finally next to _clear_thread_env().
-        _turn_session_identity_tokens = _set_turn_session_identity(session_id)
+        # Resolved the same way as `s.workspace` below so the bound cwd and the
+        # session's own record cannot disagree. Guarded: a turn must not die
+        # here because a workspace path is malformed.
         s = get_session(session_id)
+        try:
+            _turn_workspace_cwd = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
+        except Exception:
+            _turn_workspace_cwd = ""
+            logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
+        _turn_session_identity_tokens = _set_turn_session_identity(
+            session_id, workspace=_turn_workspace_cwd
+        )
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = str(Path(workspace).expanduser().resolve())
+        s.workspace = _turn_workspace_cwd
         _last_persisted_model = None
         _last_persisted_provider = None
         _turn_owns_persisted_model = False
@@ -9364,7 +9863,8 @@ def _run_agent_streaming(
         # lives outside this WebUI repo.  This change fixes the headline bug
         # for users who run a single non-default profile per WebUI process.
         try:
-            from tools.mcp_tool import discover_mcp_tools
+            from api.agent_compat import agent_attr
+            discover_mcp_tools = agent_attr("tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery")
             discover_mcp_tools()
         except Exception:
             pass  # MCP not available or not configured — non-fatal
@@ -10023,6 +10523,9 @@ def _run_agent_streaming(
                 # Resolve API key via Hermes runtime provider (matches gateway behaviour).
                 # Pass the resolved provider so non-default providers get their own credentials.
                 resolved_api_key = None
+                # Default to an empty runtime dict so the constructor-routing
+                # bundle below stays buildable when resolution raises.
+                _rt = {}
                 try:
                     from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -10046,11 +10549,38 @@ def _run_agent_streaming(
                 # Preserve the pre-canonicalization identity so image routing can
                 # still select the exact custom_providers entry after the rewrite
                 # to "custom" below.
+                #
+                # Resolve ONE complete constructor-routing bundle here and let
+                # every downstream field (including the agent-cache signature)
+                # read from it. Resolving only provider/key/base_url left the
+                # runtime-owned credential_pool / api_mode / ACP command+args
+                # beside a replaced custom endpoint, so the agent was built with
+                # a mixed authority: the list row's URL and key, but the ambient
+                # provider's transport, wire protocol and credential source.
                 _session_requested_provider = resolved_provider
-                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                    resolved_provider, resolved_api_key, resolved_base_url,
+                _runtime_bundle = _resolve_runtime_connection_bundle(
+                    resolved_provider, resolved_api_key, resolved_base_url, _rt,
                     profile_name=_resolved_profile_name,
+                    custom_provider_lookup=_session_requested_provider,
                 )
+                # Stop HERE on a terminal route verdict — before the agent
+                # kwargs, before _AIAgent(), before the agent-cache write. A
+                # named custom:<slug> that resolved no complete
+                # (api_key, base_url) pair is not "fail closed" at the
+                # constructor: AIAgent honours an explicit pair only when BOTH
+                # are truthy and otherwise calls _routed_client_kwargs(), which
+                # re-resolves a provider and can land on the ambient endpoint or
+                # the init-time fallback chain. Raising sends this turn to the
+                # outer handler, which classifies it via
+                # _custom_provider_route_classification() and emits a controlled
+                # provider / missing-credential error — and, because we never
+                # reach SESSION_AGENT_CACHE, the cache is never poisoned with an
+                # agent built on an unroutable bundle that later turns would
+                # silently reuse.
+                raise_for_custom_provider_route(_runtime_bundle)
+                resolved_provider = _runtime_bundle['provider']
+                resolved_api_key = _runtime_bundle['api_key']
+                resolved_base_url = _runtime_bundle['base_url']
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
@@ -10257,15 +10787,18 @@ def _run_agent_streaming(
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
             if 'request_overrides' in _agent_params and _main_request_overrides:
                 _agent_kwargs['request_overrides'] = _main_request_overrides
-            # Params added in newer hermes-agent — skip if not supported
+            # Params added in newer hermes-agent — skip if not supported.
+            # Read from the resolved bundle, NOT from _rt: a custom-provider
+            # override clears these, and taking them straight off the runtime
+            # provider would re-introduce the authority it replaced.
             if 'api_mode' in _agent_params:
-                _agent_kwargs['api_mode'] = _rt.get('api_mode')
+                _agent_kwargs['api_mode'] = _runtime_bundle['api_mode']
             if 'acp_command' in _agent_params:
-                _agent_kwargs['acp_command'] = _rt.get('command')
+                _agent_kwargs['acp_command'] = _runtime_bundle['acp_command']
             if 'acp_args' in _agent_params:
-                _agent_kwargs['acp_args'] = _rt.get('args')
+                _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
             if 'credential_pool' in _agent_params:
-                _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
+                _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
             # Pin Honcho memory sessions to the stable WebUI session ID.
             # Without this, 'per-session' Honcho strategy creates a new Honcho
             # session on every streaming request because HonchoSessionManager is
@@ -10280,41 +10813,26 @@ def _run_agent_streaming(
                 agent = _AIAgent(**_agent_kwargs)
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
-                import hashlib as _hashlib
-                import json as _json
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                _credential_pool = _rt.get('credential_pool')
-                _sig_blob = _json.dumps([
-                    resolved_model or '',
-                    _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
-                    resolved_base_url or '',
-                    resolved_provider or '',
-                    _rt.get('api_mode') or '',
-                    _rt.get('command') or '',
-                    _rt.get('args') or [],
-                    bool(_credential_pool),
-                    _max_iterations_cfg or '',
-                    _max_tokens_cfg or '',
-                    _fallback_resolved or {},
-                    sorted(_toolsets) if _toolsets else [],
-                    _reasoning_config or {},
-                    _main_request_overrides or {},
-                    _public_prefill_context_status(_prefill_context),
-                    # #1897: profile_home is part of the agent's identity because
-                    # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
-                    # at construction time, sourced from HERMES_HOME. Same-session
-                    # profile switches keep `session_id` stable, so without this
-                    # field the cached agent silently retains the previous
-                    # profile's SOUL.md (and any other profile-scoped context).
-                    _profile_home or '',
-                    # Terminal backend identity: sessions switching between
-                    # remote (SSH) and local backends must not reuse a cached
-                    # agent that carries stale terminal env vars (#5937).
-                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
-                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
-                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
-                ], sort_keys=True)
-                _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
+                # Signature fields come from the SAME bundle the constructor
+                # received, so a cleared/overridden field always mints a new
+                # agent instead of reusing one built on the prior authority.
+                _agent_sig = _compute_agent_cache_signature(
+                    resolved_model,
+                    resolved_api_key,
+                    resolved_base_url,
+                    resolved_provider,
+                    _runtime_bundle,
+                    max_iterations_cfg=_max_iterations_cfg,
+                    max_tokens_cfg=_max_tokens_cfg,
+                    fallback_resolved=_fallback_resolved,
+                    toolsets=_toolsets,
+                    reasoning_config=_reasoning_config,
+                    main_request_overrides=_main_request_overrides,
+                    prefill_context=_prefill_context,
+                    profile_home=_profile_home,
+                    safe_profile_runtime_env=_safe_profile_runtime_env,
+                )
 
                 agent = None
                 _identity_mismatch_entry = None
@@ -10681,7 +11199,7 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""))
+            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
@@ -10734,6 +11252,10 @@ def _run_agent_streaming(
                     active_provider=(resolved_provider or ""),
                     active_model=(resolved_model or ""),
                     requested_provider=(_session_requested_provider or ""),
+                    # Legacy fallback wraps the home STRING in Path: string
+                    # profiles are logical ids only (round-5 grammar gate),
+                    # explicit homes must arrive as Path values.
+                    profile=(getattr(s, "profile", None) or Path(_profile_home)),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
@@ -11168,7 +11690,8 @@ def _run_agent_streaming(
                             if not resolved_provider:
                                 resolved_provider = _heal_rt.get('provider')
                             resolved_base_url = _runtime_preferred_base_url(
-                                _heal_rt, resolved_provider, configured_base_url
+                                _heal_rt, resolved_provider, configured_base_url,
+                                session_requested_provider=_session_requested_provider,
                             )
                             # Preserve the session's original pre-canonicalization
                             # provider identity (captured at first resolve) so a
@@ -11177,21 +11700,64 @@ def _run_agent_streaming(
                             # (e.g. the provider was first discovered on this heal).
                             if not _session_requested_provider:
                                 _session_requested_provider = resolved_provider
-                            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                                resolved_provider, resolved_api_key, resolved_base_url,
+                            # Rebuild the COMPLETE bundle, not just the three
+                            # connection fields: the self-heal re-resolve can
+                            # return a different runtime authority, and a
+                            # custom-provider override must clear its
+                            # credential_pool / api_mode / ACP fields here too.
+                            _runtime_bundle = _resolve_runtime_connection_bundle(
+                                resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
                                 profile_name=_resolved_profile_name,
+                                custom_provider_lookup=_session_requested_provider,
                             )
+                            # The re-resolve can turn a previously routable named
+                            # route terminal (the record's key_cmd stopped
+                            # minting, the pool drained, the row was edited
+                            # mid-turn). Abandon the retry BEFORE _AIAgent and
+                            # before the SESSION_AGENT_CACHE write below: healing
+                            # a 401 by handing the constructor an incomplete pair
+                            # is exactly the re-routing this verdict exists to
+                            # stop, and caching that agent would carry it into
+                            # every later turn. Raising reaches the outer handler,
+                            # which emits the controlled provider /
+                            # missing-credential error instead of the 401.
+                            raise_for_custom_provider_route(_runtime_bundle)
+                            resolved_provider = _runtime_bundle['provider']
+                            resolved_api_key = _runtime_bundle['api_key']
+                            resolved_base_url = _runtime_bundle['base_url']
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
                             _agent_kwargs['model'] = resolved_model
                             _agent_kwargs['provider'] = resolved_provider
                             _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
+                            if 'api_mode' in _agent_params:
+                                _agent_kwargs['api_mode'] = _runtime_bundle['api_mode']
+                            if 'acp_command' in _agent_params:
+                                _agent_kwargs['acp_command'] = _runtime_bundle['acp_command']
+                            if 'acp_args' in _agent_params:
+                                _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
                             if 'credential_pool' in _agent_params:
-                                _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
+                                _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                             agent = _AIAgent(**_agent_kwargs)
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
+                            _agent_sig = _compute_agent_cache_signature(
+                                resolved_model,
+                                resolved_api_key,
+                                resolved_base_url,
+                                resolved_provider,
+                                _runtime_bundle,
+                                max_iterations_cfg=_max_iterations_cfg,
+                                max_tokens_cfg=_max_tokens_cfg,
+                                fallback_resolved=_fallback_resolved,
+                                toolsets=_toolsets,
+                                reasoning_config=_reasoning_config,
+                                main_request_overrides=_main_request_overrides,
+                                prefill_context=_prefill_context,
+                                profile_home=_profile_home,
+                                safe_profile_runtime_env=_safe_profile_runtime_env,
+                            )
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
                             with _SAC_L:
                                 _SAC[session_id] = (agent, _agent_sig)
@@ -11523,17 +12089,7 @@ def _run_agent_streaming(
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
-                _looks_default = (s.title == 'Untitled' or s.title == 'New Chat' or not s.title)
-                _looks_provisional = _is_provisional_title(s.title, s.messages)
-                _invalid_existing_title = _looks_invalid_generated_title(s.title)
-                _should_bg_title = (
-                    (_looks_default or _looks_provisional or _invalid_existing_title)
-                    and (not getattr(s, 'llm_title_generated', False) or _invalid_existing_title)
-                )
-                _u0 = ''
-                _a0 = ''
-                if _should_bg_title:
-                    _u0, _a0 = _first_exchange_snippets(s.messages)
+                _bg_title_inputs = _background_title_generation_inputs(s)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -12295,10 +12851,10 @@ def _run_agent_streaming(
                 # misbehaving log handler here would otherwise skip the
                 # background-title thread spawn below. (#4923 gate hardening)
                 pass
-            if _should_bg_title and _u0 and _a0:
+            if _bg_title_inputs:
                 threading.Thread(
                     target=_run_background_title_update,
-                    args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
+                    args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
                     daemon=True,
                 ).start()
             else:
@@ -12428,9 +12984,24 @@ def _run_agent_streaming(
         _exc_is_compression_snapshot_stale = (
             _classification['type'] == 'compression_snapshot_stale'
         )
+        _exc_is_provider_unroutable = _classification['type'] == 'provider_unroutable'
+
+        # The structured terminal reason for an unroutable named custom route,
+        # stamped onto the emitted payload below. Kept separate from _exc_type
+        # because every unroutable route shares one type and differs only here.
+        _exc_route_reason = None
 
         # The user hint still points to Settings / `hermes model` from _classify_provider_error().
-        if _exc_is_quota:
+        if _exc_is_provider_unroutable:
+            # Checked FIRST so the terminal route verdict can never be flattened
+            # into the generic 'Error' tail of this chain: its hint names the
+            # exact provider setting to fix, which is the only actionable thing
+            # the user gets on an unroutable custom:<slug>.
+            _exc_label, _exc_type, _exc_hint = (
+                _classification['label'], _classification['type'], _classification['hint'],
+            )
+            _exc_route_reason = _classification.get('reason')
+        elif _exc_is_quota:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
@@ -12444,6 +13015,15 @@ def _run_agent_streaming(
             )
         elif _exc_is_auth:
             _heal_stale_classification = None
+            # Set when the self-heal re-resolve produces a TERMINAL route
+            # verdict. Unlike the two in-flight sites, this branch runs INSIDE
+            # the outer exception handler, so raising here would escape the
+            # generator with no error event at all. Record the verdict instead
+            # and let the abandoned heal fall through to the emission below,
+            # which prefers this classification over the generic
+            # "Authentication error" — the 401 is a symptom, the unroutable
+            # named provider is the cause the user can actually fix.
+            _heal_route_classification = None
             if not _self_healed:
                 # ── Credential self-heal on 401 (#1401) ──
                 # Bind the session's profile so the self-heal re-resolve AND the
@@ -12467,7 +13047,8 @@ def _run_agent_streaming(
                     if not resolved_provider:
                         resolved_provider = _heal_rt.get('provider')
                     resolved_base_url = _runtime_preferred_base_url(
-                        _heal_rt, resolved_provider, configured_base_url
+                        _heal_rt, resolved_provider, configured_base_url,
+                        session_requested_provider=_session_requested_provider,
                     )
                     # Preserve the session's original pre-canonicalization provider
                     # identity (captured at first resolve) so a named custom:slug
@@ -12475,10 +13056,41 @@ def _run_agent_streaming(
                     # Only initialize when empty.
                     if not _session_requested_provider:
                         _session_requested_provider = resolved_provider
-                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url,
+                    # Rebuild the COMPLETE bundle (see the returned-error retry
+                    # above): replacing only provider/key/base_url would leave
+                    # the pre-heal credential_pool / api_mode / ACP fields on a
+                    # custom endpoint that owns none of them.
+                    _runtime_bundle = _resolve_runtime_connection_bundle(
+                        resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
                         profile_name=_resolved_profile_name,
+                        custom_provider_lookup=_session_requested_provider,
                     )
+                    _heal_route_verdict = custom_provider_route_error(_runtime_bundle)
+                    if _heal_route_verdict is not None:
+                        # The refreshed credential did not produce a routable
+                        # named connection. Abandon the heal BEFORE _AIAgent and
+                        # before the SESSION_AGENT_CACHE write below — building
+                        # here would hand the constructor an incomplete pair and
+                        # let _routed_client_kwargs() pick a provider of its own,
+                        # and caching that agent would keep doing so on every
+                        # later turn in this session.
+                        _heal_route_classification = (
+                            _custom_provider_route_classification(_heal_route_verdict)
+                        )
+                        logger.warning(
+                            '[webui] self-heal (except path): abandoning retry — %s',
+                            _heal_route_classification['message'],
+                        )
+                        # Clearing _heal_rt closes the retry block below. We must
+                        # NOT raise from inside the outer exception handler: that
+                        # would escape the generator and the client would get no
+                        # error event at all.
+                        _heal_rt = None
+
+                if _heal_rt is not None:
+                    resolved_provider = _runtime_bundle['provider']
+                    resolved_api_key = _runtime_bundle['api_key']
+                    resolved_base_url = _runtime_bundle['base_url']
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
                     _heal_kwargs['api_key'] = resolved_api_key
@@ -12486,11 +13098,33 @@ def _run_agent_streaming(
                     _heal_kwargs['model'] = resolved_model
                     _heal_kwargs['provider'] = resolved_provider
                     _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
+                    if 'api_mode' in _agent_params:
+                        _heal_kwargs['api_mode'] = _runtime_bundle['api_mode']
+                    if 'acp_command' in _agent_params:
+                        _heal_kwargs['acp_command'] = _runtime_bundle['acp_command']
+                    if 'acp_args' in _agent_params:
+                        _heal_kwargs['acp_args'] = _runtime_bundle['acp_args']
                     if 'credential_pool' in _agent_params:
-                        _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
+                        _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                     _heal_agent = _AIAgent(**_heal_kwargs)
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
+                    _agent_sig = _compute_agent_cache_signature(
+                        resolved_model,
+                        resolved_api_key,
+                        resolved_base_url,
+                        resolved_provider,
+                        _runtime_bundle,
+                        max_iterations_cfg=_max_iterations_cfg,
+                        max_tokens_cfg=_max_tokens_cfg,
+                        fallback_resolved=_fallback_resolved,
+                        toolsets=_toolsets,
+                        reasoning_config=_reasoning_config,
+                        main_request_overrides=_main_request_overrides,
+                        prefill_context=_prefill_context,
+                        profile_home=_profile_home,
+                        safe_profile_runtime_env=_safe_profile_runtime_env,
+                    )
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
                     with _SAC2_L:
                         _SAC2[session_id] = (_heal_agent, _agent_sig)
@@ -12606,7 +13240,19 @@ def _run_agent_streaming(
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
                         # Fall through to emit the original error
-            if _heal_stale_classification is not None:
+            if _heal_route_classification is not None:
+                # The heal was abandoned because the named route is unroutable.
+                # Report THAT, not the 401 that triggered the heal: telling the
+                # user to check credentials when the provider resolves no
+                # endpoint (or declares a credential source that yields nothing)
+                # sends them to the wrong setting.
+                _exc_label = _heal_route_classification['label']
+                _exc_type = _heal_route_classification['type']
+                _exc_hint = _heal_route_classification['hint']
+                _exc_route_reason = _heal_route_classification.get('reason')
+                if _heal_route_classification['message']:
+                    err_str = _heal_route_classification['message']
+            elif _heal_stale_classification is not None:
                 _exc_label = _heal_stale_classification['label']
                 _exc_type = _heal_stale_classification['type']
                 _exc_hint = _heal_stale_classification['hint']
@@ -12644,6 +13290,10 @@ def _run_agent_streaming(
                 'The conversation changed while context compression was being prepared.'
             )
         _error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)
+        if _exc_route_reason:
+            # Clients (and regressions) branch on the exact verdict rather than
+            # on the human-readable message, which is free to be reworded.
+            _error_payload['reason'] = _exc_route_reason
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
