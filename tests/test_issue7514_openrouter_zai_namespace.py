@@ -57,6 +57,7 @@ def test_openrouter_setup_exposes_z_ai_models():
         _expected_openrouter_id(model["id"])
         for model in config._FALLBACK_MODELS
         if model["id"].startswith("zai/")
+        and model["id"] not in onboarding._OPENROUTER_UNSERVED_IDS
     }
     assert expected, "expected the fallback catalog to carry Z.AI models"
     assert expected.issubset(set(ids)), (
@@ -66,8 +67,14 @@ def test_openrouter_setup_exposes_z_ai_models():
 
 
 def test_openrouter_projection_is_namespace_only():
-    """The OpenRouter list stays a 1:1, order-preserving projection."""
-    fallback = config._FALLBACK_MODELS
+    """The OpenRouter list stays a 1:1, order-preserving projection of the
+    served models: every fallback entry except the ones OpenRouter does not
+    serve (#7520) is projected with the same label and the translated id."""
+    fallback = [
+        model
+        for model in config._FALLBACK_MODELS
+        if model["id"] not in onboarding._OPENROUTER_UNSERVED_IDS
+    ]
     openrouter = _models("openrouter")
 
     assert len(openrouter) == len(fallback)
