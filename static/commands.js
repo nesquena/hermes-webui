@@ -1585,6 +1585,71 @@ function _steerIndicatorText(originalMsg, filesSnapshot){
   return names.length?`Attached files: ${names.join(', ')}`:'Attached files';
 }
 
+const _steerPendingCounts = (typeof window!=="undefined"&&window._steerPendingCounts)||{};
+if(typeof window!=="undefined")window._steerPendingCounts=_steerPendingCounts;
+function _currentSteerSessionId(){
+  return (typeof S!=="undefined"&&S&&S.session&&S.session.session_id)||null;
+}
+function _setSteerPendingCount(sid,count){
+  if(!sid)return 0;
+  const value=Math.max(0,Number(count)||0);
+  if(value)_steerPendingCounts[sid]=value;
+  else delete _steerPendingCounts[sid];
+  return value;
+}
+function getSteerPendingCount(sid){
+  sid=sid||_currentSteerSessionId();
+  return sid?(_steerPendingCounts[sid]||0):0;
+}
+function _steerPendingIndicatorStatus(count){
+  const n=Math.max(0,Number(count)||0);
+  if(n<=0) return '';
+  return t('steer_pending_count', n);
+}
+
+// The steer indicator shares the single composer-status channel with unrelated
+// features (compression, uploads, errors). A passive refresh must therefore
+// never clear a status it does not own: remember the exact text we wrote and
+// only retire the channel while it still shows that text.
+let _steerComposerStatusText='';
+function _steerComposerStatusIsMine(){
+  if(!_steerComposerStatusText) return false;
+  if(typeof $!=='function') return true;
+  const el=$('composerStatus');
+  if(!el) return true;
+  return String(el.textContent||'')===_steerComposerStatusText;
+}
+
+function _updateSteerPendingIndicatorStatus(count){
+  if(typeof setComposerStatus!=='function') return;
+  const text=_steerPendingIndicatorStatus(count);
+  if(text){
+    setComposerStatus(text);
+    _steerComposerStatusText=text;
+    return;
+  }
+  if(_steerComposerStatusIsMine()) setComposerStatus('');
+  _steerComposerStatusText='';
+}
+
+function updateSteerPendingBadge(sessionId){
+  // Display refresh only: never mutate pending count from rendering.
+  const sid=sessionId||_currentSteerSessionId();
+  if(!sid)return;
+  const count=getSteerPendingCount(sid);
+  if(_steerOwnerIsCurrent(sid)&&typeof setComposerStatus==='function'){
+    _updateSteerPendingIndicatorStatus(count);
+  }
+}
+
+function clearSteerPending(sessionId){
+  // Explicit state transition: the buffer was consumed or re-queued.
+  const sid=sessionId||_currentSteerSessionId();
+  if(!sid)return;
+  _setSteerPendingCount(sid,0);
+  updateSteerPendingBadge(sid);
+}
+
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
   if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
   await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
@@ -1673,6 +1738,12 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_no_msg'));
     return false;
   }
+  // #7434: arm this stream and capture the boundary epoch BEFORE the POST.
+  // `agent.steer()` runs on the server before the response is written, so a
+  // tool-batch boundary can drain this payload while the request is still in
+  // flight; the captured epoch is what lets this one response notice that.
+  const armedAtEpoch = ownerStreamId&&typeof _armSteerConsumption==='function'
+    ? (_armSteerConsumption(ownerSid,ownerStreamId) || 0) : 0;
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
@@ -1703,10 +1774,24 @@ async function _trySteer(msg, explicitSteer){
       }
       _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     }
+    // #7434: per-request attribution. Re-arm idempotently (a sibling's failure
+    // may have deleted the slot, and an accepted steer still needs one) and
+    // compare epochs: if a boundary has since fired, this payload was drained
+    // with the rest of the buffer, so it must not raise the pending count.
+    if(ownerStreamId&&typeof _armSteerConsumption==='function'){
+      const currentEpoch = _armSteerConsumption(ownerSid,ownerStreamId) || 0;
+      if(armedAtEpoch < currentEpoch){
+        showToast(t('cmd_steer_delivered'),2500);
+        return true;
+      }
+    }
+    _setSteerPendingCount(ownerSid,getSteerPendingCount(ownerSid)+1);
+    if(_steerOwnerIsCurrent(ownerSid)) _updateSteerPendingIndicatorStatus(getSteerPendingCount(ownerSid));
     showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
+    if(ownerStreamId&&typeof _resetSteerConsumptionArming==='function') _resetSteerConsumptionArming(ownerSid,ownerStreamId);
     _steerUploadCache=null;
     queueSessionMessage(ownerSid,{
       text:originalMsg,
@@ -1725,6 +1810,7 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('steer_leftover_queued'),3000);
     return true;
   }
+  if(ownerStreamId&&typeof _resetSteerConsumptionArming==='function') _resetSteerConsumptionArming(ownerSid,ownerStreamId);
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
   // Interrupt if that is what they want next. Pending files remain staged.

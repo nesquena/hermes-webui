@@ -2234,11 +2234,26 @@ async function loadSession(sid){
     }
     _deferWorkspaceRefreshForSession(sid);
     setBusy(true);setComposerStatus('');
+    // setComposerStatus('') above is an unconditional channel reset; a session
+    // that already holds accepted-but-unconsumed steers must restore its own
+    // indicator afterwards or the count is silently hidden on return.
+    if(typeof updateSteerPendingBadge==='function') updateSteerPendingBadge(sid);
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
   }else{
-    // Phase 2b: Idle session — load full messages lazily for rendering.
+    // Phase 2b: Idle session
+    // The server snapshot is authoritative here. With no stream at all the turn
+    // is gone: expire any pending steer armed for this owner, so a detached
+    // stream that completed while the browser was elsewhere cannot carry stale
+    // feedback into a future turn. With a stream still reported active this is
+    // a reconnect, not a teardown: the same-stream attribution and its counted
+    // steers must survive, and only an arm from another stream is expired.
+    if (typeof _clearSteerConsumptionForStream === 'function') {
+      if (activeStreamId) _clearSteerConsumptionForStream(sid, activeStreamId, { reconnecting: true });
+      else _clearSteerConsumptionForStream(sid, null);
+    }
+    // load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
     // #5177: when the caller asked us to keep stale messages until the new ones
     // arrive (visibility/focus recovery), force the fetch so the
@@ -2309,6 +2324,12 @@ async function loadSession(sid){
     // same-session stream into activeStreamId so the existing attach branch
     // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
     activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
+    if (activeStreamId && typeof _clearSteerConsumptionForStream === 'function') {
+      // The stream resolved here is the one about to be re-attached, so the
+      // release is reconnect-scoped: it expires stale attribution from a prior
+      // turn without discarding the epoch the current turn still needs.
+      _clearSteerConsumptionForStream(sid, activeStreamId, { reconnecting: true });
+    }
 
     if(activeStreamId){
       S.busy=true;
@@ -2339,6 +2360,7 @@ async function loadSession(sid){
     }else{
       S.busy=false;
       S.activeStreamId=null;
+      if(typeof _clearSteerConsumptionForStream==='function') _clearSteerConsumptionForStream(sid, activeStreamId);
       updateSendBtn();
       setStatus('');
       setComposerStatus('');

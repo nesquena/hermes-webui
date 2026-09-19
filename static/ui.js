@@ -8506,6 +8506,7 @@ function setBusy(v){
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
     updateQueueBadge(sid);
+    if(typeof clearSteerPending==='function') clearSteerPending(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
     const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
@@ -16791,6 +16792,7 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  if(typeof updateSteerPendingBadge==='function') updateSteerPendingBadge(sid);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
