@@ -1593,6 +1593,12 @@
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px"><span data-i18n="settings_desc_shutdown_before_cmd">Gracefully stops the local WebUI server. Useful if you launched via </span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_between_cmds"> and want to stop without switching to a terminal. You'll need to relaunch the server (</span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_after_cmd"> or the native app) before the WebUI is reachable again.</span></div>
               <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
             </div>
+            <div class="settings-field" id="restartServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_restart">Restart the Hermes WebUI server</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px"><span data-i18n="settings_desc_restart">Gracefully restarts the local WebUI server via </span><code>./ctl.sh restart</code><span data-i18n="settings_desc_restart_suffix">. Available only when ctl.sh owns this instance. The page will reconnect automatically after the restart.</span></div>
+              <button class="sm-btn" id="btnRestartServer" onclick="restartServer()" style="width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3)" data-i18n="settings_btn_restart">Restart server</button>
+              <div id="restartServerStatus" style="display:none;margin-top:8px;font-size:12px;color:var(--muted)"></div>
+            </div>
             <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label>Passkeys</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Register this browser or device for passwordless sign-in. Once at least one passkey exists, you can remove the password and sign in with passkeys only.</div>
