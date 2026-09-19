@@ -1192,6 +1192,89 @@ def _resolve_completion_target(
     return owner
 
 
+def _canonical_wakeup_session_id(session_id: str) -> str:
+    """Resolve an archived WebUI origin to its canonical live compression tip.
+
+    ``origin_ui_session_id`` remains the authority for cross-tab ownership, but
+    compression intentionally seals that concrete session id. SessionDB is the
+    authority for the successor: its chain resolver excludes branch,
+    delegate/subagent, and tool children. The selected tip must still be live
+    before WebUI starts the wakeup turn.
+    """
+    target = str(session_id or "")
+    if not target:
+        return ""
+
+    try:
+        from api.routes import _get_or_materialize_session
+
+        session = _get_or_materialize_session(target, refresh_cli_messages=False)
+    except Exception:
+        # Without a snapshot there is no profile fallback to authorize: retain
+        # the historical exact-ID path for ordinary live/legacy sessions.
+        return target
+
+    resolved_session_id = str(getattr(session, "session_id", "") or "")
+    if resolved_session_id != target:
+        logger.error(
+            "cross-session compression route BLOCKED: expected origin %r but "
+            "snapshot reader returned %r",
+            target,
+            resolved_session_id,
+        )
+        return ""
+
+    if not getattr(session, "pre_compression_snapshot", False):
+        return target
+
+    # This runs on a background completion thread, where profile=None would
+    # select state_sync's TLS/process-global fallback.  Legacy/default WebUI
+    # sidecars legitimately store None or "", so pin those values to the
+    # explicit root-profile alias instead of risking a named profile's DB.
+    profile = str(getattr(session, "profile", "") or "") or "default"
+    db = None
+    try:
+        from api.state_sync import _get_state_db
+
+        db = _get_state_db(profile=profile)
+        if db is None:
+            logger.warning(
+                "process wakeup cannot resolve archived session %s: state.db unavailable",
+                target,
+            )
+            return ""
+
+        tip = str(db.get_compression_tip(target) or "")
+        if not tip or tip == target:
+            logger.warning(
+                "process wakeup cannot resolve archived session %s: no durable continuation",
+                target,
+            )
+            return ""
+        row = db.get_session(tip)
+        if not row or row.get("ended_at") is not None:
+            logger.warning(
+                "process wakeup cannot resolve archived session %s: tip %s is not live",
+                target,
+                tip,
+            )
+            return ""
+        return tip
+    except Exception:
+        logger.warning(
+            "process wakeup compression-lineage resolution failed for session %s",
+            target,
+            exc_info=True,
+        )
+        return ""
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                logger.debug("state.db close failed after wakeup routing", exc_info=True)
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -1275,6 +1358,7 @@ def _process_one(evt: dict) -> None:
         session_key_resolved_sid=session_id,
         origin_ui_session_id=origin_ui_session_id,
     )
+    session_id = _canonical_wakeup_session_id(session_id)
     if not session_id:
         logger.debug("process_complete drop: completion target resolved empty")
         # An async delegation event that resolves empty here must NOT silently
