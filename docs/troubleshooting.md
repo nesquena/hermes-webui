@@ -177,6 +177,16 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ---
 
+## Repeated "marking openrouter unhealthy" or stale-provider warnings during chat start
+
+**Symptom.** Starting a chat in an older session logs three warnings within the same second — an auxiliary "PAID lane engaged for auxiliary task", `marking <provider> unhealthy for 60s`, and a credential-pool warning — even though the session's model belongs to your currently configured provider.
+
+**Why.** Sessions persist the provider that was selected when they were created. When you later switch providers (for example away from OpenRouter without an OpenRouter key), the session keeps the stale `model_provider` until it is repaired. On chat start, WebUI consults the cached model catalog: a stored provider whose model has exactly one unambiguous owner elsewhere, whose own catalog group is absent, that has no live credential, and that is not a self-hosted, plugin, or custom-endpoint provider is cleared to the true owner (#7585). Any doubt keeps the lane untouched: self-hosted and plugin providers and named `custom` endpoints may serve models that never appear in a catalog, an errored or minimal/emergency catalog cannot prove non-ownership, a provider that still has a usable credential is preserved, and ambiguous ownership is never guessed (#5731). Provider IDs are compared canonically — lowercased, underscores folded to hyphens, and alias-resolved only when the alias target is a known canonical ID — so `my_local`, `my-local`, and `My-Local` are one lane rather than three (#7594). The same canonical ID is what `providers.<id>.base_url` declarations and catalog groups are matched against, not their spelling. Named `custom` entries and plugin providers are looked up under both their raw registered ID and its canonical form, so canonicalising an ID cannot silently drop the protection those lanes rely on. Canonicalisation never decides on doubt: if normalising an ID raises, or the catalog is errored/minimal, or no single owner can be proven, the stored provider is kept as-is rather than re-routed on a guess.
+
+**When to file a bug.** File a WebUI bug if the warnings persist after chat start has repaired the session (check the session record's `model_provider`), or if a session's provider changes while the stored provider still has a working credential. Include the session ID, both provider names, and whether a catalog refresh had run recently.
+
+---
+
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
 **Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI manually. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
