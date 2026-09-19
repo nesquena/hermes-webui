@@ -258,13 +258,18 @@ function _reconcileWorkspacePanelBreakpoint(){
   const {panel}= _workspacePanelEls();
   if(!panel) return;
   const open=_workspacePanelMode!=='closed';
-  const hasPreview=_hasWorkspacePreviewVisible();
   const before=panel.classList.contains('mobile-open');
   if(_isCompactWorkspaceViewport()){
-    // Mirror _setWorkspacePanelMode(): a compact panel is only shown when the
-    // mode is open AND there is something to show (live preview or a session).
-    const shouldShow=open&&(hasPreview||!!S.session);
-    panel.classList.toggle('mobile-open',shouldShow);
+    // Mirror _setWorkspacePanelMode() EXACTLY: the compact class tracks the
+    // runtime open/closed mode and nothing else. An earlier revision added
+    // `&& (hasPreview||!!S.session)` here, which diverged from the setter and
+    // hid the panel on compact while its mode and persisted state still said
+    // open — a browse panel with no session (the state
+    // syncWorkspacePanelState() deliberately preserves on fresh/empty-session
+    // boots) went off-screen and its controls announced it as closed.
+    // Do not reintroduce a second visibility predicate here: this function's
+    // only job is to re-derive the class the setter owns.
+    panel.classList.toggle('mobile-open',open);
   }else{
     panel.classList.remove('mobile-open');
   }

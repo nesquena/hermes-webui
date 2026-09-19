@@ -512,6 +512,48 @@ def test_breakpoint_change_leaves_a_closed_panel_closed():
     )
 
 
+def test_breakpoint_change_keeps_open_browse_panel_without_session():
+    """Greptile P1: a compact resize must not hide an open browse panel that has
+
+    no session and no preview. `syncWorkspacePanelState()` deliberately keeps
+    'browse' mode on fresh/empty-session boots, so the reconciler re-deriving a
+    narrower predicate hid the panel while its runtime and persisted state still
+    said open — the controls announced it as closed."""
+    result = _run_f5(mode="browse", compact=True, preview_visible=False, has_session=False)
+    assert result["afterCompact"] is True, (
+        "resizing into a compact viewport with an open browse panel and no session "
+        "left .mobile-open unset: the panel is hidden while its state says open"
+    )
+
+
+def test_breakpoint_change_keeps_open_browse_panel_without_preview_but_with_session():
+    """Same divergence, the other axis: browse mode with a session but no preview."""
+    result = _run_f5(mode="browse", compact=True, preview_visible=False, has_session=True)
+    assert result["afterCompact"] is True, (
+        "an open browse panel with a session but no preview must stay visible on compact"
+    )
+
+
+def test_reconciler_matches_the_setters_visibility_predicate():
+    """The two writers of `.mobile-open` must agree on the predicate.
+
+    The setter uses `open` alone; the reconciler must not add a second
+    visibility predicate, or the breakpoint path and the mode path disagree."""
+    reconcile = _function("_reconcileWorkspacePanelBreakpoint", prefix="function")
+    setter = extract_function(_read(BOOT_JS_PATH), "_setWorkspacePanelMode")
+    assert "panel.classList.toggle('mobile-open',open)" in reconcile.replace(" ", ""), (
+        "the reconciler must derive .mobile-open from the runtime mode alone"
+    )
+    assert "panel.classList.toggle('mobile-open',open)" in setter.replace(" ", ""), (
+        "the setter derives .mobile-open from the runtime mode alone"
+    )
+    # No extra visibility predicate on either side.
+    for label, body in (("reconciler", reconcile), ("setter", setter)):
+        assert "shouldShow" not in body, (
+            f"{label} reintroduced a separate visibility predicate for .mobile-open"
+        )
+
+
 def test_resize_and_fullscreen_exit_call_the_reconciler():
     """The reconciler only helps if the real lifecycle paths invoke it."""
     boot = _read(BOOT_JS_PATH)
