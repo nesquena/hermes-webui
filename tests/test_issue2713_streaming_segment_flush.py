@@ -188,7 +188,7 @@ class TestInterimAssistantHandlerFlush:
         src = read("static/messages.js")
         fn = _extract_handler(src, "interim_assistant")
         branch_start = fn.index("if(alreadyStreamed)")
-        branch = fn[branch_start : fn.index("assistantText +=", branch_start)]
+        branch = fn[branch_start : fn.index("const semanticDelta=", branch_start)]
         assert "ensureAssistantRow(true)" in branch, (
             "already_streamed interim boundaries must materialize the current "
             "token segment before reset"

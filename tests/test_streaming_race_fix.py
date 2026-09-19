@@ -49,14 +49,18 @@ class TestStreamFinalized:
             "_scheduleRender must return early when _streamFinalized is true"
         )
 
-    def test_raf_handle_stored_in_schedule_render(self):
+    def test_schedule_render_uses_shared_cancellable_owner(self):
         src = read('static/messages.js')
-        assert '_pendingRafHandle=_pendingRafFrameHandle' in src or \
-               '_pendingRafHandle = _pendingRafFrameHandle' in src or \
-               '_pendingRafHandle=requestAnimationFrame' in src or \
-               '_pendingRafHandle = requestAnimationFrame' in src, (
-            "rAF handle must be stored in _pendingRafHandle for cancellation"
-        )
+        match = re.search(r'function _scheduleRender\([^)]*\)\{.*?\n  \}', src, re.DOTALL)
+        assert match
+        fn = match.group(0)
+        assert '_pendingProsePaint=_doRender' in fn
+        assert '_renderAnchorLiveScene()' in fn
+        assert 'requestAnimationFrame(' not in fn
+        dispose = re.search(r'function _disposeAnchorScenePaint\([^)]*\)\{.*?\n  \}', src, re.DOTALL)
+        assert dispose
+        assert '.dispose()' in dispose.group(0)
+        assert '_anchorPaintScheduler=null' in dispose.group(0)
 
     def test_done_sets_stream_finalized(self):
         src = read('static/messages.js')
