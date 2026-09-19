@@ -36,6 +36,24 @@ npm run lint:runtime
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
 
+## Native raster redaction boundary
+
+Run `./scripts/test.sh tests/test_mpf_jpeg_redaction.py tests/test_raster_data_uri_redaction.py tests/test_security_redaction.py`.
+Native `messages[*].content[*].image_url.url` raster data may bypass text
+credential scanning only after complete container validation. MPF JPEGs require
+an APP2 MP Index with bounded TIFF entries, contiguous declared JPEG extents,
+and a complete SOF/scan/EOI sequence in each image. Gaps, overlaps, malformed
+frames, and trailing bytes fall back to text redaction. Image-shaped tool
+metadata does not acquire this exemption. This is structural validation, not
+pixel decoding or secret detection inside image metadata/pixels.
+
+`tests/fixtures/multipicture.jpg` contains two Pillow-generated 8x8 solid-color
+frames (red and blue), not private photographs; generation instructions live in
+`tests/test_mpf_jpeg_redaction.py`. The tests cover both TIFF byte orders and
+credential text appended after the final EOI. Helper timing improvements do
+not by themselves prove browser or shared-server responsiveness; verify those
+separately with a real conversation and concurrent requests.
+
 ## Python lint gate (ruff) — forward-looking, new-code-only
 
 The Python twin of the ESLint runtime guard. A curated `ruff` ruleset

@@ -724,12 +724,59 @@ _JPEG_SOF_MARKERS = {
 }
 
 
-def _is_complete_jpeg(raw: bytes) -> bool:
+def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
+    """Read an MP Index TIFF inside APP2; offsets are relative to its header.
+
+    Only the declared JPEG extents are trusted, not a decoder's willingness to
+    ignore trailing bytes. The caller checks contiguous coverage and each JPEG.
+    """
+    if len(data) < 8 or data[:4] not in {b"II\x2a\x00", b"MM\x00\x2a"}:
+        return None
+    order = "little" if data[:2] == b"II" else "big"
+
+    def uint(pos: int, size: int = 4) -> int:
+        return int.from_bytes(data[pos:pos + size], order)
+
+    ifd = uint(4)
+    if ifd < 8 or ifd + 2 > len(data):
+        return None
+    count = uint(ifd, 2)
+    table_end = ifd + 2 + 12 * count
+    if table_end + 4 > len(data):
+        return None
+    tags = {}
+    for pos in range(ifd + 2, table_end, 12):
+        tag = uint(pos, 2)
+        if tag in tags:
+            return None
+        tags[tag] = (uint(pos + 2, 2), uint(pos + 4), uint(pos + 8))
+    if tags.get(0xB001, ())[:2] != (4, 1):
+        return None
+    images = tags[0xB001][2]
+    entry = tags.get(0xB002)
+    if not entry or images < 2 or entry[:2] != (7, 16 * images):
+        return None
+    offset = entry[2]
+    if offset < table_end + 4 or offset + 16 * images > len(data):
+        return None
+    ranges = []
+    for index in range(images):
+        pos = offset + index * 16
+        attributes, size, relative = uint(pos), uint(pos + 4), uint(pos + 8)
+        if attributes & 0x07000000 or size < 4 or (index == 0 and relative != 0):
+            return None
+        start = 0 if index == 0 else base + relative
+        ranges.append((start, start + size))
+    return ranges
+
+
+def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
     pos = 2
     saw_sof = False
     saw_scan = False
+    mpf_ranges = None
     while pos < len(raw):
         marker_start = pos
         if raw[pos] != 0xFF:
@@ -741,7 +788,20 @@ def _is_complete_jpeg(raw: bytes) -> bool:
         marker = raw[pos]
         pos += 1
         if marker == 0xD9:
-            return saw_sof and saw_scan and pos == len(raw)
+            if not saw_sof or not saw_scan:
+                return False
+            if mpf_ranges is None:
+                return pos == len(raw)
+            if mpf_ranges[0] != (0, pos):
+                return False
+            # No gaps, overlaps, undeclared pictures or post-EOI payloads.
+            for start, end in mpf_ranges[1:]:
+                if start != pos or end > len(raw):
+                    return False
+                if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
+                    return False
+                pos = end
+            return pos == len(raw)
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
             return False
         if pos + 2 > len(raw):
@@ -752,6 +812,12 @@ def _is_complete_jpeg(raw: bytes) -> bool:
         segment_end = pos + segment_length
         if segment_end > len(raw):
             return False
+        if _allow_mpf and marker == 0xE2 and raw[pos + 2:pos + 6] == b"MPF\x00":
+            if mpf_ranges is not None:
+                return False
+            mpf_ranges = _mpf_image_ranges(raw[pos + 6:segment_end], pos + 6)
+            if mpf_ranges is None:
+                return False
         if marker in _JPEG_SOF_MARKERS:
             if segment_length < 8:
                 return False
