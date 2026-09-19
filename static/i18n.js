@@ -914,6 +914,9 @@ const LOCALES = {
     settings_aux_advanced_saved: 'Auxiliary options saved',
     settings_aux_advanced_save_failed: 'Failed to save auxiliary options',
     settings_label_send_key: 'Send Key',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
     settings_label_theme: 'Theme',
     settings_label_skin: 'Skin',
     settings_label_font_size: 'Font size',
@@ -1062,6 +1065,7 @@ const LOCALES = {
     kanban_ready_needs_assignee: 'You picked Unassigned + Ready. The dispatcher will skip this task. Submit again to confirm, or pick a profile.',
     kanban_dispatch_preview_prefix: 'Preview:',
     kanban_dispatch_run_prefix: 'Dispatched:',
+    kanban_bulk_status_aria: 'Bulk status',
     kanban_dispatch_spawned: 'spawned',
     kanban_dispatch_promoted: 'promoted',
     kanban_dispatch_reclaimed: 'reclaimed',
@@ -1206,6 +1210,10 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',
     insights_skill_usage_col_share: 'Usage %',
     insights_skill_usage_col_patches: 'Patches',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
     wiki_browse: 'Browse wiki',
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
@@ -1254,6 +1262,7 @@ const LOCALES = {
     voice_raw_attached: 'Audio attached. Press Send or type more.',
     settings_label_tts_voice: 'Voice',
     settings_desc_tts_voice: "Preferred voice. Populated from your browser's available voices.",
+    settings_tts_voice_default_system: 'Default system voice',
     settings_label_tts_rate: 'Speech rate',
     settings_label_tts_pitch: 'Speech pitch',
     settings_label_tts_engine: 'TTS Engine',
@@ -3630,7 +3639,17 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   ja: {
     offline_title: '接続が切断されました',
@@ -5440,7 +5459,17 @@ const LOCALES = {
     wiki_search_placeholder: 'ページを検索...',
     wiki_no_pages: 'Wikiページが見つかりません',
     wiki_not_configured: 'Wikiが設定されていません',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   ru: {
     offline_title: 'Соединение потеряно',
@@ -7224,7 +7253,17 @@ const LOCALES = {
     wiki_search_placeholder: 'Искать страницы…',
     wiki_no_pages: 'Страницы wiki не найдены',
     wiki_not_configured: 'Wiki не настроена',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   es: {
     offline_title: 'Conexión perdida',
@@ -8975,7 +9014,17 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   de: {
     offline_title: 'Verbindung verloren',
@@ -10720,7 +10769,17 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   zh: {
     offline_title: '连接已断开',
@@ -12458,7 +12517,17 @@ const LOCALES = {
     wiki_search_placeholder: '搜索页面...',
     wiki_no_pages: '未找到维基页面',
     wiki_not_configured: '维基未配置',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
@@ -15892,7 +15961,17 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
   ko: {
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
@@ -17686,7 +17765,17 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   fr: {
     offline_title: 'Connexion perdue',
@@ -19464,7 +19553,17 @@ const LOCALES = {
     outline_title: 'Plan',
     outline_empty: 'Pas encore de questions.',
     outline_loading: 'Chargement\u2026',
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
 
   cs: {
     _label: 'Čeština',
@@ -21229,7 +21328,17 @@ const LOCALES = {
     tool_action_label: _i18nToolActionLabelCs,
     tool_worklog_summary: _i18nToolWorklogSummaryCs,
     tool_summary_join: _i18nToolSummaryJoinCs,
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
   tr: {
 
 
@@ -23029,7 +23138,17 @@ const LOCALES = {
   
   
   
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
   pl: {
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
@@ -24829,7 +24948,17 @@ const LOCALES = {
     checkpoint_diff_title: 'Zmiany w punkcie kontrolnym',
     checkpoint_diff_no_changes: 'Nie znaleziono różnic między tym punktem kontrolnym a obecnym obszarem roboczym.',
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
-  },
+  
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
+},
   vi: {
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
@@ -26630,6 +26759,16 @@ const LOCALES = {
     yolo_disabled: 'Chế độ YOLO TẮT',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Chế độ YOLO đang bật — bấm để tắt',
+
+    kanban_bulk_status_aria: 'Bulk status',
+    insights_period_7d: '7 days',
+    insights_period_30d: '30 days',
+    insights_period_90d: '90 days',
+    insights_period_365d: '365 days',
+    settings_send_key_enter: 'Enter (Shift+Enter for newline)',
+    settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter for newline)',
+    settings_send_key_shift_enter: 'Shift+Enter (Enter for newline)',
+    settings_tts_voice_default_system: 'Default system voice',
 },
 
 };

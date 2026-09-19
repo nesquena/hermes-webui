@@ -232,7 +232,7 @@
         <label class="kanban-check"><input id="kanbanOnlyMine" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_only_mine">Only mine</span></label>
         <div id="kanbanStats" class="kanban-stats" aria-live="polite"></div>
         <div id="kanbanBulkBar" class="kanban-bulk-bar">
-          <select id="kanbanBulkStatus" aria-label="Bulk status"><option value="">Status</option><option value="ready">Ready</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="archived">Archived</option></select>
+          <select id="kanbanBulkStatus" aria-label="Bulk status" data-i18n-aria-label="kanban_bulk_status_aria"><option value="" data-i18n="kanban_status">Status</option><option value="ready" data-i18n="kanban_status_ready">Ready</option><option value="blocked" data-i18n="kanban_status_blocked">Blocked</option><option value="done" data-i18n="kanban_status_done">Done</option><option value="archived" data-i18n="kanban_status_archived">Archived</option></select>
           <button class="btn secondary" onclick="bulkUpdateKanban()" data-i18n="kanban_bulk_action">Bulk action</button>
           <button class="btn secondary kanban-nudge-dispatch-btn" onclick="nudgeKanbanDispatcher()" data-i18n="kanban_nudge_dispatcher" title="Dry-run: shows what would be claimed without spawning workers">Preview</button>
           <button class="btn primary kanban-run-dispatch-btn" onclick="runKanbanDispatcher()" data-i18n="kanban_run_dispatcher" title="Claims Ready tasks and spawns worker subprocesses">Run dispatcher</button>
@@ -280,10 +280,10 @@
       </div>
       <div class="panel-head-sub" style="padding:0 12px 8px">
         <select id="insightsPeriod" class="insights-period-select" onchange="loadInsights()">
-          <option value="7">7 days</option>
-          <option value="30" selected>30 days</option>
-          <option value="90">90 days</option>
-          <option value="365">365 days</option>
+          <option value="7" data-i18n="insights_period_7d">7 days</option>
+          <option value="30" selected data-i18n="insights_period_30d">30 days</option>
+          <option value="90" data-i18n="insights_period_90d">90 days</option>
+          <option value="365" data-i18n="insights_period_365d">365 days</option>
         </select>
       </div>
     </div>
@@ -1193,9 +1193,9 @@
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
               <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
-                <option value="enter">Enter (Shift+Enter for newline)</option>
-                <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
-                <option value="shift+enter">Shift+Enter (Enter for newline)</option>
+                <option value="enter" data-i18n="settings_send_key_enter">Enter (Shift+Enter for newline)</option>
+                <option value="ctrl+enter" data-i18n="settings_send_key_ctrl_enter">Ctrl+Enter (Enter for newline)</option>
+                <option value="shift+enter" data-i18n="settings_send_key_shift_enter">Shift+Enter (Enter for newline)</option>
               </select>
             </div>
             <div class="settings-field">
@@ -1254,7 +1254,7 @@
             <div class="settings-field">
               <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option><option value="openai">OpenAI TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
-                <option value="">Default system voice</option>
+                <option value="" data-i18n="settings_tts_voice_default_system">Default system voice</option>
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_voice">Preferred voice. Populated from your browser's available voices.</div>
             </div>

@@ -9640,7 +9640,10 @@ async function loadSettingsPanel(){
           return;
         }
         const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        // #7582: the rebuilt default option would otherwise be hardcoded
+        // English; route it through the same key the static HTML option
+        // uses so locale switching keeps both call sites in sync.
+        ttsVoiceSel.innerHTML=`<option value="" data-i18n="settings_tts_voice_default_system">${t('settings_tts_voice_default_system')}</option>`;
         voices.forEach(v=>{
           const opt=document.createElement('option');
           opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
