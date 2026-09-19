@@ -673,6 +673,9 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _syncToolCallGroupSummary() {{}}
         function _restoreWorklogDetailDisclosureState() {{}}
         function _scrollAfterMessageRender() {{}}
+        // renderMessages classifies wakeup rows through this shared helper;
+        // this suite has no wakeup rows, so the transport stamp alone is enough.
+        function _isProcessWakeupMessage(m) {{ return !!(m && m._source === 'process_wakeup'); }}
         function _maybeRecoverVirtualizedBlankViewport() {{ return false; }}
         function _updateMessageVirtualMeasurements() {{}}
         function postProcessRenderedMessages() {{}}
