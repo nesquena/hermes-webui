@@ -11450,6 +11450,12 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
+    # Run-journal retention caps (#7613). Terminal runs past any cap are
+    # reclaimed by the periodic sweeper; non-terminal runs are never touched.
+    # 0 disables an individual cap. Defaults mirror api.run_journal constants.
+    "run_journal_retention_ttl_days": 14,  # terminal runs older than N days are retired
+    "run_journal_retention_max_runs_per_session": 40,  # keep at most N newest terminal runs per session
+    "run_journal_retention_max_bytes_per_session": 256 * 1024 * 1024,  # per-session terminal-run byte budget
 }
 _SETTINGS_SPEECH_KEYS = {
     "tts_enabled",
@@ -11698,10 +11704,15 @@ _SETTINGS_INT_RANGES = {
     "inflight_state_max_json_chars": (100000, 4000000),
     "structured_code_auto_tree_lines": (1, 1000),
     "voice_silence_ms": (200, 60000),
+    # #7613 run-journal retention caps: 0 disables the individual cap.
+    "run_journal_retention_max_runs_per_session": (0, 100_000),
+    "run_journal_retention_max_bytes_per_session": (0, 100 * 1024 * 1024 * 1024),
 }
 _SETTINGS_FLOAT_RANGES = {
     "tts_rate": (0.5, 2.0),
     "tts_pitch": (0.0, 2.0),
+    # #7613 run-journal retention TTL: 0 disables the age cap.
+    "run_journal_retention_ttl_days": (0.0, 3650.0),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",

@@ -484,6 +484,14 @@ def _reaper_loop() -> None:
                     if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
                 ]:
                     _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
+            # Run-journal retention (#7613): ride this existing tick instead of
+            # spawning another daemon thread. `maybe_sweep_run_journal` is
+            # self-gating (hourly, first pass delayed, env-disable aware), so a
+            # cheap due-check runs here every tick and the sweep only starts when
+            # it is actually due.
+            from api.run_journal import maybe_sweep_run_journal
+
+            maybe_sweep_run_journal()
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.

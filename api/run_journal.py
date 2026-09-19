@@ -2,17 +2,28 @@
 
 This is the first #1925 journal/replay slice.  It mirrors SSE events emitted by
 the existing in-process streaming path without changing execution ownership.
+
+Terminal runs are subject to a retention sweep (``sweep_run_journal``, #7613):
+`delete_run_journal` only runs on session deletion, so a long-lived or pinned
+session would otherwise accumulate one ``{run_id}.jsonl`` per run forever. The
+sweep retires ``terminal: true`` runs past age / count / size caps and never
+touches non-terminal runs — those are the crashed-run recovery payloads this
+journal exists to serve.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import stat
 import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -56,6 +67,102 @@ _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
 _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
 _SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
+
+# ── Retention (#7613) ───────────────────────────────────────────────────────
+# `delete_run_journal` has exactly one call site — session deletion — so without
+# a sweep a long-lived/pinned session accumulates one `{run_id}.jsonl` per run
+# forever (measured at 916 MB of completed-run logs on one real install; 98.6%
+# of that footprint is `terminal: true` runs). The sweep retires TERMINAL runs
+# only, bounded by three independent caps (whichever is strictest wins):
+#
+#   * `ttl_days`              — run file's own mtime older than the TTL
+#   * `max_runs_per_session`  — beyond the newest N terminal runs in the session
+#   * `max_bytes_per_session` — retained terminal bytes beyond the session budget
+#
+# Non-terminal runs are NEVER reclaimed: they are the crashed-run payloads the
+# journal exists to recover. The age signal is the FILE's mtime — never the
+# directory's (a directory mtime updates whenever any file inside changes, so
+# an actively-written session always looks fresh while its dir can still be
+# reaped out from under a live writer). A value of 0 disables that one cap.
+#
+# Caps resolve env var > settings.json > module default (mirrors
+# `_resolve_session_ttl`), so operators can tune them without a code change.
+RUN_JOURNAL_SWEEP_ENV = "HERMES_WEBUI_RUN_JOURNAL_SWEEP"
+_RETENTION_TTL_ENV = "HERMES_WEBUI_RUN_JOURNAL_RETENTION_TTL_DAYS"
+_RETENTION_MAX_RUNS_ENV = "HERMES_WEBUI_RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION"
+_RETENTION_MAX_BYTES_ENV = "HERMES_WEBUI_RUN_JOURNAL_RETENTION_MAX_BYTES_PER_SESSION"
+_RETENTION_TTL_SETTING = "run_journal_retention_ttl_days"
+_RETENTION_MAX_RUNS_SETTING = "run_journal_retention_max_runs_per_session"
+_RETENTION_MAX_BYTES_SETTING = "run_journal_retention_max_bytes_per_session"
+DEFAULT_RUN_JOURNAL_RETENTION_TTL_DAYS = 14.0
+DEFAULT_RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION = 40
+DEFAULT_RUN_JOURNAL_RETENTION_MAX_BYTES_PER_SESSION = 256 * 1024 * 1024
+_RETENTION_TTL_MAX_DAYS = 3650.0
+_RETENTION_MAX_RUNS_LIMIT = 100_000
+_RETENTION_MAX_BYTES_LIMIT = 100 * 1024 * 1024 * 1024  # 100 GiB
+_SWEEP_DISABLED_VALUES = frozenset({"0", "false", "no", "off", "disabled", "none"})
+# Minimum spacing between retention sweeps when driven by the shared
+# maintenance tick (``api.background_process._reaper_loop`` via
+# ``maybe_sweep_run_journal``). The tick itself fires far more often; this gate
+# keeps the sweep hourly and, on a fresh process, delays the first pass so boot
+# never competes with a large scan. State lives in the tick owner, not here.
+RETENTION_SWEEP_INTERVAL_SECS = 3600.0
+RETENTION_FIRST_SWEEP_DELAY_SECS = 60.0
+# A run file must be untouched for this long before ANY cap can reclaim it.
+# The run's writer can append post-terminal rows (metering / stream_end /
+# title generation arrive around the terminal row), and a just-settled run may
+# still be replayed to a reconnecting client; both want a settlement window.
+_RETENTION_MIN_QUIESCENT_SECONDS = 3600.0
+# Backward scan budget for terminal-row detection. The scan walks the file
+# backwards and stops at the first VERIFIED terminal row: the common case
+# (terminal row near EOF) reads one chunk; a multi-MB single row (giant
+# `apperror` payload) needs the walk to cross its payload to reach its own
+# prefix. Files whose terminal row sits further back than this budget are left
+# untouched (fail closed — a missed reclaim is safe, a wrong one is not).
+_RETENTION_VERIFY_MAX_BYTES = 64 * 1024 * 1024
+_RETENTION_VERIFY_CHUNK_BYTES = 256 * 1024
+_RETENTION_MARKER_BYTES = b'"terminal":true'
+# A serialized run row always starts with this exact byte prefix (compact
+# separators; key order fixed by `append_run_event`; `json.dumps` escapes
+# quotes inside string values, and ids are restricted to [A-Za-z0-9_.-], so
+# these bytes can only occur at a row start).
+_RETENTION_ROW_START_BYTES = b'{"version":1,"event_id":"'
+# Serialized run-row header, anchored at the row start (``re.match``).
+# Groups: 1 = event_id, 2 = seq, 3 = run_id, 4 = session_id, 5 = terminal flag.
+# Mirrors `append_run_event`'s compact serialization exactly; `created_at`
+# permits the full float character set `json.dumps` can emit.
+_RETENTION_HEADER_RE = re.compile(
+    rb'\{"version":1,'
+    rb'"event_id":"([^"\\]{1,300})",'
+    rb'"seq":(\d{1,20}),'
+    rb'"run_id":"([^"\\]{1,300})",'
+    rb'"session_id":"([^"\\]{1,300})",'
+    rb'"event":"[^"\\]{0,300}",'
+    rb'"type":"[^"\\]{0,300}",'
+    rb'"created_at":[-0-9.eE+]{1,64},'
+    rb'"terminal":(true|false),'
+)
+# How far back a candidate marker may hunt for its row start. A genuine
+# terminal row carries the marker in its first ~500 bytes; a nested
+# `"terminal":true` inside a payload is rejected by the ownership-checked
+# header parse (see `_verify_terminal_header_at`).
+_RETENTION_ROW_START_HUNT_BYTES = 64 * 1024
+_RETENTION_HEADER_MAX_BYTES = 8 * 1024
+# Sweep scheduling state, shared by the maintenance tick and manual callers.
+# ``None`` = this process has not yet armed its first-pass delay;
+# otherwise it is the wall-clock time the last sweep was started.
+_SWEEP_LAST_STARTED: float | None = None
+_SWEEP_THREAD_LOCK = threading.Lock()
+# Serializes sweep bodies: the maintenance tick and any explicit caller never
+# scan (and unlink) concurrently.
+_SWEEP_RUN_LOCK = threading.Lock()
+# dir_fd + O_NOFOLLOW primitives (Linux/macOS) — the same pattern
+# `api/workspace.py` uses. Where they are unavailable (Windows) the sweep
+# falls back to path-based ops with containment checks; the caps and the
+# terminal-only contract are identical either way.
+_DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 def _default_session_dir() -> Path:
@@ -755,6 +862,622 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
             for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SUMMARY_CACHE[cache_key]
     return removed
+
+
+# ── Retention sweep (#7613) ─────────────────────────────────────────────────
+
+
+def _resolve_within(root_real: str, path: Path) -> bool:
+    """True when ``path``'s fully-resolved location stays inside ``root_real``.
+
+    Containment is checked on the RESOLVED path so a symlink (or a symlinked
+    parent) cannot redirect the sweep outside the journal root. ``root_real`` is
+    expected to be an ``os.path.realpath`` string. Comparison is boundary-aware:
+    a sibling directory whose name merely starts with the root's prefix is not
+    "inside" it.
+    """
+    try:
+        candidate = os.path.realpath(path)
+    except OSError:
+        return False
+    if candidate == root_real:
+        return True
+    return candidate.startswith(root_real + os.sep)
+
+
+def _stat_signature(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Complete filesystem identity used to prove a run file is unchanged.
+
+    Any append, rewrite, or same-path recreation moves at least one component
+    (``ctime`` advances on every metadata/content change and cannot be forged
+    back), so a mismatch between classification and reclaim means the file was
+    not quiescent and must not be unlinked.
+    """
+    return (
+        int(st.st_dev),
+        int(st.st_ino),
+        int(st.st_size),
+        int(st.st_mtime_ns),
+        int(st.st_ctime_ns),
+    )
+
+
+def _read_run_span(path: Path, offset: int, length: int, file_fd: int | None) -> bytes | None:
+    """Read ``length`` bytes at ``offset`` from a run file; None on failure.
+
+    ``file_fd`` (fd mode) is the run file opened relative to the pinned session
+    directory handle, so the read cannot be redirected by a path swap;
+    otherwise the file is opened by path (fallback mode).
+    """
+    try:
+        if file_fd is not None:
+            return os.pread(file_fd, max(0, length), offset)
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            return fh.read(length)
+    except OSError:
+        return None
+
+
+def _verify_terminal_header_at(
+    path: Path, marker_pos: int, size: int, *, file_fd: int | None = None
+) -> bool:
+    """Prove a top-level terminal journal row owns the marker at ``marker_pos``.
+
+    Hunts backwards for the row start, requires it to begin at a line boundary
+    (journal rows are newline-delimited and compact JSON escapes control
+    characters, so a genuine row start is always preceded by ``\\n`` or is the
+    file start — a nested ``"terminal":true`` inside a payload never is), then
+    schema-matches the row header and cross-checks its ids against the path.
+    Returns False when it cannot *prove* terminality (fail closed: a missed
+    reclaim is safe, a wrong one is not). ``file_fd`` reads through a pinned
+    descriptor when given (fd mode).
+    """
+    hunt_start = max(0, marker_pos - _RETENTION_ROW_START_HUNT_BYTES - 1)
+    # Read past the marker so the anchored header pattern can consume the
+    # separator/comma that follows it within `_RETENTION_HEADER_MAX_BYTES`.
+    read_end = min(size, marker_pos + len(_RETENTION_MARKER_BYTES) + 8)
+    buf = _read_run_span(path, hunt_start, read_end - hunt_start, file_fd)
+    if buf is None:
+        return False
+    search_end = marker_pos - hunt_start
+    for _attempt in range(8):  # bounded: real headers sit immediately before the marker
+        start_idx = buf.rfind(_RETENTION_ROW_START_BYTES, 0, search_end)
+        if start_idx == -1:
+            return False
+        at_line_start = (
+            buf[start_idx - 1 : start_idx] == b"\n" if start_idx > 0 else hunt_start == 0
+        )
+        if at_line_start:
+            header = buf[start_idx : start_idx + _RETENTION_HEADER_MAX_BYTES]
+            match = _RETENTION_HEADER_RE.match(header)
+            if match:
+                event_id, seq_text, row_run_id, row_session_id, terminal_flag = match.group(
+                    1, 2, 3, 4, 5
+                )
+                if terminal_flag == b"true":
+                    stem = path.stem.encode()
+                    parent = path.parent.name.encode()
+                    if row_run_id == stem and row_session_id == parent:
+                        try:
+                            seq = int(seq_text)
+                        except ValueError:
+                            return False
+                        if event_id == f"{path.stem}:{seq}".encode():
+                            return True
+                # A verified non-terminal / foreign header is not this file's
+                # terminal row; keep walking earlier candidates.
+        search_end = start_idx
+    return False
+
+
+def _journal_file_is_terminal(path: Path, size: int, *, file_fd: int | None = None) -> bool:
+    """Return True when the run file provably contains a top-level terminal row.
+
+    Walks the file backwards in bounded chunks, stopping at the first VERIFIED
+    terminal row — the common case (marker near EOF) reads one chunk. The
+    backward walk matters: a multi-megabyte single row (giant ``apperror``
+    payload) carries its marker inside its header, so the scan must cross the
+    row to reach it. Files whose terminal row sits deeper than the scan budget
+    return False and are left untouched. ``file_fd`` reads through a pinned
+    descriptor when given (fd mode).
+    """
+    if size <= 0:
+        return False
+    remaining = min(size, _RETENTION_VERIFY_MAX_BYTES)
+    overlap = len(_RETENTION_MARKER_BYTES) - 1
+    pos = size
+    carry = b""
+    carry_abs_start: int | None = None
+    while remaining > 0 and pos > 0:
+        span = min(_RETENTION_VERIFY_CHUNK_BYTES, remaining)
+        span_start = max(0, pos - span)
+        data = _read_run_span(path, span_start, pos - span_start, file_fd)
+        if data is None:
+            return False
+        buf = data + carry
+        data_len = len(data)
+        search_end = len(buf)
+        while True:
+            idx = buf.rfind(_RETENTION_MARKER_BYTES, 0, search_end)
+            if idx == -1:
+                break
+            if idx < data_len:
+                abs_pos = span_start + idx
+            elif carry_abs_start is not None:
+                abs_pos = carry_abs_start + (idx - data_len)
+            else:
+                abs_pos = -1
+            if abs_pos >= 0 and _verify_terminal_header_at(
+                path, abs_pos, size, file_fd=file_fd
+            ):
+                return True
+            search_end = idx
+        remaining -= pos - span_start
+        carry = data[:overlap]
+        carry_abs_start = span_start
+        pos = span_start
+    return False
+
+
+def _resolve_retention_cap(
+    env_name: str,
+    setting_name: str,
+    settings: dict,
+    *,
+    kind: type,
+    default,
+    minimum,
+    maximum,
+):
+    """Resolve one cap: env var > settings.json > default (mirrors ``_resolve_session_ttl``).
+
+    Invalid or out-of-range values fall through to the next source; a value of
+    0 is valid and disables that one cap.
+    """
+    candidates: list[Any] = [os.getenv(env_name), settings.get(setting_name)]
+    for raw in candidates:
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = float(raw) if kind is float else int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if minimum <= value <= maximum:
+            return value
+    return default
+
+
+def resolve_run_journal_retention_caps() -> dict:
+    """Current retention caps as ``{"ttl_days", "max_runs_per_session", "max_bytes_per_session"}``."""
+    settings: dict = {}
+    try:
+        from api.config import load_settings
+
+        loaded = load_settings()
+        if isinstance(loaded, dict):
+            settings = loaded
+    except Exception:
+        # Retention must never depend on config import health; defaults stand.
+        settings = {}
+    return {
+        "ttl_days": _resolve_retention_cap(
+            _RETENTION_TTL_ENV,
+            _RETENTION_TTL_SETTING,
+            settings,
+            kind=float,
+            default=DEFAULT_RUN_JOURNAL_RETENTION_TTL_DAYS,
+            minimum=0.0,
+            maximum=_RETENTION_TTL_MAX_DAYS,
+        ),
+        "max_runs_per_session": _resolve_retention_cap(
+            _RETENTION_MAX_RUNS_ENV,
+            _RETENTION_MAX_RUNS_SETTING,
+            settings,
+            kind=int,
+            default=DEFAULT_RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION,
+            minimum=0,
+            maximum=_RETENTION_MAX_RUNS_LIMIT,
+        ),
+        "max_bytes_per_session": _resolve_retention_cap(
+            _RETENTION_MAX_BYTES_ENV,
+            _RETENTION_MAX_BYTES_SETTING,
+            settings,
+            kind=int,
+            default=DEFAULT_RUN_JOURNAL_RETENTION_MAX_BYTES_PER_SESSION,
+            minimum=0,
+            maximum=_RETENTION_MAX_BYTES_LIMIT,
+        ),
+    }
+
+
+def _open_dir_no_follow(path: Path) -> int | None:
+    """Open a directory as a stable handle (``O_NOFOLLOW``); None when unavailable.
+
+    Returns an owned fd that pins the *inode* of ``path``: subsequent
+    fd-relative operations (``os.stat``/``os.unlink`` with ``dir_fd``) act on
+    that directory no matter what the pathname is later swapped to. ``None``
+    means the platform lacks dir_fd support (Windows), where the sweep falls
+    back to path-based operations with containment checks. A symlinked final
+    component is refused (``ELOOP``) — the journal only ever creates real
+    directories.
+    """
+    if not _DIR_FD_OK:
+        return None
+    try:
+        return os.open(str(path), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    except OSError:
+        return None
+
+
+def _reclaim_run_file(
+    path: Path,
+    expected_signature: tuple[int, int, int, int, int],
+    *,
+    journal_root_real: str | None = None,
+    dir_fd: int | None = None,
+) -> int:
+    """Unlink ``path`` if its stat identity still matches; return bytes freed (0 = skipped).
+
+    The stat-identity re-check runs twice — immediately before the per-path
+    writer lock, and again under it — so a trailing append (or same-path
+    recreation) between classification and reclaim aborts the unlink instead of
+    destroying rows written after the file was judged quiescent.
+
+    Containment is enforced against check-then-use races by *pinning* the
+    session directory: when ``dir_fd`` is given, every stat and the final
+    ``unlink`` run fd-relatively against that open handle, so a directory
+    swapped to a symlink after validation cannot redirect the removal (the
+    classic dir-swap race). ``journal_root_real`` remains as a path-level gate
+    for the fallback (no dir_fd) mode and as defence in depth.
+    """
+    if journal_root_real is not None and not _resolve_within(journal_root_real, path):
+        return 0
+    if dir_fd is not None:
+        try:
+            st = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return 0
+    else:
+        try:
+            st = path.stat()
+        except OSError:
+            return 0
+    if _stat_signature(st) != expected_signature:
+        return 0
+    freed = 0
+    with _lock_for(path):
+        try:
+            if dir_fd is not None:
+                st = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+            else:
+                st = path.stat()
+        except OSError:
+            return 0
+        if _stat_signature(st) != expected_signature:
+            return 0
+        try:
+            if dir_fd is not None:
+                os.unlink(path.name, dir_fd=dir_fd)
+            else:
+                path.unlink()
+            freed = int(st.st_size)
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            logger.debug("Run-journal retention could not unlink %s", path, exc_info=True)
+            return 0
+    # Confirmed removal: evict this run's cached state, mirroring
+    # `delete_run_journal`. A later run re-created at the same path must restart
+    # at seq 1 (not resume a stale cached seq) and must not reuse a lock the
+    # removed file left behind.
+    path_key = str(path)
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE.pop(path_key, None)
+    _discard_cached_summary(path)
+    if not path.exists():
+        dir_key = str(path.parent)
+        with _WRITER_LOCKS_GUARD:
+            for key in [
+                k for k in _WRITER_LOCKS if k[0] == dir_key and k[1] == path.name
+            ]:
+                del _WRITER_LOCKS[key]
+    return freed
+
+
+def _sweep_run_journal_session(
+    session_journal_dir: Path,
+    caps: dict,
+    now: float,
+    counters: dict,
+    journal_root_real: str,
+) -> None:
+    """Classify and (if eligible) reclaim terminal runs inside one session's journal dir.
+
+    ``journal_root_real`` is the resolved journal root; every candidate file must
+    still resolve inside it (fallback mode), and the session dir itself is
+    PINNED as an open handle (``dir_fd``) for the whole pass so every stat,
+    classification read, and unlink acts on the directory's inode — a swap of
+    the pathname to a symlink after the containment check cannot redirect any
+    of them (check-then-use race, closed at the point of use).
+    """
+    # Pin the session directory (O_NOFOLLOW). None on platforms without
+    # dir_fd support (Windows), where the path-based branch below still
+    # carries the containment checks.
+    session_fd = _open_dir_no_follow(session_journal_dir)
+    if session_fd is None and _DIR_FD_OK:
+        # Fail closed: dir_fd support exists but this directory could not be
+        # pinned (swapped to a symlink, removed, or unreadable). Never fall
+        # back to path-based reclaim for a directory we cannot pin — a swap
+        # raced in mid-sweep must leave the session untouched, not redirect
+        # the sweep at whatever the pathname now points to.
+        return
+    try:
+        _sweep_session_entries(
+            session_journal_dir, session_fd, caps, now, counters, journal_root_real
+        )
+    finally:
+        if session_fd is not None:
+            try:
+                os.close(session_fd)
+            except OSError:
+                pass
+
+
+def _sweep_session_entries(
+    session_journal_dir: Path,
+    session_fd: int | None,
+    caps: dict,
+    now: float,
+    counters: dict,
+    journal_root_real: str,
+) -> None:
+    """Body of one session sweep; runs with ``session_fd`` pinned when available."""
+    try:
+        if session_fd is not None:
+            names = sorted(os.listdir(session_fd))
+        else:
+            names = sorted(entry.name for entry in session_journal_dir.glob("*.jsonl"))
+    except OSError:
+        counters["errors"] += 1
+        return
+    entries: list[tuple[Path, os.stat_result, bool]] = []
+    for name in names:
+        path = session_journal_dir / name
+        # Only journal run files, by name (fd listing returns every entry).
+        if session_fd is not None and not name.endswith(".jsonl"):
+            continue
+        # Run files opened fd-relatively (below) must be plain files with no
+        # symlinked final component; a symlinked entry could point anywhere.
+        file_fd: int | None = None
+        try:
+            if session_fd is not None:
+                file_fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=session_fd)
+                st = os.fstat(file_fd)
+                if not stat.S_ISREG(st.st_mode):
+                    try:
+                        os.close(file_fd)
+                    except OSError:
+                        pass
+                    file_fd = None
+                    continue
+            else:
+                if path.is_symlink():
+                    # A run file that is itself a link could point anywhere; the
+                    # journal only ever creates plain files.
+                    continue
+                if not path.is_file():
+                    continue
+                if not _resolve_within(journal_root_real, path):
+                    continue
+                st = path.stat()
+        except OSError:
+            if file_fd is not None:
+                try:
+                    os.close(file_fd)
+                except OSError:
+                    pass
+                file_fd = None
+            continue
+        try:
+            counters["files_scanned"] += 1
+            terminal = _journal_file_is_terminal(
+                path, int(st.st_size), file_fd=file_fd
+            )
+        finally:
+            if file_fd is not None:
+                try:
+                    os.close(file_fd)
+                except OSError:
+                    pass
+        if terminal:
+            counters["terminal_files"] += 1
+        entries.append((path, st, terminal))
+    terminal_entries = [entry for entry in entries if entry[2]]
+    # Newest first: the caps keep the most recent settled runs.
+    terminal_entries.sort(
+        key=lambda entry: (entry[1].st_mtime_ns, entry[0].name), reverse=True
+    )
+    retained_bytes = 0
+    size_cap_exceeded = False
+    for rank, (path, st, _terminal) in enumerate(terminal_entries):
+        size = int(st.st_size)
+        age_seconds = now - float(st.st_mtime)
+        reclaimed = False
+        # Settlement window: never reclaim a file a writer may still be
+        # appending to (post-terminal `metering` / `stream_end` rows arrive
+        # around the terminal row) or a client may still be reconnecting to.
+        if age_seconds >= _RETENTION_MIN_QUIESCENT_SECONDS:
+            ttl_days = float(caps["ttl_days"])
+            max_runs = int(caps["max_runs_per_session"])
+            max_bytes = int(caps["max_bytes_per_session"])
+            over_ttl = ttl_days > 0 and age_seconds > ttl_days * 86400.0
+            over_count = max_runs > 0 and rank >= max_runs
+            # Size cap: retire runs from the newest-first prefix once the
+            # retained budget would be exceeded, and keep retiring everything
+            # older than the first overflow (sticky) so the retained set is a
+            # contiguous newest-first prefix. The newest terminal run (rank 0)
+            # is exempt so a session always keeps its most recent settled
+            # anchor; the TTL still reaps it once it is old enough.
+            over_size = False
+            if max_bytes > 0 and rank > 0:
+                if size_cap_exceeded or (retained_bytes + size) > max_bytes:
+                    size_cap_exceeded = True
+                    over_size = True
+            if over_ttl or over_count or over_size:
+                freed = _reclaim_run_file(
+                    path,
+                    _stat_signature(st),
+                    journal_root_real=journal_root_real,
+                    dir_fd=session_fd,
+                )
+                if freed > 0:
+                    reclaimed = True
+                    counters["removed_files"] += 1
+                    counters["removed_bytes"] += freed
+                    logger.debug(
+                        "Run-journal retention reclaimed %s (%s bytes, age %.1fd)",
+                        path,
+                        freed,
+                        age_seconds / 86400.0,
+                    )
+                else:
+                    counters["skipped_files"] += 1
+        if not reclaimed:
+            # Only bytes that survive count against the per-session budget.
+            retained_bytes += size
+
+
+def sweep_run_journal(
+    *,
+    session_dir: Path | None = None,
+    ttl_days: float | None = None,
+    max_runs_per_session: int | None = None,
+    max_bytes_per_session: int | None = None,
+    now: float | None = None,
+) -> dict:
+    """Retire TERMINAL run journals past the age / count / size caps (#7613).
+
+    A sweep, not a delete: non-terminal runs are the crashed-run payloads the
+    journal exists to recover and are never touched; terminal runs are
+    reclaimed only after a settlement window. Caps may be passed explicitly
+    (0 disables one cap; tests rely on this) or left ``None`` to resolve
+    env var > settings.json > default via ``resolve_run_journal_retention_caps``.
+
+    Cheap by construction: per-file ``stat`` first, classification reads only
+    the region needed to prove a terminal row, and reclaim re-checks the
+    file's complete stat identity before unlinking. Returns a counters dict
+    (``removed_files``, ``removed_bytes``, ``files_scanned``,
+    ``terminal_files``, ``sessions_scanned``, ``skipped_files``, ``errors``,
+    ``caps``).
+    """
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    caps = resolve_run_journal_retention_caps()
+    if ttl_days is not None:
+        caps["ttl_days"] = max(0.0, float(ttl_days))
+    if max_runs_per_session is not None:
+        caps["max_runs_per_session"] = max(0, int(max_runs_per_session))
+    if max_bytes_per_session is not None:
+        caps["max_bytes_per_session"] = max(0, int(max_bytes_per_session))
+    counters = {
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "files_scanned": 0,
+        "terminal_files": 0,
+        "sessions_scanned": 0,
+        "skipped_files": 0,
+        "errors": 0,
+        "caps": dict(caps),
+    }
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    try:
+        if not journal_root.exists():
+            return counters
+        journal_root_real = os.path.realpath(journal_root)
+        session_dirs = [
+            entry
+            for entry in sorted(journal_root.iterdir())
+            if not entry.is_symlink()
+            and entry.is_dir()
+            and _resolve_within(journal_root_real, entry)
+        ]
+    except OSError:
+        counters["errors"] += 1
+        return counters
+    sweep_now = time.time() if now is None else float(now)
+    with _SWEEP_RUN_LOCK:
+        for session_journal_dir in session_dirs:
+            if not _SAFE_ID_RE.fullmatch(session_journal_dir.name):
+                continue
+            counters["sessions_scanned"] += 1
+            try:
+                _sweep_run_journal_session(
+                    session_journal_dir, caps, sweep_now, counters, journal_root_real
+                )
+            except Exception:
+                counters["errors"] += 1
+                logger.warning(
+                    "Run-journal retention sweep failed for %s",
+                    session_journal_dir,
+                    exc_info=True,
+                )
+    if counters["removed_files"]:
+        logger.info(
+            "Run-journal retention reclaimed %d file(s) / %d bytes across %d session(s)",
+            counters["removed_files"],
+            counters["removed_bytes"],
+            counters["sessions_scanned"],
+        )
+    return counters
+
+
+def run_journal_sweep_enabled() -> bool:
+    """False when ``HERMES_WEBUI_RUN_JOURNAL_SWEEP`` is set to a disabled value."""
+    raw = os.getenv(RUN_JOURNAL_SWEEP_ENV, "").strip().lower()
+    return raw not in _SWEEP_DISABLED_VALUES
+
+
+def maybe_sweep_run_journal(now: float | None = None) -> dict | None:
+    """Run one retention sweep if due; return its counters, or None when not due.
+
+    Called from the shared maintenance tick in ``api.background_process``
+    alongside the SessionChannel reaper — the sweep is hourly and never runs on
+    `server.py`'s boot path (first pass is delayed) nor on any request path
+    (`GET /api/session` stays side-effect-free). Gating state lives here so any
+    caller — the tick, a test, a manual invocation — shares it. Returns None
+    when disabled, not yet due, or already being swept.
+    """
+    global _SWEEP_LAST_STARTED
+    if not run_journal_sweep_enabled():
+        return None
+    tick_now = time.time() if now is None else float(now)
+    with _SWEEP_THREAD_LOCK:
+        if _SWEEP_LAST_STARTED is None:
+            # Fresh process: arm so the first pass is due after
+            # RETENTION_FIRST_SWEEP_DELAY_SECS (never during boot itself),
+            # then one sweep per RETENTION_SWEEP_INTERVAL_SECS after that.
+            _SWEEP_LAST_STARTED = tick_now - (
+                RETENTION_SWEEP_INTERVAL_SECS - RETENTION_FIRST_SWEEP_DELAY_SECS
+            )
+            return None
+        if tick_now - _SWEEP_LAST_STARTED < RETENTION_SWEEP_INTERVAL_SECS:
+            return None
+        _SWEEP_LAST_STARTED = tick_now
+    try:
+        return sweep_run_journal()
+    except Exception:
+        logger.warning("Run-journal retention sweep failed", exc_info=True)
+        return None
+
+
+def _reset_run_journal_sweep_schedule() -> None:
+    """Forget the sweep schedule so the next due-check re-arms the boot delay.
+
+    Used by tests to prove the first-pass delay independently of process age.
+    """
+    global _SWEEP_LAST_STARTED
+    with _SWEEP_THREAD_LOCK:
+        _SWEEP_LAST_STARTED = None
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:
