@@ -299,6 +299,45 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
+#### Model aliases in `/model`
+
+`/model <alias>` accepts any alias configured for the profile, in either of Hermes's two formats:
+
+```yaml
+model_aliases:                     # canonical
+  sol:
+    model: gpt-5.6-sol
+    provider: openai-codex
+
+model:
+  provider: openrouter
+  aliases:                         # legacy
+    sol: openai-codex/gpt-5.6-sol  # provider-qualified
+    fast: gpt-4                    # unqualified
+```
+
+Alias resolution follows the format of the alias:
+
+- A **canonical `model_aliases` entry** and a **provider-qualified legacy target** name their own
+  route. The target is authoritative, so `/model sol` selects that provider even when a
+  same-named model exists on another provider. A canonical entry also takes precedence over a
+  legacy entry with the same name.
+- An **unqualified legacy target** names only a model, so it keeps the ordinary lookup: the
+  active provider first, then the normal fuzzy match. This is the behavior `/model` had before,
+  and it is unchanged.
+
+Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
+receives the model, the provider id, and an opaque route id, never a base URL or key. An alias URL
+is authoritative over a configured `custom:<slug>` URL and is paired only with the alias credential
+(or the keyless placeholder when the alias declares none). Without an alias URL, the named custom
+provider supplies its configured endpoint and credential; an explicitly declared alias credential
+overrides only that credential.
+
+A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
+leaves the session pointing at a route nothing owns. That send fails closed — on every backend, the
+in-process worker, the gateway and the runner alike — with a controlled "model alias unavailable"
+error instead of quietly falling back to another provider; pick the model again to store a live route.
+
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts

@@ -23461,6 +23461,65 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _server_initiated_turn_routing(session, *, model, model_provider):
+    """Resolve gateway ownership and the alias route for a server-initiated turn.
+
+    ``/api/chat/start`` computes gateway ownership from its request-scoped
+    config snapshot and passes it to ``_start_run`` explicitly; its request
+    thread also carries the profile TLS that makes the alias-lane resolution
+    profile-correct. ``start_session_turn`` (process wakeup) passes neither and
+    runs on a drain thread with no profile TLS, so resolve BOTH here under the
+    owning session's profile scope — otherwise gateway ownership is discovered
+    only later, inside ``_start_chat_stream_for_session``, after the alias-lane
+    conversion that depends on it, and a named profile's ``webui_chat_backend``
+    setting / alias table would be read from the default profile.
+    """
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    if profile_name and not _is_root_profile(profile_name):
+        with profile_scope_for_detached_worker(
+            profile_name,
+            "server-initiated turn routing",
+            logger_override=logger,
+        ):
+            return (
+                webui_gateway_chat_enabled(get_config_snapshot()),
+                api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+            )
+    return (
+        webui_gateway_chat_enabled(get_config_snapshot()),
+        api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+    )
+
+
+def _unresolved_model_alias_lane_response(alias_route, model_provider) -> dict | None:
+    """Refuse an opaque alias lane that resolved to nothing, before any dispatch.
+
+    ``model-alias-*`` is WebUI-minted identity for ONE configured alias name, not
+    a provider id. An unresolved lane means the alias was deleted or renamed,
+    belongs to another profile, or now targets a different model — so routing it
+    is not possible and not permitted. The legacy worker refuses it deeper in
+    ``_run_agent_streaming`` via :func:`api.config.raise_for_unresolved_model_alias_route`,
+    but the gateway and the runner backends receive the request verbatim and
+    would hand the minted digest to an external runtime as a provider, landing
+    the turn on an endpoint the user never picked.
+
+    Returns the controlled response (``_status`` 400, the same shape the legacy
+    /api/chat/start unroutable-provider refusal uses) or ``None`` when the lane
+    is not an alias lane, or did resolve. The verdict carries no alias name,
+    endpoint, credential or digest detail.
+    """
+    if alias_route is not None or not api_config.is_model_alias_route_provider(model_provider):
+        return None
+    verdict = api_config.unresolved_model_alias_route_error()
+    return {
+        "error": verdict["message"],
+        "type": "provider_unroutable",
+        "reason": verdict["reason"],
+        "hint": verdict["hint"],
+        "_status": 400,
+    }
+
+
 def _start_run(
     s,
     *,
@@ -23493,8 +23552,21 @@ def _start_run(
     Returns a dict with ``_status`` plus the legacy chat-start response
     fields (``stream_id``, ``session_id``, etc.). Adapter selection that
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
-    so both call sites can map it onto their own HTTP shape.
+    so both call sites can map it onto their own HTTP shape. An opaque alias
+    lane that no longer resolves is refused (``_status`` 400) here, before any
+    backend is selected — see :func:`_unresolved_model_alias_lane_response`.
     """
+    if gateway_chat_enabled is None:
+        # Server-initiated turn (start_session_turn): gateway ownership was not
+        # computed by the caller, so resolve it — together with the alias lane —
+        # under the owning session's profile scope BEFORE the alias conversion
+        # below. Explicit True/False from /api/chat/start is preserved unchanged.
+        gateway_chat_enabled, alias_route = _server_initiated_turn_routing(
+            s, model=model, model_provider=model_provider
+        )
+    else:
+        alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
+
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
         StartRunRequest,
@@ -23503,8 +23575,31 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
+    # The runner flag is read before the alias decision (the gateway/runner backends
+    # take the alias name rather than a resolved provider), and the adapter gate
+    # below keeps its original shape as the seam tests pin it.
+    runner_enabled = runtime_adapter_runner_enabled()
+    alias_refusal = _unresolved_model_alias_lane_response(alias_route, model_provider)
+    if alias_refusal is not None:
+        # Terminal for ALL THREE backends, so it lands before adapter selection:
+        # no adapter, no runner client, no stream, no persisted pending state.
+        logger.warning(
+            "Turn blocked by an unresolved model alias lane for session %s",
+            getattr(s, "session_id", None),
+        )
+        return alias_refusal
+    if alias_route is not None and (gateway_chat_enabled or runner_enabled):
+        # External runtimes own their provider credentials. Their supported
+        # request contract is the model-route alias, not WebUI's opaque lane.
+        model = alias_route["alias"]
+        model_provider = None
+    # The legacy worker deliberately keeps the opaque route id and resolves the
+    # alias inside the owning profile scope. That keeps endpoint credentials out
+    # of session/browser state and preserves alias provenance until the
+    # custom-provider authority merge.
+
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
-        if regeneration is not None and runtime_adapter_runner_enabled():
+        if regeneration is not None and runner_enabled:
             return {"error": "Regeneration is not supported by the runner backend.", "code": "unsupported_regeneration_backend", "_status": 409}
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
@@ -24168,6 +24263,22 @@ def _handle_goal_command(handler, body):
                     s.model_explicit_pick_signature = _mk_sig(model, model_provider)
             except Exception:
                 pass
+        gateway_owned = webui_gateway_chat_enabled(get_config())
+        # The same two alias rules as `_start_run`: an external runtime takes the
+        # alias NAME (it owns its provider credentials), and a lane that no longer
+        # resolves is terminal instead of being forwarded as a provider id. This
+        # kickoff is the one turn start that reaches the backends directly rather
+        # than through `_start_run`, so it needs the decision itself.
+        alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
+        alias_refusal = _unresolved_model_alias_lane_response(alias_route, model_provider)
+        if alias_refusal is not None:
+            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+            payload.update({k: v for k, v in alias_refusal.items() if k != "_status"})
+            payload["ok"] = False
+            return j(handler, payload, status=alias_refusal["_status"])
+        if alias_route is not None and gateway_owned:
+            model = alias_route["alias"]
+            model_provider = None
         stream_response = _start_chat_stream_for_session(
             s,
             msg=kickoff_prompt,
@@ -24177,7 +24288,7 @@ def _handle_goal_command(handler, body):
             model_provider=model_provider,
             normalized_model=normalized_model,
             goal_related=True,
-            external_runtime_owned=webui_gateway_chat_enabled(get_config()),
+            external_runtime_owned=gateway_owned,
         )
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
