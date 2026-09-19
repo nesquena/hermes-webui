@@ -384,6 +384,13 @@ function closeModelDropdown() {}
 function selectModelFromDropdown() {}
 
 for (const name of [
+  '_modelPickerContractRuns',
+  '_modelPickerCompareRuns',
+  '_modelPickerCompareContract',
+  '_modelPickerSortableId',
+  '_compareModelPickerEntries',
+  '_sortModelPickerEntries',
+  '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
@@ -734,6 +741,13 @@ function closeModelDropdown() {}
 function selectModelFromDropdown() {}
 
 for (const name of [
+  '_modelPickerContractRuns',
+  '_modelPickerCompareRuns',
+  '_modelPickerCompareContract',
+  '_modelPickerSortableId',
+  '_compareModelPickerEntries',
+  '_sortModelPickerEntries',
+  '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
@@ -947,6 +961,13 @@ function closeModelDropdown() {}
 function selectModelFromDropdown() {}
 
 for (const name of [
+  '_modelPickerContractRuns',
+  '_modelPickerCompareRuns',
+  '_modelPickerCompareContract',
+  '_modelPickerSortableId',
+  '_compareModelPickerEntries',
+  '_sortModelPickerEntries',
+  '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
@@ -1155,7 +1176,7 @@ function querySelectorAllImpl(node, selector) {
 
     if (selector.startsWith('.') && !selector.includes('[') && !selector.includes(' ')) {
       const className = selector.slice(1);
-      if (n.className && n.className.includes(className)) {
+      if (n.className && String(n.className).split(/\s+/).includes(className)) {
         results.push(n);
       }
     }
@@ -1163,7 +1184,8 @@ function querySelectorAllImpl(node, selector) {
       const match = selector.match(/^\.([^\[]+)\[data-([^\]=]+)="([^\]]+)"\]$/);
       if (match) {
         const [, className, dataKey, dataVal] = match;
-        if (n.className && n.className.includes(className) &&
+        if (n.className &&
+            String(n.className).split(/\s+/).includes(className) &&
             n.dataset && n.dataset[dataKey] === dataVal) {
           results.push(n);
         }
@@ -1306,6 +1328,13 @@ function closeModelDropdown() {}
 function selectModelFromDropdown() {}
 
 for (const name of [
+  '_modelPickerContractRuns',
+  '_modelPickerCompareRuns',
+  '_modelPickerCompareContract',
+  '_modelPickerSortableId',
+  '_compareModelPickerEntries',
+  '_sortModelPickerEntries',
+  '_sortModelPickerOptions',
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
@@ -1349,6 +1378,359 @@ process.stdout.write(JSON.stringify({
 """
 
 
+# Driver: click Show more, then emit the ACTUAL on-screen order of every
+# `.model-opt` row in the group — regression for #7528 round-3 blocker 1
+# ("Show more does not globally sort the expanded group"). Before the fix the
+# in-place reveal appended overflow rows before the expander while the visible
+# rows kept their slots, so a sorted visible head + sorted overflow tail was
+# NOT globally sorted (e.g. `[z-* visible] [a-* overflow]`).
+_GLOBAL_SORT_DRIVER = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[2], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = ui.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let openParen = ui.indexOf('(', start);
+  let i = openParen + 1;
+  let parenDepth = 1;
+  while (parenDepth > 0 && i < ui.length) {
+    if (ui[i] === '(') parenDepth++;
+    else if (ui[i] === ')') parenDepth--;
+    i++;
+  }
+  i = ui.indexOf('{', i);
+  let depth = 1;
+  i++;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
+    i++;
+  }
+  return ui.slice(start, i);
+}
+
+function extractConst(name) {
+  const re = new RegExp('const\\s+' + name + '\\s*=');
+  const start = ui.search(re);
+  if (start < 0) throw new Error(name + ' not found as const');
+  const eqIdx = ui.indexOf('=', start + name.length);
+  let i = ui.indexOf('{', eqIdx);
+  if (i < 0) throw new Error(name + ' arrow body not found');
+  let depth = 1;
+  i++;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
+    i++;
+  }
+  if (ui[i] === ';') i++;
+  return ui.slice(start, i);
+}
+
+const CSS = { escape: s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&') };
+const requestAnimationFrame = fn => { fn(); return 0; };
+
+function makeClassList(initial) {
+  const set = new Set(initial || []);
+  return {
+    _set: set,
+    add(cls) { set.add(cls); },
+    remove(cls) { set.delete(cls); },
+    contains(cls) { return set.has(cls); },
+    toggle(cls, force) {
+      if (force === true) { set.add(cls); return true; }
+      if (force === false) { set.delete(cls); return false; }
+      if (set.has(cls)) { set.delete(cls); return false; }
+      set.add(cls);
+      return true;
+    },
+  };
+}
+
+function defineClassName(node) {
+  Object.defineProperty(node, 'className', {
+    get() { return [...node.classList._set].join(' '); },
+    set(v) { node.classList = makeClassList(String(v || '').split(/\s+/).filter(Boolean)); },
+  });
+}
+
+function makeNode(tag) {
+  const node = {
+    tagName: String(tag || '').toUpperCase(),
+    children: [],
+    dataset: {},
+    style: {},
+    parentElement: null,
+    textContent: '',
+    value: '',
+    tabIndex: 0,
+    onclick: null,
+    _listeners: {},
+    _innerHTML: '',
+    appendChild(child) {
+      // Real DOM appendChild MOVES an already-attached node (removes it from
+      // its old parent). The global group re-sort depends on that move
+      // semantics, otherwise the same row gets pushed twice (#7528).
+      if (child.parentElement && child.parentElement !== this) {
+        const oldIdx = child.parentElement.children.indexOf(child);
+        if (oldIdx >= 0) child.parentElement.children.splice(oldIdx, 1);
+      } else if (child.parentElement === this) {
+        const ownIdx = this.children.indexOf(child);
+        if (ownIdx >= 0) this.children.splice(ownIdx, 1);
+      }
+      child.parentElement = this;
+      this.children.push(child);
+      if (this.tagName === 'OPTGROUP' && this._ownerSelect && child.tagName === 'OPTION') {
+        this._ownerSelect.options.push(child);
+      }
+      return child;
+    },
+    insertBefore(newChild, refChild) {
+      newChild.parentElement = this;
+      const idx = refChild ? this.children.indexOf(refChild) : -1;
+      if (idx >= 0) {
+        this.children.splice(idx, 0, newChild);
+      } else {
+        this.children.push(newChild);
+      }
+      return newChild;
+    },
+    remove() {
+      if (this.parentElement) {
+        const idx = this.parentElement.children.indexOf(this);
+        if (idx >= 0) this.parentElement.children.splice(idx, 1);
+      }
+    },
+    addEventListener(type, handler) { this._listeners[type] = handler; },
+    querySelector(selector) {
+      if (this._qs && this._qs[selector]) return this._qs[selector];
+      return querySelectorAllImpl(this, selector)[0] || null;
+    },
+    querySelectorAll(selector) {
+      return querySelectorAllImpl(this, selector);
+    },
+    setAttribute(name, value) { this[name] = value; },
+    focus() { this._focused = true; },
+  };
+  Object.defineProperty(node, 'offsetTop', { value: 0 });
+  Object.defineProperty(node, 'scrollTop', {
+    get() { return this._scrollTop || 0; },
+    set(v) { this._scrollTop = v; },
+  });
+  Object.defineProperty(node, 'previousElementSibling', {
+    get() {
+      if (!this.parentElement) return null;
+      const idx = this.parentElement.children.indexOf(this);
+      return idx > 0 ? this.parentElement.children[idx - 1] : null;
+    },
+  });
+  node.classList = makeClassList();
+  defineClassName(node);
+  Object.defineProperty(node, 'innerHTML', {
+    get() { return this._innerHTML; },
+    set(v) {
+      this._innerHTML = String(v || '');
+      this.children = [];
+      this._qs = {};
+      if (this.tagName === 'DIV' && this._innerHTML.includes('model-search-input')) {
+        const input = makeNode('input');
+        input.className = 'model-search-input';
+        const clear = makeNode('button');
+        clear.className = 'model-search-clear';
+        this._qs['.model-search-input'] = input;
+        this._qs['.model-search-clear'] = clear;
+        this.appendChild(input);
+        this.appendChild(clear);
+      } else if (this.tagName === 'DIV' && this._innerHTML.includes('model-custom-input')) {
+        const input = makeNode('input');
+        input.className = 'model-custom-input';
+        const btn = makeNode('button');
+        btn.className = 'model-custom-btn';
+        this._qs['.model-custom-input'] = input;
+        this._qs['.model-custom-btn'] = btn;
+        this.appendChild(input);
+        this.appendChild(btn);
+      }
+      // Materialize the inner `.model-opt-id` span so _expandOverflowGroup's
+      // global re-sort can read each row's sort id via querySelector (#7528).
+      const optIdMatch = String(v || '').match(/<span class="model-opt-id">([^<]*)<\/span>/);
+      if (optIdMatch && this.tagName === 'DIV') {
+        const idSpan = makeNode('span');
+        idSpan.className = 'model-opt-id';
+        idSpan.textContent = optIdMatch[1];
+        this._qs['.model-opt-id'] = idSpan;
+        this.appendChild(idSpan);
+      }
+    },
+  });
+  return node;
+}
+
+function querySelectorAllImpl(node, selector) {
+  const results = [];
+  const stack = [node];
+  while (stack.length) {
+    const n = stack.shift();
+    if (n.children && n.children.length) stack.push(...n.children);
+    if (selector.startsWith('.') && !selector.includes('[') && !selector.includes(' ')) {
+      const className = selector.slice(1);
+      if (n.className && String(n.className).split(/\s+/).includes(className)) results.push(n);
+    } else if (selector.includes('[') && !selector.includes(' ')) {
+      const match = selector.match(/^\.([^\[]+)\[data-([^\]=]+)="([^\]]+)"\]$/);
+      if (match) {
+        const [, className, dataKey, dataVal] = match;
+        if (n.className &&
+            String(n.className).split(/\s+/).includes(className) &&
+            n.dataset && n.dataset[dataKey] === dataVal) results.push(n);
+      }
+    } else if (selector.includes(' ')) {
+      const parts = selector.split(' ').filter(Boolean);
+      if (parts.length === 2) {
+        const [parentSel, childSel] = parts;
+        const parent = n.parentElement;
+        if (parent && parent.className &&
+            String(parent.className).split(/\s+/).includes(parentSel.slice(1)) &&
+            n.className &&
+            String(n.className).split(/\s+/).includes(childSel.slice(1))) results.push(n);
+      }
+    }
+  }
+  return results;
+}
+
+function makeOption(value, label, parent) {
+  const opt = makeNode('option');
+  opt.value = value;
+  opt.textContent = label || value;
+  opt.parentElement = parent || null;
+  return opt;
+}
+
+function makeSelect(groups, selectedValue) {
+  const sel = {
+    id: 'modelSelect', tagName: 'SELECT', children: [], options: [], value: selectedValue || '',
+    querySelectorAll(selector) { return querySelectorAllImpl(this, selector); },
+    querySelector(selector) { return querySelectorAllImpl(this, selector)[0] || null; },
+  };
+  for (const group of groups || []) {
+    const og = makeNode('optgroup');
+    og.label = group.provider || '';
+    og.dataset.provider = group.provider_id || '';
+    og._ownerSelect = sel;
+    og.parentNode = sel;
+    if (group.extra_models) og.dataset.extraModels = JSON.stringify(group.extra_models);
+    for (const model of group.models || []) {
+      og.appendChild(makeOption(model.id, model.label || model.id, og));
+    }
+    sel.children.push(og);
+    sel.options.push(...og.children);
+  }
+  return sel;
+}
+
+function findInTree(dd, pred) {
+  const stack = [...(dd.children || [])];
+  while (stack.length) {
+    const n = stack.shift();
+    if (pred(n)) return n;
+    if (n.children && n.children.length) stack.push(...n.children);
+  }
+  return null;
+}
+
+const payload = JSON.parse(process.argv[3]);
+const dropdown = makeNode('div');
+dropdown.classList.add('open');
+const modelSelect = makeSelect(payload.groups, payload.selectedValue || payload.groups[0].models[0].id);
+
+function $(id) {
+  if (id === 'composerModelDropdown') return dropdown;
+  if (id === 'modelSelect') return modelSelect;
+  return null;
+}
+const window = { _configuredModelBadges: payload.configuredBadges || {} };
+const document = { createElement(tag) { return makeNode(tag); } };
+function esc(v) { return String(v || ''); }
+function t(key, ...args) {
+  if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
+  return key;
+}
+function li() { return 'x'; }
+function getModelLabel(v) { return String(v || ''); }
+function _providerFromModelValue(v) {
+  const value = String(v || '');
+  if (value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
+  return '';
+}
+function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
+function closeModelDropdown() {}
+function selectModelFromDropdown() {}
+
+for (const name of [
+  '_modelPickerContractRuns',
+  '_modelPickerCompareRuns',
+  '_modelPickerCompareContract',
+  '_modelPickerSortableId',
+  '_compareModelPickerEntries',
+  '_sortModelPickerEntries',
+  '_sortModelPickerOptions',
+  '_readModelOverflowData',
+  '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
+  'renderModelDropdown',
+]) {
+  eval(extractFunc(name));
+}
+
+eval(extractConst('_expandOverflowGroup'));
+
+renderModelDropdown();
+const showAllRow = findInTree(dropdown, node => String(node._innerHTML || '').includes('Show all'));
+showAllRow.onclick({ stopPropagation() {} });
+
+const groupWrapper = querySelectorAllImpl(dropdown, '.model-group-body[data-group="g-1"]')[0] || null;
+let sortError = '';
+let childDump = '';
+try {
+  if (groupWrapper) {
+    childDump = (groupWrapper.children || []).map(c => String(c.className || '') + '#' + String(c._innerHTML || '').slice(0, 60)).join(' || ');
+    if (typeof groupWrapper.querySelectorAll === 'function') {
+      const all = groupWrapper.querySelectorAll('.model-opt');
+      sortError = 'qs-ok:' + all.length + '|' + all.map(n => {
+        const mm = String(n._innerHTML || '').match(/model-opt-id">([^<]+)</);
+        return mm ? mm[1] : (String(n.className || '') + ':' + String(n._innerHTML || '').slice(0, 30));
+      }).join(',');
+    } else {
+      sortError = 'no-qsa';
+    }
+  }
+} catch (e) { sortError = String(e && e.message || e); }
+// The stub's innerHTML setter does not materialize child nodes, so extract
+// the on-screen id of each rendered row from its markup (esc'd) in DOM order.
+const rowOrder = [];
+if (groupWrapper) {
+  for (const child of (groupWrapper.children || [])) {
+    if (child.className && String(child.className).includes('model-opt')) {
+      const m = String(child._innerHTML || '').match(/<span class="model-opt-id">([^<]*)<\/span>/);
+      if (m) rowOrder.push(m[1]);
+    }
+  }
+}
+const expected = payload.expectedOrder || [];
+
+process.stdout.write(JSON.stringify({
+  rowOrder,
+  globallySorted: rowOrder.join('|') === expected.join('|'),
+  showAllGone: !findInTree(dropdown, node => String(node._innerHTML || '').includes('Show all')),
+  sortError,
+  childDump,
+}));
+"""
+
+
 @pytest.fixture(scope="module")
 def _driver_paths(tmp_path_factory):
     driver_dir = tmp_path_factory.mktemp("issue3691_drivers")
@@ -1360,11 +1742,14 @@ def _driver_paths(tmp_path_factory):
     endpoint_error_path.write_text(_INPLACE_ENDPOINT_ERROR_DRIVER, encoding="utf-8")
     preexisting_path = driver_dir / "driver_preexisting.js"
     preexisting_path.write_text(_INPLACE_PREEXISTING_DRIVER, encoding="utf-8")
+    global_sort_path = driver_dir / "driver_global_sort.js"
+    global_sort_path.write_text(_GLOBAL_SORT_DRIVER, encoding="utf-8")
     return {
         "dropdown": str(dropdown_path),
         "inplace": str(inplace_path),
         "endpoint_error": str(endpoint_error_path),
         "preexisting": str(preexisting_path),
+        "global_sort": str(global_sort_path),
     }
 
 
@@ -1679,3 +2064,51 @@ def test_runtime_inplace_expand_with_preexisting_options_reveals_them(_driver_pa
     assert out["showAllGone"], (
         "After expansion, the 'Show all' row should be gone even when some overflow options pre-existed"
     )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_show_more_expands_group_into_globally_sorted_order(_driver_paths):
+    """Expanding 'Show more' must leave the WHOLE group globally ordered.
+
+    #7528 round-3 blocker 1: the backend now sorts each provider's visible
+    (models) and overflow (extra_models) arrays separately, and the in-place
+    reveal appended overflow rows before the expander while visible rows kept
+    their slots — producing `[sorted visible z-*] [sorted overflow a-*]` until
+    a later full re-render. The reveal must re-sort all rows of the group so
+    the expanded list is immediately globally sorted.
+    """
+    payload = {
+        "groups": [
+            {
+                "provider": "Test",
+                "provider_id": "g-1",
+                "models": [
+                    {"id": "z-model", "label": "Z Model"},
+                    {"id": "y-model", "label": "Y Model"},
+                    {"id": "m-model", "label": "M Model"},
+                ],
+                "extra_models": [
+                    {"id": "a-model", "label": "A Model"},
+                    {"id": "b-model", "label": "B Model"},
+                    {"id": "c-model", "label": "C Model"},
+                ],
+            }
+        ],
+        "selectedValue": "m-model",
+        "expectedOrder": ["a-model", "b-model", "c-model", "m-model", "y-model", "z-model"],
+    }
+    result = subprocess.run(
+        [NODE, _driver_paths["global_sort"], str(REPO / "static" / "ui.js"), json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node global_sort driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+    out = json.loads(result.stdout)
+
+    assert out["showAllGone"], "Show more expander must be consumed after expansion"
+    assert out["rowOrder"] == payload["expectedOrder"], (
+        f"Expanded group not globally sorted: got {out['rowOrder']}, expected {payload['expectedOrder']}"
+    )
+    assert out["globallySorted"] is True

@@ -46,7 +46,7 @@ def test_copilot_provider_models_settings_do_not_replace_live_catalog(monkeypatc
     group = _provider_group(payload, "copilot")
     ids = [m["id"] for m in group["models"]]
 
-    assert ids == ["gpt-5.5", "claude-opus-4.8", "gpt-5.4"]
+    assert sorted(ids) == sorted(["gpt-5.5", "claude-opus-4.8", "gpt-5.4"])
 
 
 def test_unknown_duplicate_copilot_provider_config_is_not_rendered(monkeypatch, tmp_path):

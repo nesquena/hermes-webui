@@ -51,6 +51,106 @@ HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
 
+def _natural_model_id_key(_m):
+    """Locale-independent natural sort key for model ids (#7528 round-3).
+
+    Contract shared with the frontend ``_compareModelPickerEntries`` in
+    ``static/ui.js``: no localeCompare, no browser collation — both sides run
+    the identical token algorithm so ordering is deterministic across Python
+    and JS boundaries:
+
+    1. lowercase the id;
+    2. strip one provider-routing ``@...:`` segment when present (mirrors the
+       frontend ``_modelPickerSortableId`` — a bare lowercase+tokenize would
+       sort ``@custom:abc:z-model`` before ``@custom:abc:a-model`` only after
+       the full raw string, which diverges from the UI);
+    3. split into digit runs and text runs (``\\d+|[^\\d]+``);
+    4. digit run vs digit run: compare numeric value (strip leading zeros,
+       compare core length then core text), tie-break by raw run text so
+       ``007`` vs ``7`` is deterministic;
+    5. text run vs text run: compare Unicode code points;
+    6. digit run sorts before text run at the same position;
+    7. shorter run list sorts first when prefix-identical.
+
+    ``model-2`` sorts before ``model-10`` while plain lexical sort would emit
+    ``model-10`` first. The returned key is a comparable wrapper, so callers
+    keep using ``sort(key=_natural_model_id_key)`` unchanged.
+    """
+    return _NaturalModelKey(_natural_model_routing_stripped((_m or {}).get("id") or ""))
+
+
+def _natural_model_routing_stripped(value) -> str:
+    """Strip one leading ``@provider:`` routing segment, mirroring the
+    frontend's provider-aware ``_modelPickerSortableId`` fallback branch."""
+    _s = str(value or "")
+    if _s.startswith("@"):
+        colon = _s.find(":")
+        if colon >= 0:
+            _s = _s[colon + 1 :]
+    return _s
+
+
+def _natural_model_key_runs(text: str) -> list:
+    return re.findall(r"\d+|[^\d]+", str(text or "").lower())
+
+
+class _NaturalModelKey:
+    """Hash-free, comparison-only sort key implementing the shared contract."""
+
+    __slots__ = ("_runs",)
+
+    def __init__(self, value):
+        self._runs = _natural_model_key_runs(value)
+
+    @staticmethod
+    def _cmp_runs(a: str, b: str) -> int:
+        a_digit = a.isdigit()
+        b_digit = b.isdigit()
+        if a_digit and b_digit:
+            a_core = a.lstrip("0") or "0"
+            b_core = b.lstrip("0") or "0"
+            if len(a_core) != len(b_core):
+                return -1 if len(a_core) < len(b_core) else 1
+            if a_core != b_core:
+                return -1 if a_core < b_core else 1
+            if a != b:
+                return -1 if a < b else 1
+            return 0
+        if not a_digit and not b_digit:
+            for ca, cb in zip(a, b, strict=False):
+                if ord(ca) != ord(cb):
+                    return -1 if ord(ca) < ord(cb) else 1
+            if len(a) != len(b):
+                return -1 if len(a) < len(b) else 1
+            return 0
+        return -1 if a_digit else 1
+
+    def _cmp(self, other) -> int:
+        common = min(len(self._runs), len(other._runs))
+        for i in range(common):
+            c = self._cmp_runs(self._runs[i], other._runs[i])
+            if c:
+                return c
+        if len(self._runs) != len(other._runs):
+            return -1 if len(self._runs) < len(other._runs) else 1
+        return 0
+
+    def __lt__(self, other):
+        return self._cmp(other) < 0
+
+    def __le__(self, other):
+        return self._cmp(other) <= 0
+
+    def __gt__(self, other):
+        return self._cmp(other) > 0
+
+    def __ge__(self, other):
+        return self._cmp(other) >= 0
+
+    def __eq__(self, other):
+        return isinstance(other, _NaturalModelKey) and self._cmp(other) == 0
+
+
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a positive int from the environment, falling back on bad input.
 
@@ -7367,6 +7467,21 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         groups.sort(key=_group_sort_key)
 
+        # Alphabetize model entries within each provider group (natural,
+        # case-insensitive numeric order, mirroring the frontend
+        # localeCompare(numeric:true) comparator). Previously models kept
+        # insertion order from config/live /v1/models probes, so a group
+        # like newapi showed jd-* / sn-* / sub-* intermixed in scramble
+        # (user request 2026-09-05). Natural order keeps model-2 before
+        # model-10 at both the API and the UI boundary.
+        for _group in groups:
+            _group_models = _group.get("models")
+            if isinstance(_group_models, list) and len(_group_models) > 1:
+                try:
+                    _group_models.sort(key=_natural_model_id_key)
+                except Exception:
+                    pass
+
         model_aliases: dict[str, str] = {}
         try:
             raw_aliases = cfg.get("model", {}).get("aliases", {})
@@ -9967,6 +10082,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 return (2, pid)
             return (3, pid)
         groups.sort(key=_group_sort_key)
+
+        # Alphabetize model entries within each provider group (natural,
+        # case-insensitive numeric order). Mirrors the static catalog path
+        # (and the frontend localeCompare(numeric:true) comparator) so live
+        # /v1/models probe results are also sorted by model id, with
+        # model-2 before model-10 at every boundary (user request 2026-09-05).
+        for _group in groups:
+            _group_models = _group.get("models")
+            if isinstance(_group_models, list) and len(_group_models) > 1:
+                try:
+                    _group_models.sort(key=_natural_model_id_key)
+                except Exception:
+                    pass
 
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases: dict[str, str] = {}
