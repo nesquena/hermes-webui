@@ -61,6 +61,8 @@ const LOCALES = {
     saved_prompts_save_current: 'Save current input as prompt',
     saved_prompts_saved: 'Prompt saved',
     saved_prompts_delete: 'Delete prompt',
+    saved_prompts_delete_confirm: 'Click again to delete',
+    saved_prompts_deleted: 'Prompt deleted',
     saved_prompts_empty_input: 'Type a prompt to save first',
     context_block_name_default: 'Context',
     context_block_flush_aria: 'Context blocks will be included when you send',

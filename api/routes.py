@@ -12915,10 +12915,68 @@ def _load_saved_prompts() -> list:
         return []
 
 
+# One generation of backup kept next to the store: any destructive write (the
+# DELETE /api/prompts path in particular) leaves the previous contents behind in
+# `saved_prompts.json.bak`, so a mis-click is recoverable from disk. See #7644.
+_SAVED_PROMPTS_BACKUP_SUFFIX = ".bak"
+
+
+def _saved_prompts_backup_path(p: "Path | None" = None) -> "Path":
+    """Path of the one-generation backup of the saved-prompts store (#7644)."""
+    p = p if p is not None else _saved_prompts_path()
+    return p.with_name(p.name + _SAVED_PROMPTS_BACKUP_SUFFIX)
+
+
+def _write_text_atomic(path: "Path", text: str) -> None:
+    """Write *text* to *path* via temp file + fsync + os.replace.
+
+    `Path.write_text` truncates in place, so a crash or full disk mid-write
+    leaves the file truncated and the next `_load_saved_prompts()` (which
+    swallows parse errors and returns `[]`) silently drops every saved prompt.
+    Same tempfile+fsync+os.replace pattern as
+    `api.config._atomic_write_settings_text` and
+    `webui_session_db.WebUIJsonSessionDB._atomic_write`.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _save_saved_prompts(prompts: list) -> None:
+    """Persist the saved-prompt list, atomically and with one backup generation.
+
+    Two durability guarantees, both added for #7644:
+
+    * the write is atomic (temp file + fsync + os.replace), so a crash mid-write
+      can no longer truncate a store holding up to 200 prompts;
+    * the previous generation is copied to `saved_prompts.json.bak` *before* the
+      rewrite, so a DELETE — which used to be total and silent — can be undone
+      by copying the backup back over the store.
+    """
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        previous = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        previous = None
+    if previous:
+        backup = _saved_prompts_backup_path(p)
+        try:
+            _write_text_atomic(backup, previous)
+        except OSError as exc:
+            # Never let a backup failure block the write itself; the caller
+            # (POST/PUT/DELETE) still succeeds, but the loss of recovery is loud.
+            logger.warning("saved prompts: could not write backup %s: %s", backup, exc)
+    _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
@@ -17825,7 +17883,16 @@ def handle_delete(handler, parsed) -> bool:
         pid = str(body.get("id") or "").strip()
         if not pid:
             return bad(handler, "id is required")
-        prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
+        before = _load_saved_prompts()
+        prompts = [p for p in before if p.get("id") != pid]
+        if len(prompts) != len(before):
+            # #7644: deletions used to be total and silent. The store keeps the
+            # previous generation in .bak and the log records what went away.
+            logger.info(
+                "saved prompt deleted: id=%s (previous generation kept at %s)",
+                pid,
+                _saved_prompts_backup_path().name,
+            )
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True})
 
