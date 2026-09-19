@@ -426,6 +426,10 @@ global.renderSessionList = (opts) => {{
   renderCalls.push(opts);
   return Promise.resolve();
 }};
+function _resetSessionSelectionForScopeChange() {{
+  _selectedSessions.clear();
+  _sessionSelectMode = false;
+}}
 {fn_source}
 _setSessionSourceFilter('cli');
 console.log(JSON.stringify({{
@@ -488,6 +492,7 @@ global._purgeStaleInflightEntries = () => {{}};
 global._syncSessionAttentionSoundState = () => {{}};
 global._pruneLineageReportCacheToVisibleSessions = () => {{}};
 global._markPollingCompletionUnreadTransitions = () => {{}};
+global._pruneSessionSelectionToCurrentScope = () => false;
 global._recordSessionProfileCount = () => {{}};
 global._isSessionEffectivelyStreaming = () => false;
 global.startStreamingPoll = () => {{}};

@@ -288,6 +288,20 @@ EXPECT:
   - No session is auto-created
 FAIL: New session created, error thrown, or UI breaks.
 
+### T2.8: Batch Selection Controls Stay Docked
+SETUP: Enough conversations to make the session list scroll.
+STEPS:
+  1. Confirm **Select** is visible at the bottom of the Chat sidebar without scrolling the conversation list
+  2. Scroll the conversation list and click **Select**
+  3. Select one conversation, then use **Select all** and **Deselect all**
+EXPECT:
+  - **Select** stays docked below the scrolling list
+  - Select mode replaces it with one bottom toolbar containing Cancel, Select all/Deselect all, selected count, Archive, Move, and Delete
+  - The toolbar remains visible with zero selected; Archive, Move, and Delete are disabled until a conversation is selected
+  - Scrolling does not move the toolbar or cover the last conversation row
+  - The same controls fit without horizontal clipping in the open mobile sidebar
+FAIL: Entry or actions require scrolling to the top/bottom, disappear at zero selected, cover rows, or overflow the sidebar.
+
 ---
 
 ## Section 3: Model Selection
