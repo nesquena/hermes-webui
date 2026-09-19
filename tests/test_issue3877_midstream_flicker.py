@@ -102,8 +102,7 @@ def test_reattach_swaps_when_preserved_ties_or_beats_rebuilt():
     original node (the residual "disappears, then reappears" frame). On a tie the
     preserved node wins because it holds the live parser reference and nothing is lost.
     """
-    body = _function_body(UI_JS, "renderMessages")
-    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    reattach = _function_body(UI_JS, "_reconcilePreservedLiveTurn")
     assert reattach, "the #3877 re-attach block is missing"
     # Length comparison still gates the swap...
     assert "_liveAssistantSegmentTextLength" in reattach
@@ -125,8 +124,7 @@ def test_reattach_swaps_at_segment_level_to_preserve_rebuilt_structure():
     caught up — the whole preserved turn is restored so nothing the user saw vanishes
     for a frame. Whole-turn replace is also the fallback when there's no live segment
     to target."""
-    body = _function_body(UI_JS, "renderMessages")
-    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    reattach = _function_body(UI_JS, "_reconcilePreservedLiveTurn")
     # Structural-count comparison routes segment-swap vs whole-turn restore.
     assert "_structuralCount" in reattach
     assert "_rebuiltStructure>=_preservedStructure" in reattach, (
@@ -160,8 +158,7 @@ def test_reattach_targets_the_parser_owned_tail_segment_not_the_first():
     one whose data-live-segment-seq matches the rebuilt tail — not the first via a bare
     querySelector(). Picking the first would move the wrong segment and leave the
     parser-owned tail detached (Codex CORE finding on the #3877-reopen fix)."""
-    body = _function_body(UI_JS, "renderMessages")
-    reattach = body[body.find("Re-attach the preserved live turn (#3877)") :]
+    reattach = _function_body(UI_JS, "_reconcilePreservedLiveTurn")
     # Preserved segment is chosen from querySelectorAll (tail), not querySelector (first).
     assert "_preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant=\"1\"]')" in reattach
     assert "_preservedSegs[_preservedSegs.length-1]" in reattach, (
@@ -181,6 +178,12 @@ def test_reattach_runs_after_rebuild_loop():
     compare against / replace) but is still inside renderMessages."""
     body = _function_body(UI_JS, "renderMessages")
     capture_idx = body.find("_preservedLiveTurn=null")
-    reattach_idx = body.find("Re-attach the preserved live turn (#3877)")
-    assert capture_idx != -1 and reattach_idx != -1
-    assert reattach_idx > capture_idx, "re-attach must come after the capture/rebuild"
+    rebuild_idx = body.find("inner.innerHTML=''", capture_idx)
+    call = "_reconcilePreservedLiveTurn(inner,_preservedLiveTurn);"
+    owned_idx = body.find(call)
+    ordinary_idx = body.find(call, owned_idx + len(call))
+    assert capture_idx != -1 and rebuild_idx > capture_idx
+    assert owned_idx > rebuild_idx, "owned reconciliation must follow the rebuild"
+    assert ordinary_idx > owned_idx, "ordinary rendering must share reconciliation"
+    commit_idx = body.find("_commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);")
+    assert owned_idx < commit_idx < ordinary_idx, "reconcile staged content before commit"

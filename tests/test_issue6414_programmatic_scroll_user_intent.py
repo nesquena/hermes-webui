@@ -121,8 +121,8 @@ def test_small_upward_wheel_does_not_unpin_after_programmatic_guard_stales():
     assert result["cancels"] == 0
 
 
-def test_older_message_fallback_executes_real_slow_render_writer_contract():
-    """Exercise the production fallback, rather than retyping its ownership edge."""
+def test_older_message_owned_commit_stamps_after_slow_render():
+    """Execute prepend handoff and its real shared writer after a slow render."""
     script = f"""
 let now = 1000;
 const performance = {{ now: () => now }};
@@ -131,6 +131,7 @@ let writeObservation = null;
 const container = {{
   scrollHeight: 1000,
   clientHeight: 300,
+  getBoundingClientRect() {{ return {{top:0}}; }},
   get scrollTop() {{ return storedTop; }},
   set scrollTop(value) {{
     storedTop = value;
@@ -175,12 +176,21 @@ function _syncToolCallsForLoadedMessages() {{}}
 function _messageIsRenderable() {{ return true; }}
 function msgContent(message) {{ return message && message.content; }}
 function _currentMessageRenderWindowSize() {{ return _messageRenderWindowSize; }}
-function renderMessages() {{ now += 200; container.scrollHeight = 1300; }}
+let contentTop=100;
+const row={{isConnected:true,getBoundingClientRect(){{return {{top:contentTop-container.scrollTop}};}}}};
+function _messageWindowSnapshot() {{return {{node:row,offset:row.getBoundingClientRect().top}};}}
+function _deferClearProgrammaticScroll() {{}}
+function renderMessages(options) {{
+  now += 200; contentTop += 300; container.scrollHeight = 1300;
+  if(!options._ownedPrepend) throw Error('prepend must use shared window transaction');
+  _restoreMessageWindowReader(container,options._prependAnchor);
+}}
 function _captureMessageViewportAnchor() {{ return null; }}
 function _restoreMessageViewportAnchor() {{ return false; }}
 function _messageVirtualPrependedHeightDelta() {{ return null; }}
 function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
+{_function_body('_restoreMessageWindowReader')}
 {_function_body('_loadOlderMessages', SESSIONS_JS)}
 
 await _loadOlderMessages();
@@ -206,7 +216,8 @@ def test_all_programmatic_scroll_writers_stamp_the_shared_freshness_clock():
     """Keep UI and session writers from silently drifting apart."""
     for source_name, source in (("ui.js", UI_JS), ("sessions.js", SESSIONS_JS)):
         writers = list(re.finditer(r"_programmaticScroll\s*=\s*true\s*;", source))
-        assert writers, f"{source_name} has no programmatic-scroll writers"
+        if source_name == "ui.js":
+            assert writers, "the shared UI owner must contain position writers"
         for writer in writers:
             tail = source[writer.end() : writer.end() + 160]
             assert re.match(

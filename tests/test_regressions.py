@@ -791,9 +791,9 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     instead of clearing #msgInner to an empty transcript.
     """
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
-    fn_start = ui_src.find("function renderMessages")
-    assert fn_start >= 0, "renderMessages() not found in ui.js"
-    fn_body = ui_src[fn_start:fn_start + 1400]
+    from tests.test_ui_tool_call_cleanup import _function_body
+
+    fn_body = _function_body(ui_src, "renderMessages")
 
     compact = re.sub(r"\s+", "", fn_body)
     assert (

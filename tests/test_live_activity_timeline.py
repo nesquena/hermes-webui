@@ -157,7 +157,9 @@ def test_message_tool_metadata_path_keeps_live_burst_metadata_available():
 def test_message_tool_metadata_empty_assistant_tools_reuse_previous_visible_anchor():
     assert "function _assistantToolAnchorIdxForMessage(messages, rawIdx)" in UI_JS
     render_fn = UI_JS.split("const derived=[];", 1)[1].split("if(derived.length) S.toolCalls=derived;", 1)[0]
-    assert "const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);" in render_fn
+    # Folded modes retain the visible-progress anchor; transparent cards own
+    # their declaring source instead of moving when older turns are prepended.
+    assert "const assistantToolAnchorIdx=isTransparentStream()?rawIdx:_assistantToolAnchorIdxForMessage(S.messages,rawIdx);" in render_fn
     assert "assistant_msg_idx:assistantToolAnchorIdx" in render_fn
 
     assert NODE, "node not on PATH"

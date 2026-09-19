@@ -401,18 +401,24 @@ console.log(JSON.stringify({blank, visible}));
     assert metrics["visible"] is True
 
 
-def test_render_messages_has_one_shot_virtual_blank_viewport_fallback():
+def test_virtual_blank_recovery_leaves_valid_nonvirtual_and_preserved_views_alone():
     js = UI_JS_PATH.read_text(encoding="utf-8")
-    render_start = js.index("function renderMessages(options)")
-    render_end = js.index("function _toolDisplayName", render_start)
-    render_body = js[render_start:render_end]
-
-    assert "const virtualFallback=!!(options&&options._virtualFallback);" in render_body
-    assert "const virtualWindow=virtualFallback" in render_body
-    assert "if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;" in render_body
-    assert "if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){" in js
-    assert "_sessionHtmlCache.delete(_sessionHtmlCacheSid);" in js
-    assert "renderMessages({preserveScroll:true,_virtualFallback:true});" in js
+    source = _extract_func_script(js) + """
+let schedules = 0;
+let visible = false;
+const S = {session:{session_id:'one'}};
+const _sessionHtmlCacheSid = 'one';
+const _sessionHtmlCache = {delete(){throw Error('unexpected cache eviction');}};
+function _messageViewportIntersectsRenderedRow(){return visible;}
+function _scheduleMessageVirtualizedRender(){schedules++;}
+eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
+const ordinary = _maybeRecoverVirtualizedBlankViewport({},false,{virtualized:false});
+const preserving = _maybeRecoverVirtualizedBlankViewport({},true,{virtualized:false});
+visible=true;
+const healthy = _maybeRecoverVirtualizedBlankViewport({},true,{virtualized:true});
+console.log(JSON.stringify({ordinary,preserving,healthy,schedules}));
+"""
+    assert json.loads(_run_node(source)) == dict(ordinary=False,preserving=False,healthy=False,schedules=0)
 
 
 def test_virtual_blank_viewport_recovery_evicts_stale_cache_before_fallback():
@@ -426,7 +432,7 @@ const _sessionHtmlCache = {
 let _sessionHtmlCacheSid = 'sid-123';
 const S = { session: { session_id: 'sid-123' } };
 function _messageViewportIntersectsRenderedRow(){ return false; }
-function renderMessages(options){ renderCalls.push(options); }
+function _scheduleMessageVirtualizedRender(force){ renderCalls.push(force); }
 eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
 const recovered = _maybeRecoverVirtualizedBlankViewport({preserveScroll:false, someFlag:true}, true, {virtualized:true});
 console.log(JSON.stringify({recovered, deletes, renderCalls}));
@@ -434,7 +440,7 @@ console.log(JSON.stringify({recovered, deletes, renderCalls}));
     metrics = json.loads(_run_node(source))
     assert metrics["recovered"] is True
     assert metrics["deletes"] == ["sid-123"]
-    assert metrics["renderCalls"] == [{"preserveScroll": True, "_virtualFallback": True}]
+    assert metrics["renderCalls"] == [True]
 
 
 def test_same_frame_restore_nudges_virtual_window_when_anchor_row_is_missing():
@@ -558,6 +564,7 @@ let _messageVirtualEstimatedRowHeight = 140;
 function _syncMessageVirtualHeightCache(){ /* no-op for the test */ }
 function $(id){ return {scrollTop: 5000, clientHeight: 720}; }
 function _messageVirtualRoleForEntry(){ return 'default'; }
+const S={busy:false};
 const window = {};
 eval(extractFunc('_messageVirtualWindow'));
 eval(extractFunc('_currentMessageVirtualWindow'));
@@ -676,7 +683,7 @@ const metrics = _messageVirtualWindow({
   total: 3,
   scrollTop: 0,
   viewportHeight: 600,
-  heights: [0, 0, 0],
+  heights: new Array(3),  // Unmeasured; a numeric zero is a measured collapsed row.
   defaultHeight: 140,
   roleForIdx: (idx) => {
     const entry = visWithIdx[idx];
@@ -837,7 +844,7 @@ const win = _messageVirtualWindow({
   total: 3,
   scrollTop: 0,
   viewportHeight: 600,
-  heights: [0, 0, 0],
+  heights: new Array(3),  // Unmeasured; a numeric zero is a measured collapsed row.
   defaultHeight: 140,
   roleForIdx: idx => _messageVirtualRoleForEntry(visWithIdx[idx]),
   bufferPx: 0,
@@ -1060,20 +1067,27 @@ console.log(JSON.stringify({
     )
 
 
-def test_virtualized_render_uses_compensation_helper():
-    """_scheduleMessageVirtualizedRender must wrap renderMessages with _compensateScrollForMeasurementDelta."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    start = js.index("function _scheduleMessageVirtualizedRender(")
-    end = js.index("\n// ──", start)
-    body = js[start:end]
-
-    assert "_compensateScrollForMeasurementDelta" in body, (
-        "_scheduleMessageVirtualizedRender must call "
-        "_compensateScrollForMeasurementDelta to compensate scroll after measurement-driven rerenders"
-    )
-    assert "renderMessages(" in body, (
-        "the compensation helper should wrap the actual renderMessages call"
-    )
+def test_virtualized_render_samples_live_window_once_at_commit():
+    """A queued window update uses current geometry, not request-time state."""
+    source = _extract_func_script(UI_JS_PATH.read_text()) + """
+let _messageVirtualWindowKey='old', _messageVirtualScrollRaf=0;
+let revision=1, raf, calls=[];
+function $(){return {};}
+function _getVisibleMessagesWithIdx(){return [revision];}
+function _currentMessageVirtualWindow(entries){return {virtualized:true,key:entries[0]};}
+function _messageVirtualKeepTailCount(){return 50;}
+function _messageVirtualWindowKeyFor(w){return w.key;}
+function _settleMessageWindowReader(){}
+function requestAnimationFrame(cb){raf=cb;return 1;}
+function renderMessages(options){calls.push({revision,options});}
+eval(extractFunc('_scheduleMessageVirtualizedRender'));
+_scheduleMessageVirtualizedRender();
+revision=2;
+_scheduleMessageVirtualizedRender();
+raf();
+console.log(JSON.stringify({calls,pending:_messageVirtualScrollRaf}));
+"""
+    assert json.loads(_run_node(source)) == dict(calls=[dict(revision=2,options=dict(preserveScroll=True,_windowOnly=True))],pending=0)
 
 
 def test_scroll_listener_guards_programmatic_scroll_before_marking_active():
