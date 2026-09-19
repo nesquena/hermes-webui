@@ -177,7 +177,11 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
     assert_contains_all(
         MESSAGES_JS,
         [
-            "_renderStreamingFadeMarkdown(displayText)",
+            # #7040 round 9: the fade path takes the RAW text (it projects
+            # internally so it can also record canonical state); every other
+            # live sink takes the already-projected value.
+            "_renderStreamingFadeMarkdown(_rawDisplayText)",
+            "const displayText = _projectLiveDisplayText(_rawDisplayText)",
             "_smdWrite(displayText)",
             "?33:66",
         ],
@@ -453,6 +457,12 @@ def test_transparent_stream_hidden_body_appends_plain_text_only():
     script = (
         function_block(MESSAGES_JS, "_renderStreamingFadeMarkdown")
         + r"""
+// #7040: _renderStreamingFadeMarkdown now routes raw text through the
+// large-transcript display projection before handing it to the fade
+// renderer. That projection is covered by its own dedicated tests
+// (test_transcript_display_projection.py) -- stub it here as identity so
+// this test keeps exercising fade-playout behavior in isolation.
+function _projectLiveDisplayText(t){ return t; }
 let _streamFadeDomText='';
 let _smdParser=null;
 let _smdReconnect=false;
@@ -490,20 +500,33 @@ if(!assistantBody.classList.added.includes('stream-fade-active')) throw new Erro
 def test_transparent_anchor_prose_receives_revealed_fade_text():
     render_section = slice_between(
         MESSAGES_JS,
-        "const displayText = segmentStart===0",
+        "const _rawDisplayText = segmentStart===0",
         "scrollIfPinned();",
     )
     assert_contains_all(
         render_section,
         [
+            "const displayText = _projectLiveDisplayText(_rawDisplayText)",
             "let anchorProcessText=displayText",
             "if(assistantBody){",
-            "const caughtUp=_renderStreamingFadeMarkdown(displayText)",
+            "const caughtUp=_renderStreamingFadeMarkdown(_rawDisplayText)",
             "if(_shouldUseLiveProseFade())",
             "anchorProcessText=_streamFadeDomText||''",
             "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText)",
         ],
     )
+    # #7040 round 9: EVERY live prose sink in this schedule must receive the
+    # projected value, never the raw accumulated text. Guard each sink
+    # explicitly so a future edit cannot silently reintroduce a raw write on
+    # the default/no-fade, reduced-motion, or renderMd-fallback path.
+    assert "_smdWrite(displayText)" in render_section
+    assert "renderMd(displayText)" in render_section
+    assert "_smdWrite(_rawDisplayText)" not in render_section
+    assert "renderMd(_rawDisplayText)" not in render_section
+    assert "esc(_rawDisplayText)" not in render_section
+    # The no-fade branch must also record canonical text so Copy/TTS/export can
+    # recover the unprojected value mid-stream in reduced-motion mode.
+    assert "assistantBody._canonicalRawText=_rawDisplayText" in render_section
     assert render_section.index("let anchorProcessText=displayText") < render_section.index("if(assistantBody){")
     assert render_section.index("anchorProcessText=_streamFadeDomText||''") < render_section.index(
         "_upsertAnchorProcessProse(anchorProcessText)"

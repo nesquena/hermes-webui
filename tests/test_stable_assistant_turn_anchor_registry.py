@@ -1490,7 +1490,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     assert "projectAssistantTurnAnchorActivityScene" in src
 
     tool_body = _event_listener_body(src, "tool")
-    assert tool_body.index("upsertLiveToolCall(d,'start')") < tool_body.index(
+    assert tool_body.index("upsertLiveToolCall(d,'start', e&&e.lastEventId)") < tool_body.index(
         "_applyToAnchor('tool'"
     )
     assert tool_body.index("_upsertAnchorProcessProse(pendingDisplayTextBeforeTool") < tool_body.index(
