@@ -1186,9 +1186,9 @@
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsVirtualizeTranscript" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_virtualize_transcript">Virtualize long transcripts (experimental)</span>
+                <span data-i18n="settings_label_virtualize_transcript">Virtualize long transcripts</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_virtualize_transcript">Experimental. Renders only the visible portion of very long chat transcripts (over 80 messages) to speed up scrolling. Off by default because it can cause scroll flicker on long sessions with large tool-call blocks. Turn it on to try it; leave it off for the full transcript to render at once (and so the browser's Find (Ctrl+F) matches the whole conversation).</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_virtualize_transcript">Render only the visible portion of very long chat transcripts (over 80 messages) for smoother scrolling. On by default. Turn this off if you see any rendering or scroll issues, or want the browser's Find (Ctrl+F) to match the whole conversation — the full transcript will render at once.</div>
             </div>
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
