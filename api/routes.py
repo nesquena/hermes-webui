@@ -13954,6 +13954,35 @@ def _handle_session_get(handler, parsed) -> bool:
         return j(handler, {"session": public_session_projection(sess)})
 
 
+def _read_instance_label() -> str:
+    """#7611: installation-scoped instance label used to distinguish
+    multi-instance browser tabs and desktop windows. Order of
+    precedence: env var ``HERMES_WEBUI_INSTANCE_NAME``, then
+    ``config.yaml``'s top-level ``instance_name`` or nested
+    ``webui.instance_name``. The label is installation-scoped —
+    never editable from the WebUI settings UI (a per-profile
+    value would defeat the multi-instance use case because the
+    profile name is already shown in the profile chip and
+    sidebar). An empty label leaves the default title untouched.
+    """
+    label = (os.getenv("HERMES_WEBUI_INSTANCE_NAME") or "").strip()
+    if label:
+        return label
+    try:
+        from api.config import get_config
+        cfg = get_config() or {}
+        candidates = (
+            cfg.get("instance_name"),
+            (cfg.get("webui") or {}).get("instance_name") if isinstance(cfg.get("webui"), dict) else None,
+        )
+        for cand in candidates:
+            if isinstance(cand, str) and cand.strip():
+                return cand.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -14436,6 +14465,12 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/settings":
         settings = load_settings()
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
+        # #7611: surface the installation-scoped instance label so the
+        # frontend can prefix the browser/desktop title without
+        # overloading the bot_name or profile identity. The label
+        # is read-only from the WebUI; the value comes from the
+        # env var or config.yaml only.
+        settings["instance_label"] = _read_instance_label()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
         settings.setdefault("max_tokens", None)

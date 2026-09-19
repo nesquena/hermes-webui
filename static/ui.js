@@ -11506,8 +11506,14 @@ function _topbarMessageMetaText(){
   return t('n_messages',loadedCount);
 }
 function syncTopbar(){
+  // #7611: install-scoped instance label prefix for browser tab
+  // and desktop window title. Empty label leaves the default
+  // title untouched; this helper is shared by every document.title
+  // assignment below so the empty-set behavior is consistent.
+  const _instanceLabel=(window._instanceLabel||'').trim();
+  const _titledName=(base) => _instanceLabel ? (_instanceLabel+' \u2022 '+base) : base;
   if(!S.session){
-    document.title=assistantDisplayName();
+    document.title=_titledName(assistantDisplayName());
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
@@ -11529,7 +11535,7 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
+  document.title=_titledName(sessionTitle+' \u2014 '+assistantDisplayName());
   if(typeof activeSessionHasPendingPromptAttention==='function'&&activeSessionHasPendingPromptAttention()){
     document.title='● '+document.title;
   }

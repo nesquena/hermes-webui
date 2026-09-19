@@ -3068,7 +3068,16 @@ function applyBotName(){
   // The saved assistant name applies to the default profile only.
   // Non-default profiles use their own profile names.
   const name=assistantDisplayName();
-  if(!S.session) document.title=name;
+  // #7611: prefix the browser/desktop title with the
+  // installation-scoped instance label so multiple Hermes
+  // deployments (Production / Staging / Dev) are visually
+  // distinguishable in the tab strip and the Tauri desktop
+  // window title. The label is read-only and never edits
+  // bot_name or the profile identity; an empty label leaves the
+  // default title untouched.
+  const _instanceLabel=(window._instanceLabel||'').trim();
+  const _titledName=_instanceLabel ? (_instanceLabel+' \u2022 '+name) : name;
+  if(!S.session) document.title=_titledName;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
   const logo=document.querySelector('.sidebar-header .logo');
@@ -3377,6 +3386,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
+    // #7611: installation-scoped instance label. Empty string
+    // means "unset", which leaves the default title unchanged.
+    window._instanceLabel=(s.instance_label||'').trim();
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
       window._defaultModel=s.default_model;
