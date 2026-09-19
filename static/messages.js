@@ -4360,6 +4360,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
         }
+        // #5747 re-gate (F3): the settled snapshot is a REBUILT copy of the live
+        // call, so it must inherit what the live tool_complete handler recorded:
+        // the mutation-consumption flag AND the identity the sink was keyed by.
+        // Without the identity the settled replay's tid net cannot recognize the
+        // event and re-adds a mutation the live path already consumed (a second
+        // reload). Carried for keyed and for ordered-unkeyed matches alike — both
+        // are the same logical event.
+        const liveTid=live.tid||live.id||live.tool_call_id||live.tool_use_id||live.call_id||'';
+        if(liveTid&&!next.tid) next.tid=liveTid;
+        if(live._workspaceMutationConsumed) next._workspaceMutationConsumed=true;
       }
       return next;
     });
@@ -6304,7 +6314,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>tc);
+            // #5747 re-gate (F3): do NOT pre-overwrite S.toolCalls here — the
+            // merge below reads it as the LIVE source for burst/duration/consumed
+            // metadata. It replaces S.toolCalls itself.
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));

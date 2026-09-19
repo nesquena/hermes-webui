@@ -108,7 +108,9 @@ def test_workspace_files_and_artifacts_paths_stay_outside_todo_render_change():
     assert artifacts_start != -1
     assert "renderSessionArtifacts()" in src[:todos_start]
     assert "const ARTIFACT_MUTATION_TOOLS = new Set" in src[artifacts_start:]
-    assert "function _normalizeArtifactPath(path)" in src[artifacts_start:]
+    # Signature extended in #5747: optional {allowBare} opts for structured tool
+    # args (extension-less root files like Makefile).
+    assert "function _normalizeArtifactPath(path" in src[artifacts_start:]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for shared todo renderer behavior test")
