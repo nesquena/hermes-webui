@@ -28,7 +28,14 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
-from api.subprocess_utils import windows_hide_flags
+from api.subprocess_utils import (
+    clean_git_env,
+    noninteractive_git_argv,
+    repository_git_proxy_blocks,
+    sanitize_git_diagnostic,
+    trusted_git_credential_helpers,
+    windows_hide_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +55,7 @@ CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
-_CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
-_GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
 _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'could not resolve host',
     'failed to connect',
@@ -113,15 +118,7 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     but strip URL userinfo, common GitHub token shapes, and secret-looking query
     parameter values before any message reaches the update-check API/UI.
     """
-    if not output:
-        return ""
-    sanitized = _CREDENTIAL_IN_URL_RE.sub(r"\1<redacted>@", str(output))
-    sanitized = _GITHUB_TOKEN_RE.sub("<redacted>", sanitized)
-    sanitized = _QUERY_SECRET_RE.sub(r"\1<redacted>", sanitized)
-    sanitized = sanitized.strip()
-    if len(sanitized) > limit:
-        sanitized = sanitized[:limit].rstrip() + "…"
-    return sanitized
+    return sanitize_git_diagnostic(output, limit=limit)
 
 
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
@@ -233,19 +230,40 @@ def _run_git(args, cwd, timeout=10):
 
     On failure, returns stderr (or stdout as fallback) so callers can
     surface actionable git error messages instead of empty strings.
+
+    The child gets a scrubbed environment (``clean_git_env``). Update checks run
+    unattended, so inherited desktop askpass helpers must not turn a remote 401
+    into a credential dialog the user never asked for. Credential helpers from
+    system and user config remain available; checkout config cannot add one.
     """
     git_executable = _resolve_git_executable()
     if not git_executable:
         return 'git executable not found', False
+    env = clean_git_env()
+    if repository_git_proxy_blocks(args, cwd, env, executable=git_executable):
+        return 'repository-configured core.gitProxy is not allowed for git:// update remotes', False
+    is_network_command = bool(args and args[0] in {'fetch', 'pull', 'push', 'ls-remote'})
+    credential_helpers = ()
+    if is_network_command:
+        credential_helpers = trusted_git_credential_helpers(
+            cwd,
+            env,
+            executable=git_executable,
+        )
     try:
         r = subprocess.run(
-            [git_executable] + args,
+            noninteractive_git_argv(
+                args,
+                executable=git_executable,
+                credential_helpers=credential_helpers,
+            ) if is_network_command else [git_executable] + args,
             cwd=str(cwd),
             capture_output=True,
             text=True,
             timeout=timeout,
             encoding='utf-8',
             errors='replace',
+            env=env,
             creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git

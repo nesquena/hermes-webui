@@ -95,5 +95,6 @@ failures include authentication errors, missing upstream branches, conflicts, di
 refs, missing Git binaries, and timeouts.
 
 Repository-local credential helpers and askpass commands are disabled for workspace Git operations.
-Private HTTPS remotes that depend on a stored credential helper may fail to fetch, pull, or push from
-WebUI; use an SSH remote or another externally authenticated transport for those workflows.
+Credential helpers from user and system Git config remain available for private HTTPS remotes.
+SSH remotes can use the inherited SSH agent, but unattended operations do not open password,
+passphrase, or host-key prompts.

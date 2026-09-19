@@ -221,6 +221,40 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## Update check reports a Git authentication or fetch failure
+
+**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
+`could not read Username`. No terminal or desktop credential prompt appears.
+
+**Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
+config injection settings; disables checkout-controlled askpass and credential helpers; and forces
+SSH batch mode. Credential helpers from trusted user and system Git config remain available, as does
+an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
+to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
+supported. Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
+transport prefix names a helper command.
+
+**Diagnostic.** Run the project diagnostic for each checkout named by the update status:
+
+```bash
+python3 scripts/diagnose_update_git.py /path/to/checkout
+```
+
+The diagnostic reads the origin, accepts only HTTP(S) and SSH remote forms, then probes the captured
+URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
+reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
+checkout paths, origin paths, URL credentials, tokens, and secret query values.
+
+**Fix.** Configure a non-interactive user/system credential helper for a private HTTPS origin, or use
+an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
+it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check.
+
+**When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
+environment but the update check still fails, or if either path opens a credential prompt. Include
+only sanitized hosts and errors; do not include credential-bearing URLs, tokens, or private paths.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

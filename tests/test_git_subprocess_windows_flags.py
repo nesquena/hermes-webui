@@ -33,6 +33,8 @@ def _is_subprocess_run(node: ast.Call) -> bool:
 
 def _git_argv_kind(node: ast.AST) -> str | None:
     """Recognize the production argv forms used by direct Git subprocess calls."""
+    if isinstance(node, ast.IfExp):
+        return _git_argv_kind(node.body) or _git_argv_kind(node.orelse)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _git_argv_kind(node.left)
     if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
@@ -44,7 +46,7 @@ def _git_argv_kind(node: ast.AST) -> str | None:
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "_hardened_git_argv"
+        and node.func.id in {"_hardened_git_argv", "noninteractive_git_argv"}
     ):
         return node.func.id
     return None
