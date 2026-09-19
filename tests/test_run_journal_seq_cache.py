@@ -61,6 +61,52 @@ def test_writer_and_free_function_share_one_gapless_sequence(tmp_path):
     assert file_seqs == [1, 2, 3, 4]
 
 
+def test_writer_and_free_append_keep_physical_sequence_order(tmp_path, monkeypatch):
+    """A direct append cannot overtake a writer after it reserves its seq."""
+    writer = run_journal.RunJournalWriter(
+        "sess_order", "run_order", session_dir=tmp_path
+    )
+    real_append = run_journal.append_run_event
+    writer_at_append = threading.Event()
+    release_writer = threading.Event()
+    errors: list[BaseException] = []
+
+    def controlled_append(*args, **kwargs):
+        if threading.current_thread().name == "journal-writer":
+            writer_at_append.set()
+            if not release_writer.wait(timeout=10):
+                raise TimeoutError("writer interleave was not released")
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "append_run_event", controlled_append)
+
+    def write_from_writer():
+        try:
+            writer.append_sse_event("token", {"text": "writer"})
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=write_from_writer, name="journal-writer")
+    thread.start()
+    assert writer_at_append.wait(timeout=10), "writer never reached append"
+    run_journal.append_run_event(
+        "sess_order",
+        "run_order",
+        "steer_delivered",
+        {"text": "direct"},
+        session_dir=tmp_path,
+    )
+    release_writer.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert errors == []
+    journal = run_journal.read_run_events(
+        "sess_order", "run_order", session_dir=tmp_path
+    )
+    assert [event["seq"] for event in journal["events"]] == [1, 2]
+
+
 def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
     # A caller-supplied seq must push the cache forward so a later cache append
     # does not collide with it.
@@ -71,6 +117,238 @@ def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
         "sess_expl", "run_expl", "token", {"text": "y"}, session_dir=tmp_path
     )
     assert nxt["seq"] == 6
+
+
+def test_accept_transaction_does_not_call_runtime_after_terminal(tmp_path):
+    run_journal.append_run_event(
+        "sess_terminal", "run_terminal", "done", {"session": {}}, session_dir=tmp_path
+    )
+    writer = run_journal.RunJournalWriter(
+        "sess_terminal", "run_terminal", session_dir=tmp_path
+    )
+    called = []
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "too late"},
+        lambda: called.append(True) or True,
+    )
+
+    assert (accepted, event, reason, error) == (False, None, "terminal", None)
+    assert called == []
+    journal = run_journal.read_run_events(
+        "sess_terminal", "run_terminal", session_dir=tmp_path
+    )
+    assert [item["event"] for item in journal["events"]] == ["done"]
+
+
+def test_accept_transaction_orders_delivery_before_concurrent_terminal(tmp_path):
+    writer = run_journal.RunJournalWriter(
+        "sess_accept", "run_accept", session_dir=tmp_path
+    )
+    terminal_started = threading.Event()
+    terminal_finished = threading.Event()
+
+    def append_terminal():
+        terminal_started.set()
+        run_journal.append_run_event(
+            "sess_accept",
+            "run_accept",
+            "done",
+            {"session": {}},
+            session_dir=tmp_path,
+        )
+        terminal_finished.set()
+
+    def accept():
+        thread = threading.Thread(target=append_terminal)
+        thread.start()
+        assert terminal_started.wait(timeout=10)
+        assert not terminal_finished.wait(timeout=0.1), "terminal bypassed transaction lock"
+        return True
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "in time"},
+        accept,
+    )
+    assert accepted is True
+    assert event is not None
+    assert reason is None
+    assert error is None
+    assert terminal_finished.wait(timeout=10)
+
+    journal = run_journal.read_run_events(
+        "sess_accept", "run_accept", session_dir=tmp_path
+    )
+    assert [item["event"] for item in journal["events"]] == [
+        "steer_delivered",
+        "done",
+    ]
+
+
+def test_accept_transaction_publishes_before_concurrent_terminal(tmp_path):
+    writer = run_journal.RunJournalWriter(
+        "sess_publish", "run_publish", session_dir=tmp_path
+    )
+    terminal_started = threading.Event()
+    terminal_finished = threading.Event()
+    published = []
+
+    def append_terminal():
+        terminal_started.set()
+        run_journal.append_run_event(
+            "sess_publish",
+            "run_publish",
+            "done",
+            {"session": {}},
+            session_dir=tmp_path,
+        )
+        terminal_finished.set()
+
+    def accept():
+        threading.Thread(target=append_terminal).start()
+        assert terminal_started.wait(timeout=10)
+        assert not terminal_finished.wait(timeout=0.1)
+        return True
+
+    def publish(event):
+        # Publication is in the same ordering domain as append: the terminal
+        # writer cannot commit (and then enqueue) before this callback runs.
+        assert not terminal_finished.is_set()
+        published.append(event["event_id"])
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "publish first"},
+        accept,
+        publish=publish,
+    )
+    assert accepted is True and event is not None and reason is None and error is None
+    assert published == [event["event_id"]]
+    assert terminal_finished.wait(timeout=10)
+
+
+def test_normal_sse_publish_cannot_be_overtaken_by_steer(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_total_order", "run_total_order", session_dir=tmp_path
+    )
+    normal_publish_started = threading.Event()
+    release_normal_publish = threading.Event()
+    steer_finished = threading.Event()
+    published = []
+    errors: list[BaseException] = []
+
+    def publish_normal(event):
+        published.append(event["event_id"])
+        normal_publish_started.set()
+        if not release_normal_publish.wait(timeout=10):
+            raise TimeoutError("normal SSE publication was not released")
+
+    def write_normal():
+        try:
+            writer.append_and_publish_sse_event(
+                "token",
+                {"text": "before steer"},
+                publish_normal,
+            )
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    def write_steer():
+        try:
+            accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+                "steer_delivered",
+                {"text": "correct course"},
+                lambda: True,
+                publish=lambda item: published.append(item["event_id"]),
+            )
+            assert accepted is True and event is not None and reason is None and error is None
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+        finally:
+            steer_finished.set()
+
+    normal_thread = threading.Thread(target=write_normal)
+    normal_thread.start()
+    assert normal_publish_started.wait(timeout=10)
+
+    steer_thread = threading.Thread(target=write_steer)
+    steer_thread.start()
+    assert not steer_finished.wait(timeout=0.1), "Steer overtook normal SSE publication"
+
+    release_normal_publish.set()
+    normal_thread.join(timeout=10)
+    steer_thread.join(timeout=10)
+
+    assert not normal_thread.is_alive() and not steer_thread.is_alive()
+    assert errors == []
+    journal = run_journal.read_run_events(
+        "sess_total_order", "run_total_order", session_dir=tmp_path
+    )
+    journal_ids = [event["event_id"] for event in journal["events"]]
+    assert published == journal_ids == ["run_total_order:1", "run_total_order:2"]
+
+    # The replay projection must expose the same order the live queue observed.
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: {
+            "session_id": "sess_total_order",
+            "run_id": "run_total_order",
+            "last_seq": 2,
+            "last_event_id": "run_total_order:2",
+        },
+    )
+    monkeypatch.setattr(routes, "read_run_events", lambda _sid, _run: journal)
+    snapshot = routes._run_journal_live_snapshot("run_total_order")
+    projected = [
+        (row.get("source_event_type"), row.get("seq"))
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+    ]
+    assert projected == [
+        ("token", 1),
+        ("steer_delivered", 2),
+    ]
+
+
+def test_steer_delivery_fsyncs_before_durable_success(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_fsync", "run_fsync", session_dir=tmp_path
+    )
+    fsync_calls = []
+    monkeypatch.setattr(run_journal.os, "fsync", lambda fd: fsync_calls.append(fd))
+    monkeypatch.setattr(run_journal, "_fsync_parent_dir", lambda _path: None)
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "persist me"},
+        lambda: True,
+    )
+
+    assert accepted is True and event is not None and reason is None and error is None
+    assert len(fsync_calls) == 1, "durable success requires the steer row fsynced before return"
+
+
+def test_steer_fsync_failure_reports_accepted_but_not_durable(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_fsync_fail", "run_fsync_fail", session_dir=tmp_path
+    )
+    monkeypatch.setattr(run_journal.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync failed")))
+    monkeypatch.setattr(run_journal, "_fsync_parent_dir", lambda _path: None)
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "accepted runtime text"},
+        lambda: True,
+    )
+
+    assert accepted is True
+    assert event is None
+    assert reason == "persistence_error"
+    assert isinstance(error, OSError)
 
 
 def test_delete_evicts_seq_cache_so_recreated_run_restarts(tmp_path):
