@@ -643,7 +643,7 @@ async function cmdClear(){
     // remains durable for `sid`, but its response must never pull the active
     // pane back to that old session or replace the newer transcript.
     const stillActive=!!S.session&&S.session.session_id===sid&&
-      (!window._loadingSessionId||window._loadingSessionId===sid);
+      (!_loadingSessionId||_loadingSessionId===sid);
     if(stillActive){
       S.session=data.session;
       S.messages=data.session.messages||[];

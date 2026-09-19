@@ -226,3 +226,31 @@ def test_session_clear_preserves_imported_messaging_transcript_and_blocks_state_
         truncation_boundary=loaded.truncation_boundary,
     )
     assert merged == []
+
+
+def test_repeat_clear_retains_durable_clear_marker(monkeypatch, tmp_path):
+    """A second clear must not turn a deliberately empty session into scratch."""
+    from api.models import Session
+
+    _install_isolated_session_env(monkeypatch, tmp_path)
+    sid = "repeat_clear_retains_marker"
+    messages = [
+        _msg("user", "first prompt", 1.0, "repeat-u1"),
+        _msg("assistant", "first reply", 2.0, "repeat-a1"),
+    ]
+    Session(
+        session_id=sid,
+        title="Repeat clear",
+        workspace=str(tmp_path),
+        messages=messages,
+        context_messages=list(messages),
+    ).save()
+
+    first = _post_clear(monkeypatch, sid)
+    first_marker = first["payload"]["session"]["clear_generation"]
+    second = _post_clear(monkeypatch, sid)
+    second_marker = second["payload"]["session"]["clear_generation"]
+
+    assert first_marker
+    assert second_marker == first_marker
+    assert Session.load(sid).clear_generation == first_marker
