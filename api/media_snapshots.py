@@ -53,6 +53,7 @@ Caps
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -216,16 +217,46 @@ def is_valid_digest(digest: str) -> bool:
         return False
 
 
-def snapshot_path_for_digest(digest: str) -> Path | None:
-    """Return the on-disk path for a digest, or None if absent/invalid.
+def snapshot_candidate_for_digest(digest: str) -> Path | None:
+    """Return a regular digest-named snapshot without reading its body."""
+    import stat as stat_mod
 
-    Never creates anything; serving uses this to decide snapshot vs live-file
-    fallback.
-    """
     if not is_valid_digest(digest):
         return None
     candidate = get_snapshot_dir() / f"{digest}.snap"
-    return candidate if candidate.is_file() else None
+    try:
+        return candidate if stat_mod.S_ISREG(candidate.lstat().st_mode) else None
+    except OSError:
+        return None
+
+
+def snapshot_path_for_digest(digest: str) -> Path | None:
+    """Return a byte-verified snapshot path, or None if absent/invalid."""
+    candidate = snapshot_candidate_for_digest(digest)
+    if candidate is None:
+        return None
+    return candidate if _snapshot_bytes_match_digest(candidate, digest) else None
+
+
+def _snapshot_bytes_match_digest(path: Path, digest: str) -> bool:
+    """Verify a regular snapshot object's bytes instead of trusting its name."""
+    import stat as stat_mod
+
+    if not is_valid_digest(digest):
+        return False
+    try:
+        if not stat_mod.S_ISREG(path.lstat().st_mode):
+            return False
+        actual = hashlib.sha256()
+        with open(path, "rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                actual.update(chunk)
+        return hmac.compare_digest(actual.hexdigest(), digest)
+    except OSError:
+        return False
 
 
 def _binding_path_for_digest(digest: str) -> Path:
@@ -389,13 +420,17 @@ def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str 
                 os.fsync(dst.fileno())
             hex_digest = digest.hexdigest()
             final_path = directory / f"{hex_digest}.snap"
-            if final_path.exists():
-                # Content already stored (dedup) — drop the duplicate copy.
+            if _snapshot_bytes_match_digest(final_path, hex_digest):
+                # Content already stored and verified (dedup) — drop the
+                # duplicate copy. The digest-shaped filename alone is not
+                # sufficient because a partial/tampered object may exist.
                 try:
                     tmp_path.unlink()
                 except OSError:
                     pass
             else:
+                # Repair an invalid existing object atomically from the bytes
+                # just hashed, or install the object when it was absent.
                 os.replace(tmp_path, final_path)
             tmp_path = None
             # Server-owned source-path binding: this digest may only be served
