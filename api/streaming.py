@@ -196,41 +196,58 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
-def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
+def _find_compact_echo_suffix_start(value: str, suffix: str) -> int | None:
+    """Return the index where a whitespace-folded ``suffix`` starts at the
+    end of ``value``, or ``None`` when the tail does not echo it.
+
+    The match walks ``value`` and ``suffix`` from the end, skipping
+    whitespace in ``value``; only the echo span itself is inspected, so the
+    cost is linear in the echo length and allocation-free. Unlike a fixed
+    fold window, the walk cannot miss a compact-equivalent suffix whose raw
+    span is stretched by interior whitespace.
+
+    ``str.isspace`` is used for the walk instead of the ``\\s`` pattern used
+    by :func:`_compact_for_echo_compare`. The two agree on every Unicode code
+    point, so the folded view and the walk stay consistent.
+    """
+    candidate = _compact_for_echo_compare(suffix)
+    if not candidate:
+        return None
+    i = len(value) - 1
+    j = len(candidate) - 1
+    while j >= 0:
+        while i >= 0 and value[i].isspace():
+            i -= 1
+        if i < 0 or value[i] != candidate[j]:
+            return None
+        i -= 1
+        j -= 1
+    return i + 1
+
+
+def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
     """Remove ``suffix`` from ``value`` when they match after whitespace folding.
 
-    The search window is folded once and the cut point is then located by
-    walking backwards across the echo itself. The previous implementation
-    probed every candidate cut index and re-folded the whole remaining tail for
-    each probe, which is quadratic in the window size: a 6000-character final
-    message cost seconds of CPU, held under the GIL, stalling every other
-    stream in the process.
+    The cut point is located by the same backward walk as
+    :func:`_find_compact_echo_suffix_start`: no fixed search window is
+    involved, so a compact-equivalent suffix is removed no matter how much
+    interior whitespace stretches its raw span. The previous windowed
+    implementation folded a bounded tail on every call; its retired probing
+    variant re-folded the remaining tail per candidate cut index, which is
+    quadratic: a 6000-character final message cost seconds of CPU, held under
+    the GIL, stalling every other stream in the process.
 
-    ``str.isspace`` is used for the backwards walk instead of the ``\\s``
-    pattern used by :func:`_compact_for_echo_compare`. The two agree on every
-    Unicode code point, so the folded view and the walk stay consistent.
+    Whitespace sitting between the kept text and the echo is removed by
+    ``rstrip``, which lands on the same result as the leftmost cut index the
+    probing loop used to return.
     """
     raw = str(value or '')
-    candidate = _compact_for_echo_compare(suffix)
-    if not raw or not candidate:
+    if not raw:
         return raw, False
-    tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
-    offset = len(raw) - len(tail)
-    compact_tail = _compact_for_echo_compare(tail)
-    if len(candidate) > len(compact_tail) or not compact_tail.endswith(candidate):
+    start = _find_compact_echo_suffix_start(raw, suffix)
+    if start is None:
         return raw, False
-    # Consume exactly as many non-whitespace characters as the folded suffix
-    # holds; ``idx`` then sits on the first character of the echo. Whitespace
-    # sitting between the kept text and the echo is removed by ``rstrip``,
-    # which is why this lands on the same result as the leftmost cut index the
-    # probing loop used to return.
-    remaining = len(candidate)
-    idx = len(tail)
-    while remaining and idx:
-        idx -= 1
-        if not tail[idx].isspace():
-            remaining -= 1
-    return raw[: offset + idx].rstrip(), True
+    return raw[:start].rstrip(), True
 
 
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:

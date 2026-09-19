@@ -587,6 +587,27 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     return None
 
 
+def find_run_file(run_id: str, *, session_dir: Path | None = None) -> tuple[str, Path] | None:
+    """Locate a run journal file by run id WITHOUT parsing its body.
+
+    Hot callers that immediately read the full journal (the live-snapshot
+    rebuild) must not pay :func:`find_run_summary`'s full-file parse first:
+    on a long live run the file holds tens of thousands of rows and parsing
+    it twice per rebuild dominated the snapshot cost. Returns
+    ``(session_id, path)`` for the first match, or ``None`` when the run id
+    is invalid or no journal exists.
+    """
+    try:
+        rid = _validate_id(run_id, "run_id")
+    except ValueError:
+        return None
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    for path in journal_root.glob(f"*/{rid}.jsonl"):
+        return path.parent.name, path
+    return None
+
+
 def read_session_run_events(
     session_id: str,
     *,
