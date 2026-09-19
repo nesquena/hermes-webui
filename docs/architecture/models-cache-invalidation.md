@@ -66,6 +66,48 @@ the fingerprint captured at publish time.
   TTL expires. When the runtime version cannot be resolved (early boot), that
   check is skipped rather than wedging the boot.
 
+## Invalidation paths: memory vs. disk
+
+Every path that drops the published in-memory snapshot resets
+`_available_models_cache` (plus its timestamps and source fingerprint) and
+calls `_sync_models_cache_provenance()` so the hot-path tuple cannot tear. They
+differ in what they do to the per-profile `models_cache.json` on disk
+(`_delete_models_cache_on_disk()`):
+
+| Path | In-memory snapshot | Disk snapshot |
+| --- | --- | --- |
+| `invalidate_models_cache(delete_disk=True)` (default) | dropped | **deleted** unconditionally |
+| `invalidate_models_cache(delete_disk=False)` | dropped | left in place |
+| `invalidate_provider_models_cache(provider_id)` | dropped | **deleted** unconditionally (no `delete_disk` option) |
+| `_get_fresh_memory_models_cache()` on a fingerprint mismatch or invalid cached shape | dropped | untouched |
+| config-reload branch in `get_available_models()` (`_cfg_changed`) | dropped | deleted by `reload_config_if_stale()` → `_refresh_config_cache()` **only if** the *same* `config.yaml` path was already loaded and its mtime moved (`_old_cfg_mtime != 0.0 and _old_cfg_path == config_path`, i.e. a real edit of the active profile's config); a first-ever load (server start, `_cfg_mtime == 0.0`) or a path change keeps it |
+
+The path guard matters for per-client profile switches: `switch_profile(name,
+process_wide=False)` deliberately skips `reload_config()`, so the process-global
+`_cfg_mtime` / `_cfg_path` still describe the *previous* profile's config after
+`POST /api/profile/switch`. The first `/api/models` for the new profile then
+takes the config-reload branch (different path, different mtime). Without the
+`_old_cfg_path == config_path` check that reload looked like a config edit and
+unlinked the *target* profile's `models_cache.<name>.json`, defeating the
+`delete_disk=False` switch on the very next request
+(`tests/test_profile_switch_next_models_request_keeps_disk_cache.py`).
+
+`invalidate_models_cache` is the only entry point that offers the
+`delete_disk` choice. `delete_disk=True` is for when a source may have changed,
+or test isolation requires a guaranteed cold build; every pre-existing caller
+keeps this mode. `delete_disk=False` is for when the sources have **not**
+changed and the caller only needs the next request to re-resolve *which*
+profile's catalog to serve.
+
+`POST /api/profile/switch` uses `delete_disk=False`. The disk cache is already
+keyed per profile (`_get_models_cache_path()`), and a stale or wrong-profile
+snapshot is rejected on read by `_is_loadable_disk_cache()` via the source
+fingerprint above, so deleting it on a switch bought no correctness — it only
+forced a full cold rebuild (live provider `fetch_models` calls, several seconds)
+on every switch. Because this mode leans entirely on the fingerprint check, it
+is safe only while that check stays the single gate for serving a disk snapshot
+(change-protocol items 1 and 4).
+
 ## Change protocol
 
 1. Add or change a source axis in `_models_cache_source_fingerprint()` only —
@@ -89,6 +131,11 @@ the fingerprint captured at publish time.
 timestamp-only churn keeps the fingerprint identical (and a session visit after a
 Codex refresh needs no live rebuild), while genuine changes — a new model, a
 visibility change, any catalog field, any unknown field — still invalidate.
+
+`tests/test_profile_switch_models_disk_cache.py` covers the invalidation modes:
+`delete_disk=False` keeps the disk file and the next `get_available_models()`
+reloads it without a live rebuild, the default still unlinks it, and the
+executed `/api/profile/switch` route passes `delete_disk=False`.
 
 ## References
 
