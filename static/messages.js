@@ -5595,11 +5595,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     S.toolCalls=inflight.toolCalls;
-    persistInflightState();
+    // rc3b: this runs for every tool/tool_complete SSE event (198 on a
+    // tool-heavy replay); the direct persist wrote the WHOLE inflight map to
+    // localStorage (synchronous IO) per event. The 2s trailing throttle keeps
+    // the same persistence contract the token path already accepted
+    // (WS2.3-style); terminal paths still cancel the timer and clear/flush
+    // synchronously, so at most 2s of tool state can be lost on a crash.
+    _throttledPersist();
     return tc;
   }
 
   let _lastRenderMs=0;
+  // rc3a (fase 6): the reasoning SSE handler used to rebuild the thinking card
+  // and anchor rows for EVERY reasoning event. Replaying a tool-heavy active
+  // session delivers thousands of reasoning events in one burst, so each event
+  // caused a full text-node write on the card plus a forced layout through
+  // scrollIfPinned — the measured main-thread starvation. The handler now only
+  // advances the reasoning accumulators and defers the DOM write to the render
+  // frame; the state layer (reasoningText/liveReasoningText/INFLIGHT) is still
+  // updated synchronously per event, so no event content is ever dropped.
+  let _pendingReasoningDomFlush=false;
+  function _flushPendingReasoningDom(){
+    if(!_pendingReasoningDomFlush) return;
+    _pendingReasoningDomFlush=false;
+    if(_streamFinalized) return;
+    if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+    const liveThinkingText=_liveThinkingText();
+    const anchorReasoningFallback={};
+    if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
+      _updateLiveThinkingCard(liveThinkingText,{
+        ...anchorReasoningFallback,
+        anchorRenderFallback:true,
+        sessionId:activeSid,
+        streamId,
+      });
+    }
+  }
   // Parse-result cache: _scheduleRender can accept a pre-computed _parseStreamState()
   // from the token event handler, avoiding a duplicate O(n) scan inside _doRender
   // when the rAF fires before the next token arrives.
@@ -5642,6 +5673,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // writes to suppress Chromium scroll re-anchoring during streaming growth.
       if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
       _lastRenderMs=performance.now();
+      _flushPendingReasoningDom();
       const parsed=_cachedParsed&&_cachedParsedText===assistantText&&_cachedParsedReasoning===liveReasoningText ? _cachedParsed : _parseStreamState();
       _cachedParsed=null;
       _renderLiveThinking(parsed);
@@ -5764,6 +5796,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       if(reasoningEcho) _stripLiveReasoningEcho(visible);
+      // rc3a: flush the pending reasoning frame write before the accumulators
+      // are reset (same ordering contract as the tool boundary below).
+      _flushPendingReasoningDom();
       liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
@@ -5846,17 +5881,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText += text;
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
+      // rc3a: defer the thinking-card/anchor DOM write to the render frame.
+      // Per-event writes starved the main thread on replay bursts (fase 6);
+      // the accumulators are already updated synchronously above, so the flush
+      // renders the exact same final content, at most one frame later.
       if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
-        const liveThinkingText=_liveThinkingText();
-        const anchorReasoningFallback={};
-        if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
-          _updateLiveThinkingCard(liveThinkingText,{
-            ...anchorReasoningFallback,
-            anchorRenderFallback:true,
-            sessionId:activeSid,
-            streamId,
-          });
-        }
+        _pendingReasoningDomFlush=true;
+        _scheduleRender();
       }
     });
 
@@ -5876,6 +5907,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
+      // rc3a: flush any pending per-frame reasoning DOM write BEFORE the
+      // accumulators are reset, so the reasoning→tool ordering (and content)
+      // stays identical to the per-event behavior.
+      _flushPendingReasoningDom();
       // Provider reasoning/thinking is a Worklog Thinking Card, separate from
       // tool cards. Close the current live card before appending a tool row.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
@@ -5889,7 +5924,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _flushPendingSegmentRender({force:true});
       appendLiveToolCard(tc,{sessionId:activeSid,streamId});
-      snapshotLiveTurn();
+      // rc3b: trailing snapshot instead of a synchronous outerHTML serialize of
+      // the whole (growing) live turn per tool event (WS2.2 throttle contract);
+      // the session-switch path still captures synchronously on its own.
+      _throttledSnapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();
@@ -5930,7 +5968,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       } else {
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
-      snapshotLiveTurn();
+      // rc3b: trailing snapshot (WS2.2 contract) — same rationale as 'tool'.
+      _throttledSnapshotLiveTurn();
       scrollIfPinned();
     });
 
