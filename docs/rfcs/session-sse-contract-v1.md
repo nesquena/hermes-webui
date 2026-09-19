@@ -65,6 +65,36 @@ is a global invalidation signal, not a per-session lifecycle stream. The propose
 heartbeat interval for SSE streams. Phase 1 reuses this constant rather than
 adding a separate configurable knob.
 
+### Implemented browser-subscriber lifetime and replay
+
+The existing browser-facing subscription streams are not one unbounded HTTP
+generation. `_SSE_SUBSCRIBER_LEASE_SECONDS = 300` caps each generation for:
+
+- `GET /api/session/stream` (per-session background-completion/live-turn bridge),
+- `GET /api/sessions/events` (global session-list invalidation), and
+- `GET /api/gateway/sessions/stream` (gateway session snapshots).
+
+At the lease boundary the handler sets `BaseHTTPRequestHandler.close_connection`
+and returns; it does **not** emit a `Connection: close` response header. A live
+`EventSource` treats the resulting EOF as reconnectable and opens a replacement
+generation. If only an upstream proxy remains, no browser reconnect arrives, so
+the old handler releases its exact subscriber queue and the channel reaper can
+collect it. Active tabs therefore incur one reconnect plus the endpoint's normal
+refresh/snapshot work every five minutes.
+
+`GET /api/session/stream` also uses the native `Last-Event-ID` request header to
+bridge the reconnect gap. `SessionChannel` retains at most 32 copied events that
+carry stable payload `event_id` values. Every first `initial` frame establishes a
+synthetic cursor; a known cursor replays only the later retained FIFO prefix. A
+fresh, unknown, or evicted cursor replays no old completion toast and falls back
+to the existing active-turn and persisted-message-count recovery. The channel's
+subscriber-drop grace is preserved for the full reconnect interval even when the
+channel itself is older than its idle TTL.
+
+This lifecycle applies only to the three endpoints above. Approval/clarify SSE,
+run-journal observers, the proposed `GET /api/sessions/{session_id}/events`, and
+other event streams keep their own documented contracts.
+
 ### Run-journal cursor and replay
 
 Current replay identity is run/stream-scoped:
@@ -77,8 +107,8 @@ shift in `api/routes.py` cannot invalidate the doc or its contract test.
 - `_parse_run_journal_event_id()` and `_parse_run_journal_after_seq()` (both in
   `api/routes.py`) parse the replay cursor from the `after_event_id` /
   `after_seq` **query params** (not the
-  `Last-Event-ID` header — that header is the *proposed* new-endpoint contract
-  below, §Reconnect).
+  `Last-Event-ID` header used by `GET /api/session/stream` above and proposed for
+  the new endpoint below, §Reconnect).
 - `_runner_event_id()` (in `api/routes.py`) constructs the event `id`
   field as `stream_id:seq`.
 - SSE frames carry their `id:` via the `_sse_with_id()` helper, emitted on the
