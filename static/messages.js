@@ -879,12 +879,48 @@ async function toggleSavedPromptsPopup(){
       const del=document.createElement('button');
       del.className='saved-prompt-delete';
       del.type='button';
-      del.title=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';
+      const delTitle=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete prompt';
+      const delConfirmTitle=(typeof t==='function'&&t('saved_prompts_delete_confirm'))||'Click again to delete';
+      del.title=delTitle;
+      del.setAttribute('aria-label',delTitle);
       del.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      // #7644: the ✕ is 12x12 and sits right next to the label, so a single
+      // mis-click used to permanently delete the prompt. The first click only
+      // arms the row (red "confirm" state, auto-disarmed after 4s); the delete
+      // request needs a second, deliberate click. Server-side the previous
+      // generation is kept in saved_prompts.json.bak, so even a confirmed
+      // delete stays recoverable from disk.
+      let deleteArmTimer=null;
+      const disarmDelete=()=>{
+        if(deleteArmTimer){clearTimeout(deleteArmTimer);deleteArmTimer=null;}
+        del.classList.remove('is-confirming');
+        row.classList.remove('is-confirm-pending');
+        del.title=delTitle;
+        del.setAttribute('aria-label',delTitle);
+      };
       del.onclick=async(e)=>{
         e.stopPropagation();
-        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){}
+        if(!del.classList.contains('is-confirming')){
+          del.classList.add('is-confirming');
+          row.classList.add('is-confirm-pending');
+          del.title=delConfirmTitle;
+          del.setAttribute('aria-label',delConfirmTitle);
+          deleteArmTimer=setTimeout(disarmDelete,4000);
+          return;
+        }
+        disarmDelete();
+        del.disabled=true;
+        try{
+          await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});
+        }catch(_e){
+          // Never swallow a failed delete: the row is still on screen and the
+          // user must know it was NOT removed.
+          del.disabled=false;
+          if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to delete prompt',2000,'error');
+          return;
+        }
         _savedPromptsCache=null;
+        if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_deleted'))||'Prompt deleted',1600);
         await toggleSavedPromptsPopup();
         await toggleSavedPromptsPopup();
       };

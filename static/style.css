@@ -5812,6 +5812,10 @@ main.main > #mainPlugin{display:none;}
 .saved-prompt-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
 .saved-prompt-delete{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px;border-radius:4px;display:flex;align-items:center;justify-content:center;}
 .saved-prompt-delete:hover{color:var(--danger,#f56565);background:rgba(245,101,101,.12);}
+/* #7644: armed (first-click) state of the ✕ — a second click is required to
+   actually delete; disarmed automatically after 4s by messages.js. */
+.saved-prompt-delete.is-confirming{color:#fff;background:var(--danger,#f56565);box-shadow:0 0 0 1px rgba(245,101,101,.6);}
+.saved-prompt-row.is-confirm-pending{background:rgba(245,101,101,.14);}
 .saved-prompt-add-row{padding:6px 4px 2px;border-top:1px solid var(--border);margin-top:4px;}
 .saved-prompt-save-btn{width:100%;padding:6px 10px;border-radius:6px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
 .saved-prompt-save-btn:hover{background:var(--accent-bg-strong);}
