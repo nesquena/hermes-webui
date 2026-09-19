@@ -5224,6 +5224,7 @@ function _reasoningEffortContext(){
     provider=_modelStateForSelect(sel, model).model_provider||'';
   }
   const ctx={};
+  if(S&&S.session&&S.session.session_id) ctx.session_id=S.session.session_id;
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
   return ctx;
@@ -5320,13 +5321,25 @@ function _applyReasoningChip(eff){
 // topbar syncs can serve the cached chip state instead of re-hitting the
 // network. null = never fetched.
 let _lastReasoningFetchKey=null;
-// Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
-// async handlers capture their own value; a response (success OR failure) only
-// applies if it is still the most recent dispatch. This defeats out-of-order
-// resolution even when two fetches share the same model/provider key (e.g. a
-// profile switch that resets the cache and refetches the same default model but
-// a different agent.reasoning_effort) — #4650 review.
+// Monotonic dispatch counter. Every reasoning request — the fetchReasoningChip()
+// GET and the chip-selection POST alike — increments it and the async handlers
+// capture their own value; a response (success OR failure) only applies if it is
+// still the most recent dispatch. This defeats out-of-order resolution even when
+// two dispatches share the same model/provider key (e.g. a profile switch that
+// resets the cache and refetches the same default model but a different
+// agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
+
+// True when the dispatch identified by (seq, key) is still the one the UI is
+// waiting on. Both halves are load-bearing: the sequence number rejects a
+// dispatch that a newer one superseded for the SAME session, and the key
+// comparison rejects a response that lands after the active session, model, or
+// provider changed. A stale response must be discarded silently — applying it
+// would write one session's effort onto another session's chip, which is the
+// session-confusion class the per-session storage fix removes.
+function _reasoningDispatchIsCurrent(seq, key){
+  return seq===_reasoningFetchSeq && key===_reasoningEffortQuery();
+}
 
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
@@ -5458,15 +5471,28 @@ document.addEventListener('click',function(e){
     // (#6219 round-3)
     if(opt){
       const payload=Object.assign({effort:effort},_reasoningEffortContext());
+      // Snapshot the dispatch identity BEFORE the request. A POST dispatched
+      // from session A can resolve AFTER the user switches to session B; without
+      // this guard the late response writes A's effort onto B's chip and poisons
+      // B's cache — the same session-confusion the per-session storage fix
+      // removes, on the async-completion path. Discard a stale response
+      // silently: no chip write, no cache write, and no toast, because a toast
+      // for a session the user already left is itself misinformation.
+      const key=_reasoningEffortQuery();
+      const seq=++_reasoningFetchSeq;
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          if(!_reasoningDispatchIsCurrent(seq,key)) return;
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
           const display=(st&&st.reasoning_effort)||effort||'Default';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+display);
         })
-        .catch(function(){showToast('🧠 Failed to set effort');});
+        .catch(function(){
+          if(!_reasoningDispatchIsCurrent(seq,key)) return;
+          showToast('🧠 Failed to set effort');
+        });
       closeReasoningDropdown();
     }
   }
