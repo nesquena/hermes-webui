@@ -859,6 +859,24 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
 # ── Retention sweep (#7613) ─────────────────────────────────────────────────
 
 
+def _resolve_within(root_real: str, path: Path) -> bool:
+    """True when ``path``'s fully-resolved location stays inside ``root_real``.
+
+    Containment is checked on the RESOLVED path so a symlink (or a symlinked
+    parent) cannot redirect the sweep outside the journal root. ``root_real`` is
+    expected to be an ``os.path.realpath`` string. Comparison is boundary-aware:
+    a sibling directory whose name merely starts with the root's prefix is not
+    "inside" it.
+    """
+    try:
+        candidate = os.path.realpath(path)
+    except OSError:
+        return False
+    if candidate == root_real:
+        return True
+    return candidate.startswith(root_real + os.sep)
+
+
 def _stat_signature(st: os.stat_result) -> tuple[int, int, int, int, int]:
     """Complete filesystem identity used to prove a run file is unchanged.
 
@@ -1048,14 +1066,27 @@ def resolve_run_journal_retention_caps() -> dict:
     }
 
 
-def _reclaim_run_file(path: Path, expected_signature: tuple[int, int, int, int, int]) -> int:
+def _reclaim_run_file(
+    path: Path,
+    expected_signature: tuple[int, int, int, int, int],
+    *,
+    journal_root_real: str | None = None,
+) -> int:
     """Unlink ``path`` if its stat identity still matches; return bytes freed (0 = skipped).
 
     The stat-identity re-check runs twice — immediately before the per-path
     writer lock, and again under it — so a trailing append (or same-path
     recreation) between classification and reclaim aborts the unlink instead of
     destroying rows written after the file was judged quiescent.
+
+    ``journal_root_real`` (when given) is the resolved journal root and acts as
+    a final containment gate: the unlink is refused unless the path still
+    resolves inside it. This is deliberately redundant with the directory-walk
+    filter — the unlink is the irreversible step, so it re-validates at the
+    point of use rather than trusting an upstream check.
     """
+    if journal_root_real is not None and not _resolve_within(journal_root_real, path):
+        return 0
     try:
         st = path.stat()
     except OSError:
@@ -1101,8 +1132,13 @@ def _sweep_run_journal_session(
     caps: dict,
     now: float,
     counters: dict,
+    journal_root_real: str,
 ) -> None:
-    """Classify and (if eligible) reclaim terminal runs inside one session's journal dir."""
+    """Classify and (if eligible) reclaim terminal runs inside one session's journal dir.
+
+    ``journal_root_real`` is the resolved journal root; every candidate file must
+    still resolve inside it, so a symlinked entry cannot redirect the sweep.
+    """
     try:
         paths = sorted(session_journal_dir.glob("*.jsonl"))
     except OSError:
@@ -1111,7 +1147,13 @@ def _sweep_run_journal_session(
     entries: list[tuple[Path, os.stat_result, bool]] = []
     for path in paths:
         try:
+            if path.is_symlink():
+                # A run file that is itself a link could point anywhere; the
+                # journal only ever creates plain files.
+                continue
             if not path.is_file():
+                continue
+            if not _resolve_within(journal_root_real, path):
                 continue
             st = path.stat()
         except OSError:
@@ -1153,7 +1195,11 @@ def _sweep_run_journal_session(
                     size_cap_exceeded = True
                     over_size = True
             if over_ttl or over_count or over_size:
-                freed = _reclaim_run_file(path, _stat_signature(st))
+                freed = _reclaim_run_file(
+                    path,
+                    _stat_signature(st),
+                    journal_root_real=journal_root_real,
+                )
                 if freed > 0:
                     reclaimed = True
                     counters["removed_files"] += 1
@@ -1216,9 +1262,14 @@ def sweep_run_journal(
     try:
         if not journal_root.exists():
             return counters
-        session_dirs = sorted(
-            entry for entry in journal_root.iterdir() if entry.is_dir()
-        )
+        journal_root_real = os.path.realpath(journal_root)
+        session_dirs = [
+            entry
+            for entry in sorted(journal_root.iterdir())
+            if not entry.is_symlink()
+            and entry.is_dir()
+            and _resolve_within(journal_root_real, entry)
+        ]
     except OSError:
         counters["errors"] += 1
         return counters
@@ -1229,7 +1280,9 @@ def sweep_run_journal(
                 continue
             counters["sessions_scanned"] += 1
             try:
-                _sweep_run_journal_session(session_journal_dir, caps, sweep_now, counters)
+                _sweep_run_journal_session(
+                    session_journal_dir, caps, sweep_now, counters, journal_root_real
+                )
             except Exception:
                 counters["errors"] += 1
                 logger.warning(

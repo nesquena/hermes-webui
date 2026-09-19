@@ -534,3 +534,135 @@ def test_periodic_loop_sweeps_the_default_session_dir(tmp_path, monkeypatch):
         open_run.unlink()
     except OSError:
         pass
+
+
+
+# ── Symlink containment (Greptile review on PR #7642) ──────────────────────
+
+
+def _raw_terminal_file(dir_path: Path, sid: str, run_id: str, *, age_days: float = 90.0) -> Path:
+    """Write a terminal run file BY HAND with ids matching its parent dir/stem.
+
+    Mirrors the real attack shape: `_run_journal/<sid>/<run_id>.jsonl` where the
+    rows carry `run_id == stem` and `session_id == parent.name`. Written as raw
+    JSONL (not via RunJournalWriter) so the file can be planted at a path the
+    writer would never choose — e.g. inside a symlink target directory.
+    """
+    rows = [
+        {
+            "version": 1,
+            "event_id": f"{run_id}:1",
+            "seq": 1,
+            "run_id": run_id,
+            "session_id": sid,
+            "event": "token",
+            "type": "token",
+            "created_at": 1.0,
+            "terminal": False,
+            "terminal_state": None,
+            "payload": {"text": "x"},
+        },
+        {
+            "version": 1,
+            "event_id": f"{run_id}:2",
+            "seq": 2,
+            "run_id": run_id,
+            "session_id": sid,
+            "event": "done",
+            "type": "done",
+            "created_at": 2.0,
+            "terminal": True,
+            "terminal_state": "completed",
+            "payload": {"session": {"session_id": sid}},
+        },
+    ]
+    dir_path.mkdir(parents=True, exist_ok=True)
+    path = dir_path / f"{run_id}.jsonl"
+    path.write_text(
+        "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    old = time.time() - age_days * DAY
+    os.utime(path, (old, old))
+    return path
+
+
+def test_sweep_ignores_a_symlinked_session_dir_pointing_outside(tmp_path):
+    """A symlinked session dir must not let the sweep reclaim outside the root.
+
+    Regression for the Greptile finding on PR #7642: if `_run_journal/<sid>` is
+    a symlink to an external directory, a naive `is_dir()` walk traverses it and
+    unlinks matching files OUTSIDE the journal root. The sweep must skip any
+    symlinked session dir (the journal only ever creates real directories).
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # The attack: files whose run_id/session_id match the LINK NAME, so they
+    # would classify as terminal if the sweep followed the symlink.
+    victim_a = _raw_terminal_file(outside, "evil-sid", "outside-run-a")
+    victim_b = _raw_terminal_file(outside, "evil-sid", "outside-run-b")
+
+    session_dir = tmp_path / "sessions"
+    journal_root = session_dir / run_journal.RUN_JOURNAL_DIR_NAME
+    journal_root.mkdir(parents=True)
+    os.symlink(outside, journal_root / "evil-sid")
+
+    result = sweep_run_journal(
+        session_dir=session_dir, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0
+    )
+
+    assert victim_a.exists(), "sweep must not unlink files outside the journal root"
+    assert victim_b.exists(), "sweep must not unlink files outside the journal root"
+    assert result["removed_files"] == 0
+    assert result["files_scanned"] == 0, "a symlinked session dir must not be traversed"
+
+
+def test_sweep_ignores_a_symlinked_run_file_pointing_outside(tmp_path):
+    """A symlinked run file must not be reclaimed, even inside a real session dir.
+
+    Second half of the containment contract: the session dir is legitimate, but
+    one `{run_id}.jsonl` entry is a symlink to an external file. The symlink is
+    skipped (the journal only ever writes plain files), so the target survives.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "symlink-file-sid"
+    journal_dir = _journal_dir(session_dir, sid)
+    journal_dir.mkdir(parents=True)
+
+    outside = tmp_path / "outside-file"
+    outside.mkdir()
+    victim = _raw_terminal_file(outside, sid, "linked-run")
+    os.symlink(victim, journal_dir / "linked-run.jsonl")
+
+    result = sweep_run_journal(
+        session_dir=session_dir, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0
+    )
+
+    assert victim.exists(), "a symlinked run file's target must never be unlinked"
+    assert result["removed_files"] == 0
+
+
+def test_sweep_still_reclaims_normal_files_alongside_a_symlink(tmp_path):
+    """The containment guard must not break ordinary reclamation.
+
+    Same shape as the attack test, but the qualifying run is a REAL file in a
+    REAL session dir alongside a symlinked sibling: the real stale terminal run
+    is reclaimed, the symlink target is not touched.
+    """
+    session_dir = tmp_path / "sessions"
+    sid = "mixed-sid"
+    real = _write_terminal_run(session_dir, sid, "real-run", age_days=90)
+
+    outside = tmp_path / "mixed-outside"
+    outside.mkdir()
+    victim = _raw_terminal_file(outside, sid, "linked-run")
+    os.symlink(victim, _journal_dir(session_dir, sid) / "linked-run.jsonl")
+
+    result = sweep_run_journal(
+        session_dir=session_dir, ttl_days=14, max_runs_per_session=0, max_bytes_per_session=0
+    )
+
+    assert result["removed_files"] == 1, "the real stale terminal run must be reclaimed"
+    assert result["removed_bytes"] > 0
+    assert not real.exists()
+    assert victim.exists(), "the symlinked target must survive"
