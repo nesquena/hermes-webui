@@ -12,64 +12,27 @@ from pathlib import Path
 import pytest
 
 ROUTES_PY = Path(__file__).resolve().parent.parent / "api" / "routes.py"
+CRON_RUNTIME_PY = Path(__file__).resolve().parent.parent / "api" / "cron_runtime.py"
 
 
-def _get_function_source(func_name: str) -> str:
+def _get_function_source(func_name: str, source_path: Path = ROUTES_PY) -> str:
     """Extract a top-level function's source via AST for stability."""
-    tree = ast.parse(ROUTES_PY.read_text(encoding="utf-8"))
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
-            lines = ROUTES_PY.read_text(encoding="utf-8").splitlines()
+            lines = source_path.read_text(encoding="utf-8").splitlines()
             return "\n".join(lines[node.lineno - 1 : node.end_lineno])
-    pytest.fail(f"Function {func_name} not found in {ROUTES_PY}")
+    pytest.fail(f"Function {func_name} not found in {source_path}")
 
 
 class TestRunCronTrackedImport:
     """_run_cron_tracked must be self-contained — it runs in a worker thread."""
 
-    def test_run_job_imported_inside_function(self):
-        """run_job must be imported inside the subprocess target, not relied on
-        from a caller's local scope."""
-        src = _get_function_source("_cron_job_subprocess_main")
-        tree = ast.parse(src)
-        names_used = set()
-
-        class NameCollector(ast.NodeVisitor):
-            def visit_Name(self, node):
-                names_used.add(node.id)
-
-        ImportCollector = type(
-            "ImportCollector",
-            (ast.NodeVisitor,),
-            {
-                "imports": set(),
-                "visit_ImportFrom": lambda self, node: (
-                    self.imports.add(a.name for a in node.names),
-                ),
-            },
-        )
-
-        # Collect all names referenced in the function body
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                names_used.add(node.id)
-
-        # Collect imports inside the function
-        func_imports = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    func_imports.add(alias.name if alias.asname is None else alias.asname)
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    func_imports.add(alias.name if alias.asname is None else alias.asname)
-
-        # run_job is referenced → must be imported inside the function
-        if "run_job" in names_used:
-            assert "run_job" in func_imports, (
-                "_run_cron_tracked references run_job but does not import it locally. "
-                "It runs in a worker thread and cannot rely on caller's local imports."
-            )
+    def test_cron_operation_imports_scheduler_inside_function(self):
+        """The child dispatcher imports the scheduler in its own scope."""
+        src = _get_function_source("_invoke_cron_operation", CRON_RUNTIME_PY)
+        assert "import cron.scheduler as scheduler" in src
+        assert "getattr(scheduler, operation," in src
 
     def test_handle_cron_run_does_not_import_run_job(self):
         """After the fix, _handle_cron_run should NOT need to import run_job
@@ -91,7 +54,7 @@ class TestRunCronTrackedImport:
         src = _get_function_source("_run_cron_tracked")
         assert "_run_cron_job_in_profile_subprocess" in src
 
-    def test_cron_subprocess_target_calls_run_job(self):
-        """Sanity: the subprocess target still actually calls run_job."""
-        src = _get_function_source("_cron_job_subprocess_main")
-        assert "run_job" in src, "cron subprocess target should call run_job"
+    def test_cron_operation_dispatches_requested_operation(self):
+        """The shared child dispatcher invokes the requested scheduler operation."""
+        src = _get_function_source("_invoke_cron_operation", CRON_RUNTIME_PY)
+        assert "callable_(job, *args, **kwargs)" in src
