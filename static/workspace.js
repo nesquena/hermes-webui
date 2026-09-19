@@ -699,8 +699,19 @@ function _awaitElementLoad(el, assign, failKey){
     // already up, so only a genuine error still needs surfacing — this restores
     // the status reporting the fire-and-forget code had. A late success needs
     // nothing: the content is visible by then.
-    const onLateLoad=()=>el.removeEventListener('error', onLateError);
-    const onLateError=()=>setStatus(t(failKey));
+    //
+    // Both late handlers retire together. `{once:true}` only removes the handler
+    // that actually fired, and this element is shared (#previewImg), so an
+    // attempt that ends in `error` left its paired `load` handler attached for
+    // good — repeated timed-out failures stacked stale closures on the element
+    // and let old handlers consume events from later previews. Each terminal
+    // event now removes both.
+    const detachLate=()=>{
+      el.removeEventListener('load', onLateLoad);
+      el.removeEventListener('error', onLateError);
+    };
+    const onLateLoad=()=>detachLate();
+    const onLateError=()=>{detachLate();setStatus(t(failKey));};
     el.addEventListener('load', onLoad);
     el.addEventListener('error', onError);
     // Anti-hang guard (Greptile): a response that stalls — proxy holding the
