@@ -69,7 +69,10 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
-_CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, threading.Event]" = {}
+# Each in-flight event is tagged with the cache invalidation generation in
+# which its owner started. A clear must not let a follower that arrives just
+# after the clear race into a duplicate rebuild while that prior owner runs.
+_CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, tuple[threading.Event, int]]" = {}
 _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # LRU-bounded (drop-oldest) so a long-lived process under churn — where the
 # state.db fingerprint advances on every streamed message and the structural
@@ -81,7 +84,10 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
-_CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
+# Cold callers join a normal rebuild for up to one second. This comfortably
+# covers a scheduled owner handoff without duplicating an expensive projection;
+# callers that explicitly need fallback behavior override this in their scope.
+_CLI_SESSIONS_CACHE_WAIT_SECONDS = 1.0
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
 
@@ -5199,7 +5205,14 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         s.save()
     return s
 
-def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False, show_kanban: bool = False) -> bool:
+def _hide_from_default_sidebar(
+    session: dict,
+    *,
+    show_cron: bool = False,
+    show_matrix: bool = False,
+    show_webhook: bool = False,
+    show_kanban: bool = False,
+) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = (
@@ -5209,6 +5222,12 @@ def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_w
         or session.get('session_source')
     )
     if not show_cron and (source == 'cron' or sid.startswith('cron_')):
+        return True
+    matrix_sources = {
+        str(session.get(key) or '').strip().lower()
+        for key in ('source', 'source_tag', 'raw_source', 'session_source')
+    }
+    if not show_matrix and 'matrix' in matrix_sources:
         return True
     if not show_webhook and source == 'webhook':
         return True
@@ -5267,7 +5286,7 @@ def _is_intentionally_background_sidebar_session(session: dict) -> bool:
         or session.get('raw_source')
         or session.get('session_source')
     )
-    return source in {'cron', 'webhook', 'kanban'} or sid.startswith('cron_')
+    return source in {'cron', 'matrix', 'webhook', 'kanban'} or sid.startswith('cron_')
 
 
 def _include_project_hidden_background_sidebar_sessions(
@@ -5276,7 +5295,7 @@ def _include_project_hidden_background_sidebar_sessions(
 ) -> list[dict]:
     """Keep project-assigned background sessions addressable by project chips.
 
-    Cron and webhook sessions stay hidden from the default sidebar, but if they
+    Cron, Matrix, and webhook sessions stay hidden from the default sidebar, but if they
     have a project assignment they must still be present in the client cache so
     their dedicated project chips can reveal them (#3019).
     """
@@ -7225,21 +7244,26 @@ def _cli_sessions_cache_invalidation_stamp() -> int:
         return int(_CLI_SESSIONS_CACHE_INVALIDATION_VERSION)
 
 
-def _cli_sessions_cache_claim_rebuild(cache_key: tuple) -> tuple[threading.Event, bool]:
+def _cli_sessions_cache_claim_rebuild(
+    cache_key: tuple,
+) -> tuple[threading.Event, bool, int]:
     with _CLI_SESSIONS_CACHE_LOCK:
         current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
         if current is not None:
-            return current, False
+            event, invalidation_stamp = current
+            return event, False, invalidation_stamp
         event = threading.Event()
-        _CLI_SESSIONS_CACHE_INFLIGHT[cache_key] = event
-        return event, True
+        invalidation_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+        _CLI_SESSIONS_CACHE_INFLIGHT[cache_key] = (event, invalidation_stamp)
+        return event, True, invalidation_stamp
 
 
 def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
         if event is None:
             return
-        if _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key) is event:
+        current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
+        if current is not None and current[0] is event:
             _CLI_SESSIONS_CACHE_INFLIGHT.pop(cache_key, None)
     if event is not None:
         event.set()
@@ -7326,7 +7350,7 @@ def _reload_cli_sessions_after_inflight(
     db_path: str,
 ) -> list:
     while True:
-        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        event, is_owner, event_invalidation_stamp = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
             break
         wait_finished = False
@@ -7340,6 +7364,16 @@ def _reload_cli_sessions_after_inflight(
             )
         except Exception:
             pass
+        # If a clear happened after this owner claimed its slot, this caller may
+        # have joined after the clear and therefore cannot infer the transition
+        # from its own entry timestamp. Wait for the obsolete owner to release,
+        # then re-contend so exactly one caller owns the next-generation rebuild.
+        if _cli_sessions_cache_invalidation_stamp() != event_invalidation_stamp:
+            try:
+                event.wait()
+            except Exception:
+                pass
+            continue
         cached_sessions = _copy_fresh_cli_sessions_cache_entry(cache_key)
         if cached_sessions is not None:
             return cached_sessions
@@ -7668,7 +7702,7 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     stops being true (metadata moves to another store), this gate would short-
     circuit before the real source — update both together.
     """
-    default = {"title": None, "archived": False}
+    default = {"title": None, "archived": False, "project_id": None}
     if not is_safe_session_id(sid):
         return dict(default)
     p = SESSION_DIR / f'{sid}.json'
@@ -7696,6 +7730,7 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
         if title:
             metadata["title"] = title
         metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        metadata["project_id"] = getattr(webui_meta, 'project_id', None)
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
@@ -7874,7 +7909,11 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
+            'project_id': (
+                _sidecar_meta.get('project_id')
+                if _source == 'matrix'
+                else _state_row_project_id(sid, _source)
+            ),
             'profile': profile,
             'source_tag': _source,
             'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
@@ -8210,7 +8249,7 @@ def get_cli_sessions(
                 else:
                     stale_sessions = _copy_cli_sessions(cached_sessions)
                     stale_stamp = cached_stamp
-        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        event, is_owner, _event_invalidation_stamp = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
             try:
                 invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
