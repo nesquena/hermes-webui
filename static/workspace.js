@@ -391,7 +391,11 @@ function switchWorkspacePanelTab(tab){
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
   const todosPanel = $('workspaceTodosPanel');
   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
-  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+  if(_workspacePanelActiveTab === 'artifacts'){
+    const ownerSessionId=S&&S.session&&S.session.session_id;
+    renderSessionArtifacts();
+    if(ownerSessionId) void _refreshSessionSkillUsageForOwner(ownerSessionId);
+  }
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
 }
 
@@ -417,6 +421,15 @@ function _loadWorkspacePanelTodos(){
 
 function _escHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _sessionSkillUsage(){
+  const raw=S&&S.session&&S.session.skill_provenance;
+  if(!raw||typeof raw!=='object'||Array.isArray(raw)) return [];
+  return Object.keys(raw)
+    .filter(name=>name&&Number.isInteger(raw[name])&&raw[name]>0)
+    .map(name=>({name,count:raw[name]}))
+    .sort((a,b)=>a.name.localeCompare(b.name));
 }
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
@@ -565,17 +578,35 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
+async function _refreshSessionSkillUsageForOwner(sessionId){
+  const ownerId=String(sessionId||'').trim();
+  if(!ownerId) return;
+  try{
+    const data=await api(`/api/session?session_id=${encodeURIComponent(ownerId)}&messages=0&resolve_model=0`);
+    if(!S.session||S.session.session_id!==ownerId) return;
+    if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(ownerId)) return;
+    const usage=data&&data.session&&data.session.skill_provenance;
+    if(!usage||typeof usage!=='object'||Array.isArray(usage)) return;
+    S.session.skill_provenance=usage;
+    renderSessionArtifacts();
+  }catch(_){ }
+}
+
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
+  const skills = typeof _sessionSkillUsage==='function' ? _sessionSkillUsage() : [];
+  const ownerId=String(S.session&&S.session.session_id||'');
+  const currentDisclosure=root.querySelector&&root.querySelector('details.workspace-artifact-skills');
+  const skillsOpen=!currentDisclosure||currentDisclosure.dataset.sessionId!==ownerId||currentDisclosure.open;
+  if(count) count.textContent = String(items.length + skills.length);
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
     return;
   }
-  if(!items.length){
+  if(!items.length&&!skills.length){
     root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
@@ -597,7 +628,7 @@ function renderSessionArtifacts(){
       tail: directory.slice(parentSlash + 1),
     };
   };
-  root.innerHTML = items.map(item => {
+  const fileMarkup = items.map(item => {
     const path = displayPath(item.path);
     const parts = splitArtifactDisplayPath(path);
     const directory = (parts.head || parts.tail)
@@ -607,6 +638,10 @@ function renderSessionArtifacts(){
     const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
     return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
   }).join('');
+  const skillMarkup = skills.length
+    ? `<details class="workspace-artifact-skills" data-session-id="${esc(ownerId)}"${skillsOpen?' open':''}><summary>${esc(t('insights_skill_usage_skills_used') || 'Skills Used')}</summary><div class="workspace-artifact-skill-list">${skills.map(skill => `<div class="workspace-artifact-skill-row"><span class="workspace-artifact-skill-name">${esc(skill.name)}</span><span class="workspace-artifact-skill-uses">${esc(t('insights_skill_usage_col_uses') || 'Uses')}: ${skill.count}</span></div>`).join('')}</div></details>`
+    : '';
+  root.innerHTML = fileMarkup + skillMarkup;
 }
 
 function projectSessionArtifactsForOwner(sessionId){
