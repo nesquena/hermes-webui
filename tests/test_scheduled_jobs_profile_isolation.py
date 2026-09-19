@@ -549,3 +549,169 @@ def test_streaming_profile_home_mutation_avoids_long_lived_cron_cache_patch():
     assert "_STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)" in src
     assert "def _patch_streaming_profile_module_caches" not in src
     assert "old_profile_module_cache_snapshot" not in src
+
+def test_sessiondb_on_threadpool_executor_in_cron_scope(tmp_path, monkeypatch):
+    """Regression test for #6857: SessionDB() on a fresh ThreadPoolExecutor inside a cron scope must respect the profile home."""
+    sqlite_mod = pytest.importorskip("hermes_state")  # auto-skip when hermes-agent is unavailable
+    SessionDB = sqlite_mod.SessionDB
+
+    default_home = tmp_path / "default_home"
+    named_home = default_home / "profiles" / "named"
+
+    # Initialize the profile structure
+    (default_home / "profiles").mkdir(parents=True)
+    named_home.mkdir(parents=True)
+
+    # Point HERMES_HOME env to default_home (so default profile is active by default)
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+    from api import profiles as p
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", default_home)
+
+    # Helper to run SessionDB() in a thread and return the db_path. The armed
+    # context must be copied explicitly: production executors (cron / agent
+    # tool-call boundaries) enter the worker via copy_context().run(), which is
+    # what makes the ContextVar override — not os.environ — the transport.
+    def get_sessiondb_path_via_thread():
+        from concurrent.futures import ThreadPoolExecutor
+        import contextvars
+        ctx = contextvars.copy_context()
+
+        def _open_probe_and_close():
+            # #6912 re-gate (fix-spec 4): close every constructed handle — the
+            # probe runs on a worker thread, so a leaked connection keeps the
+            # profile state.db open past the scope.
+            db = SessionDB()
+            try:
+                return db.db_path
+            finally:
+                db.close()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(ctx.run, _open_probe_and_close)
+            return future.result()
+
+    # Test 1: Inside a named-profile cron scope (TLS set to named), SessionDB should use the named profile
+    p.set_request_profile("named")
+    try:
+        with p.cron_profile_context():
+            db_path = get_sessiondb_path_via_thread()
+            expected = named_home / "state.db"
+            assert db_path == expected, f"Expected {expected}, got {db_path}"
+            # #6857 re-gate: the cron scope must not publish its home to the
+            # process env — that is the channel that leaked to other threads.
+            assert os.environ.get("HERMES_HOME") == str(default_home), (
+                "cron scope leaked its profile home into os.environ"
+            )
+    finally:
+        p.clear_request_profile()
+
+    # Test 2: Inside a default-profile cron scope (TLS set to default), SessionDB should use the default profile
+    p.set_request_profile("default")
+    try:
+        with p.cron_profile_context():
+            db_path = get_sessiondb_path_via_thread()
+            expected = default_home / "state.db"
+            assert db_path == expected, f"Expected {expected}, got {db_path}"
+            assert os.environ.get("HERMES_HOME") == str(default_home)
+    finally:
+        p.clear_request_profile()
+@pytest.mark.parametrize("via_explicit_home", [False, True], ids=["profile_context", "context_for_home"])
+@pytest.mark.parametrize("raised", [False, True], ids=["normal_exit", "exceptional_exit"])
+def test_cron_profile_context_restores_state_on_normal_and_exceptional_exit(
+    tmp_path, monkeypatch, via_explicit_home, raised
+):
+    """#6912 re-gate (fix-spec 4): BOTH cron context managers must restore the
+    process env, the home pin and the scope depth on a normal exit AND when the
+    body raises. The scope runs on worker threads, so a leak here pins the next
+    cron job to the wrong profile home.
+    """
+    pytest.importorskip("cron.jobs")
+
+    base = tmp_path / "base"
+    named = base / "profiles" / "named"
+    _write_jobs(base, [{"id": "d1", "name": "default-job"}])
+    _write_jobs(named, [{"id": "n1", "name": "named-job"}])
+
+    monkeypatch.setenv("HERMES_HOME", str(base))
+
+    from api import profiles as p
+
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", base)
+
+    # The Agent-side resolver must also come back to its pre-scope home: the
+    # scope installs a ContextVar pin, and a leaked pin keeps unscoped Agent
+    # readers pointed at the cron profile after the job finished.
+    agent_constants = pytest.importorskip("hermes_constants")
+    agent_home_before = agent_constants.get_hermes_home()
+
+    import cron.jobs as _cj
+    # #6912 CR: hand the cron.jobs module globals back with monkeypatch instead
+    # of leaving them bound to this test's disposable tmp_path.
+    monkeypatch.setattr(_cj, "HERMES_DIR", base)
+    monkeypatch.setattr(_cj, "CRON_DIR", base / "cron")
+    monkeypatch.setattr(_cj, "JOBS_FILE", base / "cron" / "jobs.json")
+    monkeypatch.setattr(_cj, "OUTPUT_DIR", base / "cron" / "output")
+    assert any(j["id"] == "d1" for j in _cj.list_jobs(include_disabled=True))
+
+    if via_explicit_home:
+        ctx = p.cron_profile_context_for_home(named)
+    else:
+        p.set_request_profile("named")
+        ctx = p.cron_profile_context()
+
+    try:
+        if raised:
+            with pytest.raises(RuntimeError, match="boom"):
+                with ctx:
+                    # #6912 CR: prove IN SCOPE that the Agent home override was
+                    # installed. The post-exit check alone is false-green: the
+                    # cron.jobs pinning is a separate channel, so it also passes
+                    # when the override was never installed.
+                    assert os.environ.get("HERMES_HOME") == str(base), (
+                        "cron scope mirrored its profile home into os.environ: "
+                        f"{os.environ.get('HERMES_HOME')} != {base}"
+                    )
+                    assert agent_constants.get_hermes_home() == named, (
+                        "the Agent home override was not installed in scope: "
+                        f"{agent_constants.get_hermes_home()} != {named}"
+                    )
+                    assert any(j["id"] == "n1" for j in _cj.list_jobs(include_disabled=True))
+                    assert p._cron_profile_context_depth() == 1
+                    raise RuntimeError("boom")
+        else:
+            with ctx:
+                # #6912 CR: prove IN SCOPE that the Agent home override was
+                # installed. The post-exit check alone is false-green: the
+                # cron.jobs pinning is a separate channel, so it also passes
+                # when the override was never installed.
+                assert os.environ.get("HERMES_HOME") == str(base), (
+                    "cron scope mirrored its profile home into os.environ: "
+                    f"{os.environ.get('HERMES_HOME')} != {base}"
+                )
+                assert agent_constants.get_hermes_home() == named, (
+                    "the Agent home override was not installed in scope: "
+                    f"{agent_constants.get_hermes_home()} != {named}"
+                )
+                assert any(j["id"] == "n1" for j in _cj.list_jobs(include_disabled=True))
+                assert p._cron_profile_context_depth() == 1
+    finally:
+        p.clear_request_profile()
+
+    # Normal and exceptional exits must leave identical, fully restored state.
+    assert p._cron_profile_context_depth() == 0, "cron scope depth leaked"
+    assert os.environ.get("HERMES_HOME") == str(base), (
+        "cron scope leaked its profile home into os.environ"
+    )
+    assert not p._cron_env_lock.locked(), "cron env lock leaked"
+    assert p.get_active_hermes_home() == base, (
+        "the home pin survived the scope: "
+        f"resolver still points at {p.get_active_hermes_home()}"
+    )
+    assert any(j["id"] == "d1" for j in _cj.list_jobs(include_disabled=True)), (
+        "cron.jobs stayed pinned to the scoped profile home"
+    )
+    assert agent_constants.get_hermes_home() == agent_home_before, (
+        "the Agent resolver did not return to its pre-scope home: "
+        f"{agent_constants.get_hermes_home()} != {agent_home_before}"
+    )

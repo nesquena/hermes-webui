@@ -1302,7 +1302,7 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
         raise ValueError("unsupported gateway action")
 
     from api import config as api_config
-    from api.profiles import get_active_profile_name
+    from api.profiles import get_active_hermes_home, get_active_profile_name
 
     agent_dir = getattr(api_config, "_AGENT_DIR", None)
     if not agent_dir:
@@ -1323,6 +1323,23 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
     cmd.extend(["gateway", action])
 
     env = os.environ.copy()
+    # #6857: the process env can hold a stale named/deleted home after a
+    # named→default switch; resolve the active home through the profile
+    # authority and pin it explicitly so start/stop/restart always target the
+    # canonical home (root when no named profile is active).
+    #
+    # Fail closed: this spawns a gateway process, so silently inheriting
+    # HERMES_HOME from os.environ would let a stale/deleted profile home leak
+    # into subprocess state — the exact failure mode #6857 is about. Raising
+    # surfaces as a 500 via the route's generic handler instead.
+    try:
+        env["HERMES_HOME"] = str(get_active_hermes_home())
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not resolve the active HERMES_HOME for the gateway "
+            f"{action} command; refusing to fall back to the process env value, "
+            "which can point at a stale or deleted profile home."
+        ) from exc
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("BROWSER", "echo")
     return subprocess.run(
