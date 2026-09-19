@@ -12,6 +12,11 @@ from tests.conftest import TEST_BASE, TEST_WORKSPACE
 
 
 _BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+_VIEWPORT_CASES = [
+    pytest.param({"width": 1440, "height": 900}, id="desktop"),
+    pytest.param({"width": 768, "height": 900}, id="narrow"),
+    pytest.param({"width": 390, "height": 844}, id="mobile"),
+]
 
 
 def _seed_session(session_id: str, text: str, *, pinned: bool = False) -> None:
@@ -56,8 +61,9 @@ def _open_session(page, session_id: str) -> None:
 
 
 @pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+@pytest.mark.parametrize("viewport", _VIEWPORT_CASES)
 def test_slash_clear_persists_empty_session_after_reload(
-    cleanup_test_sessions, pinned: bool
+    cleanup_test_sessions, pinned: bool, viewport: dict[str, int]
 ):
     """A cleared session keeps its identity after reload whether pinned or not."""
     session_id = f"clear_browser_{'pinned' if pinned else 'unpinned'}_{uuid.uuid4().hex}"
@@ -68,7 +74,7 @@ def test_slash_clear_persists_empty_session_after_reload(
     with pw.sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
         try:
-            page = browser.new_page()
+            page = browser.new_page(viewport=viewport)
             _open_session(page, session_id)
             assert "history that must not return" in page.locator("#msgInner").inner_text()
 
