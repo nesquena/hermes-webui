@@ -2174,6 +2174,20 @@ def _prepare_marker_clean_writeback(
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
+    # Strip consumed [OUT-OF-BAND USER MESSAGE] blocks from every row so the
+    # display transcript (session.messages) never renders the raw control
+    # wrapper. The model-facing path was already covered in #5063 by
+    # gateway_chat.py calling _strip_oob_blocks on context_messages; this
+    # mirrors that on the settle/display side. We rebuild each row via
+    # {**msg, 'content': ...} rather than mutating in place so the input
+    # ``result_messages`` references passed by callers are not touched
+    # (#7600).
+    cleaned = [
+        {**msg, 'content': _strip_oob_blocks(msg['content'])}
+        if isinstance(msg, dict) and 'content' in msg
+        else msg
+        for msg in cleaned
+    ]
     provenance = {
         'verification_nudge_seen': has_verification_nudge,
         'active_turn_identity': copy.deepcopy(active_turn_identity),

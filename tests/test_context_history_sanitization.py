@@ -10,6 +10,7 @@ from api.streaming import (
     _api_safe_message_positions,
     _compact_image_parts_for_persistence,
     _compact_session_image_parts_for_persistence,
+    _prepare_marker_clean_writeback,
     _restore_reasoning_metadata,
     _sanitize_messages_for_api,
     _strip_oob_blocks,
@@ -543,3 +544,130 @@ def test_restore_metadata_aligns_row_with_empty_tool_calls():
     assert asst["reasoning"] == "prior reasoning", "reasoning must carry forward across the empty-tool_calls row"
     assert asst["id"] == "msg-42", "stable id must carry forward"
     assert asst["timestamp"] == 1234, "timestamp must carry forward (row must not re-mint / drift)"
+
+
+def test_prepare_marker_clean_writeback_strips_oob_from_display_rows():
+    """#7600: the display-path writeback (used by session.messages) must
+    strip consumed [OUT-OF-BAND USER MESSAGE] wrappers, mirroring the
+    model-facing path that #5063 already fixed. Before this fix the
+    frontend rendered the raw control marker in the chat bubble."""
+    user_with_oob = (
+        "steer text the user actually wants to see\n"
+        "[OUT-OF-BAND USER MESSAGE — consumed steer]\n"
+        "internal control text that must not reach the UI either\n"
+        "[/OUT-OF-BAND USER MESSAGE]"
+    )
+    result_messages = [
+        {"role": "user", "content": user_with_oob},
+        {"role": "assistant", "content": "ok, taking that into account"},
+    ]
+
+    cleaned, _next_ctx, _prov, _boundary = _prepare_marker_clean_writeback(
+        previous_context_messages=[],
+        result_messages=result_messages,
+    )
+
+    # The OOB block must be gone from both rows' content.
+    assert not _contains_oob(cleaned[0]["content"]), (
+        "user row should have its [OUT-OF-BAND USER MESSAGE] wrapper stripped "
+        "before the display transcript is written"
+    )
+    assert "steer text the user actually wants to see" in cleaned[0]["content"], (
+        "the real steer text must survive stripping"
+    )
+    assert cleaned[1]["content"] == "ok, taking that into account"
+
+
+def test_prepare_marker_clean_writeback_does_not_mutate_input():
+    """#7600: the strip pass must not mutate the caller's ``result_messages``
+    list or its message dicts in place. We rebuild each row via
+    ``{**msg, 'content': ...}`` so the input is left untouched, which keeps
+    any other reference the caller holds consistent."""
+    original_user_content = (
+        "visible text\n"
+        "[OUT-OF-BAND USER MESSAGE — internal]\n"
+        "control text\n"
+        "[/OUT-OF-BAND USER MESSAGE]"
+    )
+    user_msg = {"role": "user", "content": original_user_content}
+    asst_msg = {"role": "assistant", "content": "ok"}
+    result_messages = [user_msg, asst_msg]
+
+    _cleaned, _next_ctx, _prov, _boundary = _prepare_marker_clean_writeback(
+        previous_context_messages=[],
+        result_messages=result_messages,
+    )
+
+    # Input list length and object identities unchanged.
+    assert len(result_messages) == 2
+    assert result_messages[0] is user_msg
+    assert result_messages[1] is asst_msg
+    # Input message contents unchanged (still contain the OOB block).
+    assert "OUT-OF-BAND USER MESSAGE" in result_messages[0]["content"]
+    assert result_messages[1]["content"] == "ok"
+
+
+def test_prepare_marker_clean_writeback_handles_list_and_dict_content():
+    """#7600: OOB wrappers can appear in list-of-parts or dict-shaped content
+    too. _strip_oob_blocks already recurses into both, so the writeback
+    stays consistent regardless of how the model surfaces the row."""
+    list_user = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "leading text"},
+            {
+                "type": "text",
+                "text": "[OUT-OF-BAND USER MESSAGE — x]ctrl[/OUT-OF-BAND USER MESSAGE]",
+            },
+        ],
+    }
+    dict_user = {
+        "role": "user",
+        "content": {"text": "wrap [OUT-OF-BAND USER MESSAGE — y]h[/OUT-OF-BAND USER MESSAGE] tail"},
+    }
+    result_messages = [list_user, dict_user]
+
+    cleaned, _next_ctx, _prov, _boundary = _prepare_marker_clean_writeback(
+        previous_context_messages=[],
+        result_messages=result_messages,
+    )
+
+    assert not _contains_oob(cleaned[0]["content"]), "list-form content must also be stripped"
+    assert "leading text" in cleaned[0]["content"][0]["text"]
+    assert not _contains_oob(cleaned[1]["content"]), "dict-form content must also be stripped"
+    assert "wrap" in cleaned[1]["content"]["text"]
+    assert "tail" in cleaned[1]["content"]["text"]
+
+
+def test_prepare_marker_clean_writeback_preserves_message_metadata():
+    """#7600: the row-rebuild must preserve tool_calls, id, timestamp, and
+    any other side fields. Only ``content`` is replaced; everything else
+    rides forward so downstream settlement (id assignment, restore, dedupe)
+    sees the same row shape as before."""
+    user_with_oob = (
+        "real text\n"
+        "[OUT-OF-BAND USER MESSAGE — ctrl][/OUT-OF-BAND USER MESSAGE]"
+    )
+    result_messages = [
+        {
+            "role": "assistant",
+            "content": "answer text",
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "x"}}],
+            "id": "msg-existing",
+            "timestamp": 1700000000,
+            "_custom_flag": True,
+        },
+    ]
+
+    cleaned, _next_ctx, _prov, _boundary = _prepare_marker_clean_writeback(
+        previous_context_messages=[],
+        result_messages=result_messages,
+    )
+
+    asst = cleaned[0]
+    assert asst["tool_calls"] == [{"id": "call-1", "type": "function", "function": {"name": "x"}}]
+    assert asst["id"] == "msg-existing"
+    assert asst["timestamp"] == 1700000000
+    assert asst["_custom_flag"] is True
+    # Content itself is unchanged (no OOB in this row).
+    assert asst["content"] == "answer text"
