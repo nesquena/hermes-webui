@@ -221,8 +221,8 @@ class TestReconnectAccumulatorPreservation:
         """Deferred hidden-tab recovery must not reattach an old stream after
         the user has switched to a different session in the same tab."""
         src = read('static/messages.js')
-        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(source\)\{.*?\n  \}', src, re.DOTALL)
-        assert m, "_reattachOrRestoreAfterDeferredStreamError(source) not found"
+        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(source, capability=null\)\{.*?\n  \}', src, re.DOTALL)
+        assert m, "_reattachOrRestoreAfterDeferredStreamError(source, capability=null) not found"
         fn = m.group(0)
         assert 'S.session&&S.session.session_id' in fn
         assert '!==activeSid' in fn

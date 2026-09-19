@@ -951,7 +951,9 @@ class TestFrontendWiring:
         """Frontend must listen for pending_steer_leftover SSE events and queue them."""
         idx = self.msgs.find("addEventListener('pending_steer_leftover'")
         assert idx >= 0, "messages.js must add a listener for pending_steer_leftover"
-        block = self.msgs[idx:idx + 600]
+        # Window widened to 900: the #6381 ownership guard line now opens the
+        # pending_steer_leftover listener, pushing queueSessionMessage further in.
+        block = self.msgs[idx:idx + 900]
         assert "queueSessionMessage" in block, (
             "pending_steer_leftover handler must queue the leftover text for the next turn"
         )

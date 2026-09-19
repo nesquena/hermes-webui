@@ -99,7 +99,7 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     never replaces the pane with the persisted transcript when done is missing.
     """
     body = _event_body("stream_end")
-    restore_idx = body.find("_restoreSettledSession(source,{status:true})")
+    restore_idx = body.find("_restoreSettledSession(source,{status:true,capability:_capability})")
     if restore_idx == -1:
         restore_idx = body.find("_restoreSettledSession(source)")
     close_idx = body.find("_closeSource(source)", restore_idx)
@@ -123,7 +123,7 @@ def test_settled_restore_and_error_close_only_the_event_source_owner():
     assert "function _handleStreamError(source)" in MESSAGES_JS
     assert "_closeSource(source);" in restore_body
     assert "_closeSource(source);" in error_body
-    assert "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})" in event_body
+    assert "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true, capability:_capability})" in event_body
     assert "_handleStreamError(source)" in event_body
     assert "_restoreSettledSession())" not in event_body
     assert "_handleStreamError();" not in event_body
@@ -200,7 +200,7 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     error_body = _event_body("error")
 
     assert "const LIVE_STREAMS={};" in MESSAGES_JS
-    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
+    assert "LIVE_STREAMS[activeSid]={streamId,source,capability:_capability};" in wire_body
     assert "existingLive.source.close();" in wire_body
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
