@@ -99,6 +99,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+from api.request_logging import emit_request_log
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -338,10 +339,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _safe_webui_print(message: str) -> None:
         """Emit a request log line without letting logging break responses."""
-        try:
-            print(message, flush=True)
-        except Exception:
-            pass
+        emit_request_log(message)
 
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""

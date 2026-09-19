@@ -6,6 +6,26 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## Requests succeed but access records disappear during agent work
+
+The server emits `[webui]` JSON access records to its original process stdout,
+using a private duplicate captured before agent imports. This keeps request and
+HTTP error logs visible when an in-process tool redirects or closes `sys.stdout`.
+Logging failures still must not interrupt HTTP responses.
+
+Check the service's captured stdout (for example, `docker logs <container>` or
+the journal for your WebUI unit). Verify successful `POST /api/chat/start` and
+`GET /api/chat/stream` records, not only health probes or rejected requests.
+Records include `method`, `path`, `status`, and `ms`: elapsed time until response
+headers, **not** the lifetime of an SSE stream or the agent turn. A missing record
+before response headers does not distinguish a pending request from a logging
+failure. Keep the launcher's output destination open for the process lifetime.
+
+Scheduled cron execution belongs to the Hermes Agent gateway scheduler, not the
+WebUI HTTP server. Investigate cron outcomes in the gateway's logs and the
+active Hermes home's `cron/executions.db`; WebUI access records show HTTP cron
+management requests, not every scheduled execution.
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.
