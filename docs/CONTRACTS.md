@@ -21,6 +21,17 @@ contributor guidance; it does not change runtime behavior or CI gates.
   workflow. Read it for context, but do not edit it in ordinary contributor PRs;
   put release-note-ready wording in the PR body instead.
 
+## Image Markdown rendering
+
+Chat Markdown supports image targets written as `![alt](target)`. The renderer accepts `https://`, `file://`, and safe `data:image/` targets. Hermes image-generation providers may also emit a bare absolute path on the next line; WebUI recognizes that compatibility form only when the path is an image file under a `/cache/images/` segment, such as:
+
+```markdown
+![Generated image]
+(/home/user/.hermes/cache/images/mai_example.png)
+```
+
+This narrow cache-path rule prevents root-relative web URLs (`/images/logo.png`), protocol-relative URLs (`//cdn.example/image.png`), traversal paths, and blank-paragraph joins from being interpreted as local media. Local references continue through the session-authorized `api/media` route.
+
 ## Runtime, durability, and state contracts
 
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
