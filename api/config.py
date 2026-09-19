@@ -10899,13 +10899,18 @@ PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuati
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
-    """Record the session that owns a stream before worker startup."""
+    """Record the immutable session that owns a stream before worker startup.
+
+    Re-registration can occur while a long-running stream crosses compression
+    aliases; the first admitted owner remains the journal authority until
+    teardown unregisters the stream.
+    """
     stream_id = str(stream_id or "").strip()
     session_id = str(session_id or "").strip()
     if not stream_id or not session_id:
         return
     with STREAM_SESSION_OWNERS_LOCK:
-        STREAM_SESSION_OWNERS[stream_id] = session_id
+        STREAM_SESSION_OWNERS.setdefault(stream_id, session_id)
 
 
 def stream_owner_session_id(stream_id: str) -> str | None:
@@ -10917,6 +10922,20 @@ def stream_owner_session_id(stream_id: str) -> str | None:
         owner = STREAM_SESSION_OWNERS.get(stream_id)
     owner = str(owner or "").strip()
     return owner or None
+
+
+def stream_journal_owner_session_id(stream_id: str, fallback_session_id: str | None = None) -> str | None:
+    """Return the immutable session directory that owns ``stream_id``'s journal.
+
+    Compression may move the live agent to a continuation session while the
+    WebUI keeps the same transport/run id.  The owner registered when that run
+    was admitted remains authoritative for every append and replay of the run.
+    """
+    owner = stream_owner_session_id(stream_id)
+    if owner:
+        return owner
+    fallback = str(fallback_session_id or "").strip()
+    return fallback or None
 
 
 def unregister_stream_owner(stream_id: str) -> None:

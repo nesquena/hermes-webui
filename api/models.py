@@ -1276,6 +1276,7 @@ class Session:
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
                  active_stream_id: str=None,
+                 last_run_stream_id: str=None,
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
@@ -1362,6 +1363,7 @@ class Session:
         self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
         self.active_stream_id = active_stream_id
+        self.last_run_stream_id = last_run_stream_id
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
@@ -1471,7 +1473,7 @@ class Session:
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
-            'personality', 'active_stream_id',
+            'personality', 'active_stream_id', 'last_run_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',

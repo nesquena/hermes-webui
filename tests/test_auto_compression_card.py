@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
 from api.streaming import (
@@ -552,6 +554,69 @@ def test_agent_status_callback_wiring():
     src = _read("api/streaming.py")
     assert "_agent_status_callback" in src
     assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
+
+
+def test_agent_rotation_event_callback_publishes_committed_lineage_before_run_returns():
+    src = _read("api/streaming.py")
+
+    assert "if 'event_callback' in _agent_params:" in src
+    assert "str(event_name or '') != 'session:compress'" in src
+    assert "bool(payload.get('in_place'))" in src
+    assert "_publish_live_rotation_identity(" in src
+    assert "old_session_id=old_sid" in src
+    assert "new_session_id=new_sid" in src
+    assert "_chain_agent_event_callback(" in src
+    assert "_agent_kwargs.get('event_callback')" in src
+
+
+def test_agent_rotation_event_callback_executes_on_real_agent_compression():
+    """Exercise the actual Hermes Agent event emitter, not only source wiring."""
+    import api.streaming as streaming
+
+    agent_cls = streaming._get_ai_agent()
+    if agent_cls is None:
+        pytest.skip("Hermes Agent is not installed in this CI environment")
+    events = []
+    agent = agent_cls.__new__(agent_cls)
+    agent.platform = "webui"
+    agent.session_id = "continuation-session"
+    agent.event_callback = lambda event, payload: events.append((event, payload))
+    agent.context_compressor = type("Compressor", (), {"compression_count": 1})()
+    agent.log_prefix = ""
+    agent._memory_manager = None
+    agent._session_db = None
+    agent.tools = []
+    agent._emit_status = lambda _message: None
+
+    import agent.conversation_compression as compression
+
+    compression._finish_compaction_boundary(
+        agent,
+        [],
+        new_system_prompt="",
+        old_session_id="origin-session",
+        in_place=False,
+        compacted_in_place=False,
+        session_commit_succeeded=False,
+        defer_context_engine_notification=False,
+        compression_made_progress=True,
+        compression_used_fallback=False,
+        compression_feasibility_skip=False,
+        task_id="origin-session",
+    )
+
+    assert events == [
+        (
+            "session:compress",
+            {
+                "platform": "webui",
+                "session_id": "continuation-session",
+                "old_session_id": "origin-session",
+                "in_place": False,
+                "compression_count": 1,
+            },
+        )
+    ]
 
 
 def test_fallback_lifecycle_message_predicate_matches_agent_emitters():

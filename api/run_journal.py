@@ -18,6 +18,14 @@ RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
+# Process-local terminal claims close the runtime acceptance window before a
+# terminal row is written. A terminal append can fail after the live stream has
+# already committed to teardown; relying only on the JSONL row would then let a
+# concurrent Steer accept against a dead run. Claims share the per-path writer
+# lock, so terminal selection, Steer acceptance, and durable append remain one
+# serialized state machine without introducing another lock edge.
+_TERMINAL_CLAIMS: set[str] = set()
+_TERMINAL_CLAIMS_LOCK = threading.Lock()
 # Next-seq to assign per run-journal file path, kept in memory so repeat appends
 # to the same run do not re-parse the whole file on every call. The per-path
 # ``_lock_for(path)`` serializes same-path reserve→append so seqs stay monotonic
@@ -172,6 +180,49 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
     return events, malformed
 
 
+def _read_complete_jsonl(path: Path) -> tuple[list[dict], list[dict], int]:
+    """Read complete JSONL records, ignoring one incomplete trailing write."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return [], [], 0
+    if raw.endswith(b"\n"):
+        complete = raw
+    elif b"\n" in raw:
+        complete = raw.rsplit(b"\n", 1)[0] + b"\n"
+    else:
+        complete = b""
+    events: list[dict] = []
+    malformed: list[dict] = []
+    for line_no, line in enumerate(complete.decode("utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            malformed.append({"line": line_no, "raw": line})
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+        else:
+            malformed.append({"line": line_no, "raw": line})
+    return events, malformed, len(complete)
+
+
+def _truncate_failed_append(path: Path, durable_size: int) -> None:
+    """Drop an incomplete trailing record left by a failed append."""
+    try:
+        current_size = path.stat().st_size
+    except OSError:
+        return
+    if current_size <= durable_size:
+        return
+    with path.open("r+b") as fh:
+        fh.truncate(durable_size)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
     raw = str(raw or "").strip()
     if not raw:
@@ -281,6 +332,26 @@ def _reserve_next_seq(path: Path) -> int:
         return seeded
 
 
+def _resync_next_seq_after_failed_append(path: Path) -> None:
+    """Reset the cache from complete durable rows after an append raised.
+
+    A failure before any bytes land must return the unpublished sequence. A
+    late flush/fsync failure may still leave a complete row on disk, while a
+    partial write can leave a torn final line. Truncate only that incomplete
+    suffix, then seed the next id from complete records under the path lock.
+    """
+    events, malformed, durable_size = _read_complete_jsonl(path)
+    if malformed:
+        _discard_cached_summary(path)
+        return
+    _truncate_failed_append(path, durable_size)
+    seqs = [int(event.get("seq") or 0) for event in events if isinstance(event.get("seq"), int)]
+    disk_next = (max(seqs) + 1) if seqs else 1
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE[str(path)] = disk_next
+    _discard_cached_summary(path)
+
+
 def _note_assigned_seq(path: Path, seq: int) -> None:
     """Keep the cache at least one past an explicitly-supplied ``seq``.
 
@@ -385,6 +456,55 @@ def _iter_bounded_raw_jsonl_lines(path: Path, *, max_bytes: int, retained_bytes:
         return
 
 
+def _append_run_event_locked(
+    path: Path,
+    session_id: str,
+    run_id: str,
+    event_name: str,
+    payload,
+    *,
+    seq: int | None = None,
+    created_at: float | None = None,
+) -> dict:
+    if seq is not None:
+        assigned_seq = int(seq)
+        _note_assigned_seq(path, assigned_seq)
+    else:
+        assigned_seq = _reserve_next_seq(path)
+    terminal_state = _terminal_state_for_event(event_name, payload)
+    event = {
+        "version": 1,
+        "event_id": f"{run_id}:{assigned_seq}",
+        "seq": assigned_seq,
+        "run_id": str(run_id),
+        "session_id": str(session_id),
+        "event": event_name,
+        "type": event_name,
+        "created_at": float(created_at if created_at is not None else time.time()),
+        "terminal": bool(terminal_state),
+        "terminal_state": terminal_state,
+        "payload": payload,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created_file = not path.exists()
+    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+            if _should_fsync_event(terminal_state):
+                os.fsync(fh.fileno())
+    except Exception:
+        if seq is None:
+            _resync_next_seq_after_failed_append(path)
+        raise
+    _discard_cached_summary(path)
+    if created_file:
+        _fsync_parent_dir(path)
+    return event
+
+
 def append_run_event(
     session_id: str,
     run_id: str,
@@ -402,38 +522,15 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
-        if seq is not None:
-            assigned_seq = int(seq)
-            _note_assigned_seq(path, assigned_seq)
-        else:
-            assigned_seq = _reserve_next_seq(path)
-        terminal_state = _terminal_state_for_event(event_name, payload)
-        event = {
-            "version": 1,
-            "event_id": f"{run_id}:{assigned_seq}",
-            "seq": assigned_seq,
-            "run_id": str(run_id),
-            "session_id": str(session_id),
-            "event": event_name,
-            "type": event_name,
-            "created_at": float(created_at if created_at is not None else time.time()),
-            "terminal": bool(terminal_state),
-            "terminal_state": terminal_state,
-            "payload": payload,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        created_file = not path.exists()
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            if _should_fsync_event(terminal_state):
-                os.fsync(fh.fileno())
-        _discard_cached_summary(path)
-        if created_file:
-            _fsync_parent_dir(path)
-        return event
+        return _append_run_event_locked(
+            path,
+            session_id,
+            run_id,
+            event_name,
+            payload,
+            seq=seq,
+            created_at=created_at,
+        )
 
 
 class RunJournalWriter:
@@ -447,18 +544,129 @@ class RunJournalWriter:
         self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # append_run_event owns sequence reservation and the physical append in
+        # one per-path critical section. Reserving here and releasing the lock
+        # before calling it lets a direct concurrent append write seq=N+1 before
+        # this writer writes seq=N, which makes replay report a non-contiguous
+        # journal even though the numeric set is gapless.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
+        )
+
+    def append_terminal_sse_event(self, event_name: str, payload=None) -> dict:
+        """Claim terminal ownership before attempting its durable append.
+
+        The claim is intentionally retained when the append fails: the runtime
+        stream is already terminal, so a missing disk row must fail closed for
+        later control acceptance instead of reopening the run.
+        """
+        event_name = str(event_name or "").strip()
+        if event_name not in TERMINAL_SSE_EVENTS:
+            raise ValueError("terminal event required")
+        with self._lock:
+            with _TERMINAL_CLAIMS_LOCK:
+                _TERMINAL_CLAIMS.add(str(self._path))
+            return _append_run_event_locked(
+                self._path,
+                self.session_id,
+                self.run_id,
+                event_name,
+                payload or {},
+            )
+
+    def accept_append_and_publish_if_nonterminal(
+        self,
+        event_name: str,
+        payload,
+        accept,
+        publish=None,
+    ):
+        """Run ``accept`` and append its event before any terminal writer wins.
+
+        Returns ``(accepted, event, reason, error)``. The callback is never called
+        after a terminal or malformed journal. A persistence error after callback
+        acceptance is reported separately because runtime acceptance cannot be
+        rolled back.
+        """
+        with self._lock:
+            return self._accept_append_and_publish_locked(
+                event_name,
+                payload,
+                accept,
+                publish,
+            )
+
+    def _accept_append_and_publish_locked(
+        self,
+        event_name: str,
+        payload,
+        accept,
+        publish=None,
+    ):
+        existing, malformed = _read_jsonl(self._path)
+        if malformed:
+            return False, None, "journal_malformed", None
+        with _TERMINAL_CLAIMS_LOCK:
+            terminal_claimed = str(self._path) in _TERMINAL_CLAIMS
+        if terminal_claimed or any(event.get("terminal") for event in existing):
+            return False, None, "terminal", None
+        accepted = bool(accept())
+        if not accepted:
+            return False, None, "rejected", None
+        try:
+            event = _append_run_event_locked(
+                self._path,
+                self.session_id,
+                self.run_id,
+                str(event_name or "").strip(),
+                payload or {},
+            )
+        except Exception as exc:
+            return True, None, "persistence_error", exc
+        if publish is not None:
+            try:
+                publish(event)
+            except Exception as exc:
+                return True, event, "publication_error", exc
+        return True, event, None, None
+
+    def accept_append_and_publish_with_owner_lock(
+        self,
+        owner_lock,
+        event_name: str,
+        payload,
+        accept,
+        publish=None,
+    ):
+        """Acquire this run lock before releasing the owner-registry lock."""
+        acquired = False
+        try:
+            self._lock.acquire()
+            acquired = True
+        finally:
+            owner_lock.release()
+        if not acquired:
+            raise RuntimeError("failed to acquire run journal lock")
+        try:
+            return self._accept_append_and_publish_locked(
+                event_name,
+                payload,
+                accept,
+                publish,
+            )
+        finally:
+            self._lock.release()
+
+    def accept_and_append_if_nonterminal(self, event_name: str, payload, accept):
+        """Backward-compatible append-only wrapper around the transaction API."""
+        return self.accept_append_and_publish_if_nonterminal(
+            event_name,
+            payload,
+            accept,
         )
 
 
@@ -754,6 +962,9 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         with _SUMMARY_CACHE_LOCK:
             for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SUMMARY_CACHE[cache_key]
+        with _TERMINAL_CLAIMS_LOCK:
+            for claim in [entry for entry in _TERMINAL_CLAIMS if str(Path(entry).parent) == dir_key]:
+                _TERMINAL_CLAIMS.discard(claim)
     return removed
 
 

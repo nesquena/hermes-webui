@@ -9,18 +9,22 @@ def test_streaming_initializes_one_run_journal_writer_per_stream():
     writer_idx = src.index("RunJournalWriter(session_id, stream_id)", register_idx)
     cancel_idx = src.index("cancel_event = threading.Event()", writer_idx)
 
-    assert "from api.run_journal import RunJournalWriter" in src
+    assert "from api.run_journal import" in src
+    assert "RunJournalWriter" in src[0:src.index("from api.todo_state import")]
     assert register_idx < writer_idx < cancel_idx
 
 
 def test_streaming_journals_sse_events_before_queue_delivery():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     put_idx = src.index("def put(event, data):")
-    journal_idx = src.index("run_journal.append_sse_event(event, data)", put_idx)
+    selector_idx = src.index("append_event = (", put_idx)
+    terminal_idx = src.index("run_journal.append_terminal_sse_event", selector_idx)
+    journal_idx = src.index("run_journal.append_sse_event", terminal_idx)
+    append_idx = src.index("journaled = append_event(event, data)", journal_idx)
     queue_idx = src.index("q.put_nowait(queue_item)", put_idx)
     block = src[put_idx:queue_idx]
 
-    assert put_idx < journal_idx < queue_idx
+    assert put_idx < selector_idx < terminal_idx < journal_idx < append_idx < queue_idx
     assert "Failed to append run journal event" in block
     assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
 

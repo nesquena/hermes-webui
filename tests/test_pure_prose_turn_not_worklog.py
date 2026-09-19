@@ -107,6 +107,9 @@ def test_pure_prose_scene_is_not_worklog_worthy():
         out.with_compression = _anchorSceneSceneHasWorklogWorthyRows({{
           activity_rows: [ {{ role: 'lifecycle', source_event_type: 'compressed', text: '' }} ]
         }});                                  // expect true
+        out.with_control = _anchorSceneSceneHasWorklogWorthyRows({{
+          activity_rows: [ {{ role: 'control', source_event_type: 'steer_delivered', text: 'redirect' }} ]
+        }});                                  // expect true
         // (5) A bare terminal/done lifecycle is NOT worklog-worthy.
         out.bare_lifecycle = _anchorSceneSceneHasWorklogWorthyRows({{
           activity_rows: [ {{ role: 'lifecycle', source_event_type: 'done', text: '' }} ]
@@ -123,6 +126,7 @@ def test_pure_prose_scene_is_not_worklog_worthy():
     assert out["with_tool"] is True, "a turn with a tool row is a real worklog"
     assert out["with_thinking"] is True, "a turn with a thinking row is a real worklog"
     assert out["with_compression"] is True, "a compression lifecycle card is worklog-worthy"
+    assert out["with_control"] is True, "a steer control boundary is worklog-worthy"
     assert out["bare_lifecycle"] is False, "a bare terminal/done lifecycle is not worklog-worthy"
     assert out["empty"] is False
     assert out["no_scene"] is False

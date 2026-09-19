@@ -40,6 +40,8 @@ from api.config import (
     unregister_stream_owner,
     peek_stream,
     stream_owner_session_id,
+    STREAM_SESSION_OWNERS,
+    STREAM_SESSION_OWNERS_LOCK,
     session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
@@ -68,7 +70,7 @@ from api.helpers import (
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
-from api.run_journal import RunJournalWriter
+from api.run_journal import TERMINAL_SSE_EVENTS, RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -9101,6 +9103,92 @@ def _cached_agent_matches_session(agent, session_id: str) -> bool:
     return identity is None or identity == str(session_id)
 
 
+def _live_rotation_parent_session_id(agent) -> str | None:
+    """Return the immediate origin published by a live automatic rotation.
+
+    Hermes emits an authoritative ``session:compress`` event after the durable
+    child commit.  Older Agent builds do not expose that event, so the WebUI's
+    completion path may populate the compatibility attribute instead.
+    """
+    lineage_parent = str(
+        getattr(agent, "_live_rotation_parent_session_id", "") or ""
+    ).strip()
+    return lineage_parent or None
+
+
+def _publish_live_rotation_identity(agent, *, stream_id: str, old_session_id: str, new_session_id: str) -> bool:
+    """Publish a committed rotation to the live Agent and run registry.
+
+    The immutable journal owner remains unchanged. Only the control-plane
+    liveness identity moves to the continuation so `/api/chat/steer` can find
+    the still-running Agent before ``run_conversation()`` returns.
+    """
+    old_sid = str(old_session_id or "").strip()
+    new_sid = str(new_session_id or "").strip()
+    if agent is None or not old_sid or not new_sid or old_sid == new_sid:
+        return False
+    with STREAMS_LOCK:
+        if stream_id not in STREAMS or AGENT_INSTANCES.get(stream_id) is not agent:
+            return False
+        agent._live_rotation_parent_session_id = old_sid
+    update_active_run(stream_id, session_id=new_sid)
+    logger.info(
+        "Published live compression rotation: stream=%s old_session=%s new_session=%s",
+        stream_id,
+        old_sid,
+        new_sid,
+    )
+    return True
+
+
+def _chain_agent_event_callback(agent, callback) -> None:
+    """Add a host observer without replacing an Agent/plugin event callback."""
+    previous = getattr(agent, 'event_callback', None)
+    if previous is callback:
+        return
+
+    def chained(event_name, payload):
+        if callable(previous):
+            try:
+                previous(event_name, payload)
+            except Exception:
+                logger.debug("Previous agent event_callback failed", exc_info=True)
+        callback(event_name, payload)
+
+    agent.event_callback = chained
+
+
+def _agent_matches_live_rotation_session(agent, session_id: str) -> bool:
+    """Match current or immediate pre-compression identity for a live Agent."""
+    requested = str(session_id or "").strip()
+    if not requested:
+        return False
+    identity = _cached_agent_session_identity(agent)
+    # Identityless compatibility objects remain reusable only through an exact
+    # SESSION_AGENT_CACHE key.  The global live-agent registry is shared by all
+    # sessions, so treating an unverifiable object as a lineage match would let
+    # any request-controlled SID steer the sole unrelated run.
+    if identity is None:
+        return False
+    if identity == requested:
+        return True
+    lineage_parent = _live_rotation_parent_session_id(agent)
+    if lineage_parent == requested:
+        return True
+    with LOCK:
+        projected_current = SESSIONS.get(identity)
+        projected_requested = SESSIONS.get(requested)
+        return (
+            projected_current is not None
+            and str(getattr(projected_current, "parent_session_id", "") or "").strip() == requested
+            and bool(getattr(projected_current, "pre_compression_snapshot", False)) is False
+        ) or (
+            projected_requested is not None
+            and str(getattr(projected_requested, "parent_session_id", "") or "").strip() == identity
+            and bool(getattr(projected_requested, "pre_compression_snapshot", False)) is False
+        )
+
+
 def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
     """Keep AIAgent's primary-runtime snapshot aligned with refreshed creds.
 
@@ -9169,6 +9257,7 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
+    _run_stream_id = str(stream_id)
     q = peek_stream(stream_id)
     if q is None:
         # The stream was cancelled before the worker started; the route layer
@@ -9541,7 +9630,12 @@ def _run_agent_streaming(
         event_id = None
         if run_journal is not None:
             try:
-                journaled = run_journal.append_sse_event(event, data)
+                append_event = (
+                    run_journal.append_terminal_sse_event
+                    if event in TERMINAL_SSE_EVENTS
+                    else run_journal.append_sse_event
+                )
+                journaled = append_event(event, data)
                 # Carry the exact journal id for this queued frame. A global
                 # "latest event" side channel is still kept for legacy queues,
                 # but StreamChannel subscribers need the per-item id so a
@@ -9573,6 +9667,7 @@ def _run_agent_streaming(
     # write without nonlocal) so it can seed `_last_err` and let the classifier
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
+
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
@@ -10781,6 +10876,22 @@ def _run_agent_streaming(
                 _agent_kwargs['tool_complete_callback'] = on_tool_complete
             if 'status_callback' in _agent_params:
                 _agent_kwargs['status_callback'] = _agent_status_callback
+            if 'event_callback' in _agent_params:
+                def _agent_event_callback(event_name, payload):
+                    if str(event_name or '') != 'session:compress' or not isinstance(payload, dict):
+                        return
+                    old_sid = str(payload.get('old_session_id') or '').strip()
+                    new_sid = str(payload.get('session_id') or '').strip()
+                    if bool(payload.get('in_place')) or not old_sid or not new_sid or old_sid == new_sid:
+                        return
+                    _publish_live_rotation_identity(
+                        agent,
+                        stream_id=stream_id,
+                        old_session_id=old_sid,
+                        new_session_id=new_sid,
+                    )
+
+                _agent_kwargs['event_callback'] = _agent_event_callback
             if 'max_iterations' in _agent_params and _max_iterations_cfg is not None:
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
@@ -10918,6 +11029,11 @@ def _run_agent_streaming(
                             agent, _session_db
                         )
                         agent._session_db = _session_db
+                    if hasattr(agent, 'event_callback'):
+                        _chain_agent_event_callback(
+                            agent,
+                            _agent_kwargs.get('event_callback'),
+                        )
                     if hasattr(agent, '_api_call_count'):
                         agent._api_call_count = 0
                     # Reset interrupt state from a prior cancel so the reused
@@ -11500,6 +11616,12 @@ def _run_agent_streaming(
                     # over the just-preserved snapshot back to the original fork
                     # parent, losing access to the recoverable history in old_sid.json.
                     s.parent_session_id = old_sid
+                    # Compatibility fallback for Agent builds that do not emit
+                    # the authoritative ``session:compress`` event. Newer builds
+                    # publish the same immediate-parent lineage during the live
+                    # rotation; retaining this assignment is harmless and keeps
+                    # post-run cache migration backward-compatible.
+                    agent._live_rotation_parent_session_id = old_sid
                     with LOCK:
                         cached_old_session = SESSIONS.pop(old_sid, None)
                         if cached_old_session is not None and cached_old_session is not s:
@@ -11521,6 +11643,18 @@ def _run_agent_streaming(
                     # too until the weak registry can reclaim both safely after
                     # all old-ID holders and waiters release the lock.
                     _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
+                    # Publish the rotation lineage while the run is still live.
+                    # The Steer endpoint resolves continuation aliases from this
+                    # in-process projection; waiting until final s.save() leaves
+                    # the entire continuation tool phase falsely not_running.
+                    try:
+                        s.save(touch_updated_at=False, skip_index=False)
+                    except Exception:
+                        logger.debug(
+                            "Failed to publish live compression continuation %s",
+                            new_sid,
+                            exc_info=True,
+                        )
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -12130,6 +12264,7 @@ def _run_agent_streaming(
                     live_tool_calls=_live_tool_calls,
                 )
                 s.tool_calls = tool_calls
+                s.last_run_stream_id = _run_stream_id
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
@@ -13536,6 +13671,95 @@ def _run_agent_streaming(
 # ============================================================
 
 
+def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text: str):
+    """Accept and journal one steer before a terminal event can win the run."""
+    created_at = time.time()
+    payload = {
+        "session_id": str(session_id),
+        "stream_id": str(stream_id),
+        "text": str(text),
+        "status": "delivered",
+        "created_at": created_at,
+    }
+
+    # Resolve the live channel before entering the owner -> journal transaction.
+    # This is the only STREAMS_LOCK acquisition on this path. Publishing through
+    # the captured StreamChannel later is thread-safe and avoids re-acquiring
+    # STREAMS_LOCK while the journal lock is held. Otherwise teardown can hold
+    # STREAMS_LOCK while waiting for the owner lock, and another steer can hold
+    # the owner lock while waiting for this run's journal lock: a three-lock cycle.
+    #
+    # Teardown may remove the registry entry after this snapshot. That does not
+    # invalidate an already-resolved channel object; the owner->journal handoff
+    # below still decides whether the run is nonterminal and may accept the steer.
+    # If teardown won before this snapshot or before owner lookup, fail closed.
+    stream = peek_stream(str(stream_id))
+    if stream is None:
+        return False, "stream_dead", False
+
+    STREAM_SESSION_OWNERS_LOCK.acquire()
+    try:
+        journal_session_id = str(STREAM_SESSION_OWNERS.get(str(stream_id)) or "").strip()
+        if not journal_session_id:
+            STREAM_SESSION_OWNERS_LOCK.release()
+            return False, "stream_dead", False
+        writer = RunJournalWriter(journal_session_id, str(stream_id))
+    except Exception:
+        STREAM_SESSION_OWNERS_LOCK.release()
+        raise
+
+    def publish(journaled):
+        event_id = journaled.get("event_id")
+        payload["created_at"] = journaled.get("created_at", created_at)
+        if event_id:
+            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
+            if stream is not None and hasattr(stream, "note_last_event_id"):
+                try:
+                    stream.note_last_event_id(str(event_id))
+                except Exception:
+                    logger.debug("Failed to note steer event id %s", event_id, exc_info=True)
+        if stream is None or not callable(getattr(stream, "put_nowait", None)):
+            return
+        item = (
+            ("steer_delivered", payload, event_id)
+            if event_id
+            else ("steer_delivered", payload)
+        )
+        stream.put_nowait(item)
+
+    accepted, journaled, reason, error = writer.accept_append_and_publish_with_owner_lock(
+        STREAM_SESSION_OWNERS_LOCK,
+        "steer_delivered",
+        payload,
+        lambda: agent.steer(text),
+        publish,
+    )
+    if reason == "terminal":
+        return False, "stream_dead", False
+    if reason == "journal_malformed":
+        return False, "steer_error", False
+    if reason == "publication_error":
+        logger.warning(
+            "Failed to broadcast accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return True, None, True
+    if error is not None:
+        logger.warning(
+            "Failed to persist accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return accepted, "persistence_error", False
+    if not accepted or not isinstance(journaled, dict):
+        return False, None, False
+
+    return True, None, True
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -13559,7 +13783,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     or Stop-and-send.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
-    "stream_id": str|None}.
+    "stream_id": str|None, "durable": false?}. The optional ``durable`` field
+    is emitted only for accepted runtime delivery whose journal persistence
+    failed, preserving the legacy success response while exposing degradation.
     """
     from api.helpers import j, bad
     from api import config as _cfg
@@ -13571,24 +13797,64 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
+    def _live_local_binding(request_session_id: str):
+        """Return the unambiguous live local run for either rotation-side ID."""
+        request_session_id = str(request_session_id or "").strip()
+        if not request_session_id:
+            return None, None
+        with _cfg.STREAMS_LOCK:
+            stream_snapshot = set(_cfg.STREAMS)
+            agent_snapshot = [
+                (str(stream_id), agent)
+                for stream_id, agent in _cfg.AGENT_INSTANCES.items()
+            ]
+        # Do not call the lineage matcher while STREAMS_LOCK is held. The
+        # snapshots remain safe because the final owner/journal handoff below
+        # arbitrates against teardown.
+        live_candidates = [
+            (stream_id, agent)
+            for stream_id, agent in agent_snapshot
+            if stream_id in stream_snapshot
+            and _agent_matches_live_rotation_session(agent, request_session_id)
+        ]
+        # Fail closed on ambiguity instead of selecting an unrelated run by
+        # registry order. Compression rotation has exactly one live candidate.
+        if len(live_candidates) == 1:
+            return live_candidates[0]
+        return None, None
+
     evicted_cached_entry = None
+    active_stream_id = None
+    agent = None
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
-        if cached:
-            agent = cached[0]
-            if not _cached_agent_matches_session(agent, sid):
-                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
-                logger.warning(
-                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
-                    sid,
-                    _cached_agent_session_identity(agent),
-                )
-                cached = None
+    if cached:
+        agent = cached[0]
+        if not _cached_agent_matches_session(agent, sid):
+            live_stream_id, live_agent = _live_local_binding(sid)
+            if live_agent is agent:
+                active_stream_id = live_stream_id
+            else:
+                with _cfg.SESSION_AGENT_CACHE_LOCK:
+                    current_cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+                    if current_cached is cached:
+                        evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
+                    cached = None
+                if evicted_cached_entry is not None:
+                    logger.warning(
+                        '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
+                        sid,
+                        _cached_agent_session_identity(agent),
+                    )
     if evicted_cached_entry is not None:
         try:
             _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
+    if not cached:
+        active_stream_id, agent = _live_local_binding(sid)
+        if active_stream_id and agent is not None:
+            cached = (agent, None)
     if not cached:
         try:
             s = get_session(sid)
@@ -13596,8 +13862,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except KeyError:
             active_stream_id = None
         if active_stream_id:
-            with _cfg.STREAMS_LOCK:
-                stream_alive = active_stream_id in _cfg.STREAMS
+            stream_alive = _cfg.peek_stream(active_stream_id) is not None
             if stream_alive:
                 try:
                     with _cfg.ACTIVE_RUNS_LOCK:
@@ -13625,31 +13890,43 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     # Verify the agent is currently running. Use the session's
     # active_stream_id rather than calling load_session_locked() which
     # would block on the streaming thread's lock.
-    try:
-        s = get_session(sid)
-    except KeyError:
-        return j(handler, {"accepted": False, "fallback": "session_not_found",
-                           "stream_id": None})
-    active_stream_id = getattr(s, "active_stream_id", None) or None
+    if not active_stream_id:
+        active_stream_id, live_agent = _live_local_binding(sid)
+        if live_agent is not agent:
+            active_stream_id = None
+    if not active_stream_id:
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return j(handler, {"accepted": False, "fallback": "session_not_found",
+                               "stream_id": None})
+        active_stream_id = getattr(s, "active_stream_id", None) or None
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
-    with _cfg.STREAMS_LOCK:
-        stream_alive = active_stream_id in _cfg.STREAMS
+    stream_alive = _cfg.peek_stream(active_stream_id) is not None
     if not stream_alive:
         # Active stream id is stale — stream has ended; caller falls back
         return j(handler, {"accepted": False, "fallback": "stream_dead",
                            "stream_id": None})
 
     try:
-        accepted = bool(agent.steer(text))
+        accepted, fallback, durable = _accept_and_publish_steer_event(
+            agent,
+            sid,
+            active_stream_id,
+            text,
+        )
     except Exception as exc:
         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+    response = {"accepted": accepted, "fallback": fallback,
+                "stream_id": active_stream_id}
+    if accepted and durable is False:
+        response["durable"] = False
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:
