@@ -215,6 +215,19 @@ settle.
 Steer must not exist only as a toast or transient DOM state. It must survive
 refresh, session switch, replay, and settled render.
 
+**The transport wrapper is not the Steer row.** A Steer reaches the agent as an
+`[OUT-OF-BAND USER MESSAGE …] … [/OUT-OF-BAND USER MESSAGE]` block appended to
+the run's last tool result. That block is transport-level control data, not user
+content: settlement drops it from both written copies — the display transcript
+(`session.messages`) and the persisted context state
+(`session.context_messages`) — so the wrapper never renders in the settled view
+and is never replayed to the model. The Steer's own user-visible row is not
+touched by that scrub, which is scoped to the tool row that carried the wrapper:
+user text that merely quotes a complete marker (a pasted example, a log excerpt)
+stays byte-for-byte and appears exactly once. A session whose transcript was
+stored before this behavior existed keeps the wrapper in place until its next
+settlement, when the merged transcript is scrubbed again.
+
 ### Relationship to system control events
 
 Steer is similar to system-delivered control events such as tool-iteration-limit

@@ -2174,6 +2174,14 @@ def _prepare_marker_clean_writeback(
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
+    # Same internal-control class, second home: a consumed mid-turn /steer is
+    # appended to the turn's last tool result wrapped in
+    # [OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]. Strip it
+    # here, on the rows both writebacks are built from, so neither
+    # session.messages (rendered verbatim) nor session.context_messages keeps
+    # the raw wrapper. Stripping the incoming rows too keeps them identity-equal
+    # to the marker-free rows persisted by earlier turns. (#7600)
+    cleaned = _strip_oob_markers_from_messages(cleaned)
     provenance = {
         'verification_nudge_seen': has_verification_nudge,
         'active_turn_identity': copy.deepcopy(active_turn_identity),
@@ -2286,6 +2294,11 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    # The merge carries earlier display rows across turns verbatim, so a row
+    # settled before this guard existed would keep its raw wrapper forever.
+    # Scrub the persisted display copy too — after the merge, so identity
+    # matching above still saw the rows unchanged. (#7600)
+    session.messages = _strip_oob_markers_from_messages(session.messages)
     _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
@@ -5432,6 +5445,54 @@ def _strip_oob_blocks(content):
             for key, value in content.items()
         }
     return content
+
+
+def _content_has_oob_marker(content) -> bool:
+    """True when ``content`` holds a complete [OUT-OF-BAND USER MESSAGE] block.
+
+    Cheap pre-check so a scrub pass over a settled transcript only copies the
+    rows that actually carry the control wrapper.
+    """
+    if isinstance(content, str):
+        return bool(_OOB_USER_MESSAGE_BLOCK_RE.search(content))
+    if isinstance(content, list):
+        return any(_content_has_oob_marker(part) for part in content)
+    if isinstance(content, dict):
+        return any(_content_has_oob_marker(value) for value in content.values())
+    return False
+
+
+def _strip_oob_markers_from_messages(messages):
+    """Drop consumed OOB steer wrappers from the tool rows that carry them.
+
+    A mid-turn ``/steer`` is delivered as an ``[OUT-OF-BAND USER MESSAGE ...]``
+    block appended to the turn's last tool result. The wrapper is agent control
+    data: the gateway history builder already strips it from the model-facing
+    copy, and the settled transcript must not keep it either — ``session.messages``
+    is rendered verbatim in the UI (#7600).
+
+    Only ``role == 'tool'`` rows are candidates, because that is the only place
+    the transport ever appends a wrapper. User and assistant rows are
+    user-visible content: a message that quotes a complete marker — a pasted
+    example, a log excerpt — must survive verbatim, so the scrub never reaches
+    those rows. Only the carrier's ``content`` is rebuilt; every other field
+    stays the object it already is, so stable ids, reasoning metadata, and turn
+    bookkeeping are untouched and the scrubbed rows still compare equal to the
+    marker-free rows already persisted from earlier turns.
+    """
+    cleaned = []
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get('role') != 'tool':
+            cleaned.append(message)
+            continue
+        content = message.get('content')
+        if not _content_has_oob_marker(content):
+            cleaned.append(message)
+            continue
+        scrubbed = dict(message)
+        scrubbed['content'] = _strip_oob_blocks(content)
+        cleaned.append(scrubbed)
+    return cleaned
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
