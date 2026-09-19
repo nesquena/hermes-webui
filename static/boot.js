@@ -286,6 +286,15 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
+  // #6709 (gate round 6): the panel is the preview's only host, and a panel
+  // collapse is now presentation-only (see closeWorkspacePanel) — it keeps the
+  // preview alive: path, dirty flag, editor contents and the #previewArea
+  // `.visible` class. Reopening must therefore restore PREVIEW mode rather than
+  // expose a browse pane whose tree and empty-state are still suppressed by the
+  // retained preview path (renderFileTree() hides both while a preview path is
+  // set). Normalizing here fixes the blank Files pane at its root without
+  // destroying the user's unsaved draft.
+  if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -295,19 +304,22 @@ function openWorkspacePanel(mode='browse'){
 }
 
 function closeWorkspacePanel(){
-  // #6709 (Greptile round 5): closing the panel must also end any open preview.
-  // The panel is the preview's only host, so a close path that leaves
-  // _previewCurrentPath set (the settings toggle and the mobile outside-tap
-  // drawer close both call this directly, never clearPreview()) keeps BOTH
-  // browse surfaces suppressed: renderFileTree() hides #fileTree and
-  // #wsEmptyState while a preview path is set. Reopening through
-  // openWorkspacePanel('browse') does not render the tree either, so the Files
-  // pane came back showing a stale preview with the tree unreachable.
-  // keepPanelOpen:true — this function owns the panel mode; clearPreview() must
-  // not bounce back into openWorkspacePanel('browse') on the way out.
-  if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
-    clearPreview({keepPanelOpen:true});
-  }
+  // #6709 (gate round 6): this must stay PRESENTATION-ONLY. An earlier revision
+  // called clearPreview({keepPanelOpen:true}) here, which silently destroyed an
+  // in-progress edit: clearPreview() unconditionally resets _previewCurrentPath,
+  // _previewCurrentMode and _previewDirty and empties the editor surfaces, so a
+  // user who typed into Edit and then collapsed the panel via any of the
+  // ordinary controls (composer Files toggle, Settings workspace-panel toggle,
+  // mobile outside-tap drawer close) lost the orphaned textarea bytes with no
+  // confirm, and opening another file could overwrite the draft.
+  //
+  // Collapsing the panel must NOT clear the preview path, dirty flag, editor
+  // contents or visible-preview state. The blank-pane lifecycle that motivated
+  // the old teardown is instead fixed at its root by openWorkspacePanel(), which
+  // normalizes a browse reopen to `preview` while a preview is retained — so the
+  // retained preview is what the user sees, and the tree is never exposed in
+  // the suppressed state. Only the explicit preview-close action
+  // (handleWorkspaceClose → clearPreview()) tears a preview down.
   _setWorkspacePanelMode('closed');
 }
 

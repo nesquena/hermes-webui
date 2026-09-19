@@ -809,3 +809,190 @@ def test_settings_close_reopen_does_not_leave_blank_panel_empty_dir():
     data = json.loads(proc.stdout.split("REOPEN ", 1)[1].strip())
     assert data["during"]["empty"] == "none", data
     _assert_panel_not_blank(data["afterReopen"], "empty")
+
+
+# ── Dirty-preview lifecycle (gate round 6) ────────────────────────────────────
+#
+# The exact-head gate found that the round-5 fix (closeWorkspacePanel() calling
+# clearPreview({keepPanelOpen:true})) introduced a data-loss regression: an
+# ordinary presentation-only panel collapse — composer Files toggle, Settings
+# workspace-panel toggle, mobile outside-tap drawer close — silently discarded an
+# unsaved Edit draft. These tests drive the REAL panel-mode functions through
+# each of those three entry points with a dirty preview and assert the draft
+# survives, the reopen restores preview mode (not a blank browse pane), and only
+# the explicit preview-close action clears the preview.
+
+_DIRTY_PREVIEW_SHIM = r"""
+var document={documentElement:{dataset:{}},querySelector:function(){return null;}};
+var localStorage={setItem:function(){},getItem:function(){return null;}};
+function _isCompactWorkspaceViewport(){ return globalThis.__compact===true; }
+function _workspacePanelEls(){
+  const layout={classList:{toggle(){},add(){},remove(){}}};
+  const panel={classList:{toggle(){},add(){},remove(){},contains(){return false;}}};
+  const btn={classList:{toggle(){}},setAttribute(){},set disabled(v){},get disabled(){return false;}};
+  return {layout:layout,panel:panel,toggleBtn:btn,edgeToggleBtn:btn,collapseBtn:btn};
+}
+function _uiText(k,d){ return d||k; }
+function _setButtonTooltip(){}
+function renderBreadcrumb(){}
+function _state(){
+  const editArea = $id('previewEditArea');
+  return {
+    path: _previewCurrentPath,
+    dirty: _previewDirty,
+    mode: _workspacePanelMode,
+    editorDisplay: editArea.style.display,
+    draft: editArea.value,
+    previewVisible: $id('previewArea').classList.contains('visible'),
+    tree: store.fileTree.style.display,
+  };
+}
+"""
+
+# The three ordinary presentation-only collapse entry points the gate named.
+_DIRTY_CLOSE_PATHS = {
+    # Composer Files toggle: index.html onclick="toggleWorkspacePanel()".
+    "composer": "toggleWorkspacePanel();",
+    # Settings workspace-panel toggle: panels.js onchange → toggleWorkspacePanel(false).
+    "settings": "if(_workspacePanelMode!=='closed') toggleWorkspacePanel(false);",
+    # Mobile outside-tap drawer close on #mainChat.
+    "mobile": "globalThis.__compact=true; closeMobileWorkspacePanelFromChat({target:{}});",
+}
+
+# The one path that IS supposed to tear the preview down.
+_DIRTY_EXPLICIT_CLOSE = "handleWorkspaceClose();"
+
+
+def _dirty_preview_harness(entries_json: str, close_js: str) -> str:
+    """Drive the REAL boot.js panel-mode functions with a dirty, open edit
+
+    draft and then run ``close_js`` (one of the collapse entry points)."""
+    pre = _NODE_PREAMBLE
+    for name in (
+        "closeWorkspacePanel",
+        "openWorkspacePanel",
+        "syncWorkspacePanelUI",
+        "_hasWorkspacePreviewVisible",
+    ):
+        pre = re.sub(r"^function %s\([^)]*\)\{[^\n]*\}\n" % name, "", pre, flags=re.M)
+    fns = "\n".join(
+        _extract_boot_function(n)
+        for n in (
+            "_setWorkspacePanelMode",
+            "openWorkspacePanel",
+            "closeWorkspacePanel",
+            "_hasWorkspacePreviewVisible",
+            "syncWorkspacePanelUI",
+            "toggleWorkspacePanel",
+            "closeMobileWorkspacePanelFromChat",
+            "handleWorkspaceClose",
+        )
+    )
+    drive = r"""
+const previewArea = $id('previewArea');
+const previewClasses = new Set(['visible']);
+previewArea.classList = {
+  add(c){ previewClasses.add(c); },
+  remove(c){ previewClasses.delete(c); },
+  contains(c){ return previewClasses.has(c); },
+};
+const editArea = $id('previewEditArea');
+editArea.style.display = '';          // Edit mode is open
+editArea.value = 'UNSAVED-DRAFT';
+S.entries = __ENTRIES__;
+S.session = {session_id:'s1', workspace:'/ws'};
+S.currentDir = '.';
+_previewCurrentPath = 'draft.txt';
+_previewCurrentMode = 'code';
+_previewDirty = true;
+_workspacePanelMode = 'preview';
+renderFileTree();
+const before = _state();
+__CLOSE__
+const afterClose = _state();
+openWorkspacePanel('browse');         // every reopen path funnels through here
+const afterReopen = _state();
+console.log('DIRTY ' + JSON.stringify({before, afterClose, afterReopen}));
+""".replace("__ENTRIES__", entries_json).replace("__CLOSE__", close_js)
+    return (
+        pre
+        + _DIRTY_PREVIEW_SHIM
+        + "\n"
+        + _extract_render_file_tree()
+        + "\n"
+        + _extract_clear_preview()
+        + "\n"
+        + fns
+        + "\n"
+        + drive
+    )
+
+
+def _run_dirty(close_js: str, entries_json: str = '[{"name":"other.txt","type":"file","path":"/ws/other.txt"}]') -> dict:
+    js = _dirty_preview_harness(entries_json, close_js)
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    assert "DIRTY" in proc.stdout, proc.stdout
+    return json.loads(proc.stdout.split("DIRTY ", 1)[1].strip())
+
+
+@pytest.mark.parametrize("label", sorted(_DIRTY_CLOSE_PATHS))
+def test_panel_collapse_preserves_unsaved_draft(label):
+    """Composer / Settings / mobile collapse must not touch the draft.
+
+    The gate reproduced this at head 811561ca: close ended at
+    {path:'', dirty:false, confirmCalls:0} with the textarea bytes orphaned."""
+    data = _run_dirty(_DIRTY_CLOSE_PATHS[label])
+    # precondition: the draft really was live and the preview really was open
+    assert data["before"]["path"] == "draft.txt", data
+    assert data["before"]["dirty"] is True, data
+    assert data["before"]["draft"] == "UNSAVED-DRAFT", data
+    assert data["before"]["editorDisplay"] != "none", data
+    assert data["before"]["previewVisible"] is True, data
+    # the panel collapsed …
+    assert data["afterClose"]["mode"] == "closed", (label, data)
+    # … but the preview state survived the collapse untouched
+    assert data["afterClose"]["path"] == "draft.txt", (label, data)
+    assert data["afterClose"]["dirty"] is True, (label, data)
+    assert data["afterClose"]["draft"] == "UNSAVED-DRAFT", (label, data)
+    assert data["afterClose"]["editorDisplay"] != "none", (label, data)
+    assert data["afterClose"]["previewVisible"] is True, (label, data)
+
+
+@pytest.mark.parametrize("label", sorted(_DIRTY_CLOSE_PATHS))
+def test_panel_reopen_restores_preview_not_blank_browse(label):
+    """Reopen after a collapse must restore the retained preview, not expose a
+
+    browse pane whose tree and empty-state are still suppressed by the preview
+    path (the blank Files pane the round-5 teardown was trying to avoid)."""
+    data = _run_dirty(_DIRTY_CLOSE_PATHS[label])
+    after = data["afterReopen"]
+    # normalised back to preview: the retained preview is what the user sees
+    assert after["mode"] == "preview", (label, data)
+    assert after["path"] == "draft.txt", (label, data)
+    assert after["dirty"] is True, (label, data)
+    assert after["draft"] == "UNSAVED-DRAFT", (label, data)
+    assert after["previewVisible"] is True, (label, data)
+    # and the pane is never a blank browse surface
+    assert after["tree"] == "none", (label, data)
+
+
+@pytest.mark.parametrize("label", sorted(_DIRTY_CLOSE_PATHS))
+def test_collapse_then_explicit_close_still_clears_preview(label):
+    """Only the explicit preview-close action tears the preview down — and it
+
+    must still reconcile browse state so the tree is visible (round-4/round-5
+    behaviour, which the gate said looks converged)."""
+    js = _dirty_preview_harness(
+        '[{"name":"other.txt","type":"file","path":"/ws/other.txt"}]',
+        _DIRTY_CLOSE_PATHS[label] + "\n" + _DIRTY_EXPLICIT_CLOSE,
+    )
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout.split("DIRTY ", 1)[1].strip())
+    after = data["afterClose"]
+    assert after["path"] == "", (label, data)
+    assert after["dirty"] is False, (label, data)
+    assert after["previewVisible"] is False, (label, data)
+    # browse surfaces reconciled: the tree is back (non-empty directory)
+    assert after["tree"] == "", (label, data)
