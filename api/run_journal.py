@@ -787,3 +787,315 @@ def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | No
         "payload": payload,
         "synthetic": True,
     }
+
+
+# ── Retention sweep (issue #7613) ────────────────────────────────────────
+# ``delete_run_journal`` only fires on full session delete (#3802/#3811), so a
+# long-lived / pinned session accumulates one ``{run_id}.jsonl`` per agent
+# turn forever. #7613 reported 916 MB across 104 sessions on one install,
+# 98.6% of it from terminal runs (the rest is the load-bearing non-terminal
+# recovery payload and MUST be left alone). Nothing ever reads a terminal
+# run for a stream no client is still attached to, so a bounded sweep
+# reclaiming only ``terminal: true`` files is safe.
+#
+# Throttle state for ``maybe_sweep_run_journals``. The lock is held only
+# across the read/update of the timestamp; the sweep itself is unlocked
+# because all in-memory cache access inside it already takes the per-cache
+# mutexes (``_WRITER_LOCKS_GUARD``, ``_SEQ_CACHE_LOCK``, ``_SUMMARY_CACHE_LOCK``).
+_LAST_SWEEP_AT: float = 0.0
+_LAST_SWEEP_LOCK = threading.Lock()
+
+
+def _resolve_retention(retention: dict | None) -> dict:
+    """Return the retention spec from a caller-supplied dict or from ``api.config``.
+
+    The dict shape (keys: ``enabled``, ``max_age_secs``, ``max_runs_per_session``,
+    ``aggressive_total_bytes``, ``min_interval_secs``) matches the constants in
+    ``api.config``. Returning a plain dict lets test code build literal specs
+    without importing ``api.config`` (which would trigger yaml reads).
+    """
+    if retention is not None:
+        return dict(retention)
+    from api import config as _cfg
+
+    return {
+        "enabled": bool(getattr(_cfg, "RUN_JOURNAL_RETENTION_ENABLED", True)),
+        "max_age_secs": int(getattr(_cfg, "RUN_JOURNAL_RETENTION_MAX_AGE_SECS", 14 * 86400)),
+        "max_runs_per_session": int(
+            getattr(_cfg, "RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION", 100)
+        ),
+        "aggressive_total_bytes": int(
+            getattr(_cfg, "RUN_JOURNAL_RETENTION_AGGRESSIVE_TOTAL_BYTES", 500 * 1024 * 1024)
+        ),
+        "min_interval_secs": int(getattr(_cfg, "RUN_JOURNAL_RETENTION_MIN_INTERVAL_SECS", 300)),
+    }
+
+
+def should_purge_run(
+    summary: dict,
+    file_mtime: float,
+    *,
+    retention: dict,
+    now: float,
+    is_over_count_cap: bool = False,
+) -> bool:
+    """Return whether a single run-journal file should be reclaimed.
+
+    The predicate is **terminal-only**: a run whose summary reports a
+    settled outcome (``terminal`` True) is safe to retire when no client
+    can still be attached to that stream. Non-terminal files (the
+    live-recovery payload) are NEVER returned, regardless of age, count,
+    or size — the journal exists to recover crashed runs and silently
+    deleting it would destroy the user's only recoverable output.
+
+    Within the terminal surface, three orthogonal triggers compose (OR):
+
+    1. **Age cap** — terminal file older than ``max_age_secs`` (halved
+       when the caller's spec has ``aggressive=True``).
+    2. **Count cap** — set by the caller's per-session sort: when the
+       session's terminal file count exceeds ``max_runs_per_session``
+       (0 disables), the caller marks the oldest ``count - cap`` files
+       as ``is_over_count_cap=True`` and the rest as False. Only those
+       marked files purge via the count trigger; the unmarked ones
+       survive even if the session is over-cap. This pushes the sort
+       work to one place (the session sweep) instead of every call.
+    3. **Aggressive mode** — set by ``purge_all_terminal_journals`` when
+       the total on-disk bytes exceed ``aggressive_total_bytes``; halves
+       the age cap so an out-of-control install self-heals on the next
+       sweep. The terminal-only predicate is preserved at every size.
+
+    File mtime is intentionally NOT the primary signal. Directory mtime
+    is unusable (#7613 warns: it updates on any write inside, so a live
+    session looks fresh while a long-idle one can be reaped). The file's
+    own mtime is the cheap, accurate proxy for "when did this run
+    actually finish writing" and is correct even for an actively-written
+    session (its files' mtime advances on each fsync).
+    """
+    if not summary or not summary.get("terminal"):
+        return False
+    max_age = float(retention["max_age_secs"])
+    if retention.get("aggressive"):
+        max_age = max(1.0, max_age / 2.0)
+    if (now - float(file_mtime)) >= max_age:
+        return True
+    cap = int(retention.get("max_runs_per_session", 0) or 0)
+    if cap > 0 and is_over_count_cap:
+        return True
+    return False
+
+
+def _purge_run_file(path: Path) -> bool:
+    """Delete a single ``{run_id}.jsonl`` and evict its three in-memory caches.
+
+    Mirrors the per-directory eviction in ``delete_run_journal`` (#5784, #5799)
+    but at the single-file granularity required by retention. Every cache key
+    that mentions ``path`` is dropped under its own mutex, the same pattern
+    the directory-level sweep uses. A failed unlink is treated as "already
+    gone" and still evicts the caches — a stale cache entry would hand a
+    fresh writer a stale lock or seq and is strictly worse than the file
+    being present.
+    """
+    # Path safety: stem and parent.name must both be safe ids so we can't
+    # unlink something outside the journal dir even if a caller hands us
+    # a hostile path. _SAFE_ID_RE rejects path separators but allows
+    # '.', '..', and '..foo' — reject '.' and '..' explicitly, mirroring
+    # ``delete_run_journal`` (#5784).
+    if path.suffix != ".jsonl" or path.stem in (".", ".."):
+        return False
+    if path.parent.name in (".", "..") or not _SAFE_ID_RE.fullmatch(path.parent.name):
+        return False
+    dir_key = str(path.parent)
+    name = path.name
+    with _WRITER_LOCKS_GUARD:
+        for key in [k for k in _WRITER_LOCKS if k[0] == dir_key and k[1] == name]:
+            del _WRITER_LOCKS[key]
+    with _SEQ_CACHE_LOCK:
+        for cache_key in [
+            k
+            for k in _SEQ_CACHE
+            if str(Path(k).parent) == dir_key and Path(k).name == name
+        ]:
+            del _SEQ_CACHE[cache_key]
+    with _SUMMARY_CACHE_LOCK:
+        for cache_key in [
+            k
+            for k in _SUMMARY_CACHE
+            if str(Path(k).parent) == dir_key and Path(k).name == name
+        ]:
+            del _SUMMARY_CACHE[cache_key]
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return not path.exists()
+
+
+def purge_session_terminal_journals(
+    session_id: str,
+    *,
+    session_dir: Path | None = None,
+    retention: dict | None = None,
+    now: float | None = None,
+) -> int:
+    """Reclaim terminal run-journal files under ``_run_journal/<session_id>/``.
+
+    Iterates each ``*.jsonl`` in the session's run-journal dir, asks
+    ``should_purge_run`` whether the run qualifies (terminal-only predicate),
+    and deletes the matching files. The age cap and aggressive-mode decision
+    are derived from the resolved retention spec; the total-bytes threshold
+    that flips aggressive mode is checked at the all-session level by
+    ``purge_all_terminal_journals`` so this function stays simple and
+    testable.
+
+    Returns the number of files deleted. Non-terminal files are NEVER
+    touched regardless of age, count, or size.
+    """
+    spec = _resolve_retention(retention)
+    if not spec.get("enabled"):
+        return 0
+    if now is None:
+        now = time.time()
+    try:
+        sid = _validate_id(session_id, "session_id")
+    except ValueError:
+        return 0
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_root.exists() or not session_root.is_dir():
+        return 0
+    rows: list[tuple[Path, float, bool]] = []  # (path, mtime, terminal)
+    for path in session_root.glob("*.jsonl"):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        try:
+            _validate_id(path.stem, "run_id")
+        except ValueError:
+            continue
+        summary = latest_run_summary(sid, path.stem, session_dir=root)
+        rows.append((path, st.st_mtime, bool(summary and summary.get("terminal"))))
+    if not rows:
+        return 0
+    # Sort terminal files by mtime asc; the oldest (count - cap) are the
+    # count-cap targets. The cap check is intentionally per-session so a
+    # session with 5 terminal files and a cap of 2 reclaims 3, leaving 2.
+    terminal_rows = sorted(
+        (r for r in rows if r[2]), key=lambda r: r[1]
+    )
+    terminal_count = len(terminal_rows)
+    cap = int(spec.get("max_runs_per_session", 0) or 0)
+    over_cap_paths: set[Path] = set()
+    if cap > 0 and terminal_count > cap:
+        over_cap_paths = {r[0] for r in terminal_rows[: terminal_count - cap]}
+    deleted = 0
+    for path, mtime, terminal in rows:
+        if not terminal:
+            continue
+        if not should_purge_run(
+            {"terminal": True},
+            mtime,
+            retention=spec,
+            now=now,
+            is_over_count_cap=path in over_cap_paths,
+        ):
+            continue
+        if _purge_run_file(path):
+            deleted += 1
+    return deleted
+
+
+def purge_all_terminal_journals(
+    *,
+    session_dir: Path | None = None,
+    retention: dict | None = None,
+    now: float | None = None,
+) -> dict:
+    """Sweep every session's terminal run journals.
+
+    Computes the total on-disk size across all sessions; if it exceeds
+    ``aggressive_total_bytes`` the spec passed to per-session sweeps has
+    ``aggressive=True`` set so the age cap is halved and the install
+    self-heals. Returns ``{"scanned": N, "deleted": N, "aggressive": bool,
+    "total_bytes": N}`` for the caller's log line / health check.
+    """
+    spec = _resolve_retention(retention)
+    if not spec.get("enabled"):
+        return {"scanned": 0, "deleted": 0, "aggressive": False, "total_bytes": 0}
+    if now is None:
+        now = time.time()
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    if not journal_root.exists() or not journal_root.is_dir():
+        return {"scanned": 0, "deleted": 0, "aggressive": False, "total_bytes": 0}
+    total_bytes = 0
+    session_dirs: list[Path] = []
+    for session_path in journal_root.iterdir():
+        try:
+            if not session_path.is_dir():
+                continue
+        except OSError:
+            continue
+        if not _SAFE_ID_RE.fullmatch(session_path.name):
+            continue
+        session_dirs.append(session_path)
+        # Sum sizes in the same pass to avoid a second iterdir on huge trees.
+        for journal_file in session_path.glob("*.jsonl"):
+            try:
+                total_bytes += journal_file.stat().st_size
+            except OSError:
+                continue
+    aggressive_threshold = int(spec.get("aggressive_total_bytes", 0) or 0)
+    aggressive = bool(aggressive_threshold) and total_bytes >= aggressive_threshold
+    per_session_spec = dict(spec)
+    if aggressive:
+        per_session_spec["aggressive"] = True
+    deleted_total = 0
+    for session_path in session_dirs:
+        try:
+            deleted_total += purge_session_terminal_journals(
+                session_path.name,
+                session_dir=root,
+                retention=per_session_spec,
+                now=now,
+            )
+        except Exception:
+            # One bad session must not abort the whole sweep.
+            continue
+    return {
+        "scanned": len(session_dirs),
+        "deleted": deleted_total,
+        "aggressive": aggressive,
+        "total_bytes": total_bytes,
+    }
+
+
+def maybe_sweep_run_journals(
+    *,
+    session_dir: Path | None = None,
+    force: bool = False,
+) -> dict | None:
+    """Throttled entry point for the retention sweep.
+
+    Skips the sweep when ``min_interval_secs`` has not elapsed since the
+    last successful call. ``force=True`` bypasses the throttle (used by
+    the startup hook so a freshly-restarted server catches up on a
+    long-lived install's accumulated terminal runs).
+
+    Returns the sweep stats dict on a real run, or ``None`` when the
+    throttle skipped. The throttle lock is held only across the
+    read/update; the sweep itself is unlocked because all in-memory cache
+    access inside the sweep takes its own per-cache mutex.
+    """
+    spec = _resolve_retention(None)
+    if not spec.get("enabled"):
+        return None
+    global _LAST_SWEEP_AT
+    now = time.time()
+    with _LAST_SWEEP_LOCK:
+        if not force and (now - _LAST_SWEEP_AT) < float(spec["min_interval_secs"]):
+            return None
+        _LAST_SWEEP_AT = now
+    return purge_all_terminal_journals(session_dir=session_dir, retention=spec, now=now)

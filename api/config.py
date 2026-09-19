@@ -11124,6 +11124,25 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 
+# ── Run-journal retention (Option R) ─────────────────────────────────────
+# Bounded reclaim of completed run-journal files. ``api.run_journal`` stores
+# one ``{run_id}.jsonl`` per agent turn under ``_run_journal/<session_id>/``
+# for SSE replay + recovery. ``delete_run_journal`` only fires on full session
+# delete (#3802/#3811), so a long-lived / pinned session accumulates
+# terminal runs forever; #7613 reported 916 MB across 104 sessions on one
+# install. Nothing ever reads a terminal run for a stream no client is
+# still attached to, so a bounded sweep over terminal-only files is safe
+# (non-terminal is the live-recovery payload and MUST be left alone).
+# Aggressive mode (when total bytes exceed ``..._AGGRESSIVE_TOTAL_BYTES``)
+# halves the age cap so an out-of-control install self-heals; the predicate
+# is still ``terminal: true`` only, so non-terminal recovery is preserved
+# at every size.
+RUN_JOURNAL_RETENTION_ENABLED: bool = True
+RUN_JOURNAL_RETENTION_MAX_AGE_SECS: int = 14 * 86400  # 14 days for terminal files
+RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION: int = 100  # 0 = no count cap
+RUN_JOURNAL_RETENTION_AGGRESSIVE_TOTAL_BYTES: int = 500 * 1024 * 1024  # 500 MiB triggers half-age sweep
+RUN_JOURNAL_RETENTION_MIN_INTERVAL_SECS: int = 300  # throttle between sweeps (5 min)
+
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
 # still unwinding, blocked in a provider call, or waiting for delegated work.

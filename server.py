@@ -720,6 +720,33 @@ def main() -> None:
     except (ValueError, OSError):
         logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
+    # Reclaim completed run-journal files on startup so a long-lived install
+    # doesn't carry forward 100s of MB of terminal-only payloads (#7613).
+    # Fire-and-forget: the sweep is bounded by the per-file cache mutexes
+    # already used by ``delete_run_journal`` and never blocks serve_forever.
+    # The helper thread is daemon so a fast shutdown doesn't wait on it.
+    def _startup_journal_retention_sweep() -> None:
+        try:
+            from api.run_journal import maybe_sweep_run_journals
+
+            stats = maybe_sweep_run_journals(force=True)
+            if stats:
+                logger.info(
+                    "Run-journal retention sweep: scanned=%d deleted=%d aggressive=%s total_bytes=%d",
+                    stats.get("scanned", 0),
+                    stats.get("deleted", 0),
+                    stats.get("aggressive", False),
+                    stats.get("total_bytes", 0),
+                )
+        except Exception:
+            logger.debug("Startup run-journal retention sweep failed", exc_info=True)
+
+    threading.Thread(
+        target=_startup_journal_retention_sweep,
+        name="webui-startup-journal-retention",
+        daemon=True,
+    ).start()
+
     try:
         httpd.serve_forever()
     finally:
