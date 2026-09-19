@@ -1491,11 +1491,16 @@ async function send(){
       // false it's opting out — e.g. /reasoning <level> falls through so the
       // agent sees the raw text.  Roll back the echo push in that case so
       // the normal send path doesn't duplicate it.
-      if(_cmd.fn(_parsedCmd.args)===false){
+      const _commandResult=_cmd.fn(_parsedCmd.args);
+      if(_commandResult===false){
         if(_pushedUser){S.messages.pop();renderMessages();}
         // Fall through to normal send path
       } else {
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        // Clear immediately, but retain the send lock until an asynchronous
+        // command such as /clear has finished its durable server mutation.
+        $('msg').value='';autoResize();hideCmdDropdown();
+        await _commandResult;
+        return;
       }
     }
     if(_parsedCmd&&!_cmd){
