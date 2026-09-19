@@ -52,7 +52,7 @@ def _installed_entry_point():
     selected = importlib.metadata.entry_points().select(
         group="console_scripts", name=EXPECTED_SCRIPT
     )
-    return selected[0] if selected else None
+    return next(iter(selected), None)
 
 
 def test_installed_entry_point_wiring():
