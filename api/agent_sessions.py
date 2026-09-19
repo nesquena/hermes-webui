@@ -405,7 +405,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     for children in children_by_parent.values():
         children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
 
-    def compression_tip(row: dict) -> tuple[dict | None, int]:
+    def compression_tip(row: dict) -> tuple[dict | None, int, bool]:
         """Return the freshest importable continuation descendant for ``row``.
 
         Compression parents can have multiple continuation-looking children when
@@ -415,6 +415,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         continuation descendants and select by real message activity instead.
         """
         latest_importable = row if (row.get('actual_message_count') or 0) > 0 else None
+        lineage_pinned = bool(row.get('pinned'))
         segment_count = 0
         best_depth = 1
         best_score = (
@@ -432,6 +433,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
                 continue
             seen.add(current_id)
             segment_count += 1
+            lineage_pinned = lineage_pinned or bool(current.get('pinned'))
 
             current_score = _as_score(current.get('last_activity'), current.get('started_at'))
             if (
@@ -449,7 +451,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
                     continue
                 stack.append((child, depth + 1))
 
-        return latest_importable, max(segment_count, 1)
+        return latest_importable, max(segment_count, 1), lineage_pinned
 
     projected = []
     for row in rows:
@@ -457,9 +459,10 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
 
         segment_count = 1
+        lineage_pinned = bool(row.get('pinned'))
         tip = row
         if row.get('end_reason') in {'compression', 'cli_close'}:
-            tip, segment_count = compression_tip(row)
+            tip, segment_count, lineage_pinned = compression_tip(row)
         if not tip or (tip.get('actual_message_count') or 0) <= 0:
             continue
 
@@ -499,6 +502,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         merged['_lineage_root_id'] = row['id']
         merged['_lineage_tip_id'] = tip['id']
         merged['_compression_segment_count'] = segment_count
+        # An explicit Agent pin belongs to the logical conversation, not only
+        # to whichever compression segment happened to receive the toggle.
+        merged['pinned'] = lineage_pinned
         projected.append(merged)
 
     projected.sort(
@@ -506,6 +512,87 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         reverse=True,
     )
     return projected
+
+
+_PINNED_CONTINUATION_HYDRATION_MAX_ROWS = 128
+
+
+def _hydrate_pinned_continuation_rows(
+    cur,
+    rows: list[dict],
+    *,
+    select_sql: str,
+    join_clause: str,
+    group_by_clause: str,
+    where_clause: str,
+    params: list[object],
+) -> list[dict]:
+    """Add a bounded continuation closure for explicitly pinned rows.
+
+    The normal candidate query is deliberately recency-bounded. A pin can live
+    on an old root or middle compression segment, however, while its canonical
+    import tip is newer but still outside that window. Fetch just the adjacent
+    lineage metadata needed to establish that tip; never widen ordinary history.
+    If the bounded walk cannot finish, omit the affected pin rather than expose
+    a stale segment as a resumable conversation.
+    """
+    rows_by_id = {str(row.get('id')): row for row in rows if row.get('id')}
+    pinned_ids = {sid for sid, row in rows_by_id.items() if bool(row.get('pinned'))}
+    if not pinned_ids:
+        return rows
+
+    frontier = set(pinned_ids)
+    hydrated_count = 0
+    incomplete_pins: set[str] = set()
+    while frontier:
+        if hydrated_count >= _PINNED_CONTINUATION_HYDRATION_MAX_ROWS:
+            incomplete_pins.update(pinned_ids)
+            break
+        placeholders = ', '.join('?' for _ in frontier)
+        cur.execute(
+            f"""
+            {select_sql}
+            FROM sessions s
+            {join_clause}
+            WHERE ({where_clause})
+              AND (s.id IN ({placeholders}) OR s.parent_session_id IN ({placeholders}))
+            {group_by_clause}
+            """,
+            [*params, *frontier, *frontier],
+        )
+        fetched = [dict(row) for row in cur.fetchall()]
+        new_rows = [row for row in fetched if str(row.get('id')) not in rows_by_id]
+        if not new_rows:
+            break
+        remaining = _PINNED_CONTINUATION_HYDRATION_MAX_ROWS - hydrated_count
+        if len(new_rows) > remaining:
+            incomplete_pins.update(pinned_ids)
+            break
+        rows_by_id.update({str(row['id']): row for row in new_rows if row.get('id')})
+        hydrated_count += len(new_rows)
+        frontier = {str(row['id']) for row in new_rows if row.get('id')}
+
+    if incomplete_pins:
+        # A pin may identify any segment in a collapsed lineage. When the
+        # bounded traversal cannot establish the tip, drop every projected row
+        # whose known continuation component contains that pin. This is stricter
+        # than returning a possibly stale transcript target.
+        blocked = set(incomplete_pins)
+        changed = True
+        while changed:
+            changed = False
+            for row in rows_by_id.values():
+                parent_id = row.get('parent_session_id')
+                parent = rows_by_id.get(str(parent_id)) if parent_id else None
+                if parent and _is_continuation_session(parent, row):
+                    if str(parent.get('id')) in blocked and str(row.get('id')) not in blocked:
+                        blocked.add(str(row['id']))
+                        changed = True
+                    if str(row.get('id')) in blocked and str(parent.get('id')) not in blocked:
+                        blocked.add(str(parent.get('id')))
+                        changed = True
+        rows_by_id = {sid: row for sid, row in rows_by_id.items() if sid not in blocked}
+    return list(rows_by_id.values())
 
 
 def read_importable_agent_session_rows(
@@ -533,16 +620,18 @@ def read_importable_agent_session_rows(
 
     ``limit`` bounds the *recency slice*, not the returned row count. Subagent
     rows only render as children when their parent row is in the same payload,
-    so subagent ancestors of selected rows are re-added afterwards and the
-    result can exceed ``limit`` by the number of such anchors. Callers must
+    so subagent ancestors of selected rows are re-added afterwards; explicit
+    Agent pins are likewise retained beside that bounded window. The result can
+    therefore exceed ``limit`` by the number of such anchors. Callers must
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
-    That recovery is deliberately bounded by the oversampled candidate set
+    Subagent recovery is deliberately bounded by the oversampled candidate set
     (``limit * 8`` newest sessions): it re-uses rows the projection already
     fetched and never issues an extra query, so an ancestor older than the
     oversample stays unresolved and its children render top-level, exactly as
-    they did before. Widening that window is a ``candidate_limit`` change, not
-    a change to this walk.
+    they did before. Explicit pins may additionally hydrate at most
+    ``_PINNED_CONTINUATION_HYDRATION_MAX_ROWS`` adjacent continuation rows so a
+    canonical import tip is never silently replaced by an older segment.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -588,6 +677,7 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        pinned_expr = 's.pinned' if 'pinned' in session_cols else '0'
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -707,7 +797,7 @@ def read_importable_agent_session_rows(
 
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
-                   s.started_at, s.source,
+                   s.started_at, s.source, {pinned_expr} AS pinned,
                    {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},
@@ -737,8 +827,36 @@ def read_importable_agent_session_rows(
             # Oversampling preserves room for hidden compression segments or
             # other rows filtered after projection.
             candidate_limit = max(result_limit * 8, result_limit)
+            # Pinned sessions are explicit user discovery signals, not merely
+            # recent activity. Merge their bounded metadata rows with the normal
+            # recency candidates so an older pin remains addressable without
+            # turning the hot sidebar path into a full-history transcript scan.
+            pinned_candidates_cte = ""
+            pinned_params: list[object] = []
+            if 'pinned' in session_cols:
+                pinned_candidates_cte = (
+                    ", pinned_candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    WHERE {where_clause} AND COALESCE(s.pinned, 0) != 0\n"
+                    "                )"
+                ).format(where_clause=" AND ".join(where_clauses))
+                pinned_params = list(params)
             if latest_messages_cte:
                 candidate_cte = (
+                    "WITH {latest_messages_cte}, recent_candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    LEFT JOIN latest_messages lm ON lm.session_id = s.id\n"
+                    "                    WHERE {where_clause}\n"
+                    "                    {candidate_order_clause}\n"
+                    "                    LIMIT ?\n"
+                    "                ){pinned_candidates_cte}, candidates AS (\n"
+                    "                    SELECT id FROM recent_candidates\n"
+                    "                    UNION\n"
+                    "                    SELECT id FROM pinned_candidates\n"
+                    "                )"
+                    if pinned_candidates_cte else
                     "WITH {latest_messages_cte}, candidates AS (\n"
                     "                    SELECT s.id\n"
                     "                    FROM sessions s\n"
@@ -751,9 +869,22 @@ def read_importable_agent_session_rows(
                     latest_messages_cte=latest_messages_cte,
                     where_clause=" AND ".join(where_clauses),
                     candidate_order_clause=candidate_order_clause,
+                    pinned_candidates_cte=pinned_candidates_cte,
                 )
             else:
                 candidate_cte = (
+                    "WITH recent_candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    WHERE {where_clause}\n"
+                    "                    {candidate_order_clause}\n"
+                    "                    LIMIT ?\n"
+                    "                ){pinned_candidates_cte}, candidates AS (\n"
+                    "                    SELECT id FROM recent_candidates\n"
+                    "                    UNION\n"
+                    "                    SELECT id FROM pinned_candidates\n"
+                    "                )"
+                    if pinned_candidates_cte else
                     "WITH candidates AS (\n"
                     "                    SELECT s.id\n"
                     "                    FROM sessions s\n"
@@ -764,6 +895,7 @@ def read_importable_agent_session_rows(
                 ).format(
                     where_clause=" AND ".join(where_clauses),
                     candidate_order_clause=candidate_order_clause,
+                    pinned_candidates_cte=pinned_candidates_cte,
                 )
 
             cur.execute(
@@ -776,7 +908,7 @@ def read_importable_agent_session_rows(
                 {group_by_clause}
                 {order_by_clause}
                 """,
-                [*params, candidate_limit],
+                [*params, candidate_limit, *pinned_params],
             )
         else:
             cur.execute(
@@ -790,12 +922,32 @@ def read_importable_agent_session_rows(
                 """,
                 params,
             )
-        projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
+        candidate_rows = [dict(row) for row in cur.fetchall()]
+        if limit is not None and 'pinned' in session_cols and 'parent_session_id' in session_cols:
+            candidate_rows = _hydrate_pinned_continuation_rows(
+                cur,
+                candidate_rows,
+                select_sql=select_sql,
+                join_clause=join_clause,
+                group_by_clause=group_by_clause,
+                where_clause=' AND '.join(where_clauses),
+                params=params,
+            )
+        projected = _project_agent_session_rows(candidate_rows)
+        for row in projected:
+            row['pinned'] = bool(row.get('pinned'))
         projected = [_with_normalized_source(row) for row in projected]
         projected = [row for row in projected if is_cli_session_row_visible(row)]
         if limit is None:
             return projected
         selected = projected[:max(0, int(limit))]
+        # Keep explicit pins in addition to the ordinary recency window. The
+        # CTE above already bounds the extra DB work to pinned metadata rows.
+        selected_ids = {row.get('id') for row in selected}
+        selected.extend(
+            row for row in projected
+            if bool(row.get('pinned')) and row.get('id') not in selected_ids
+        )
 
         # The recency slice is per-row, but subagent rows are only renderable as
         # children: the sidebar nests a child under its parent solely when that

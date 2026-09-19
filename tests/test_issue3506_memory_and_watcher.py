@@ -166,7 +166,8 @@ def _make_db(tmp_path: Path):
             parent_session_id TEXT,
             message_count INTEGER DEFAULT 0,
             title TEXT,
-            archived INTEGER DEFAULT 0
+            archived INTEGER DEFAULT 0,
+            pinned INTEGER DEFAULT 0
         );
         CREATE TABLE messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,6 +250,19 @@ def test_cheap_fingerprint_detects_source_change(tmp_path):
     conn.commit()
     fp2 = gw._cheap_change_fingerprint(db)
     assert fp2 != fp1, "a source change alters projected metadata and must be detected"
+
+
+def test_cheap_fingerprint_detects_pin_only_change(tmp_path):
+    """Pinning an older Agent session must wake the sidebar projection immediately."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "s1", "cli", mc=2)
+    fp1 = gw._cheap_change_fingerprint(db)
+
+    conn.execute("UPDATE sessions SET pinned = 1 WHERE id = 's1'")
+    conn.commit()
+
+    assert gw._cheap_change_fingerprint(db) != fp1
 
 
 def test_cheap_fingerprint_detects_same_count_message_rewrite(tmp_path):
@@ -547,6 +561,35 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
     _add_session(conn, "tg1", "telegram", mc=3)  # a real change
     assert w._poll_once(now=3.0) is True
     assert projected == [True, True]
+
+
+def test_pin_only_change_triggers_immediate_watcher_projection(tmp_path, monkeypatch):
+    """A pin mutation must not wait for the periodic parity projection."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "s1", "cli", mc=2)
+    projections = []
+
+    def fake_projection(_path):
+        projections.append(True)
+        return [{"session_id": "s1"}] if len(projections) == 1 else [
+            {"session_id": "s1"}, {"session_id": "older-pinned"},
+        ]
+
+    monkeypatch.setattr(gw, "_get_agent_sessions_from_db", fake_projection)
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    subscriber.get_nowait()
+
+    conn.execute("UPDATE sessions SET pinned = 1 WHERE id = 's1'")
+    conn.commit()
+
+    assert watcher._poll_once(now=2.0) is True
+    assert projections == [True, True]
+    assert subscriber.get_nowait()["sessions"] == [
+        {"session_id": "s1"}, {"session_id": "older-pinned"},
+    ]
 
 
 def test_lru_eviction_skips_active_runs():
