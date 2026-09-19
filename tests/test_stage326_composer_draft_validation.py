@@ -9,110 +9,280 @@ debounced auto-save. The hardening:
 - files: must be list; clamped to 50 entries
 """
 import json
-import os
-import sys
-import threading
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
-
-import pytest
-
-# These tests directly call the handler logic by importing the routes module
-# and exercising the validation through a minimal mock handler. We don't need
-# a full HTTP server.
+from types import SimpleNamespace
 
 
-@pytest.fixture
-def isolated_state_dir(tmp_path, monkeypatch):
-    """Point STATE_DIR at a tmpdir so saved sessions don't pollute reality."""
+def _build_draft_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_BASE_HOME", str(tmp_path))
-    yield tmp_path
+    monkeypatch.setenv("HERMES_WEBUI_DEFAULT_WORKSPACE", str(tmp_path / "workspace"))
+
+    import api.models as models
+    import api.routes as routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+    return models, routes
 
 
-def test_draft_text_clamped_to_50kb(isolated_state_dir):
-    """Posting a >50KB text field should be silently truncated to 50_000 chars."""
-    # Read the routes.py source and assert the clamp logic is present.
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-
-    # The clamp constant must exist.
-    assert "_MAX_DRAFT_TEXT = 50_000" in src or "_MAX_DRAFT_TEXT=50_000" in src.replace(" ", ""), (
-        "routes.py must define _MAX_DRAFT_TEXT clamp for the composer-draft POST handler"
+def _draft_post(monkeypatch, routes, body):
+    captured = {}
+    handler = SimpleNamespace(
+        command="POST",
+        wfile=None,
+        send_response=lambda status: None,
+        send_header=lambda key, value: None,
+        end_headers=lambda: None,
     )
 
-    # And the truncation must be applied.
-    assert "text = text[:_MAX_DRAFT_TEXT]" in src, (
-        "routes.py must truncate over-large draft text to _MAX_DRAFT_TEXT"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload,
+            status=status,
+        )
+        or True,
+    )
+
+    assert routes.handle_post(handler, SimpleNamespace(path="/api/session/draft")) is True
+    return captured
+
+
+def test_draft_text_clamped_to_50kb(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-save-text-clamp"
+    models.Session(
+        session_id=sid,
+        title="Draft validation",
+        messages=[{"role": "assistant", "content": "x" * 10}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    captured = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": "x" * 60_000,
+            "files": [],
+        },
+    )
+
+    draft_path = models.SESSION_DIR / ".drafts" / f"{sid}.json"
+    draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert len(draft_payload["text"]) == 50_000
+    assert captured["payload"]["draft"]["text"] == "x" * 50_000
+
+
+def test_draft_files_clamped_to_50_entries(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-save-files-clamp"
+    models.Session(
+        session_id=sid,
+        title="Draft validation",
+        messages=[{"role": "assistant", "content": "x" * 10}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    captured = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": "",
+            "files": list(range(60)),
+        },
+    )
+
+    draft_path = models.SESSION_DIR / ".drafts" / f"{sid}.json"
+    draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert len(draft_payload["files"]) == 50
+    assert len(captured["payload"]["draft"]["files"]) == 50
+
+
+def test_draft_text_type_coerced_to_string(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-save-text-nonstring"
+    models.Session(
+        session_id=sid,
+        title="Draft validation",
+        messages=[{"role": "assistant", "content": "x" * 10}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    observed = {}
+    original_save = routes._save_session_draft
+
+    def save_draft_spy(sid_value, draft_payload):
+        observed["payload"] = draft_payload
+        return original_save(sid_value, draft_payload)
+
+    monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
+    captured = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": 1234,
+            "files": [],
+        },
+    )
+
+    assert captured["payload"]["draft"]["text"] == ""
+    assert observed["payload"]["text"] == ""
+
+
+def test_draft_files_type_coerced_to_list(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-save-files-nonlist"
+    models.Session(
+        session_id=sid,
+        title="Draft validation",
+        messages=[{"role": "assistant", "content": "x" * 10}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    observed = {}
+    original_save = routes._save_session_draft
+
+    def save_draft_spy(sid_value, draft_payload):
+        observed["payload"] = draft_payload
+        return original_save(sid_value, draft_payload)
+
+    monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
+    captured = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": "text",
+            "files": {"not": "a-list"},
+        },
+    )
+
+    assert captured["payload"]["draft"]["files"] == []
+    assert observed["payload"]["files"] == []
+
+
+def test_draft_validation_appears_before_persist(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-validation-order"
+    models.Session(
+        session_id=sid,
+        title="Draft validation",
+        messages=[{"role": "assistant", "content": "x" * 10}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    entered_lock = []
+
+    class LockProbe:
+        def __enter__(self):
+            entered_lock.append("entered")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: LockProbe())
+
+    original_save = routes._save_session_draft
+
+    def save_draft_spy(sid_value, draft_payload):
+        assert entered_lock
+        assert draft_payload["text"] == ""
+        assert draft_payload["files"] == []
+        return original_save(sid_value, draft_payload)
+
+    monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
+    _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": 999,
+            "files": {"not": "a-list"},
+        },
     )
 
 
-def test_draft_files_clamped_to_50_entries():
-    """Posting a >50-entry files list should be silently truncated."""
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    assert "_MAX_DRAFT_FILES = 50" in src, (
-        "routes.py must define _MAX_DRAFT_FILES clamp"
-    )
-    assert "files = files[:_MAX_DRAFT_FILES]" in src, (
-        "routes.py must truncate over-large draft files list"
-    )
+def test_draft_save_does_not_touch_session_updated_at(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
 
+    sid = "draft-save-activity"
+    models.Session(
+        session_id=sid,
+        title="Draft validation",
+        messages=[{"role": "assistant", "content": "x" * 200_000}],
+        updated_at=1234.0,
+    ).save(touch_updated_at=False, skip_index=True)
 
-def test_draft_text_type_coerced_to_string():
-    """Non-string text must be coerced to empty string, not stored as-is."""
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    # The type-coerce pattern must be present.
-    assert 'if text is not None and not isinstance(text, str):' in src, (
-        "routes.py must coerce non-string text to empty string before persist"
-    )
+    session_sidecar = models.SESSION_DIR / f"{sid}.json"
+    before = json.loads(session_sidecar.read_text(encoding="utf-8"))
 
-
-def test_draft_files_type_coerced_to_list():
-    """Non-list files must be coerced to empty list."""
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    assert 'if files is not None and not isinstance(files, list):' in src, (
-        "routes.py must coerce non-list files to empty list before persist"
+    captured = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": "new draft text",
+            "files": [],
+        },
     )
 
+    after = json.loads(session_sidecar.read_text(encoding="utf-8"))
+    assert captured["payload"]["draft"] == {"text": "new draft text", "files": []}
+    assert after["updated_at"] == before["updated_at"]
+    assert after["composer_draft"] == before["composer_draft"]
 
-def test_draft_validation_appears_before_persist():
-    """The validation must run BEFORE the lock acquire / save, not after."""
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    # Anchor on the unique POST-validation comment marker.
-    marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("s.composer_draft = next_draft\n                # Draft persistence is not conversation activity")
-    assert marker_idx != -1 and persist_idx != -1, (
-        "could not locate validation marker or persist site"
+
+def test_draft_save_skips_unchanged_payload_before_persist(monkeypatch, tmp_path):
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-save-noop"
+    models.Session(
+        session_id=sid,
+        title="Draft validation noop",
+        messages=[{"role": "user", "content": "hello"}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    draft_calls = []
+    original_save_draft = routes._save_session_draft
+
+    def save_draft_spy(sid_value, draft_payload):
+        draft_calls.append((sid_value, draft_payload))
+        return original_save_draft(sid_value, draft_payload)
+
+    monkeypatch.setattr(routes, "_save_session_draft", save_draft_spy)
+
+    first = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": "persistent draft",
+            "files": [],
+        },
     )
-    assert marker_idx < persist_idx, (
-        "validation block must run before composer_draft persist"
+    second = _draft_post(
+        monkeypatch,
+        routes,
+        {
+            "session_id": sid,
+            "text": "persistent draft",
+            "files": [],
+        },
     )
 
-
-def test_draft_save_does_not_touch_session_updated_at():
-    """Autosaving the composer must not look like conversation activity.
-
-    If POST /api/session/draft bumps updated_at, the frontend's active-session
-    external refresh poll treats every keystroke autosave as a remote session
-    update and force-reloads the current chat a few seconds later.
-    """
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    persist_idx = src.find("s.composer_draft = next_draft")
-    assert persist_idx != -1, "could not locate composer draft persist site"
-    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", persist_idx)
-    assert save_idx != -1, "composer draft save must preserve session updated_at and skip index churn"
-
-
-def test_draft_save_skips_unchanged_payload_before_persist():
-    """Duplicate debounced draft POSTs should not rewrite the full session JSON."""
-    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    draft_idx = src.find('current_draft = dict(getattr(s, "composer_draft", {}) or {})')
-    unchanged_idx = src.find("if next_draft == current_draft", draft_idx)
-    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", draft_idx)
-
-    assert draft_idx != -1, "draft route should snapshot current composer_draft"
-    assert unchanged_idx != -1, "draft route should no-op unchanged normalized payloads"
-    assert save_idx != -1, "draft route should still save changed drafts"
-    assert unchanged_idx < save_idx, "unchanged guard must run before full session save"
-    assert 'payload["unchanged"] = True' in src
+    assert second["payload"].get("unchanged") is True
+    assert len(draft_calls) == 1
+    assert first["payload"]["draft"] == {"text": "persistent draft", "files": []}
