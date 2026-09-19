@@ -227,15 +227,32 @@ const el = {
   ]);
   out.settled = settled;
   out.statuses = statuses.slice();
-  out.listenersLeft = el.listenerCount();
 
   // After the bound released the wait, emit whatever arrives late and record
-  // what — if anything — was reported.
+  // what — if anything — was reported, plus whether the pair of late handlers
+  // was retired (Greptile P2: only the firing handler used to be removed).
   statuses = [];
   if(params.fireBound && params.late === 'error') el.emit('error');
   if(params.fireBound && params.late === 'load') el.emit('load');
   await new Promise(r => setImmediate(r));
   out.lateStatuses = statuses.slice();
+  out.listenersLeft = el.listenerCount();
+
+  // Repeated stalled previews on the SAME shared element must not accumulate
+  // handlers (Greptile P2: the paired late handler was never removed).
+  if(params.repeat){
+    for(let i = 0; i < params.repeat; i++){
+      const p = _awaitElementLoad(el, () => {}, 'image_load_failed');
+      await new Promise(r => setImmediate(r));
+      captured.slice().forEach(fn => fn());   // fire the anti-hang bound
+      await p;
+      // the stalled request finally fails: with the old code this removed only
+      // the error handler and left the paired load handler behind for good.
+      el.emit('error');
+      await new Promise(r => setImmediate(r));
+    }
+    out.repeatListenersLeft = el.listenerCount();
+  }
 
   // A response that later succeeds must still be honoured while waiting.
   statuses = [];
@@ -478,6 +495,41 @@ def test_a_late_load_is_still_honoured():
     stall is released early."""
     out = _run_stall_harness(fire_bound=False)
     assert out["lateLoadResult"] is True, out
+
+
+def test_late_handlers_retire_as_a_pair():
+    """Greptile P2: `{once:true}` only removes the handler that fired, and this
+
+    element is shared (#previewImg) — so an attempt ending in `error` left its
+    paired `load` handler attached permanently. Repeated timed-out failures
+    stacked stale closures on the element and let old handlers consume events
+    from later previews. Whichever terminal event arrives must clear both."""
+    for late in ("error", "load"):
+        out = _run_stall_harness(fire_bound=True, late=late)
+        assert out["listenersLeft"] == 0, (
+            f"a late {late} left {out['listenersLeft']} listener(s) attached to the "
+            f"shared preview element: {out}"
+        )
+
+
+def test_repeated_timed_out_failures_do_not_accumulate_listeners():
+    """The accumulation the finding describes: several consecutive stalled
+
+    previews must not leave a growing pile of handlers on the shared element."""
+    js = _STALL_HARNESS.replace(
+        "__HELPERS__", json.dumps({"_awaitElementLoad": _helper("_awaitElementLoad")})
+    ).replace(
+        "__PARAMS__",
+        json.dumps({"fireBound": False, "late": "", "repeat": 4}),
+    ).replace("__CONSTS__", _shipped_const_line("_PREVIEW_LOAD_TIMEOUT_MS"))
+    proc = subprocess.run(
+        [NODE, "-e", js], capture_output=True, text=True, cwd=REPO_ROOT, timeout=30
+    )
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["repeatListenersLeft"] == 0, (
+        f"stalled previews accumulated listeners on the shared element: {out}"
+    )
 
 
 # ── real browser: a broken image fails closed ───────────────────────────────
