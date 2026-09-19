@@ -104,6 +104,11 @@ Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.
 Use **Test connection** to verify the Base URL and populate the model list
 before continuing.
 
+After reload, a saved self-hosted Base URL is shown as **Configured** even when
+the provider has no API key. This label means that an endpoint is saved; it does
+not mean the endpoint is reachable now or that it is the active runtime
+provider. Use **Test connection** to verify reachability.
+
 AIML API uses the existing custom OpenAI-compatible setup path, not a
 first-class built-in Hermes provider id. Configure it under the
 custom-provider flow with Base URL `https://api.aimlapi.com/v1`, then use
@@ -178,7 +183,9 @@ server-side. You can change it later from Settings.
 The wizard uses the same files and APIs as the normal app:
 
 - Active Hermes `config.yaml`: provider, default model, and Base URL when
-  relevant.
+  relevant. A self-hosted provider keeps its saved Base URL independently of
+  the active model; activating a selection updates the existing active
+  provider/default-model/Base-URL tuple.
 - Active Hermes `.env`: provider API keys when you entered one.
 - WebUI `settings.json`: onboarding completion, workspace, password state, and
   other WebUI preferences.
