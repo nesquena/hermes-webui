@@ -389,6 +389,38 @@ def test_cancelled_stale_process_wakeup_credential_failure_records_pause(tmp_pat
     assert saved_after.process_wakeup_pause["suppressed_count"] == 1
 
 
+def test_default_profile_process_wakeup_revalidation_binds_default_tls(monkeypatch):
+    """The route caller must not inherit another process-active profile."""
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+    profiles.clear_request_profile()
+    observed_profiles = []
+
+    def _record_active_profile(_provider_id, *, refresh=False):
+        assert refresh is True
+        observed_profiles.append(profiles.get_active_profile_name())
+        return False
+
+    monkeypatch.setattr(
+        routes,
+        "provider_has_process_wakeup_recovery_credential",
+        _record_active_profile,
+    )
+    session = Session(
+        session_id="default_profile_wakeup_revalidation",
+        profile="default",
+    )
+
+    assert profiles.get_active_profile_name() == "work"
+    assert routes._process_wakeup_provider_has_recovery_credential(
+        session,
+        model="test-model",
+        provider="test-provider",
+        provider_id="test-provider",
+    ) is False
+    assert observed_profiles == ["default"]
+    assert profiles.get_active_profile_name() == "work"
+
+
 def test_process_wakeup_pause_revalidates_when_credential_state_changes(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
