@@ -1,0 +1,29 @@
+/* Capy Spaces foundation shell. Hidden unless the feature flag/API enables it. */
+.capy-spaces-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  height: 100%;
+  overflow: auto;
+}
+
+.capy-spaces-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  padding: 16px;
+}
+
+.capy-spaces-card h3 {
+  margin: 0 0 8px;
+}
+
+.capy-spaces-muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.capy-spaces-recovery {
+  border-color: color-mix(in srgb, var(--warning, #f59e0b) 45%, var(--border));
+}
