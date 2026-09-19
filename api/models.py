@@ -1301,6 +1301,8 @@ class Session:
                  truncation_boundary=None,
                  clear_generation=None,
                  intentional_shrink_generation=None,
+                 transcript_generation: int=0,
+                 transcript_generation_baseline: int=0,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1399,6 +1401,10 @@ class Session:
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
         self.intentional_shrink_generation = intentional_shrink_generation
+        self.transcript_generation = max(0, _parse_nonnegative_int(transcript_generation) or 0)
+        self.transcript_generation_baseline = max(
+            0, _parse_nonnegative_int(transcript_generation_baseline) or 0
+        )
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1485,6 +1491,8 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'intentional_shrink_generation',
+            'transcript_generation',
+            'transcript_generation_baseline',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1835,6 +1843,8 @@ class Session:
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
+            'transcript_generation': self.transcript_generation,
+            'transcript_generation_baseline': self.transcript_generation_baseline,
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,

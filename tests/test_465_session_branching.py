@@ -610,7 +610,7 @@ def test_session_compact_includes_parent():
     # method name and first parameter without pinning formatting.
     compact_def_match = re.search(r"def compact\(\s*self", src)
     assert compact_def_match, "Could not find compact() method"
-    snippet = src[compact_def_match.start():compact_def_match.start() + 3000]
+    snippet = src[compact_def_match.start():compact_def_match.start() + 3500]
     assert "'parent_session_id'" in snippet, \
         "compact() should include parent_session_id"
 
