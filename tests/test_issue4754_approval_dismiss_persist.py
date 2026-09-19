@@ -9,10 +9,27 @@ ROOT = Path(__file__).resolve().parent.parent
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def _compact(text: str) -> str:
     return "".join(text.split())
+
+
+def _function_body(compact: str, signature: str) -> str:
+    """Return the full, brace-balanced body of a function (whitespace-stripped)."""
+    start = compact.find(signature)
+    assert start != -1, f"{signature} not found"
+    depth = 0
+    for idx in range(start, len(compact)):
+        char = compact[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return compact[start:idx + 1]
+    raise AssertionError(f"unbalanced body for {signature}")
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +102,11 @@ def test_dismiss_approval_card_defined():
 
 
 def test_dismiss_approval_card_marks_dismissed():
-    compact = _compact(MESSAGES_JS)
-    func_start = compact.find("functiondismissApprovalCard(")
-    assert func_start != -1
-    body_end = compact.find("}", func_start)
-    body = compact[func_start:body_end + 1]
-    assert "_markApprovalDismissed(sid,_approvalCurrentId)" in body
+    # The dismiss path must record the dismissal for the *owned* approval
+    # (#7242): the id is captured from the response owner, not from the
+    # process-global current card.
+    body = _function_body(_compact(MESSAGES_JS), "functiondismissApprovalCard(")
+    assert "_markApprovalDismissed(ownerSid,ownerApprovalId)" in body
 
 
 def test_dismiss_approval_card_hides_card():
@@ -231,7 +247,10 @@ def test_dismiss_button_onclick():
 
 
 def test_dismiss_button_aria_label():
-    assert 'aria-label="Dismiss approval"' in INDEX_HTML
+    # Label is localized (#7242): the control declares the i18n key and the
+    # default (English) locale resolves it.
+    assert 'data-i18n-aria-label="approval_dismiss_deny"' in INDEX_HTML
+    assert "approval_dismiss_deny:" in I18N_JS
 
 
 def test_dismiss_button_near_collapse_button():
