@@ -12,6 +12,8 @@
 # CPU/RAM metrics on platforms without /proc:  pip install psutil>=5.9
 pyyaml>=6.0
 cryptography>=42.0
+# REQUIRED for Cloudflare Access JWT authentication when HERMES_WEBUI_CF_ACCESS_TEAM_DOMAIN is set.
+PyJWT>=2.1
 # OPTIONAL: Office workspace preview/edit support needs these parsers.
 # The workspace file routes return 503 with an install hint when they are absent.
 # Install them only if you want .docx/.xlsx/.pptx preview support:
