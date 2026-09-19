@@ -159,6 +159,7 @@ def _make_db(tmp_path: Path):
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
             session_source TEXT,
+            model_config TEXT,
             model TEXT,
             started_at REAL NOT NULL,
             ended_at REAL,
@@ -352,6 +353,48 @@ def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_pa
     assert watcher._poll_once(now=at_deadline) is True
     event = subscriber.get_nowait()
     assert event["sessions"] == []
+    assert subscriber.empty()
+
+
+def test_marker_only_update_invalidates_projection_on_next_poll(tmp_path):
+    """model_config is projection authority, so its mutation cannot wait for parity."""
+    gw = importlib.import_module("api.gateway_watcher")
+    db, conn = _make_db(tmp_path)
+    _add_session(conn, "compression-parent", "telegram", mc=1, started=100.0)
+    _add_session(conn, "compression-child", "telegram", mc=1, started=199.0)
+    conn.execute(
+        "UPDATE sessions SET ended_at = 200.0, end_reason = 'compression' "
+        "WHERE id = 'compression-parent'"
+    )
+    conn.execute(
+        "UPDATE sessions SET parent_session_id = 'compression-parent' "
+        "WHERE id = 'compression-child'"
+    )
+    conn.commit()
+
+    watcher = gw.GatewayWatcher(state_db_path=db)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    initial = subscriber.get_nowait()
+    assert [row["session_id"] for row in initial["sessions"]] == [
+        "compression-child"
+    ]
+
+    # No timestamp, count, source, or message row changes. This one field turns
+    # the previously-collapsed child into a direct branch and must be visible on
+    # the ordinary five-second poll rather than the 60-second parity fallback.
+    conn.execute(
+        "UPDATE sessions SET model_config = ? WHERE id = 'compression-child'",
+        ('{"_branched_from":"compression-parent"}',),
+    )
+    conn.commit()
+
+    assert watcher._poll_once(now=2.0) is True
+    event = subscriber.get_nowait()
+    assert {row["session_id"] for row in event["sessions"]} == {
+        "compression-parent",
+        "compression-child",
+    }
     assert subscriber.empty()
 
 
