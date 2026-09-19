@@ -43,6 +43,28 @@ TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_
 # `done`, and breaking early would drop them. `apperror` is included because
 # it terminates with no trailing `stream_end`.
 SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
+# Transient live-UI telemetry. Journaled historically, but with no recovery
+# value: nothing reconstructs transcript state from a metering row, and their
+# ~10 Hz emit rate made long reasoning-heavy runs produce journals that were
+# overwhelmingly telemetry (observed: 18 MB / 39k events, 97% metering +
+# reasoning deltas) — the replay of that backlog to a reconnecting tab OOMs
+# the browser. Write-time paths skip journaling them; replay readers skip any
+# metering rows still present in legacy journals.
+REPLAY_SKIPPED_SSE_EVENTS = frozenset({"metering"})
+
+
+def journal_replay_visible(event: "dict | Any") -> bool:
+    """Return True when a journal row should be replayed to a reconnecting client.
+
+    ``metering`` rows (legacy journals only — new writes skip them) are dropped:
+    they are point-in-time live-UI telemetry whose only replay effect is
+    re-painting a stale TPS label while multiplying the reconnect burst size.
+    Unknown/missing event names stay visible (fail open to content).
+    """
+    if not isinstance(event, dict):
+        return True
+    name = str(event.get("event") or event.get("type") or "")
+    return name not in REPLAY_SKIPPED_SSE_EVENTS
 # Back-compat alias used by older call sites / tests.
 _TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
@@ -446,10 +468,21 @@ class RunJournalWriter:
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
 
-    def append_sse_event(self, event_name: str, payload=None) -> dict:
+    def append_sse_event(self, event_name: str, payload=None) -> "dict | None":
         # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
+        # this writer and any direct append_run_event call on the same path
         # agree on one monotonic, gapless sequence.
+        if event_name in REPLAY_SKIPPED_SSE_EVENTS:
+            # Transient telemetry (metering) is never journaled. Emitted at
+            # ~10 Hz during active streams, it turned long reasoning-heavy
+            # runs into multi-MB journals that were ~65% telemetry by bytes
+            # (observed: 18 MB / 39k events), and the replay of that backlog
+            # to a reconnecting tab OOMs the browser. No recovery consumer
+            # reads metering rows, so skipping them has no behavioral cost.
+            # Return a falsy marker so put() callers leave their journal-id
+            # plumbing untouched (event_id stays None → frame is delivered
+            # id-less, same as pre-journal legacy events).
+            return None
         with self._lock:
             seq = _reserve_next_seq(self._path)
         return append_run_event(
