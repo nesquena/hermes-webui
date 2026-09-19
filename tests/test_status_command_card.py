@@ -88,7 +88,7 @@ function makeSeg() {{
 }}
 
 const ordinaryBlock = extractBlock(
-  "const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);",
+  "const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml||fallbackNoticeHtml);",
   "_assistantTurnBlocks(currentAssistantTurn).appendChild(seg);"
 );
 const orderedBlock = extractBlock(
@@ -102,12 +102,16 @@ function runBaseOrdinary(opts) {{
   const filesHtml = opts.filesHtml || '';
   const statusHtml = opts.statusHtml || '';
   const recoveryHtml = opts.recoveryHtml || '';
+  const fallbackNoticeHtml = opts.fallbackNoticeHtml || '';
   const bodyHtml = opts.bodyHtml || '';
   const footHtml = opts.footHtml || '';
   const thinkingText = opts.thinkingText || '';
   const window = {{ _showThinking: opts.showThinking !== false }};
   function isSimplifiedToolCalling() {{ return !!opts.simplified; }}
-  const hasVisibleBody = !!(String(content || '').trim() || filesHtml || statusHtml || recoveryHtml);
+  const hasVisibleBody = !!(String(content || '').trim() || filesHtml || recoveryHtml || fallbackNoticeHtml);
+  if (fallbackNoticeHtml) {{
+    seg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+  }}
   if (statusHtml) {{
     seg.insertAdjacentHTML('beforeend', statusHtml);
   }} else if (hasVisibleBody) {{
@@ -124,6 +128,7 @@ function runHeadOrdinary(opts) {{
   const filesHtml = opts.filesHtml || '';
   const statusHtml = opts.statusHtml || '';
   const recoveryHtml = opts.recoveryHtml || '';
+  const fallbackNoticeHtml = opts.fallbackNoticeHtml || '';
   const bodyHtml = opts.bodyHtml || '';
   const footHtml = opts.footHtml || '';
   const thinkingText = opts.thinkingText || '';
@@ -137,6 +142,7 @@ function runOrderedSpecial(opts) {{
   const orderedSeg = makeSeg();
   const isLastTextPart = opts.isLastTextPart ?? true;
   const statusHtml = opts.statusHtml || '';
+  const fallbackNoticeHtml = opts.fallbackNoticeHtml || '';
   const filesHtml = opts.filesHtml || '';
   const footHtml = opts.footHtml || '';
   const partBodyHtml = opts.partBodyHtml || '';

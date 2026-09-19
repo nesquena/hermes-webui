@@ -106,7 +106,7 @@ class TestCancelStreamPreservesPartial:
 
         result = cancel_stream('stream_partial')
 
-        assert result is True
+        assert result["cancelled"] is True
 
         # Reload the session and check messages
         from api.models import Session
