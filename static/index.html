@@ -1485,6 +1485,65 @@
             <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
             </div>
+            <div class="settings-section-head" style="margin-top:22px">
+              <div>
+                <div class="settings-section-title" data-i18n="custom_endpoints_title">Custom Endpoints</div>
+                <div class="settings-section-meta" data-i18n="custom_endpoints_meta">Add any OpenAI-compatible endpoint (vLLM, Ollama, relay, ...) with its API key — no config.yaml or .env editing. Keys are stored in the profile .env file.</div>
+              </div>
+              <button type="button" class="settings-action-btn" id="ceAddBtn" onclick="_openCustomEndpointForm(null)" title="Add custom endpoint" data-i18n-title="custom_endpoints_add_title" data-i18n-aria-label="custom_endpoints_add_title" aria-label="Add custom endpoint">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg> <span data-i18n="custom_endpoints_add">Add</span>
+              </button>
+            </div>
+            <div id="customEndpointsList" style="display:flex;flex-direction:column;margin-top:4px">
+              <!-- Populated dynamically by loadCustomEndpointsPanel() -->
+            </div>
+            <div id="customEndpointsEmpty" style="display:none;text-align:center;padding:24px 0;color:var(--muted);font-size:13px" data-i18n="custom_endpoints_empty">
+              No custom endpoints configured.
+            </div>
+            <div id="customEndpointsFormContainer" style="display:none;margin-top:8px">
+              <div class="provider-card">
+                <div class="provider-card-header" style="cursor:default">
+                  <div class="provider-card-info">
+                    <div class="provider-card-name" id="customEndpointsFormTitle">New endpoint</div>
+                  </div>
+                </div>
+                <div class="provider-card-body" style="display:block">
+                  <div class="provider-card-field">
+                    <label class="provider-card-label" data-i18n="custom_endpoints_name">Name</label>
+                    <input type="text" id="ceName" placeholder="my-endpoint" />
+                  </div>
+                  <div class="provider-card-field">
+                    <label class="provider-card-label" data-i18n="custom_endpoints_provider_id">Provider ID</label>
+                    <input type="text" id="ceId" placeholder="auto — slug of the name" />
+                    <div class="provider-card-hint" data-i18n="custom_endpoints_provider_id_hint">Used to store the API key. Leave blank to derive from the name.</div>
+                  </div>
+                  <div class="provider-card-field">
+                    <label class="provider-card-label" data-i18n="custom_endpoints_url">Endpoint URL</label>
+                    <input type="text" id="ceUrl" placeholder="https://example.com/v1" />
+                  </div>
+                  <div class="provider-card-field">
+                    <label class="provider-card-label" data-i18n="custom_endpoints_model">Default Model</label>
+                    <input type="text" id="ceModel" list="customEndpointsModels" placeholder="model-id" />
+                    <datalist id="customEndpointsModels"></datalist>
+                  </div>
+                  <div class="provider-card-field">
+                    <label class="provider-card-label" data-i18n="custom_endpoints_api_key">API Key</label>
+                    <input type="password" id="ceApiKey" autocomplete="off" data-i18n-placeholder="custom_endpoints_api_key_placeholder" placeholder="" />
+                    <div class="provider-card-hint" data-i18n="custom_endpoints_api_key_hint">Leave blank to keep the current key. Empty + Save removes the key.</div>
+                  </div>
+                  <div class="provider-card-field" style="flex-direction:row;gap:16px;align-items:center;margin-top:10px">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="ceDiscover" checked /> <span data-i18n="custom_endpoints_discover">Discover models</span></label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="ceMakeDefault" /> <span data-i18n="custom_endpoints_make_default">Use for new chats</span></label>
+                  </div>
+                  <div id="ceResult" class="provider-card-hint" style="display:none;margin-top:10px"></div>
+                  <div style="display:flex;gap:8px;margin-top:14px">
+                    <button type="button" class="provider-card-btn" id="ceTestBtn" data-i18n="custom_endpoints_test">Test</button>
+                    <button type="button" class="provider-card-btn provider-card-btn-primary" id="ceSaveBtn" data-i18n="custom_endpoints_save">Save</button>
+                    <button type="button" class="provider-card-btn" id="ceNewBtn" data-i18n="custom_endpoints_new">New endpoint</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="settings-pane" id="settingsPanePlugins">
             <div class="settings-section-head">
