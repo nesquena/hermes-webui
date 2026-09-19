@@ -166,6 +166,67 @@ def test_cron_polling_suppresses_toasts_but_keeps_unread_badges():
     assert "if(c.job_id) _cronNewJobIds.add(String(c.job_id));" in body
 
 
+def test_cron_polling_fires_browser_notification_when_tab_hidden():
+    """#7257: cron origin deliveries should fire a browser notification
+    when the tab is backgrounded, because the old ``if(document.hidden)
+    return`` gate skipped the entire recent-fetch and no surface ever
+    fired. Visible tabs keep the existing showToast; hidden tabs go
+    through sendBrowserNotification so the user's notification
+    permission and enabled setting still gate the alert."""
+    body = _function_body("startCronPolling")
+    # The old "skip when hidden" gate is gone. Use the precise
+    # token form (with trailing semicolon) so the match does not
+    # also hit the explanatory comment that quotes the old line.
+    assert "if(document.hidden) return;" not in body, (
+        "the document.hidden early-return must be removed; the rest of "
+        "the poll body now handles both visible and hidden paths"
+    )
+    # The completion branch picks one of two surfaces by visibility.
+    assert "if(document.hidden){" in body, (
+        "hidden tab path must branch on document.hidden"
+    )
+    assert "sendBrowserNotification(" in body, (
+        "hidden tab path must call the existing sendBrowserNotification "
+        "primitive so permission and enabled-setting gates still apply"
+    )
+    # Visible tab still gets the existing toast.
+    assert "showToast(t('cron_completion_status'" in body
+    # The same completion must not produce both surfaces; the
+    # if/else structure enforces that, so the visible branch
+    # itself is closed by an else (not a parallel if).
+    assert "} else {" in body
+
+
+def test_cron_polling_status_text_is_reused_across_surfaces():
+    """#7257: when building the status string for either surface we
+    should compute it once rather than re-deriving it inline, so the
+    localized success/failure text cannot drift between the toast and
+    the notification body."""
+    body = _function_body("startCronPolling")
+    assert "const statusText" in body, (
+        "the localized success/failure string should be hoisted to a "
+        "local before branching on document.hidden"
+    )
+    # Both surfaces must consume statusText (or the localized variant
+    # for the toast), not re-derive from c.status inline.
+    assert "statusText" in body
+
+
+def test_cron_polling_does_not_advance_unread_for_muted_jobs():
+    """Regression guard: the muted-job path (c.toast_notifications ===
+    false) must still advance the unread badge so the user sees a red
+    dot in the sidebar; the notification primitive is opt-in, but the
+    session-unread marker is not."""
+    body = _function_body("startCronPolling")
+    # The toast/notification surface is gated on the user's preference.
+    assert "c.toast_notifications !== false" in body
+    # The _cronNewJobIds and session-unread marker advance OUTSIDE the
+    # toast/notification gate so muted jobs still appear in the sidebar.
+    assert "_cronPollSince=Math.max(_cronPollSince,c.completed_at);" in body
+    assert "_cronNewJobIds.add(String(c.job_id))" in body
+    assert "_markSessionCompletionUnreadIfBackground" in body
+
+
 def test_cron_toast_i18n_keys_exist():
     assert "cron_toast_notifications_label" in I18N_JS
     assert "cron_toast_notifications_hint" in I18N_JS

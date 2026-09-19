@@ -13020,7 +13020,6 @@ window.addEventListener('hermes:cron_created', () => {
 function startCronPolling(){
   if(_cronPollTimer) return;
   _cronPollTimer=setInterval(async()=>{
-    if(document.hidden) return;  // don't poll when tab is in background
     try{
       const pollGeneration=_cronPollGeneration;
       const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
@@ -13028,7 +13027,24 @@ function startCronPolling(){
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){
-            showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
+            // #7257: even when the tab is backgrounded we still want the
+            // user to know a cron job just completed. With the old
+            // ``if(document.hidden) return`` gate, the entire recent-fetch
+            // skipped silently and no surface (toast or notification) ever
+            // fired. Now: visible tabs keep the existing showToast,
+            // hidden tabs get a browser notification routed through
+            // sendBrowserNotification (which itself honors the user's
+            // notification permission and enabled setting). _cronPollSince,
+            // _cronNewJobIds, and the session-unread marker all advance
+            // regardless of which surface fires.
+            const statusText = c.status==='error' ? t('status_failed') : t('status_completed');
+            if(document.hidden){
+              if(typeof sendBrowserNotification === 'function'){
+                sendBrowserNotification(c.name, statusText, {sid: c.session_id});
+              }
+            } else {
+              showToast(t('cron_completion_status', c.name, statusText), 4000);
+            }
           }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
