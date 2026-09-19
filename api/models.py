@@ -6712,7 +6712,7 @@ CRON_PROJECT_NAME = 'Cron Jobs'
 _CRON_PROJECT_LOCK = threading.Lock()
 
 
-def ensure_cron_project(create: bool = True) -> str | None:
+def ensure_cron_project(create: bool = True, profile: str | None = None) -> str | None:
     """Return the project_id of the system "Cron Jobs" project for the active profile.
 
     Each profile gets its own "Cron Jobs" project so cron-spawned sessions in
@@ -6734,7 +6734,10 @@ def ensure_cron_project(create: bool = True) -> str | None:
     """
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    # `profile` is the owner of the state.db being projected; the active
+    # profile is only a fallback so a cross-profile scan never tags another
+    # profile's system project onto the one currently selected.
+    active = profile or get_active_profile_name() or 'default'
     with _CRON_PROJECT_LOCK:
         projects = load_projects()
         # Look for an existing per-profile cron project. Match either an exact
@@ -6774,11 +6777,12 @@ WEBHOOK_PROJECT_NAME = 'Webhooks'
 _WEBHOOK_PROJECT_LOCK = threading.Lock()
 
 
-def ensure_webhook_project() -> str:
-    """Return the project_id of the system "Webhooks" project for the active profile."""
+def ensure_webhook_project(profile: str | None = None) -> str:
+    """Return the project_id of the system "Webhooks" project for `profile` (default: active)."""
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    # Owner of the scanned state.db wins over the selected profile (see ensure_cron_project).
+    active = profile or get_active_profile_name() or 'default'
     with _WEBHOOK_PROJECT_LOCK:
         projects = load_projects()
         for p in projects:
@@ -6806,7 +6810,7 @@ def ensure_webhook_project() -> str:
         return project_id
 
 
-def _profile_has_user_projects() -> bool:
+def _profile_has_user_projects(profile: str | None = None) -> bool:
     """True if the active profile already has at least one real (non-system) project.
 
     "Opted into project organization" means `load_projects()` contains a
@@ -6819,7 +6823,7 @@ def _profile_has_user_projects() -> bool:
     """
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    active = profile or get_active_profile_name() or 'default'
     reserved = {CRON_PROJECT_NAME, WEBHOOK_PROJECT_NAME}
     for p in load_projects():
         if p.get('name') in reserved:
@@ -7746,7 +7750,9 @@ def _load_cli_sessions_uncached(
     def _cron_pid():
         if not _cron_pid_cache[0]:
             _cron_pid_cache[0] = True
-            _cron_pid_cache[1] = ensure_cron_project(create=_profile_has_user_projects())
+            _cron_pid_cache[1] = ensure_cron_project(
+                create=_profile_has_user_projects(_cli_profile), profile=_cli_profile,
+            )
         return _cron_pid_cache[1]
 
     # Memoize the cron jobs.json job_id -> name map for this scan. The two row
@@ -7797,7 +7803,7 @@ def _load_cli_sessions_uncached(
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
         if _webhook_pid_cache[0] is None:
-            _webhook_pid_cache[0] = ensure_webhook_project()
+            _webhook_pid_cache[0] = ensure_webhook_project(profile=_cli_profile)
         return _webhook_pid_cache[0]
 
     def _state_row_project_id(sid: str, source: str | None) -> str | None:
