@@ -132,7 +132,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         mock_resp = types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content='Test Title'),
+                    message=types.SimpleNamespace(content='{"title": "Test Title"}'),
                     finish_reason='stop',
                 )
             ]
@@ -172,7 +172,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         mock_resp = types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content='Gemini Title'),
+                    message=types.SimpleNamespace(content='{"title": "Gemini Title"}'),
                     finish_reason='stop',
                 )
             ]
@@ -213,7 +213,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         mock_resp = types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content='Configured Model Title'),
+                    message=types.SimpleNamespace(content='{"title": "Configured Model Title"}'),
                     finish_reason='stop',
                 )
             ]
@@ -257,7 +257,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         mock_resp = types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content='Configured Key Title'),
+                    message=types.SimpleNamespace(content='{"title": "Configured Key Title"}'),
                     finish_reason='stop',
                 )
             ]
@@ -296,7 +296,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         mock_resp = types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content='Alte Session Bilder'),
+                    message=types.SimpleNamespace(content='{"title": "Alte Session Bilder"}'),
                     finish_reason='stop',
                 )
             ]
@@ -419,7 +419,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         mock_resp = types.SimpleNamespace(
             choices=[
                 types.SimpleNamespace(
-                    message=types.SimpleNamespace(content='Agent Route Title'),
+                    message=types.SimpleNamespace(content='{"title": "Agent Route Title"}'),
                     finish_reason='stop',
                 )
             ]
@@ -487,10 +487,12 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
         fallback path instead."""
         from api.streaming import generate_title_raw_via_aux
 
-        call_count = [0]
+        calls = []
 
         def fake_call_llm(**kwargs):
-            call_count[0] += 1
+            calls.append(kwargs)
+            if 'response_format' in (kwargs.get('extra_body') or {}):
+                raise ValueError('response_format unsupported')
             return {
                 'choices': [
                     {
@@ -509,9 +511,10 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(status, 'llm_empty_reasoning_aux')
-        # One call per prompt at the base budget — no retry on prompt 0, no
-        # second-prompt attempt either (short-circuited).
-        self.assertEqual(call_count[0], 1)
+        # The schema probe is rejected, then the reasoning-disabled compatibility
+        # call short-circuits without a larger budget or second-prompt attempt.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]['extra_body'], {'reasoning': {'enabled': False}})
 
     def test_aux_still_retries_finish_length_without_reasoning(self):
         """Length-truncated responses WITHOUT reasoning tokens still get the
@@ -521,7 +524,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         responses = [
             {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
-            {'choices': [{'message': {'content': 'Useful Session Title'}, 'finish_reason': 'stop'}]},
+            {'choices': [{'message': {'content': '{"title": "Useful Session Title"}'}, 'finish_reason': 'stop'}]},
         ]
         captured_budgets = []
 
@@ -604,8 +607,10 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(status, 'llm_empty_reasoning')
-        # One call per prompt at base budget — no retry, no second-prompt attempt.
-        self.assertEqual(call_count[0], 1)
+        # The schema response gets one compatibility attempt. Reasoning-only
+        # compatibility output then short-circuits without a larger budget or
+        # second-prompt attempt.
+        self.assertEqual(call_count[0], 2)
         self.assertIsNone(agent.reasoning_config)
 
     def test_agent_route_still_retries_finish_length_without_reasoning(self):
@@ -614,7 +619,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         responses = [
             {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
-            {'choices': [{'message': {'content': 'Agent Session Title'}, 'finish_reason': 'stop'}]},
+            {'choices': [{'message': {'content': '{"title": "Agent Session Title"}'}, 'finish_reason': 'stop'}]},
         ]
         captured_budgets = []
 
@@ -1090,7 +1095,7 @@ class TestAuxTitleConversationContext(unittest.TestCase):
     MOCK_RESP = types.SimpleNamespace(
         choices=[
             types.SimpleNamespace(
-                message=types.SimpleNamespace(content='Weather Title'),
+                message=types.SimpleNamespace(content='{"title": "Weather Title"}'),
                 finish_reason='stop',
             )
         ]
