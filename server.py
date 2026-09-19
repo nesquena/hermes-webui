@@ -290,6 +290,33 @@ class QuietHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def _fold_api_path(handler, parsed):
+    """Case-insensitive /api/ route matching that preserves dynamic values.
+
+    API routes are matched case-insensitively (e.g. ``/API/Settings`` and
+    ``/api/settings`` dispatch identically, and an uppercase ``/API/`` prefix
+    is normalized too), but only the *matching* path is case-folded. The
+    original-case path is retained on the handler (``_raw_api_path``) so route
+    handlers can extract case-sensitive dynamic values — share tokens, MCP
+    server names, opaque IDs — from the unmodified tail instead of from the
+    folded path (see api/routes._original_api_path).
+
+    The handler instance is reused across HTTP/1.1 keep-alive requests, so the
+    retained path is reset for EVERY request: a non-API request must never see
+    an ``_raw_api_path`` left behind by an earlier /api/ request on the same
+    connection (#6589 re-gate).
+    """
+    # Per-request state: clear the previous request's retained path up front.
+    # Only /api/* requests below retain a path; without this reset, a later
+    # non-API request on the same connection would read stale API state.
+    handler._raw_api_path = None
+    raw_path = parsed.path
+    if raw_path.casefold().startswith("/api/"):
+        handler._raw_api_path = raw_path
+        return parsed._replace(path=raw_path.casefold())
+    return parsed
+
+
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.1 keep-alive stays on, so every response must declare framing.
     protocol_version = "HTTP/1.1"
@@ -378,6 +405,9 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            # Case-insensitive /api/ routing: fold only the matching path,
+            # keep the original-case path for dynamic captures (#3943).
+            parsed = _fold_api_path(self, parsed)
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
@@ -403,6 +433,9 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
+            # Case-insensitive /api/ routing: fold only the matching path,
+            # keep the original-case path for dynamic captures (#3943).
+            parsed = _fold_api_path(self, parsed)
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
