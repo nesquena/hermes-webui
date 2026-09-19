@@ -93,6 +93,52 @@ The WebUI's `auto_title_refresh_every` setting remains a separate control for
 periodic refreshes of already-generated titles; it does not re-enable
 automatic generation when the auxiliary flag is off.
 
+### Pinning the title language
+
+`auxiliary.title_generation.language` pins the language generated titles are
+written in, whatever language the conversation itself is in:
+
+```yaml
+auxiliary:
+  title_generation:
+    language: Japanese
+```
+
+A nonblank value is read once per generation attempt and drives both halves of
+that attempt. The prompt instruction becomes `Write the title in <language>.`
+in place of the default "match the language of the user question" rule, and the
+post-generation drift check is retargeted to agree with it. Both title routes
+honour the pin: the auxiliary-client route and the active-agent route.
+
+Retargeting the validator is the point. The drift check exists to reject a
+title whose language wandered away from the conversation (issue #3293), and on
+a pinned install that same check would reject the pinned title the prompt had
+just asked for. How a generated title is validated therefore depends on the
+pin:
+
+- **A pin the script map recognises** (`Japanese`, `Russian`,
+  `Brazilian Portuguese`, `pt-BR`) is checked against that language's script.
+  A title substantially outside it is still rejected, so an English pin
+  rejects a CJK title and a Japanese pin rejects a Cyrillic one.
+- **A nonblank pin the script map cannot name** (`Amharic`, say) is checked
+  against the title's own dominant script. That rejects a title written half
+  in the requested language and half in the conversation's, and accepts one
+  written wholly in a script this module cannot name. It cannot distinguish a
+  real unnamed language from a nonsense one, so such a title is kept on the
+  strength of being internally consistent rather than on matching the
+  request.
+- **No pin** keeps the original behaviour unchanged: the title is checked
+  against the language of the conversation's opening message.
+
+Language lookup is diacritic-insensitive and also matches individual tokens of
+a qualified name, so `Francais`, `Français`, `Traditional Chinese` and `pt-BR`
+all resolve to a script.
+
+The pin affects session titles only. It does not change the language the
+assistant replies in, and it has no effect when
+`auxiliary.title_generation.enabled` is `false`, since no LLM title is
+generated at all in that case.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
