@@ -652,7 +652,7 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
     assert payload["afterDestination"] == "high"
     assert payload["calls"] == 2
     assert "refreshProfileTransitionReasoningChip" in PANELS_JS
-    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = data.active || name")
+    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = responseActive")
     background = PANELS_JS[PANELS_JS.index("function _refreshProfileSwitchBackground"):PANELS_JS.index("async function loadProfilesPanel")]
     for refresh in (
         "_ensureComposerControlVisibilityState",
@@ -760,6 +760,164 @@ fetchReasoningChip();
     }
     assert payload["directLoadAfterOld"] == ""
     assert payload["directLoadAfterNew"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("wire_value", "expected"),
+    [
+        pytest.param(True, True, id="literal-true"),
+        pytest.param(False, False, id="literal-false"),
+        pytest.param(None, False, id="missing"),
+        pytest.param("false", False, id="string-false"),
+        pytest.param(1, False, id="number-one"),
+        pytest.param({"value": True}, False, id="object"),
+    ],
+)
+def test_profile_switch_paths_accept_only_literal_true_default_provenance(
+    wire_value, expected
+):
+    response = {"active": "destination"}
+    if wire_value is not None:
+        response["is_default"] = wire_value
+    source = f"""
+const panelsSrc = {PANELS_JS!r};
+const sessionsSrc = {SESSIONS_JS!r};
+const response = {json.dumps(response)};
+function extractFunc(src, name) {{
+  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+global.window = {{}};
+global.document = {{ title: '' }};
+global.localStorage = {{ removeItem() {{}} }};
+global.$ = () => null;
+global.S = {{
+  activeProfile: 'source', activeProfileIsDefault: true,
+  session: null, messages: [], _pendingSessionToolsets: null,
+}};
+global.api = async url => {{
+  if (url === '/api/profile/switch') return {{...response}};
+  throw new Error('unexpected API ' + url);
+}};
+global.renderSessionList = async () => {{}};
+global.syncTopbar = () => {{}};
+global.showToast = () => {{}};
+global.t = value => value;
+global._profileSwitchPanelLoad = async () => {{}};
+global._refreshProfileSwitchBackground = () => {{}};
+var _profileSwitchGeneration = 0;
+var _skillsData = null, _workspaceList = null;
+eval(extractFunc(panelsSrc, 'switchToProfile'));
+eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
+(async () => {{
+  await switchToProfile('destination');
+  const panelSwitch = S.activeProfileIsDefault;
+  S.activeProfile = 'source';
+  S.activeProfileIsDefault = true;
+  await _switchProfileForSessionLoad('destination');
+  console.log(JSON.stringify({{panelSwitch, sessionLoadSwitch: S.activeProfileIsDefault}}));
+}})().catch(error => {{ console.error(error.stack || error); process.exit(1); }});
+"""
+
+    payload = json.loads(_run_node(source))
+    assert payload == {"panelSwitch": expected, "sessionLoadSwitch": expected}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"active": ""}, id="empty"),
+        pytest.param({"active": "   "}, id="blank"),
+        pytest.param({"active": " destination "}, id="padded"),
+        pytest.param({"active": 7}, id="non-string"),
+    ],
+)
+def test_profile_switch_paths_invalidate_authority_on_malformed_active_identity(response):
+    source = f"""
+const panelsSrc = {PANELS_JS!r};
+const sessionsSrc = {SESSIONS_JS!r};
+const response = {json.dumps(response)};
+function extractFunc(src, name) {{
+  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+global.window = {{}};
+global.document = {{ title: '' }};
+global.localStorage = {{ removeItem() {{}} }};
+global.$ = () => null;
+global.S = {{
+  activeProfile: 'source', activeProfileIsDefault: true,
+  session: null, messages: [], _pendingSessionToolsets: null,
+}};
+global.api = async url => {{
+  if (url === '/api/profile/switch') return {{...response}};
+  throw new Error('unexpected API ' + url);
+}};
+global.renderSessionList = async () => {{}};
+global.renderSessionListFromCache = () => {{}};
+global.syncTopbar = () => {{}};
+global.showToast = () => {{}};
+global.t = value => value;
+global._profileSwitchPanelLoad = async () => {{}};
+global._refreshProfileSwitchBackground = () => {{}};
+var _profileSwitchGeneration = 0;
+var _skillsData = null, _workspaceList = null;
+eval(extractFunc(panelsSrc, 'switchToProfile'));
+eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
+(async () => {{
+  const panelResult = await switchToProfile('destination');
+  const panelState = {{
+    activeProfile: S.activeProfile,
+    activeProfileIsDefault: S.activeProfileIsDefault,
+  }};
+  S.activeProfile = 'source';
+  S.activeProfileIsDefault = true;
+  let sessionError = null;
+  try {{
+    await _switchProfileForSessionLoad('destination');
+  }} catch (error) {{
+    sessionError = error.message;
+  }}
+  console.log(JSON.stringify({{
+    panelResult,
+    panelState,
+    sessionError,
+    sessionState: {{
+      activeProfile: S.activeProfile,
+      activeProfileIsDefault: S.activeProfileIsDefault,
+    }},
+  }}));
+}})().catch(error => {{ console.error(error.stack || error); process.exit(1); }});
+"""
+
+    payload = json.loads(_run_node(source))
+    assert payload["panelResult"] is False
+    assert payload["panelState"] == {
+        "activeProfile": None,
+        "activeProfileIsDefault": False,
+    }
+    assert "active profile" in payload["sessionError"].lower()
+    assert payload["sessionState"] == {
+        "activeProfile": None,
+        "activeProfileIsDefault": False,
+    }
 
 
 def test_blank_profile_transition_context_clears_before_explicit_model_change():

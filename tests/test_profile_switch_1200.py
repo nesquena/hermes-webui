@@ -16,6 +16,8 @@ import tempfile
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 def test_switch_profile_returns_target_workspace_not_current(tmp_path, monkeypatch):
     """
@@ -664,14 +666,29 @@ def test_get_available_models_reloads_when_request_profile_changes_even_with_reb
         config.invalidate_models_cache()
 
 
-def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
-    """An empty session created under profile A can be sent under profile B after a switch."""
+@pytest.mark.parametrize("chat_backend", ["legacy", "gateway"])
+@pytest.mark.parametrize(
+    ("persisted_profile", "active_profile", "requested_profile"),
+    [
+        pytest.param("default", "work", "work", id="default-to-work"),
+        pytest.param("work", "kinni", "default", id="work-to-root-alias"),
+    ],
+)
+def test_chat_start_passes_empty_session_retag_and_backend_flag_to_start_run(
+    monkeypatch,
+    tmp_path,
+    chat_backend,
+    persisted_profile,
+    active_profile,
+    requested_profile,
+):
+    """The route retags only the empty session and resolves the backend flag."""
     import api.routes as routes
 
     class FakeSession:
         def __init__(self):
             self.session_id = "sid-profile-switch"
-            self.profile = "default"
+            self.profile = persisted_profile
             self.workspace = str(tmp_path)
             self.model = "google/gemini-3-flash-preview"
             self.model_provider = "openrouter"
@@ -682,38 +699,42 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
             self.pending_user_message = None
             self.pending_attachments = []
             self.pending_started_at = None
-            self.saved = False
-
-        def save(self):
-            self.saved = True
 
     fake = FakeSession()
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", chat_backend)
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
-    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: active_profile)
+    root_aliases = {"default", "kinni"}
+    monkeypatch.setattr(
+        routes,
+        "_profiles_match",
+        lambda left, right: left == right or {left, right} <= root_aliases,
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_trusted_workspace",
+        lambda path, **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda *_args, **_kwargs: (None, None, {}),
+    )
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
         lambda model, provider, **_: (model, provider, False),
     )
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
-    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
 
-    started_threads = []
+    start_calls = []
 
-    class FakeThread:
-        def __init__(self, *args, **kwargs):
-            started_threads.append((args, kwargs))
+    def record_start_run(session, **kwargs):
+        start_calls.append((session, session.profile, kwargs))
+        return {"stream_id": "stub-stream", "session_id": session.session_id}
 
-        def start(self):
-            pass
-
-    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(routes, "_start_run", record_start_run)
 
     payloads = []
-
-    class Handler:
-        pass
 
     def fake_j(handler, payload, status=200, **kwargs):
         payloads.append((status, payload))
@@ -727,18 +748,34 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
         "workspace": str(tmp_path),
         "model": fake.model,
         "model_provider": fake.model_provider,
-        "profile": "work",
+        "profile": requested_profile,
     }
-    routes._handle_chat_start(Handler(), body)
+    result = routes._handle_chat_start(object(), body)
 
-    assert fake.profile == "work"
-    assert fake.saved is True
-    assert started_threads, "chat_start should launch the stream after retagging"
-    assert payloads and payloads[-1][0] == 200
+    assert len(start_calls) == 1
+    started_session, profile_at_start, start_kwargs = start_calls[0]
+    assert started_session is fake
+    assert profile_at_start == requested_profile
+    assert start_kwargs == {
+        "msg": "hello",
+        "attachments": [],
+        "workspace": str(tmp_path),
+        "model": fake.model,
+        "model_provider": fake.model_provider,
+        "normalized_model": False,
+        "source": "webui",
+        "route": "/api/chat/start",
+        "diag": None,
+        "gateway_chat_enabled": chat_backend == "gateway",
+        "regeneration": None,
+    }
+    assert fake.profile == requested_profile
+    assert result == {"stream_id": "stub-stream", "session_id": fake.session_id}
+    assert payloads == [(200, result)]
 
 
-def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
-    """Profile retagging is limited to empty placeholder sessions."""
+def test_chat_start_rejects_non_empty_session_profile_mismatch(monkeypatch, tmp_path):
+    """Persisted turns make a profile mismatch a 404 before starting a run."""
     import api.routes as routes
 
     class FakeSession:
@@ -755,33 +792,29 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
             self.pending_user_message = None
             self.pending_attachments = []
             self.pending_started_at = None
-            self.saved = False
-
-        def save(self):
-            self.saved = True
 
     fake = FakeSession()
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
+
+    start_calls = []
     monkeypatch.setattr(
         routes,
-        "_resolve_compatible_session_model_state",
-        lambda model, provider, **_: (model, provider, False),
+        "_start_run",
+        lambda *args, **kwargs: start_calls.append((args, kwargs)),
     )
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
-    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    errors = []
+    rejected = object()
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400, **_kwargs: errors.append(
+            (status, message)
+        )
+        or rejected,
+    )
 
-    class FakeThread:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
-    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: payload)
-
-    routes._handle_chat_start(
+    result = routes._handle_chat_start(
         object(),
         {
             "session_id": fake.session_id,
@@ -793,8 +826,10 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
         },
     )
 
+    assert result is rejected
+    assert errors == [(404, "Session not found")]
+    assert start_calls == []
     assert fake.profile == "default"
-    assert fake.saved is True
 
 
 def test_chat_start_rejects_invalid_request_profile(monkeypatch):

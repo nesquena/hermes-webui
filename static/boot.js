@@ -3582,10 +3582,13 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     const alreadyAttempted = _bootActiveProfileUnauthRedirectBudget.readAttempted(markerStorage);
     try {
       const p = await loadActiveProfile();
-      if (p && typeof p === 'object' && typeof p.name === 'string') {
+      if (p && typeof p === 'object'
+        && typeof p.name === 'string'
+        && p.name !== ''
+        && p.name.trim() === p.name) {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {status: 'resolved', profile: p.name, isDefault: p.is_default===true};
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -3593,8 +3596,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         }
         return {status: 'recovery-redirect'};
       }
-      if (p === undefined) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
-      else _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+      if (p !== undefined) {
+        _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+        return {status: 'unresolved', profile: null, isDefault: false};
+      }
+      _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
       return {status: 'fallback', profile: 'default', isDefault: true};
     } catch (e) {
       _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);

@@ -60,9 +60,14 @@ def test_cache_key_stable_across_message_writes_while_streaming(monkeypatch, tmp
     db.write_bytes(b"")  # exists; fingerprint reader degrades gracefully
 
     monkeypatch.setattr(M, "_default_claude_code_projects_dir", lambda: tmp_path / "projects")
-    # Simulate the volatile fingerprint advancing on each streamed message.
+    # Simulate only the volatile state.db fingerprint advancing on each streamed
+    # message. projects.db is a separate, intentionally unfrozen cache component.
     fp = {"v": 0}
-    monkeypatch.setattr(M, "_sqlite_file_stat_cache_key", lambda p: ("fp", fp["v"]))
+
+    def sqlite_key(path):
+        return ("fp", fp["v"]) if Path(path).name == "state.db" else ("projects",)
+
+    monkeypatch.setattr(M, "_sqlite_file_stat_cache_key", sqlite_key)
 
     # Active stream -> key should be frozen (independent of fp).
     _set_active_streams(monkeypatch, ["live-stream-1"])

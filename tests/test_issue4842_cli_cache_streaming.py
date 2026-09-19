@@ -26,11 +26,15 @@ def test_cli_cache_key_stays_frozen_during_streaming(monkeypatch, tmp_path):
     )
 
     fp = {"value": 0}
-    monkeypatch.setattr(
-        models,
-        "_sqlite_file_stat_cache_key",
-        lambda _p: ("fp", fp["value"]),
-    )
+
+    def sqlite_key(path):
+        return (
+            ("fp", fp["value"])
+            if path.name == "state.db"
+            else ("projects",)
+        )
+
+    monkeypatch.setattr(models, "_sqlite_file_stat_cache_key", sqlite_key)
 
     _set_active_streams(monkeypatch, {"live-1"})
     _, _, _, key_streaming_a = models._resolve_cli_sessions_context(None)

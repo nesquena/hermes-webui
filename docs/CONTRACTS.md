@@ -23,6 +23,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/native-project-compatibility.md`](native-project-compatibility.md):
+  shipped PR1 backend read-through contract for per-profile Agent projects,
+  imported-session cwd classification, read-only/failure boundaries, later
+  migration phases, and rollback. The document identifies the separately
+  integrated UI guards required before the final PR1 release.
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and

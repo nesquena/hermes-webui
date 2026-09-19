@@ -1392,11 +1392,103 @@ function _setNewSessionPending(pending){
   }
 }
 
+function _isReadOnlyProject(project){
+  if(!project) return false;
+  if(project.project_source==='hermes-agent') return true;
+  if(Object.prototype.hasOwnProperty.call(project,'read_only')){
+    return typeof project.read_only==='boolean' ? project.read_only : true;
+  }
+  return false;
+}
+
+function _isCanonicalProjectId(projectId){
+  return typeof projectId==='string'&&projectId!==''&&projectId.trim()===projectId;
+}
+
+function _projectForId(projectId){
+  if(!_isCanonicalProjectId(projectId)) return null;
+  return (_allProjects||[]).find(project=>project
+    &&_isCanonicalProjectId(project.project_id)
+    &&project.project_id===projectId)||null;
+}
+
+function _projectAuthorizationActiveProfile(){
+  const value=S.activeProfile;
+  return typeof value==='string'&&value!==''&&value.trim()===value?value:null;
+}
+
+function _projectListScopeMatchesActive(){
+  const activeName=_projectAuthorizationActiveProfile();
+  if(activeName===null) return false;
+  return typeof _allProjectsScope!=='undefined'
+    &&!!_allProjectsScope
+    &&typeof _allProjectsScope.profile==='string'
+    &&_allProjectsScope.profile===activeName
+    &&_allProjectsScope.allProfiles===false;
+}
+
+function _projectProfileMatchesActive(project){
+  if(!project) return false;
+  const activeName=_projectAuthorizationActiveProfile();
+  if(activeName===null) return false;
+  const rowProfile=project.profile;
+  const legacyDefault=rowProfile===undefined||rowProfile===null||rowProfile==='';
+  if(!legacyDefault&&(typeof rowProfile!=='string'||rowProfile.trim()!==rowProfile)) return false;
+  const projectName=legacyDefault?'default':rowProfile;
+  if(projectName===activeName) return true;
+  // Reverse root-alias proof (active "default", row under the renamed root)
+  // may use the profile cache only when that cache was fetched for this exact
+  // active profile. A stale cache from another profile must never bless a row.
+  const profileCacheCurrent=typeof _profilesCache!=='undefined'
+    &&_profilesCache
+    &&typeof _profilesCache.active==='string'
+    &&_profilesCache.active===activeName;
+  const profiles=(profileCacheCurrent&&Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles
+    : [];
+  const isRootAlias=name=>name==='default'||profiles.some(profile=>profile&&profile.name===name&&profile.is_default===true);
+  const activeIsRoot=activeName==='default'||S.activeProfileIsDefault===true;
+  return activeIsRoot&&isRootAlias(projectName);
+}
+
+function _projectCanReceiveNewSession(projectId){
+  const project=_projectForId(projectId);
+  // The fresh active-profile-only project response is the primary authority.
+  // `_projectProfileMatchesActive` may additionally prove a renamed-root alias
+  // from `_profilesCache`, but only when that cache's active profile is current;
+  // it cannot bless a foreign row absent from this current scoped project list.
+  return !!project
+    &&!_isReadOnlyProject(project)
+    &&_projectListScopeMatchesActive()
+    &&_projectProfileMatchesActive(project);
+}
+
+function _newSessionProjectSelection(options){
+  if(Object.prototype.hasOwnProperty.call(options,'project_id')){
+    const projectId=options.project_id;
+    if(projectId===null) return {include:true,projectId:null};
+    if(!_projectCanReceiveNewSession(projectId)){
+      throw new Error('Selected project is unavailable or read-only for the active profile. Choose a current writable project and try again.');
+    }
+    return {include:true,projectId};
+  }
+  if(_activeProject===null||_activeProject===undefined||_activeProject===NO_PROJECT_FILTER) return {include:false,projectId:null};
+  if(_projectCanReceiveNewSession(_activeProject)) return {include:true,projectId:_activeProject};
+  _activeProject=null;
+  return {include:false,projectId:null};
+}
+
 async function newSession(flash, options={}){
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
+  const hasImplicitProjectSelection=_activeProject!==null
+    &&_activeProject!==undefined
+    &&_activeProject!==NO_PROJECT_FILTER;
+  const projectSelection=(Object.prototype.hasOwnProperty.call(options,'project_id')||hasImplicitProjectSelection)
+    ? _newSessionProjectSelection(options)
+    : {include:false,projectId:null};
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
@@ -1428,11 +1520,7 @@ async function newSession(flash, options={}){
     // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
     // config default can never mint a worktree (+ branch) on mere page load.
     if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
-    if(Object.prototype.hasOwnProperty.call(options,'project_id')){
-      reqBody.project_id=options.project_id;
-    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
-      reqBody.project_id=_activeProject;
-    }
+    if(projectSelection.include) reqBody.project_id=projectSelection.projectId;
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
     const modelSelForNew=$('modelSelect');
@@ -1655,8 +1743,15 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   try{
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
-    S.activeProfile=data.active||name;
-    S.activeProfileIsDefault=!!data.is_default;
+    const responseActive=data&&data.active;
+    if(typeof responseActive!=='string'||responseActive===''||responseActive.trim()!==responseActive){
+      S.activeProfile=null;
+      S.activeProfileIsDefault=false;
+      if(typeof _allProjectsScope!=='undefined') _allProjectsScope=null;
+      throw new Error('Profile switch returned invalid active profile identity.');
+    }
+    S.activeProfile=responseActive;
+    S.activeProfileIsDefault=data.is_default===true;
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
@@ -3957,6 +4052,7 @@ let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
 const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
+let _allProjectsScope = null;  // {profile, allProfiles} from the accepted /api/projects response
 // Sentinel value for the _activeProject state when filtering to sessions
 // that have no project_id assigned. Distinct from real project IDs so the
 // equality check below can branch cleanly on it. The literal string is
@@ -4391,6 +4487,7 @@ function _showBatchProjectPicker(){
     }catch(e){showToast('Move failed: '+(e.message||e));}
   };picker.appendChild(none);
   for(const p of(_allProjects||[])){
+    if(_isReadOnlyProject(p)) continue;
     const item=document.createElement('div');item.className='project-picker-item';
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
@@ -5350,6 +5447,7 @@ function _schedulePendingSessionListApply(){
     // window; still drop completion-marking for the stale pre-switch payload.
     _applySessionListPayload(payload.sessData,payload.projData,{
       unreadGen:payload.unreadGen,
+      requestAllProfiles:payload.requestAllProfiles,
     });
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
@@ -5480,7 +5578,24 @@ function _applySessionListPayload(sessData, projData, opts){
   }
   _syncSessionAttentionSoundState(_allSessions);
   _pruneLineageReportCacheToVisibleSessions(_allSessions);
-  _allProjects = projData.projects||[];
+  const _projectScopeProfile=projData&&typeof projData.active_profile==='string'
+    &&projData.active_profile&&projData.active_profile.trim()===projData.active_profile
+    ? projData.active_profile
+    : '';
+  const _nextProjects=projData&&Array.isArray(projData.projects)?projData.projects:[];
+  const _requestAllProfiles=typeof applyOpts.requestAllProfiles==='boolean'
+    ? applyOpts.requestAllProfiles
+    : null;
+  const _nextProjectsScope=_projectScopeProfile
+    &&typeof projData.all_profiles==='boolean'
+    &&projData.all_profiles===_requestAllProfiles
+    ? {profile:_projectScopeProfile,allProfiles:projData.all_profiles}
+    : null;
+  // Publish rows and their provenance together. Missing legacy/fallback metadata
+  // deliberately clears the scope, so those rows remain filterable but cannot
+  // authorize a new-session project write.
+  _allProjects=_nextProjects;
+  _allProjectsScope=_nextProjectsScope;
   // Capture the recovering-from-error state BEFORE clearing it: the error banner
   // DOM was rendered outside the signature path, so if this payload heals with
   // rows identical to the last render, the identical-signature skip below would
@@ -5635,6 +5750,7 @@ function _renderSessionListLoadErrorNote(){
 
 async function _runRenderSessionListRefresh(opts, _gen){
   const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
+  const requestAllProfiles=_showAllProfiles===true;
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   // Capture profile-switch unread generation BEFORE the await so a switch
   // mid-flight (which increments _cronPollGeneration) invalidates completion
@@ -5658,7 +5774,11 @@ async function _runRenderSessionListRefresh(opts, _gen){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
       sessionRequestOpts.retryTimeouts=true;
     }
-    const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
+    const {sessData, projData}=await _loadSidebarSessionListPayload(
+      sessionListQS,
+      sessionRequestOpts,
+      requestAllProfiles,
+    );
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     // #4671: while a profile switch is mid-flight, drop ANY payload — even one whose
@@ -5668,11 +5788,11 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // renderSessionList(), so that render's payload is the first allowed to paint.
     if (_profileSwitchListEmbargo) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
-      _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
+      _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen,requestAllProfiles};
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData,{unreadGen});
+    _applySessionListPayload(sessData,projData,{unreadGen,requestAllProfiles});
   }catch(e){
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that
@@ -5688,7 +5808,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // (#4167 review item 3).
     const _curScope = {
       profile: S.activeProfile || 'default',
-      allProfiles: !!_showAllProfiles,
+      allProfiles: requestAllProfiles,
       sidebarSource: _requestedSessionSidebarSource(),
       excludeHidden: _sessionListExcludeHiddenEnabled(),
     };
@@ -5713,10 +5833,10 @@ async function _runRenderSessionListRefresh(opts, _gen){
   }
 }
 
-async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts){
+async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts, requestAllProfiles){
   const projectPromise = (async() => {
     try{
-      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';
+      const projectQS = requestAllProfiles===true ? '?all_profiles=1' : '';
       return await api('/api/projects' + projectQS,{timeoutToast:false});
     }catch(projectError){
       console.warn('renderProjectsList',projectError);
@@ -7647,6 +7767,7 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
 }
 
 function _attachProjectQuickCreateButton(chip, project){
+  if(_isReadOnlyProject(project)) return;
   const btn=document.createElement('button');
   btn.type='button';
   btn.className='project-chip-quick-create';
@@ -7841,6 +7962,11 @@ function renderSessionListFromCache(){
     for(const p of _allProjects){
       const chip=document.createElement('span');
       chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
+      const readOnly=_isReadOnlyProject(p);
+      if(readOnly){
+        chip.title='Managed by Hermes Agent (read-only here)';
+        chip.setAttribute('aria-label',p.name+' — managed by Hermes Agent, read-only here');
+      }
       if(p.color){
         const dot=document.createElement('span');
         dot.className='color-dot';
@@ -7855,53 +7981,55 @@ function renderSessionListFromCache(){
         clearTimeout(_pClickTimer);
         _pClickTimer=setTimeout(()=>{_pClickTimer=null;_setActiveProjectFilter(p.project_id);},220);
       };
-      chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
-      chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
-      // Touch long-press → context menu (mobile UX: project chips can only be
-      // deleted via the right-click menu, which has no touch equivalent).
-      let _lpTimer=null;
-      let _lpHandled=false;
-      let _lpStartX=0,_lpStartY=0;
-      chip.addEventListener('touchstart',(e)=>{
-        const t=e.changedTouches&&e.changedTouches[0];
-        if(!t) return;
-        // Clear any in-flight timer before scheduling a new one, mirroring the
-        // session-item long-press path (_clearLongPressTimer). Without this a
-        // second finger / stray touchstart orphans the prior timer, which then
-        // fires unsuppressed ~500ms later and pops the menu after the gesture
-        // was cancelled.
-        if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}
-        _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
-        chip.classList.add('long-pressing');
-        _lpTimer=setTimeout(()=>{
-          _lpTimer=null;
-          if(_lpHandled) return;  // already consumed by another gesture — stale fire is a no-op
-          _lpHandled=true;
-          chip.classList.remove('long-pressing');
-          clearTimeout(_pClickTimer);_pClickTimer=null;
-          const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
-          _showProjectContextMenu(syn,p,chip);
-        },500);
-      },{passive:true});
-      chip.addEventListener('touchmove',(e)=>{
-        if(!_lpTimer) return;
-        const t=e.changedTouches&&e.changedTouches[0];
-        if(!t) return;
-        if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+      if(!readOnly){
+        chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
+        chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+        // Touch long-press → context menu (mobile UX: project chips can only be
+        // deleted via the right-click menu, which has no touch equivalent).
+        let _lpTimer=null;
+        let _lpHandled=false;
+        let _lpStartX=0,_lpStartY=0;
+        chip.addEventListener('touchstart',(e)=>{
+          const t=e.changedTouches&&e.changedTouches[0];
+          if(!t) return;
+          // Clear any in-flight timer before scheduling a new one, mirroring the
+          // session-item long-press path (_clearLongPressTimer). Without this a
+          // second finger / stray touchstart orphans the prior timer, which then
+          // fires unsuppressed ~500ms later and pops the menu after the gesture
+          // was cancelled.
+          if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}
+          _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
+          chip.classList.add('long-pressing');
+          _lpTimer=setTimeout(()=>{
+            _lpTimer=null;
+            if(_lpHandled) return;  // already consumed by another gesture — stale fire is a no-op
+            _lpHandled=true;
+            chip.classList.remove('long-pressing');
+            clearTimeout(_pClickTimer);_pClickTimer=null;
+            const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
+            _showProjectContextMenu(syn,p,chip);
+          },500);
+        },{passive:true});
+        chip.addEventListener('touchmove',(e)=>{
+          if(!_lpTimer) return;
+          const t=e.changedTouches&&e.changedTouches[0];
+          if(!t) return;
+          if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+            clearTimeout(_lpTimer);_lpTimer=null;
+            chip.classList.remove('long-pressing');
+          }
+        },{passive:true});
+        chip.addEventListener('touchend',(e)=>{
           clearTimeout(_lpTimer);_lpTimer=null;
           chip.classList.remove('long-pressing');
-        }
-      },{passive:true});
-      chip.addEventListener('touchend',(e)=>{
-        clearTimeout(_lpTimer);_lpTimer=null;
-        chip.classList.remove('long-pressing');
-        if(_lpHandled){e.preventDefault();e.stopPropagation();}
-      },{passive:false});
-      chip.addEventListener('touchcancel',()=>{
-        clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
-        chip.classList.remove('long-pressing');
-      },{passive:true});
-      if(window._projectQuickCreate) _attachProjectQuickCreateButton(chip,p);
+          if(_lpHandled){e.preventDefault();e.stopPropagation();}
+        },{passive:false});
+        chip.addEventListener('touchcancel',()=>{
+          clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
+          chip.classList.remove('long-pressing');
+        },{passive:true});
+        if(window._projectQuickCreate) _attachProjectQuickCreateButton(chip,p);
+      }
       bar.appendChild(chip);
     }
     // Create button
@@ -9273,6 +9401,7 @@ function _showProjectPicker(session, anchorEl){
     return true;
   };
   for(const p of _allProjects){
+    if(_isReadOnlyProject(p)) continue;
     if (_profileHidesProject(p.profile)) continue;
     const item=document.createElement('div');
     item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
@@ -9415,6 +9544,7 @@ function _startProjectCreate(bar, addBtn){
 }
 
 function _startProjectRename(proj, chip){
+  if(_isReadOnlyProject(proj)) return;
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
@@ -9452,6 +9582,7 @@ function _startProjectRename(proj, chip){
 }
 
 function _showProjectContextMenu(e, proj, chip){
+  if(_isReadOnlyProject(proj)) return;
   document.querySelectorAll('.project-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
   menu.className='project-ctx-menu';
@@ -9511,6 +9642,7 @@ function _showProjectContextMenu(e, proj, chip){
 }
 
 async function _confirmDeleteProject(proj){
+  if(_isReadOnlyProject(proj)) return;
   const ok=await showConfirmDialog({
     message:'Delete project "'+proj.name+'"? Sessions will be unassigned but not deleted.',
     confirmLabel:t('delete_title'),

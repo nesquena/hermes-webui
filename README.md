@@ -689,6 +689,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 **Contributing & design**
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution style, PR expectations, and local verification
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system design, all API endpoints, implementation notes
+- [`docs/native-project-compatibility.md`](docs/native-project-compatibility.md) — native project read-through authority, compatibility limits, migration phases, and rollback
 - [`TESTING.md`](TESTING.md) — manual browser test plan and automated coverage reference
 - [`DESIGN.md`](DESIGN.md) — design tokens and the calm-console direction
 - [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) — UI/UX principles sourced from the design docs and visual inventories
