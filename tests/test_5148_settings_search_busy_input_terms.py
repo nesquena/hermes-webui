@@ -19,13 +19,13 @@ class TestBusyInputSettingsSearchTerms:
 
     def test_settings_index_uses_field_text_for_busy_input(self):
         """The index builder must include option and descriptor text in searchBlob."""
-        idx = PANELS_JS.find("function _buildSettingsIndex()")
-        assert idx >= 0, "_buildSettingsIndex not found"
+        idx = PANELS_JS.find("function _scanSettingsPanes()")
+        assert idx >= 0, "_scanSettingsPanes not found"
         body = PANELS_JS[idx:]
-        assert "searchBlob" in body, "_buildSettingsIndex must build a searchBlob"
-        assert "field.textContent" in body, "_buildSettingsIndex must include field text in searchBlob"
+        assert "searchBlob" in body, "_scanSettingsPanes must build a searchBlob"
+        assert "field.textContent" in body, "_scanSettingsPanes must include field text in searchBlob"
         assert "settingsSearch" in body, (
-            "_buildSettingsIndex must include supplemental data-settings-search terms in searchBlob"
+            "_scanSettingsPanes must include supplemental data-settings-search terms in searchBlob"
         )
 
     def test_filter_settings_uses_search_blob_and_keeps_label_rendering(self):
