@@ -57,6 +57,30 @@ Transparent Stream, or Final answer only; `S.messages`, `INFLIGHT`, renderer
 caches, and DOM remain projections or recovery caches rather than independent
 semantic owners.
 
+### Proposed bounded goal-intent exception (#6885)
+
+Issue [#6885](https://github.com/nesquena/hermes-webui/issues/6885) proposes a
+narrow compatibility exception to the earlier Slice 3c prohibition on a durable
+WebUI-owned goal scheduler. The browser must not be the only owner of an automatic
+`/goal` continuation after the server's post-turn judge has already returned
+`continue`. The current-path compatibility layer may therefore persist **one next
+turn intent per session** and dispatch it through the existing admitted-turn path,
+provided that:
+
+- it is not a generic queue and does not create another goal evaluator;
+- repeated judge callbacks and worker claims are idempotent;
+- restart recovery verifies that the goal is still active and the recorded turn
+  has not already been judged;
+- an empty provider result is retried only before any token, reasoning, or tool
+  activity, with a finite attempt budget;
+- the browser remains an observation surface and cannot originate duplicate work;
+- the implementation does not claim that an in-process agent run itself survives
+  a WebUI restart; a later runner/runtime backend should absorb this intent.
+
+This exception changes only automatic next-turn ownership. It does not authorize a
+server-side `/queue` scheduler, runner surrogate, duplicated active-run registry,
+or migration of the Hermes GoalManager judge into WebUI.
+
 This RFC remains `Proposed` because its broader cross-layer contract also covers
 model-context reconstruction, compression handoff, session metadata, and future
 runtime-adapter migration. Shipped Anchor coverage strengthens invariants 2, 3,
