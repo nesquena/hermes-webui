@@ -19,6 +19,7 @@ from __future__ import annotations
 import api.models as models
 from api.models import (
     _CLI_SESSIONS_CACHE_MAX_ENTRIES,
+    _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES,
     _cache_cli_sessions_if_current,
     _cli_sessions_cache_invalidation_stamp,
     _copy_fresh_cli_sessions_cache_entry,
@@ -28,6 +29,7 @@ from api.models import (
 def _reset_cache():
     with models._CLI_SESSIONS_CACHE_LOCK:
         models._CLI_SESSIONS_CACHE.clear()
+        models._CLI_SESSIONS_LAST_KNOWN_GOOD.clear()
 
 
 def test_cache_is_bounded_drops_oldest_on_write():
@@ -87,3 +89,40 @@ def test_cache_is_ordered_dict_not_plain_dict():
     import collections
 
     assert isinstance(models._CLI_SESSIONS_CACHE, collections.OrderedDict)
+
+
+def test_last_known_good_store_is_bounded_drops_oldest_on_write():
+    """The last-known-good store must not accumulate orphaned heavy deepcopies.
+
+    Its stable identity still includes volatile Claude-project and session-index
+    stat stamps, so normal external churn can mint new identities indefinitely.
+    Inserting more than LAST_KNOWN_GOOD_MAX_ENTRIES distinct stable identities
+    must keep the store bounded and evict the OLDEST identity.
+    """
+    _reset_cache()
+    stamp = _cli_sessions_cache_invalidation_stamp()
+    cap = _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES
+    assert cap >= 1
+
+    # Each write uses a DISTINCT cache key whose stable identity is also
+    # distinct (distinct project/stat component), mimicking external churn.
+    for i in range(cap + 5):
+        volatile_key = (f"src-{i}", "all", str(i), (f"proj-{i}", (1, 2), (3, 4)))
+        ok = _cache_cli_sessions_if_current(
+            volatile_key, ttl=60.0, invalidation_stamp=stamp, sessions=[{"id": i}]
+        )
+        assert ok
+
+    with models._CLI_SESSIONS_CACHE_LOCK:
+        assert len(models._CLI_SESSIONS_CACHE) == _CLI_SESSIONS_CACHE_MAX_ENTRIES
+        assert len(models._CLI_SESSIONS_LAST_KNOWN_GOOD) == cap
+        keys = list(models._CLI_SESSIONS_LAST_KNOWN_GOOD.keys())
+    assert keys[0][0] == "src-5"  # oldest five identities evicted
+    assert keys[-1][0] == f"src-{cap + 5 - 1}"
+    assert all(key[0] != "src-0" for key in keys)
+
+
+def test_last_known_good_store_is_ordered_dict_not_plain_dict():
+    import collections
+
+    assert isinstance(models._CLI_SESSIONS_LAST_KNOWN_GOOD, collections.OrderedDict)

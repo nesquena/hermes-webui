@@ -154,7 +154,9 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
 
     try:
         sessions = []
-        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+        for row in read_importable_agent_session_rows(
+            db_path, limit=200, log=logger, raise_on_unavailable=True
+        ):
             sessions.append({
                 'session_id': row['id'],
                 'title': row['title'] or 'Agent Session',
@@ -331,6 +333,10 @@ class GatewayWatcher:
 
         cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
         current_time = time.monotonic() if now is None else now
+        # Legacy message schemas may not expose the columns used by the cheap
+        # fingerprint, but the full read-only projection deliberately supports
+        # those schemas. Run it anyway; only preserve the old snapshot if the
+        # projection itself fails.
         fingerprint_changed = cheap_fp is None or cheap_fp != self._last_cheap_fp
         parity_due = (
             self._last_full_projection_at is None

@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -81,6 +82,14 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
+# Last successful projection by a stable identity. The normal cache key includes
+# volatile state.db fingerprints, so an unavailable DB can otherwise make the
+# known-good entry unfindable. Values are (invalidation generation, rows).
+# LRU-bounded like the primary cache above: the stable identity still includes
+# Claude-project and session-index stat stamps, so normal external churn can
+# mint new identities indefinitely and this store needs its own drop-oldest cap.
+_CLI_SESSIONS_LAST_KNOWN_GOOD: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES = 8
 _CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -7210,6 +7219,7 @@ def clear_cli_sessions_cache() -> None:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
         _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.clear()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
     # reset — a mutating sidebar action or test isolation — starts fully cold.
@@ -7245,6 +7255,26 @@ def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) ->
         event.set()
 
 
+def _cli_sessions_stable_cache_identity(cache_key: tuple) -> tuple:
+    """Remove volatile state.db revisions from a CLI cache identity."""
+    if cache_key and cache_key[0] == 'all_profiles':
+        # Index 4 is the explicit profile-home/profile-name ownership key. It
+        # stays stable across idle and streaming-frozen primary cache modes.
+        return (*cache_key[:3], cache_key[4], *cache_key[5:])
+    # Single-profile keys place the volatile DB fingerprint at index 4.
+    return (*cache_key[:4], *cache_key[5:]) if len(cache_key) > 4 else cache_key
+
+
+def _copy_last_known_good_cli_sessions(stable_key: tuple, invalidation_stamp: int):
+    with _CLI_SESSIONS_CACHE_LOCK:
+        entry = _CLI_SESSIONS_LAST_KNOWN_GOOD.get(stable_key)
+        if entry is None or entry[0] != invalidation_stamp:
+            return None
+        # LRU: a fresh hit is the most-recently-used entry.
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
+        return _copy_cli_sessions(entry[1])
+
+
 def _cache_cli_sessions_if_current(
     cache_key: tuple,
     ttl: float,
@@ -7254,11 +7284,24 @@ def _cache_cli_sessions_if_current(
     with _CLI_SESSIONS_CACHE_LOCK:
         if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
             return False
+        copied_sessions = _copy_cli_sessions(sessions)
         _CLI_SESSIONS_CACHE[cache_key] = (
             time.monotonic() + ttl,
             invalidation_stamp,
-            _copy_cli_sessions(sessions),
+            copied_sessions,
         )
+        _CLI_SESSIONS_LAST_KNOWN_GOOD[_cli_sessions_stable_cache_identity(cache_key)] = (
+            invalidation_stamp,
+            _copy_cli_sessions(copied_sessions),
+        )
+        _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(
+            _cli_sessions_stable_cache_identity(cache_key)
+        )
+        while (
+            len(_CLI_SESSIONS_LAST_KNOWN_GOOD)
+            > _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES
+        ):
+            _CLI_SESSIONS_LAST_KNOWN_GOOD.popitem(last=False)
         _CLI_SESSIONS_CACHE.move_to_end(cache_key)
         while len(_CLI_SESSIONS_CACHE) > _CLI_SESSIONS_CACHE_MAX_ENTRIES:
             _CLI_SESSIONS_CACHE.popitem(last=False)
@@ -7285,6 +7328,12 @@ def _copy_fresh_cli_sessions_cache_entry(cache_key: tuple):
         return _copy_cli_sessions(cached_sessions)
 
 
+@dataclass(frozen=True)
+class _CliSessionsLoadResult:
+    sessions: list
+    complete: bool = True
+
+
 def _load_and_cache_cli_sessions(
     *,
     cache_key: tuple,
@@ -7296,8 +7345,15 @@ def _load_and_cache_cli_sessions(
     all_profiles: bool,
     db_path,
 ) -> list:
+    stable_cache_key = _cli_sessions_stable_cache_identity(cache_key)
     try:
-        sessions = load_sessions()
+        loaded = load_sessions()
+        if isinstance(loaded, _CliSessionsLoadResult):
+            sessions = loaded.sessions
+            complete = loaded.complete
+        else:
+            sessions = loaded
+            complete = True
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
@@ -7305,7 +7361,25 @@ def _load_and_cache_cli_sessions(
         )
         if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
             return stale_sessions
+        stable_sessions = _copy_last_known_good_cli_sessions(
+            stable_cache_key,
+            invalidation_stamp,
+        )
+        if stable_sessions is not None:
+            return stable_sessions
         return []
+    if not complete:
+        if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
+            return stale_sessions
+        stable_sessions = _copy_last_known_good_cli_sessions(
+            stable_cache_key,
+            invalidation_stamp,
+        )
+        if stable_sessions is not None:
+            return stable_sessions
+        # No complete snapshot exists yet. Expose this attempt to the caller,
+        # but never publish a partial aggregate as authoritative cache state.
+        return _copy_cli_sessions(sessions)
     _cache_cli_sessions_if_current(
         cache_key,
         ttl,
@@ -7832,6 +7906,7 @@ def _load_cli_sessions_uncached(
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
+        raise_on_unavailable=True,
     ):
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
@@ -7919,6 +7994,7 @@ def _load_cli_sessions_uncached(
                 log=logger,
                 exclude_sources=None,
                 include_sources=("cron",),
+                raise_on_unavailable=True,
             ):
                 sid = row['id']
                 if sid in existing_sids:
@@ -7972,6 +8048,8 @@ def _load_cli_sessions_uncached(
                     'is_cli_session': is_cli_session_row(row),
                 })
                 existing_sids.add(sid)
+        except (OSError, sqlite3.Error):
+            raise
         except Exception:
             logger.debug("Cron project-chip second pass failed", exc_info=True)
 
@@ -7987,6 +8065,7 @@ def _load_cli_sessions_uncached(
                 log=logger,
                 exclude_sources=None,
                 include_sources=("webhook",),
+                raise_on_unavailable=True,
             ):
                 sid = row['id']
                 if sid in existing_sids:
@@ -8038,6 +8117,8 @@ def _load_cli_sessions_uncached(
                     'is_cli_session': is_cli_session_row({**row, **_source_meta}),
                 })
                 existing_sids.add(sid)
+        except (OSError, sqlite3.Error):
+            raise
         except Exception:
             logger.debug("Webhook project-chip second pass failed", exc_info=True)
 
@@ -8052,6 +8133,7 @@ def _load_cli_sessions_uncached(
                 log=logger,
                 exclude_sources=None,
                 include_sources=("kanban",),
+                raise_on_unavailable=True,
             ):
                 sid = row['id']
                 if sid in existing_sids:
@@ -8102,6 +8184,8 @@ def _load_cli_sessions_uncached(
                     'is_cli_session': is_cli_session_row({**row, **_source_meta}),
                 })
                 existing_sids.add(sid)
+        except (OSError, sqlite3.Error):
+            raise
         except Exception:
             logger.debug("Kanban sidebar second pass failed", exc_info=True)
 
@@ -8121,8 +8205,13 @@ def get_cli_sessions(
     bridge is purely additive and never crashes the WebUI.
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
+    contexts = []
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
+        stable_context_cache_key = tuple(
+            (_path_cache_key(ctx_home), str(ctx_profile or 'default'))
+            for ctx_home, _ctx_db_path, ctx_profile in contexts
+        )
         db_path = "all profiles"
         # #4842: freeze the volatile per-profile state.db component while
         # streaming so a streamed message row in one profile doesn't bust the
@@ -8135,6 +8224,7 @@ def get_cli_sessions(
             source_filter or '',
             bool(include_claude_code),
             context_cache_key,
+            stable_context_cache_key,
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
@@ -8155,13 +8245,15 @@ def get_cli_sessions(
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
-    def _load_sessions():
+    def _load_sessions() -> list | _CliSessionsLoadResult:
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
         )
         if all_profiles:
             merged: list[dict] = []
-            for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
+            unavailable_error = None
+            successful_profiles = 0
+            for ctx_home, ctx_db_path, ctx_profile in contexts:
                 load_kwargs = {
                     'source_filter': source_filter,
                     'visible_session_limit': None,
@@ -8170,16 +8262,46 @@ def get_cli_sessions(
                     'kanban_project_limit': None,
                 }
                 if loader_supports_include_claude_code:
-                    load_kwargs['include_claude_code'] = include_claude_code and idx == 0
-                merged.extend(
-                    _load_cli_sessions_uncached(
+                    # Claude Code is global rather than profile-owned; scan it
+                    # once below so profile 0 availability cannot suppress it.
+                    load_kwargs['include_claude_code'] = False
+                try:
+                    profile_rows = _load_cli_sessions_uncached(
                         ctx_home,
                         ctx_db_path,
                         ctx_profile,
                         **load_kwargs,
                     )
-                )
-            return merged
+                    merged.extend(profile_rows)
+                    successful_profiles += 1
+                except (OSError, sqlite3.Error) as _profile_err:
+                    # One unavailable profile must not erase fresh rows from
+                    # healthy profiles. The explicit completeness bit prevents
+                    # this partial aggregate from entering either cache.
+                    unavailable_error = _profile_err
+                    logger.warning(
+                        "get_cli_sessions() skipped unavailable profile %s: %s",
+                        ctx_profile or 'default',
+                        _profile_err,
+                    )
+            external_complete = True
+            if include_claude_code and source_filter in (None, CLAUDE_CODE_SOURCE):
+                try:
+                    merged.extend(get_claude_code_sessions())
+                except Exception as _claude_err:
+                    external_complete = False
+                    logger.warning(
+                        "get_cli_sessions() Claude Code scan failed: %s",
+                        _claude_err,
+                    )
+            return _CliSessionsLoadResult(
+                merged,
+                complete=(
+                    unavailable_error is None
+                    and successful_profiles == len(contexts)
+                    and external_complete
+                ),
+            )
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
@@ -8237,7 +8359,8 @@ def get_cli_sessions(
         )
 
     try:
-        return _load_sessions()
+        loaded = _load_sessions()
+        return loaded.sessions if isinstance(loaded, _CliSessionsLoadResult) else loaded
     except Exception as _cli_err:
         logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
