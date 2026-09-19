@@ -229,6 +229,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
+- Run-journal retention -- a periodic sweep retires settled (terminal) per-run replay logs past configurable age/count/size caps; crashed-run recovery payloads (non-terminal) are never touched. Tune via `run_journal_retention_*` in Settings or the matching `HERMES_WEBUI_RUN_JOURNAL_RETENTION_*` env vars; see [docs/troubleshooting.md](docs/troubleshooting.md#run-journal-growing-without-bound-on-disk)
 
 ### Workspace file browser
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
@@ -375,6 +376,10 @@ Full list of environment variables:
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions; an evicted session lazily reloads from its JSON sidecar on next access |
+| `HERMES_WEBUI_RUN_JOURNAL_RETENTION_TTL_DAYS` | `14` | Run-journal retention (#7613): terminal runs whose file mtime is older than this are retired by the periodic sweeper. `0` disables the age cap. Overrides the `run_journal_retention_ttl_days` settings.json key |
+| `HERMES_WEBUI_RUN_JOURNAL_RETENTION_MAX_RUNS_PER_SESSION` | `40` | Run-journal retention (#7613): keep at most this many of the newest terminal runs per session. `0` disables the count cap |
+| `HERMES_WEBUI_RUN_JOURNAL_RETENTION_MAX_BYTES_PER_SESSION` | `268435456` (256 MiB) | Run-journal retention (#7613): per-session byte budget for terminal runs; older terminal runs are retired newest-first once the budget is exceeded. `0` disables the size cap |
+| `HERMES_WEBUI_RUN_JOURNAL_SWEEP` | *(unset)* | Set to `0`/`false`/`off` to disable the periodic run-journal retention sweeper entirely. The sweep never touches non-terminal runs |
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 

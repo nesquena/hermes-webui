@@ -221,6 +221,29 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## Run journal growing without bound on disk
+
+**Symptom.** `~/.hermes/webui/sessions/_run_journal/` grows continuously across a long-lived install, occasionally reaching hundreds of MB or multiple GB (one real install measured 916 MB of completed-run logs; larger installs have passed 6 GB). Sessions load slower over time and free disk space quietly disappears.
+
+**Why.** The run journal stores one `{run_id}.jsonl` per run with the full request/response payloads. Before #7613 it had no retention policy of any kind — `delete_run_journal()` only ran on session deletion, so a session you keep (especially a pinned or long-running one) accumulated one file per run forever. Terminal runs (`completed` / `interrupted-by-user` / `errored`) are ~98% of that footprint and have no reader once the run has settled; only non-terminal runs (crashed-run recovery payloads) are still load-bearing.
+
+**Diagnostic commands.**
+
+```bash
+# Size and file count of the journal
+du -sh ~/.hermes/webui/sessions/_run_journal/
+find ~/.hermes/webui/sessions/_run_journal -name '*.jsonl' | wc -l
+
+# Biggest per-session journals
+du -sh ~/.hermes/webui/sessions/_run_journal/*/ | sort -rh | head
+```
+
+**Fix.** The server now runs a periodic retention sweep (`sweep_run_journal`) that retires **terminal** runs only, after a settlement window, bounded by three config-driven caps — whichever is strictest: age (`HERMES_WEBUI_RUN_JOURNAL_RETENTION_TTL_DAYS`, default 14 days), per-session count (`..._MAX_RUNS_PER_SESSION`, default 40), and per-session size (`..._MAX_BYTES_PER_SESSION`, default 256 MiB). Non-terminal runs are never touched. Set `HERMES_WEBUI_RUN_JOURNAL_SWEEP=0` to disable the sweep entirely; each cap accepts `0` to disable that cap alone.
+
+**When to file a bug.** File a WebUI bug if terminal runs persist well past every configured cap after the server has been up for an hour (the first sweep runs ~60 s after boot, then hourly), or if a **non-terminal** run file ever disappears — that would be data loss of the crashed-run recovery payload.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
