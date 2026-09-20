@@ -10053,8 +10053,19 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         # loads). load_metadata_only() reads only the JSON prefix (~100x
         # cheaper) and carries the same watermark/snapshot fields.
         parent_meta = _load_meta_stub(parent_id)
+        parent_source = str(
+            getattr(parent_meta, "session_source", "") or ""
+        ).strip().lower()
+        parent_message_count = getattr(parent_meta, "_metadata_message_count", None)
+        fork_boundary_cannot_apply = not root_is_fork or parent_source == "fork"
+        prefix_return_cannot_apply = bool(segments) or (
+            isinstance(parent_message_count, int)
+            and parent_message_count > len(session_messages)
+        )
         if (
             parent_meta is not None
+            and fork_boundary_cannot_apply
+            and prefix_return_cannot_apply
             and _snapshot_parent_replays_nothing(parent_meta)
             and _older_ancestors_provably_replay_nothing(
                 parent_meta,
@@ -10068,6 +10079,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             # _older_ancestors_provably_replay_nothing; a contributing older
             # snapshot above the sentinel would otherwise be dropped). Stop
             # the walk here rather than loading it and every ancestor above.
+            # The metadata gates also prove the earlier explicit-fork and
+            # cumulative-prefix returns cannot apply; uncertainty falls back
+            # to the full parent load below.
             # Provenance stays incomplete on purpose — the ancestry was not
             # fully verified, so this result must never enter the cache.
             neutralized_ancestor = True

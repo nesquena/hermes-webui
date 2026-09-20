@@ -214,6 +214,52 @@ def test_shortcut_still_dedupes_the_child_rows(deep_lineage, monkeypatch):
     )
 
 
+def test_shortcut_matches_full_walk_at_explicit_fork_boundary(
+    deep_lineage, monkeypatch
+):
+    """A fork from a non-fork snapshot keeps its raw, isolated child rows."""
+    import json
+
+    routes, Session, child = deep_lineage(hops=1, sentinel=True)
+    child.session_source = "fork"
+    child.messages = list(child.messages) + [dict(child.messages[-1])]
+
+    shortcut = routes._webui_sidecar_lineage_messages_for_display(child)
+    routes._lineage_display_cache.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    reference = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert json.dumps(shortcut, sort_keys=True) == json.dumps(reference, sort_keys=True)
+    assert reference == child.messages
+    assert len(reference) == 7
+    assert _contents(reference) == [f"child-{i}" for i in range(6)] + ["child-5"]
+    assert not any(content.startswith("anc") for content in _contents(reference))
+
+
+def test_shortcut_matches_full_walk_for_cumulative_parent_prefix(
+    deep_lineage, monkeypatch
+):
+    """A cumulative child keeps its raw rows when it contains the parent prefix."""
+    import json
+
+    routes, Session, child = deep_lineage(
+        hops=1, sentinel=True, ancestor_rows=2, child_rows=1
+    )
+    parent = Session.load("anc_0")
+    own_row = dict(child.messages[0])
+    child.messages = list(parent.messages) + [own_row, dict(own_row)]
+
+    shortcut = routes._webui_sidecar_lineage_messages_for_display(child)
+    routes._lineage_display_cache.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    reference = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert json.dumps(shortcut, sort_keys=True) == json.dumps(reference, sort_keys=True)
+    assert reference == child.messages
+    assert len(reference) == 4
+    assert _contents(reference) == ["anc0-0", "anc0-1", "child-0", "child-0"]
+
+
 def test_mixed_chain_with_contributing_segments_before_the_sentinel(
     deep_lineage, monkeypatch
 ):
