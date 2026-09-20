@@ -438,7 +438,7 @@ def _start_run_kwargs():
     }
 
 
-def test_legacy_dispatch_keeps_opaque_alias_lane_until_profile_scoped_resolution(monkeypatch):
+def test_legacy_dispatch_receives_resolved_alias_runtime_bundle(monkeypatch):
     from api import routes
 
     captured = {}
@@ -455,10 +455,9 @@ def test_legacy_dispatch_keeps_opaque_alias_lane_until_profile_scoped_resolution
     routes._start_run(session, **_start_run_kwargs())
 
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "model-alias-canonical"
-    assert "runtime_base_url" not in captured
-    assert "runtime_api_key" not in captured
-    assert "east-secret" not in json.dumps(captured)
+    assert captured["model_provider"] == "custom"
+    assert captured["runtime_base_url"] == "https://east.example.test/v1"
+    assert captured["runtime_api_key"] == "east-secret"
 
 
 def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatch):
@@ -480,8 +479,8 @@ def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatc
     assert captured["external_runtime_owned"] is True
     assert captured["model"] == "east"
     assert captured["model_provider"] is None
-    assert "runtime_api_key" not in captured
-    assert "runtime_base_url" not in captured
+    assert captured["runtime_api_key"] is None
+    assert captured["runtime_base_url"] is None
 
 
 def test_runner_dispatch_uses_alias_identity_in_start_run_contract(monkeypatch):
@@ -597,8 +596,8 @@ def test_start_session_turn_gateway_wakeup_converts_alias_lane(monkeypatch):
     assert "east-secret" not in json.dumps(captured)
 
 
-def test_start_session_turn_legacy_wakeup_keeps_opaque_alias_lane(monkeypatch):
-    """Without gateway ownership the legacy worker still resolves the lane itself."""
+def test_start_session_turn_legacy_wakeup_resolves_alias_runtime_bundle(monkeypatch):
+    """Without gateway ownership, dispatch carries the alias-owned bundle."""
     monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
     routes_mod = _stub_start_session_turn(monkeypatch)
     captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
@@ -612,7 +611,9 @@ def test_start_session_turn_legacy_wakeup_keeps_opaque_alias_lane(monkeypatch):
 
     assert resp["_status"] == 200
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "model-alias-canonical"
+    assert captured["model_provider"] == "custom"
+    assert captured["runtime_base_url"] == "https://east.example.test/v1"
+    assert captured["runtime_api_key"] == "east-secret"
     assert captured["external_runtime_owned"] is False
 
 
@@ -671,7 +672,9 @@ def test_start_run_explicit_gateway_flag_skips_ownership_detection(monkeypatch):
 
     assert captured["external_runtime_owned"] is False
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "model-alias-canonical"
+    assert captured["model_provider"] == "custom"
+    assert captured["runtime_base_url"] == "https://east.example.test/v1"
+    assert captured["runtime_api_key"] == "east-secret"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
