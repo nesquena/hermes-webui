@@ -197,6 +197,7 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
         evt,
         claim,
         process_registry,
+        permit_owner=None,
     ):
         started.append((session_id, prompt, delegation_id))
         bp._record_async_delegation_accepted(
@@ -537,6 +538,7 @@ def test_autonomous_wakeup_rejection_uses_bounded_durable_retry(monkeypatch, sta
             evt=evt,
             claim=claim,
             process_registry=registry,
+            permit_owner="test-owner",
         )
 
         assert _wait_until(lambda: len(delivery["release"]) == 1)
@@ -572,6 +574,7 @@ def test_autonomous_wakeup_exception_uses_bounded_durable_retry(monkeypatch):
             evt=evt,
             claim=claim,
             process_registry=registry,
+            permit_owner="test-owner",
         )
 
         assert _wait_until(lambda: len(delivery["release"]) == 1)
@@ -605,6 +608,7 @@ def test_autonomous_wakeup_acks_after_successful_turn_acceptance(monkeypatch):
         evt=evt,
         claim=claim,
         process_registry=registry,
+        permit_owner="test-owner",
     )
 
     assert _wait_until(lambda: len(delivery["complete"]) == 1)
@@ -1189,7 +1193,7 @@ def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "session-B"
     started: list[tuple[str, str, str]] = []
 
-    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry, permit_owner=None):
         started.append((session_id, prompt, delegation_id))
         bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
 
@@ -1219,7 +1223,7 @@ def test_origin_only_completion_without_session_key_routes_and_acks(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     started: list[str] = []
 
-    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry, permit_owner=None):
         started.append(session_id)
         bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
 
@@ -1294,3 +1298,43 @@ def test_next_turn_drain_respects_origin_over_session_key_index(monkeypatch):
     assert delivery["release"] == []
 
 
+
+
+def test_losing_permit_race_abstains_without_consuming_delivery_attempts(monkeypatch):
+    """#7201 rework: a machine wakeup that loses the durable per-session
+    permit race must abstain BEFORE claiming, so the finite delivery-attempt
+    budget is untouched — the exact non-consuming abstention the gate asked
+    for (abstain on the permit before touching the budget)."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
+
+    # Another backend already owns the permit for this session.
+    monkeypatch.setattr(
+        bp,
+        "_try_acquire_session_permit",
+        lambda session_id, owner: False,
+    )
+    # If the wakeup were wrongly attempted, the test must fail loudly.
+    monkeypatch.setattr(
+        bp,
+        "_start_async_delegation_wakeup_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must abstain")),
+    )
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _sid: False)
+
+    try:
+        for _ in range(5):
+            bp._process_one(_async_delegation_event())
+
+        # Non-consuming: NO claim was taken, NO attempt budget spent.
+        assert delivery["claim"] == []
+        assert delivery["delivery_attempts"] == 0
+        assert delivery["complete"] == []
+        assert delivery["release"] == []
+        # The abstention itself is the contract: the event was NOT claimed,
+        # NOT acked, NOT released, and no attempt budget was spent — the
+        # shared restore sweep will retry it later (unclaimed = retryable).
+    finally:
+        _reset_wakeup_state()
