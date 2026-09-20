@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 UI_SRC = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def _function_body(src: str, signature: str) -> str:
@@ -22,6 +24,10 @@ def _function_body(src: str, signature: str) -> str:
             if depth == 0:
                 return src[start : idx + 1]
     raise AssertionError(f"could not extract function body for {signature!r}")
+
+
+def _function_decl(src: str, name: str) -> str:
+    return _function_body(src, f"function {name}")
 
 
 def _optional_function_body(src: str, signature: str) -> str:
@@ -418,11 +424,48 @@ def test_frontend_replay_cursor_uses_eventsource_last_event_id():
     block = MESSAGES_SRC[cursor_pos : cursor_pos + 1000]
 
     assert "e.lastEventId" in block
-    assert "lastIndexOf(':')" in block
+    assert "raw.startsWith(`${prefix}delivery:`)" in block
+    assert "raw.slice(raw.lastIndexOf(':')+1)" in block
+    assert "/^[1-9]\\d*$/.test(tail)" in block
     assert "_lastRunJournalSeq=seq" in block
     assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
     assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
     assert "after_seq=0" not in MESSAGES_SRC
+
+
+def test_opaque_runner_cursor_survives_reconnect_without_advancing_delivery_identity():
+    """An opaque runner id must set the replay floor while delivery ids stay out."""
+    assert NODE, "node not on PATH"
+    cursor = _function_decl(MESSAGES_SRC, "_rememberRunJournalCursor")
+    after_seq = _function_decl(MESSAGES_SRC, "_runJournalReplayAfterSeq")
+    replay_params = _function_decl(MESSAGES_SRC, "_runJournalReplayParams")
+    script = f"""
+const assert=require('assert');
+let streamId='run-opaque';
+let _lastRunJournalSeq=0;
+let _lastRunJournalEventId='';
+let activeSid='session-1';
+const INFLIGHT={{'session-1':{{}}}};
+let persistCount=0;
+const _throttledPersist=()=>{{persistCount+=1;}};
+{cursor}
+{after_seq}
+{replay_params}
+_rememberRunJournalCursor({{lastEventId:'event:2'}});
+assert.strictEqual(_lastRunJournalSeq,2);
+assert.strictEqual(_lastRunJournalEventId,'event:2');
+const reconnectParams=_runJournalReplayParams();
+assert(reconnectParams.includes('after_seq=2'));
+assert(reconnectParams.includes('after_event_id=event%3A2'));
+_rememberRunJournalCursor({{lastEventId:'run-opaque:delivery:3'}});
+assert.strictEqual(_lastRunJournalSeq,2);
+assert.strictEqual(_lastRunJournalEventId,'event:2');
+assert.strictEqual(INFLIGHT['session-1'].lastRunJournalSeq,2);
+assert.strictEqual(INFLIGHT['session-1'].lastRunJournalEventId,'event:2');
+assert(persistCount>0);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
