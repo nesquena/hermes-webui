@@ -2362,6 +2362,7 @@ if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) t
         src = read('static/ui.js')
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
+        dirty_fn = extract_js_function(src, '_formatUpdateDirtyStatus')
         show_fn = extract_js_function(src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -2381,6 +2382,7 @@ global.t = (key, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{dirty_fn}
 {show_fn}
 _showUpdateBanner({{
   webui: {{
@@ -3365,3 +3367,318 @@ class TestCheckForUpdatesButton:
         assert count >= 5, (
             f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"
         )
+
+    # ── #4085 re-gate: dirty-at-latest surfaces as a distinct update state ──
+
+    def test_formatUpdateDirtyStatus_returns_null_for_clean_install(self):
+        """#4085: clean install at latest → no dirty status part."""
+        format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
+        script = f"""
+global.window = {{}};
+const $ = (id) => null;
+{instruction_fn}
+{format_fn}
+const out = _formatUpdateDirtyStatus('WebUI', {{
+  dirty: false,
+  behind: 0,
+  current_version: 'v0.52.323',
+  latest_version: 'v0.52.323',
+}});
+if (out !== null) throw new Error('clean install must return null, got: ' + out);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_formatUpdateDirtyStatus_returns_label_for_dirty_at_latest(self):
+        """#4085: dirty install at latest → "Local changes detected" label."""
+        format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
+        script = f"""
+global.window = {{}};
+const $ = (id) => null;
+global.t = (key, fallback, ...args) => {{
+  const values = {{
+    update_dirty_local_changes: 'Local changes detected',
+    update_force: 'Force update',
+  }};
+  return ((values[key] || fallback || key) + '').replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}};
+{instruction_fn}
+{format_fn}
+const out = _formatUpdateDirtyStatus('WebUI', {{
+  dirty: true,
+  behind: 0,
+  current_version: 'v0.52.323',
+  latest_version: 'v0.52.323',
+}});
+if (out === null) throw new Error('dirty+current must surface a status part');
+if (out.indexOf('Local changes detected') === -1) throw new Error('dirty+current label must include "Local changes detected", got: ' + out);
+if (out.indexOf('WebUI') === -1) throw new Error('dirty+current label must include target label, got: ' + out);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_formatUpdateDirtyStatus_skips_when_behind_present(self):
+        """#4085: dirty+behind is covered by the upstream banner, not the dirty one."""
+        format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
+        script = f"""
+global.window = {{}};
+const $ = (id) => null;
+{instruction_fn}
+{format_fn}
+const out = _formatUpdateDirtyStatus('WebUI', {{
+  dirty: true,
+  behind: 3,
+  current_version: 'v0.52.300',
+  latest_version: 'v0.52.323',
+}});
+if (out !== null) throw new Error('dirty+behind must defer to the upstream banner, got: ' + out);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_formatUpdateDirtyStatus_skips_manual_update_installs(self):
+        """#4085: no_git / manual_update installs have no checkout to dirty; the
+        /api/updates/force endpoint refuses those targets anyway, so the
+        helper must not surface a force action for them."""
+        format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
+        script = f"""
+global.window = {{}};
+const $ = (id) => null;
+{instruction_fn}
+{format_fn}
+const out1 = _formatUpdateDirtyStatus('WebUI', {{ dirty: true, behind: 0, no_git: true }});
+if (out1 !== null) throw new Error('dirty+no_git must return null, got: ' + out1);
+const out2 = _formatUpdateDirtyStatus('WebUI', {{ dirty: true, behind: 0, manual_update: true }});
+if (out2 !== null) throw new Error('dirty+manual_update must return null, got: ' + out2);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_formatUpdateDirtyStatus_skips_stale_check_error_payloads(self):
+        """#4085: stale-check errors get their own surface; do not pile a dirty
+        banner on top."""
+        format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
+        script = f"""
+global.window = {{}};
+const $ = (id) => null;
+{instruction_fn}
+{format_fn}
+const out = _formatUpdateDirtyStatus('WebUI', {{
+  dirty: true,
+  behind: 0,
+  error: 'fetch failed: connection refused',
+}});
+if (out !== null) throw new Error('dirty+error must defer to the error surface, got: ' + out);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_showUpdateBanner_dirty_current_exposes_force_button_for_webui(self):
+        """#4085: dirty+current install must surface the destructive
+        force-clean action so the user has a recovery path. The force
+        button is wired to /api/updates/force which already gates on
+        a danger confirm — see ``forceUpdate()`` at line 10822."""
+        ui_src = read('static/ui.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        show_fn = extract_js_function(ui_src, '_showUpdateBanner')
+        script = f"""
+const state = {{
+  updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
+  updateMsg: {{ textContent: '' }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'none' }}, dataset: {{ target: '' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'none' }}, dataset: {{ target: '' }} }},
+  updateWhatsNewLinks: {{ style: {{ display: 'none' }}, replaceChildren() {{ this.cleared = true; }} }},
+}};
+global.window = {{}};
+global.$ = (id) => state[id] || null;
+global._renderUpdateWhatsNewLinks = () => {{}};
+global.t = (key, fallback, ...args) => {{
+  const values = {{
+    update_dirty_local_changes: 'Local changes detected',
+    update_force: 'Force update',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+  }};
+  return ((values[key] || fallback || key) + '').replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}};
+{format_fn}
+{instruction_fn}
+{dirty_fn}
+{show_fn}
+_showUpdateBanner({{
+  webui: {{
+    dirty: true,
+    behind: 0,
+    current_version: 'v0.52.323',
+    latest_version: 'v0.52.323',
+  }},
+  agent: null,
+}});
+// Banner is visible.
+if (state.updateBanner.classList.added !== true) throw new Error('dirty+current must show the banner');
+// Force button is exposed for the destructive recovery path.
+if (state.btnForceUpdate.style.display !== 'inline-block') throw new Error('dirty+current must show the force button, got display=' + state.btnForceUpdate.style.display);
+if (state.btnForceUpdate.disabled !== false) throw new Error('dirty+current must leave the force button enabled');
+if (state.btnForceUpdate.dataset.target !== 'webui') throw new Error('dirty+current must target webui on the force button, got: ' + state.btnForceUpdate.dataset.target);
+// Apply button stays hidden — there is nothing to apply on behind=0.
+if (state.btnApplyUpdate.style.display !== 'none') throw new Error('dirty+current must NOT show the apply button');
+// Banner text includes the dirty label.
+if (state.updateMsg.textContent.indexOf('Local changes detected') === -1) throw new Error('dirty+current must include the dirty label in the banner, got: ' + state.updateMsg.textContent);
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_showUpdateBanner_clean_current_still_says_up_to_date(self):
+        """#4085 regression guard: a clean install at latest must keep the
+        existing "Up to date" UX — no banner, no force button."""
+        ui_src = read('static/ui.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        show_fn = extract_js_function(ui_src, '_showUpdateBanner')
+        script = f"""
+const state = {{
+  updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
+  updateMsg: {{ textContent: '' }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  updateWhatsNewLinks: {{ style: {{ display: 'none' }}, replaceChildren() {{ this.cleared = true; }} }},
+}};
+global.window = {{}};
+global.$ = (id) => state[id] || null;
+global._renderUpdateWhatsNewLinks = () => {{}};
+global.t = (key, fallback, ...args) => {{
+  const values = {{
+    update_dirty_local_changes: 'Local changes detected',
+    update_force: 'Force update',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+  }};
+  return ((values[key] || fallback || key) + '').replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}};
+{format_fn}
+{instruction_fn}
+{dirty_fn}
+{show_fn}
+_showUpdateBanner({{
+  webui: {{
+    dirty: false,
+    behind: 0,
+    current_version: 'v0.52.323',
+    latest_version: 'v0.52.323',
+  }},
+  agent: null,
+}});
+// Clean install: no banner, no force button surfacing.
+if (state.updateBanner.classList.added === true) throw new Error('clean+current must NOT show the banner');
+if (state.btnForceUpdate.dataset.target === 'webui') throw new Error('clean+current must NOT target webui on the force button (existing state preserved)');
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_showUpdateBanner_dirty_behind_defers_to_upstream_banner(self):
+        """#4085: dirty+behind is a single state — the upstream banner
+        carries the version, the force button remains available for the
+        destructive recovery, but the dirty status part is suppressed
+        so we do not double-list the install."""
+        ui_src = read('static/ui.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        show_fn = extract_js_function(ui_src, '_showUpdateBanner')
+        script = f"""
+const state = {{
+  updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
+  updateMsg: {{ textContent: '' }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'none' }}, dataset: {{ target: '' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'none' }}, dataset: {{ target: '' }} }},
+  updateWhatsNewLinks: {{ style: {{ display: 'none' }}, replaceChildren() {{ this.cleared = true; }} }},
+}};
+global.window = {{}};
+global.$ = (id) => state[id] || null;
+global._renderUpdateWhatsNewLinks = () => {{}};
+global.t = (key, fallback, ...args) => {{
+  const values = {{
+    update_dirty_local_changes: 'Local changes detected',
+    update_force: 'Force update',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+  }};
+  return ((values[key] || fallback || key) + '').replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}};
+{format_fn}
+{instruction_fn}
+{dirty_fn}
+{show_fn}
+_showUpdateBanner({{
+  webui: {{
+    dirty: true,
+    behind: 3,
+    current_version: 'v0.52.300',
+    latest_version: 'v0.52.323',
+  }},
+  agent: null,
+}});
+// Banner shows the upstream status (versions + behind count), not the
+// "Local changes detected" label.
+if (state.updateBanner.classList.added !== true) throw new Error('dirty+behind must show the banner');
+if (state.updateMsg.textContent.indexOf('Local changes detected') !== -1) throw new Error('dirty+behind must NOT double-list the dirty label');
+if (state.updateMsg.textContent.indexOf('WebUI') === -1) throw new Error('dirty+behind must include the WebUI target in the upstream banner');
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_showUpdateBanner_force_button_propagates_channel(self):
+        """#4085 + existing force contract: the destructive action preserves
+        the channel from the check payload (stable/experimental), so a
+        force-clean on a dirty install lands on the operator's selected
+        channel rather than a default."""
+        ui_src = read('static/ui.js')
+        # Source guard: the dirty path reuses the channel-aware body that
+        # ``forceUpdate()`` posts to /api/updates/force.
+        show_block_start = ui_src.index('function _showUpdateBanner(')
+        show_block_end = ui_src.index('\nfunction ', show_block_start + 1)
+        show_block = ui_src[show_block_start:show_block_end]
+        # The block must call the same channel-from-payload extraction that
+        # the existing conflict/diverged force path uses. The show
+        # function itself does not build the body — it sets dataset.target
+        # and the body is built inside forceUpdate() at line ~10838. So
+        # the regression guard is that the dirty path is hooked up to
+        # btnForceUpdate (which forceUpdate reads) and not a separate
+        # code path.
+        assert "btnForceUpdate" in show_block, "show banner must reference btnForceUpdate"
+        assert "dataset.target='webui'" in show_block, (
+            "dirty path must set dataset.target='webui' so the channel-aware "
+            "forceUpdate() body at line ~10838 reads window._updateData correctly"
+        )
+
+    def test_forceUpdate_body_includes_channel_for_dirty_path(self):
+        """The existing ``forceUpdate()`` body (line ~10822) reads
+        ``window._updateData?.[target]?.channel`` and forwards it to
+        /api/updates/force. The dirty path reuses the same body via the
+        btnForceUpdate hook, so the channel from the check payload is
+        preserved end-to-end. Pin the source so a future refactor
+        cannot split the dirty path onto a channel-blind body."""
+        ui_src = read('static/ui.js')
+        # Locate the force body that handles the channel.
+        m = ui_src.find('window._updateData?.[target]?.channel')
+        assert m != -1, (
+            "forceUpdate() body must read window._updateData?.[target]?.channel "
+            "so the channel survives end-to-end on the destructive path"
+        )
+
+    def test_showUpdateBanner_dirty_does_not_auto_run_force(self):
+        """#4085 hard requirement: the destructive path must NEVER
+        auto-run. The dirty banner only surfaces a button; the user
+        must click, and ``forceUpdate()`` already gates on a danger
+        confirm. Source guard: ``_showUpdateBanner`` does not POST
+        /api/updates/force itself — that is the click handler's job."""
+        ui_src = read('static/ui.js')
+        show_block_start = ui_src.index('function _showUpdateBanner(')
+        show_block_end = ui_src.index('\nfunction ', show_block_start + 1)
+        show_block = ui_src[show_block_start:show_block_end]
+        assert '/api/updates/force' not in show_block, (
+            "_showUpdateBanner must not POST /api/updates/force — that "
+            "is forceUpdate()'s job and gates on a user-initiated click + "
+            "danger confirm"
+        )
+

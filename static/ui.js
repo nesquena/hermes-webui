@@ -11597,6 +11597,21 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _formatUpdateDirtyStatus(label,info){
+  // #4085: a dirty install at-or-past latest is a distinct
+  // surfaced state, not a bare "up to date." The Settings
+  // panel renders this as a separate "Local changes detected"
+  // banner with a destructive force-clean action wired to
+  // /api/updates/force (reuses ``forceUpdate()`` and its
+  // existing danger confirm). Skips the no_git case —
+  // manual-update installs have no checkout to dirty, and the
+  // /api/updates/force endpoint refuses no_git targets.
+  if(!info||!info.dirty) return null;
+  if(info.behind>0) return null; // behind takes precedence; dirty+behind is one banner
+  if(info.no_git||info.manual_update) return null;
+  if(info.error) return null; // stale-check errors get their own surface
+  return `${label}: ${t('update_dirty_local_changes','Local changes detected')}`;
+}
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
   const tag=info.channel==='experimental'?'experimental':'latest';
@@ -11907,8 +11922,25 @@ function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
+  // #4085: also surface dirty-at-latest as a distinct banner
+  // state. ``_formatUpdateDirtyStatus`` returns null when
+  // ``behind > 0`` (the upstream banner covers it) or when
+  // ``no_git``/``error`` apply, so this only adds a banner for
+  // a real "dirty and at latest" install.
+  const webuiDirtyPart=_formatUpdateDirtyStatus('WebUI',data.webui);
+  const agentDirtyPart=_formatUpdateDirtyStatus('Agent',data.agent);
+  if(webuiDirtyPart) parts.push(webuiDirtyPart);
+  if(agentDirtyPart) parts.push(agentDirtyPart);
   window._updateData=data;
   const btnApply=$('btnApplyUpdate');
+  // #4085: the dirty-at-latest state is destructive-only,
+  // so expose the existing force button rather than the
+  // plain Apply (which would no-op on behind == 0). The
+  // existing ``forceUpdate()`` already wires the destructive
+  // endpoint, carries the channel from the check payload,
+  // and gates on a danger confirm — see line 10822.
+  const webuiDirty=!!(data&&data.webui&&data.webui.dirty&&!(data.webui.behind>0)&&!data.webui.no_git&&!data.webui.manual_update);
+  const webuiForceable=!!(data&&data.webui&&((data.webui.behind>0&&!data.webui.manual_update&&(data.webui.conflict||data.webui.diverged))||(webuiDirty)));
   if(btnApply){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
     const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
@@ -11932,6 +11964,19 @@ function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
       if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
       if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+    }
+  }
+  // #4085: when a dirty install is the only signal, surface
+  // the force button for the WebUI target so the user has a
+  // destructive recovery path. The button is hidden again on
+  // the next clean check.
+  if(webuiForceable){
+    const forceBtn=$('btnForceUpdate');
+    if(forceBtn){
+      forceBtn.dataset.target='webui';
+      forceBtn.style.display='inline-block';
+      forceBtn.disabled=false;
+      forceBtn.textContent=t('update_force','Force update');
     }
   }
   if(!parts.length){
