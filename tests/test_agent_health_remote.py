@@ -252,6 +252,16 @@ def test_gateway_health_url_with_health_suffix_is_normalized(monkeypatch):
     assert payload["details"].get("gateway_state") == "running"
 
 
+def test_gateway_v1_health_suffix_is_normalized_as_one_suffix(monkeypatch):
+    """The generic /health suffix must not consume only the tail of /v1/health."""
+    monkeypatch.delenv("GATEWAY_HEALTH_URL", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_HEALTH_URL", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.setenv("HERMES_API_URL", "http://gw:8642/v1/health")
+
+    assert agent_health._remote_gateway_base_url() == "http://gw:8642"
+
+
 def test_gateway_webui_base_url_env_is_used_for_remote_probe(monkeypatch):
     """`HERMES_WEBUI_GATEWAY_BASE_URL` should be treated like a gateway health base URL."""
     monkeypatch.delenv("HERMES_API_URL", raising=False)

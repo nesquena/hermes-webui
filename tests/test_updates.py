@@ -53,6 +53,182 @@ def _prevent_test_process_restart(monkeypatch):
     monkeypatch.setattr(updates, '_schedule_restart', MagicMock())
 
 
+_GATEWAY_ENV_VARS = (
+    'GATEWAY_HEALTH_URL',
+    'HERMES_GATEWAY_HEALTH_URL',
+    'HERMES_API_URL',
+    'HERMES_WEBUI_GATEWAY_BASE_URL',
+)
+
+
+def _clear_gateway_env(monkeypatch):
+    for name in _GATEWAY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv('HERMES_WEBUI_GATEWAY_API_KEY', raising=False)
+    monkeypatch.delenv('API_SERVER_KEY', raising=False)
+
+
+@pytest.mark.parametrize(
+    ('env_name', 'configured', 'expected'),
+    [
+        ('GATEWAY_HEALTH_URL', 'http://gw-one:8642/health', 'http://gw-one:8642'),
+        (
+            'HERMES_GATEWAY_HEALTH_URL',
+            'http://gw-two:8642/health/detailed',
+            'http://gw-two:8642',
+        ),
+        ('HERMES_API_URL', 'http://gw-three:8642/v1/health', 'http://gw-three:8642'),
+        (
+            'HERMES_WEBUI_GATEWAY_BASE_URL',
+            'http://gw-four:8642/status/',
+            'http://gw-four:8642',
+        ),
+    ],
+)
+def test_runtime_version_gateway_base_url_matches_health_contract(
+    monkeypatch, env_name, configured, expected,
+):
+    _clear_gateway_env(monkeypatch)
+    monkeypatch.setenv(env_name, configured)
+
+    assert updates.resolve_gateway_base_url() == expected
+
+
+def test_runtime_version_gateway_base_url_uses_documented_precedence(monkeypatch):
+    _clear_gateway_env(monkeypatch)
+    monkeypatch.setenv('HERMES_WEBUI_GATEWAY_BASE_URL', 'http://fourth:8642')
+    monkeypatch.setenv('HERMES_API_URL', 'http://third:8642')
+    monkeypatch.setenv('HERMES_GATEWAY_HEALTH_URL', 'http://second:8642')
+    monkeypatch.setenv('GATEWAY_HEALTH_URL', 'http://first:8642')
+
+    assert updates.resolve_gateway_base_url() == 'http://first:8642'
+
+
+@pytest.mark.parametrize(
+    ('primary_key', 'fallback_key', 'expected'),
+    [
+        ('primary-secret', 'fallback-secret', 'Bearer primary-secret'),
+        (None, 'fallback-secret', 'Bearer fallback-secret'),
+        (None, None, None),
+    ],
+)
+def test_runtime_version_gateway_auth_matches_health_contract(
+    monkeypatch, primary_key, fallback_key, expected,
+):
+    _clear_gateway_env(monkeypatch)
+    if primary_key is not None:
+        monkeypatch.setenv('HERMES_WEBUI_GATEWAY_API_KEY', primary_key)
+    if fallback_key is not None:
+        monkeypatch.setenv('API_SERVER_KEY', fallback_key)
+
+    headers = updates.resolve_gateway_auth_headers()
+
+    if expected is None:
+        assert 'Authorization' not in headers
+    else:
+        assert headers['Authorization'] == expected
+
+
+def test_resolve_runtime_agent_version_reads_live_authenticated_gateway(monkeypatch):
+    _clear_gateway_env(monkeypatch)
+    monkeypatch.setenv('HERMES_API_URL', 'http://runtime-gateway:8642')
+    monkeypatch.setenv('HERMES_WEBUI_GATEWAY_API_KEY', 'runtime-secret')
+    seen = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"status":"ok","version":"v0.52.runtime"}'
+
+    def fake_urlopen(request, timeout=0):
+        seen.append((request.full_url, dict(request.header_items()), timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+
+    assert updates.resolve_runtime_agent_version() == 'v0.52.runtime'
+    assert seen == [
+        (
+            'http://runtime-gateway:8642/health/detailed',
+            {'Authorization': 'Bearer runtime-secret'},
+            0.75,
+        )
+    ]
+    assert 'runtime-secret' not in seen[0][0]
+
+
+@pytest.mark.parametrize(
+    'failure',
+    [
+        'network',
+        'timeout',
+        'http-error',
+        'malformed-json',
+        'missing-version',
+    ],
+)
+def test_resolve_runtime_agent_version_returns_none_when_unconfirmed(monkeypatch, failure):
+    _clear_gateway_env(monkeypatch)
+    monkeypatch.setenv('HERMES_API_URL', 'http://runtime-gateway:8642')
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            if failure == 'malformed-json':
+                return b'{not-json'
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(request, timeout=0):
+        if failure == 'network':
+            raise OSError('connection refused')
+        if failure == 'timeout':
+            raise TimeoutError('timed out')
+        if failure == 'http-error':
+            raise updates.urllib.error.HTTPError(
+                request.full_url,
+                401,
+                'unauthorized',
+                {},
+                None,
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+
+    assert updates.resolve_runtime_agent_version() is None
+
+
+def test_resolve_runtime_agent_version_skips_probe_without_configured_gateway(monkeypatch):
+    _clear_gateway_env(monkeypatch)
+
+    def unexpected_urlopen(*args, **kwargs):
+        raise AssertionError('runtime version probe must not invent a remote gateway')
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', unexpected_urlopen)
+
+    assert updates.resolve_runtime_agent_version() is None
+
+
+def test_resolve_runtime_agent_version_never_raises_on_resolution_failure(monkeypatch):
+    monkeypatch.setattr(
+        updates,
+        'resolve_gateway_base_url',
+        MagicMock(side_effect=RuntimeError('configuration unavailable')),
+    )
+
+    assert updates.resolve_runtime_agent_version() is None
+
+
 def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
     if args == ['diff-index', '--quiet', 'HEAD', '--']:
         return '', True  # clean tree

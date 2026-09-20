@@ -507,7 +507,7 @@ def _remote_gateway_base_url() -> str | None:
         val = os.environ.get(var, "").strip()
         if val:
             base = val.rstrip("/")
-            for suffix in ("/health/detailed", "/health", "/v1/health", "/status"):
+            for suffix in ("/health/detailed", "/v1/health", "/health", "/status"):
                 if base.endswith(suffix):
                     base = base[: -len(suffix)].rstrip("/")
                     break
