@@ -1561,9 +1561,17 @@ async function send(){
         if(typeof renderSessionList==='function') await renderSessionList();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      // Ownership of this command: the conversation + profile it was typed in. Captured BEFORE
+      // the first await and re-validated after every await below, so a session/profile switch
+      // mid-flight can never land this command's transcript entries in -- or clear the unsent
+      // composer draft of -- a different conversation.
+      const _cmdOwner={sid:(S.session&&S.session.session_id)||null,profile:S.activeProfile||'default'};
+      const _cmdOwnerIsCurrent=()=>((S.session&&S.session.session_id)||null)===_cmdOwner.sid
+        &&(S.activeProfile||'default')===_cmdOwner.profile;
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
+      if(!_cmdOwnerIsCurrent()) return;
       if(_agentCmd&&_agentCmd.cli_only){
         if(!S.session){await newSession();await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
@@ -1573,8 +1581,17 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){
+          await newSession();
+          // The session created here IS the owner now (it did not exist when ownership was captured).
+          _cmdOwner.sid=(S.session&&S.session.session_id)||null;
+          await renderSessionList();
+          if(!_cmdOwnerIsCurrent()) return;
+        }
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        // Clear the composer BEFORE the command await: it still belongs to the originating
+        // conversation here, whereas after the await it may hold a different one's draft.
+        $('msg').value='';autoResize();hideCmdDropdown();
         let _agentOutput='(no output)';
         try{
           _agentOutput=typeof executeAgentCommand==='function'
@@ -1583,9 +1600,12 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
+        // Ownership changed while the command ran: drop the reply rather than mutate whichever
+        // conversation is open now (same rule as the /skills owner-session guard).
+        if(!_cmdOwnerIsCurrent()) return;
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession();await renderSessionList();}
