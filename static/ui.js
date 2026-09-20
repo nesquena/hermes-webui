@@ -11059,6 +11059,19 @@ function _setComposerPrimaryButtonIcon(btn,action){
   };
   const next=icons[action]||icons.send;
   if(btn.innerHTML!==next) btn.innerHTML=next;
+  // #1804: surface a short text label next to the icon for busy-mode
+  // actions so the user can see the current mode without relying on
+  // the hover tooltip. The label is read via ``t()`` so non-English
+  // locales get the translated name. ``data-label`` is consumed by
+  // the CSS ::after pseudo-element.
+  const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  if(_labelKeys[action]){
+    const _key=_labelKeys[action];
+    const _val=(typeof t==='function')?t(_key):_key;
+    btn.dataset.label=_val||_key;
+  }else{
+    delete btn.dataset.label;
+  }
 }
 
 function updateSendBtn(){
