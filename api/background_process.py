@@ -384,18 +384,26 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     compares the freshly-(re)subscribed tab's last-known count against this
     persisted count; a server that is AHEAD means a turn landed during the gap.
 
-    Reads via ``metadata_only=True`` so it never parses the full transcript
-    (this runs on every per-session SSE (re)connect). The persisted count is
-    written by ``Session.save`` as ``meta['message_count'] = len(messages)`` —
-    the SAME basis the frontend's ``S.session.message_count`` is built from —
-    so the comparison is apples-to-apples. Returns None when the count is
-    unknown (legacy sidecars without a persisted count); the caller treats
-    None as "cannot tell, do nothing", never as a trigger.
+    Reads the sidecar directly through ``Session.load_metadata_only`` instead
+    of the generic ``get_session`` resolver.  The generic resolver may return a
+    cached metadata stub whose count predates a gateway-backed sidecar rewrite;
+    comparing that stale count with the fresh ``/api/session`` response creates
+    an endless ``session-updated`` reconnect/reload loop.  The direct metadata
+    loader remains cheap and guarantees that both sides compare the same
+    on-disk sidecar generation.
+
+    The persisted count is written by ``Session.save`` as
+    ``meta['message_count'] = len(messages)`` — the SAME basis the frontend's
+    ``S.session.message_count`` is built from.  Returns None when the count is
+    unknown (legacy sidecars without a persisted count); the caller treats None
+    as "cannot tell, do nothing", never as a trigger.
     """
     try:
-        from api.models import get_session
+        from api.models import Session
 
-        s = get_session(session_id, metadata_only=True)
+        s = Session.load_metadata_only(session_id)
+        if s is None:
+            return None
         count = getattr(s, "_metadata_message_count", None)
         if count is None:
             msgs = getattr(s, "messages", None)
