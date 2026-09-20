@@ -113,11 +113,13 @@ def test_immediate_empty_draft_flush_clears_locally_known_server_draft():
     assert "_composerDraftKnownPayloadSessions.add(sid);" in save_body, (
         "debounced non-empty draft saves must mark the session as having server-side draft payload"
     )
-    assert "_rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);" in save_body
+    assert "_postComposerDraftPayload(sid," in save_body
     assert "!_composerDraftKnownPayloadSessions.has(sid)" in now_body, (
         "empty immediate switch-away saves may only be skipped when no local/server draft payload is known"
     )
-    assert "_rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);" in now_body
+    assert "_postComposerDraftPayload(sid," in now_body, (
+        "debounced and immediate draft saves must share authoritative-session handling"
+    )
 
 
 def test_pre_switch_draft_flush_rechecks_stale_loading_guard():
