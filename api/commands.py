@@ -449,11 +449,14 @@ def _write_approval_setter(subsystem: str):
     `<subsystem>.write_approval` to the shared config.yaml via the webui's own config module
     (there is no gateway session here to route the equivalent gateway-side persistence through).
 
-    Locked read-modify-write, same pattern as `api.config.set_hermes_default_model`: reads the
-    RAW file (not `get_config()`, which may return a merged-with-defaults snapshot that must
-    never be written back) under `_cfg_lock` so a concurrent config writer elsewhere can't save
-    between this read and this write and have its change discarded. `reload_config()` is called
-    AFTER releasing the lock -- it acquires `_cfg_lock` internally and the lock isn't reentrant.
+    Locked read-modify-write, same pattern as `api.config.set_hermes_default_model`, under
+    `_cfg_lock` so a concurrent config writer elsewhere can't save between this read and this
+    write and have its change discarded. It reads the RAW file via `_load_yaml_config_file_raw`:
+    NOT `get_config()` (a merged-with-defaults snapshot that must never be written back), and NOT
+    `_load_yaml_config_file()` (which expands `${VAR}` references -- writing its result back would
+    bake resolved secrets into config.yaml and freeze env-var rotation). `reload_config()` is
+    called AFTER releasing the lock -- it acquires `_cfg_lock` internally and the lock isn't
+    reentrant.
     """
 
     def _set_approval(enabled: bool) -> None:
@@ -461,7 +464,7 @@ def _write_approval_setter(subsystem: str):
 
         config_path = webui_config._get_config_path()
         with webui_config._cfg_lock:
-            config_data = webui_config._load_yaml_config_file(config_path)
+            config_data = webui_config._load_yaml_config_file_raw(config_path)
             config_data.setdefault(subsystem, {})['write_approval'] = bool(enabled)
             webui_config._save_yaml_config_file(config_path, config_data)
         webui_config.reload_config()

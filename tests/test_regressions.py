@@ -1457,6 +1457,205 @@ def test_skills_write_approval_response_targets_owner_session_not_current():
         "renderMessages() must not run for a response whose owner session is no longer current"
 
 
+def _run_webui_agent_command_scenarios():
+    """Execute the REAL awaited WebUI agent-command block from static/messages.js (the
+    `_AGENT_COMMANDS_RUN_ON_WEBUI` path that /memory, /credits, /reload-mcp ... use) in node,
+    once per ownership scenario, and return each scenario's observable end state.
+
+    The block is sliced verbatim out of send() (from the `sessions`/`resume` branch to the
+    Plugin branch), so this drives production code, not a copy of the guard."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    block = _js_block(
+        src,
+        "if(_parsedCmd.name==='sessions' || _parsedCmd.name==='resume'){",
+        "if(_agentCmd&&_agentCmd.category==='Plugin'){",
+    )
+    allowlist_decl = src[src.index("const _AGENT_COMMANDS_RUN_ON_WEBUI"):]
+    allowlist_decl = allowlist_decl[:allowlist_decl.index("\n")]
+
+    harness = textwrap.dedent(
+        """
+        %(allowlist_decl)s
+        function cliOnlyCommandResponse(){ return 'cli-only'; }
+
+        function makeEnv(initialSession){
+          const env = {
+            S: { session: initialSession, activeProfile: 'default', messages: [] },
+            composer: { value: '/memory pending' },
+            renders: 0,
+            executeCalls: 0,
+            transcripts: {},
+            pending: {},
+          };
+          return env;
+        }
+
+        async function runScenario(name, opts){
+          const env = makeEnv(opts.initialSession === undefined ? { session_id: 'sid-A' } : opts.initialSession);
+          const S = env.S;
+          const $ = () => env.composer;
+          const autoResize = () => {};
+          const hideCmdDropdown = () => {};
+          const renderMessages = () => { env.renders++; };
+          const renderSessionList = async () => {};
+          const newSession = async () => { S.session = { session_id: 'sid-NEW' }; S.messages = []; };
+          const getAgentCommandMetadata = () => new Promise((res) => {
+            env.pending.metadata = () => res({ name: 'memory' });
+            if (opts.metadataImmediate) env.pending.metadata();
+          });
+          const executeAgentCommand = () => new Promise((res) => {
+            env.executeCalls++;
+            env.pending.execute = () => res('memory result');
+          });
+          const text = '/memory pending';
+          const _parsedCmd = { name: 'memory', args: 'pending' };
+
+          const run = async () => {
+            %(block)s
+            return 'fell-through';
+          };
+
+          const done = run();
+          await new Promise((r) => setTimeout(r, 5));
+          const snapshotBefore = { composer: env.composer.value };
+          await opts.during(env, S);
+          if (env.pending.metadata && !opts.metadataImmediate) env.pending.metadata();
+          await new Promise((r) => setTimeout(r, 5));
+          if (env.pending.execute) env.pending.execute();
+          const result = await done;
+          return {
+            name, result, snapshotBefore,
+            composer: env.composer.value,
+            executeCalls: env.executeCalls,
+            currentMessages: S.messages.map((m) => m.role + ':' + m.content),
+            renders: env.renders,
+            currentSid: S.session && S.session.session_id,
+          };
+        }
+
+        (async () => {
+          const out = {};
+
+          // 1. Positive control: no switch -> reply lands, composer cleared.
+          out.noSwitch = await runScenario('noSwitch', {
+            metadataImmediate: true,
+            during: async () => {},
+          });
+
+          // 2. Switch WHILE the metadata lookup is in flight, then land B's draft.
+          out.switchDuringMetadata = await runScenario('switchDuringMetadata', {
+            during: async (env, S) => {
+              S.session = { session_id: 'sid-B' }; S.messages = [];
+              env.composer.value = 'draft typed in B';
+            },
+          });
+
+          // 3. Switch WHILE the command itself is in flight.
+          out.switchDuringCommand = await runScenario('switchDuringCommand', {
+            metadataImmediate: true,
+            during: async (env, S) => {
+              S.session = { session_id: 'sid-B' }; S.messages = [];
+              env.composer.value = 'draft typed in B';
+            },
+          });
+
+          // 4. Profile switch while the command is in flight (same session id).
+          out.profileSwitchDuringCommand = await runScenario('profileSwitchDuringCommand', {
+            metadataImmediate: true,
+            during: async (env, S) => {
+              S.activeProfile = 'other-profile';
+              env.composer.value = 'draft typed under other profile';
+            },
+          });
+
+          // 5. No session yet: newSession() creates one; reply must land in THAT session.
+          out.noSessionYet = await runScenario('noSessionYet', {
+            initialSession: null,
+            metadataImmediate: true,
+            during: async () => {},
+          });
+
+          console.log(JSON.stringify(out));
+        })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+        """
+    ) % {"allowlist_decl": allowlist_decl, "block": block}
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_webui_agent_command_positive_control_delivers_and_clears_composer():
+    out = _run_webui_agent_command_scenarios()["noSwitch"]
+    assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+    assert out["composer"] == ""
+    assert out["executeCalls"] == 1
+
+
+def test_webui_agent_command_switch_during_metadata_lookup_touches_nothing():
+    """Switching sessions while the command-metadata lookup is in flight must not run the
+    command, append anything to the newly selected conversation, or clear ITS unsent draft."""
+    out = _run_webui_agent_command_scenarios()["switchDuringMetadata"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == [], (
+        "the command's transcript entries landed in the newly selected conversation")
+    assert out["composer"] == "draft typed in B", (
+        "the newly selected conversation's unsent composer draft was erased")
+    assert out["executeCalls"] == 0, "command executed for an abandoned request"
+
+
+def test_webui_agent_command_switch_during_command_never_touches_new_conversation():
+    """Switching sessions while `/memory ...` is executing must drop the reply instead of
+    appending it to (and clearing the composer of) the newly selected conversation."""
+    out = _run_webui_agent_command_scenarios()["switchDuringCommand"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == [], (
+        "reply for sid-A was appended to sid-B's transcript")
+    assert out["composer"] == "draft typed in B", (
+        "sid-B's unsent composer draft was erased by sid-A's command finishing")
+    assert out["renders"] == 0, "renderMessages() must not run once ownership has changed"
+
+
+def test_webui_agent_command_clears_origin_composer_before_awaiting_command():
+    """The originating composer is cleared BEFORE the command await (so a session switch
+    mid-command can never leave the sent text behind, nor clear a different draft after)."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    block = _js_block(
+        src,
+        "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){",
+        "if(_agentCmd&&_agentCmd.category==='Plugin'){",
+    )
+    clear_at = block.index("$('msg').value=''")
+    await_at = block.index("await executeAgentCommand(")
+    assert clear_at < await_at, "composer must be cleared before the command await"
+    tail = block[await_at:]
+    assert "$('msg').value" not in tail, (
+        "composer is touched again after the command await -- it may belong to another conversation now")
+
+
+def test_webui_agent_command_profile_switch_during_command_drops_reply():
+    out = _run_webui_agent_command_scenarios()["profileSwitchDuringCommand"]
+    assert "assistant:memory result" not in out["currentMessages"], (
+        "a reply produced under another profile was delivered after the profile changed")
+    assert out["composer"] == "draft typed under other profile"
+
+
+def test_webui_agent_command_creates_session_and_delivers_to_it():
+    out = _run_webui_agent_command_scenarios()["noSessionYet"]
+    assert out["currentSid"] == "sid-NEW"
+    assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+
+
 def test_skills_write_approval_response_delivered_when_no_session_existed():
     """A `/skills pending` reply must still be delivered when there was NO active
     session at invocation time (e.g. right after deleting the last session) --

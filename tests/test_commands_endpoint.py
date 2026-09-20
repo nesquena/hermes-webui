@@ -646,19 +646,19 @@ def test_memory_approval_toggle_uses_its_own_config_namespace(tmp_path):
 
     config_data = {}
     orig_get_path = webui_config._get_config_path
-    orig_load = webui_config._load_yaml_config_file
+    orig_load = webui_config._load_yaml_config_file_raw
     orig_save = webui_config._save_yaml_config_file
     orig_reload = webui_config.reload_config
     try:
         webui_config._get_config_path = lambda: tmp_path / "config.yaml"
-        webui_config._load_yaml_config_file = lambda path: config_data
+        webui_config._load_yaml_config_file_raw = lambda path: config_data
         webui_config._save_yaml_config_file = lambda path, data: None
         webui_config.reload_config = lambda: None
 
         _write_approval_setter('memory')(True)
     finally:
         webui_config._get_config_path = orig_get_path
-        webui_config._load_yaml_config_file = orig_load
+        webui_config._load_yaml_config_file_raw = orig_load
         webui_config._save_yaml_config_file = orig_save
         webui_config.reload_config = orig_reload
 
@@ -721,6 +721,38 @@ def test_skills_write_approval_runtime_unavailable_is_generic_error(monkeypatch)
         execute_agent_command('/skills pending')
 
 
+@pytest.mark.parametrize("subsystem", ["skills", "memory"])
+def test_approval_toggle_preserves_env_var_placeholders_in_config(tmp_path, monkeypatch, subsystem):
+    """Toggling the gate must not bake resolved secrets into config.yaml.
+
+    `_load_yaml_config_file()` expands `${VAR}` references; writing that result
+    back replaced every placeholder with its live value on disk (and froze env-var
+    rotation). The toggle must read the RAW file. This test uses the real loader
+    and saver -- no mocks of either -- so it fails if the wrong loader is used."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "providers:\n"
+        "  main:\n"
+        "    api_key: ${GATE_ROTATING_TOKEN}\n"
+        f"{subsystem}:\n"
+        "  write_approval: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GATE_ROTATING_TOKEN", "token-v1")
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(webui_config, "reload_config", lambda: None)
+
+    _write_approval_setter(subsystem)(True)
+
+    on_disk = config_path.read_text(encoding="utf-8")
+    assert "${GATE_ROTATING_TOKEN}" in on_disk
+    assert "token-v1" not in on_disk
+    assert webui_config._load_yaml_config_file_raw(config_path)[subsystem]["write_approval"] is True
+
+
 def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
     """`/skills approval on|off`'s set_mode_fn must persist through the webui's own
     config module (there is no gateway session to route the gateway-side
@@ -734,19 +766,19 @@ def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
     reloaded = []
 
     orig_get_path = webui_config._get_config_path
-    orig_load = webui_config._load_yaml_config_file
+    orig_load = webui_config._load_yaml_config_file_raw
     orig_save = webui_config._save_yaml_config_file
     orig_reload = webui_config.reload_config
     try:
         webui_config._get_config_path = lambda: tmp_path / "config.yaml"
-        webui_config._load_yaml_config_file = lambda path: config_data
+        webui_config._load_yaml_config_file_raw = lambda path: config_data
         webui_config._save_yaml_config_file = lambda path, data: saved.append((path, data.copy()))
         webui_config.reload_config = lambda: reloaded.append(True)
 
         _write_approval_setter('skills')(True)
     finally:
         webui_config._get_config_path = orig_get_path
-        webui_config._load_yaml_config_file = orig_load
+        webui_config._load_yaml_config_file_raw = orig_load
         webui_config._save_yaml_config_file = orig_save
         webui_config.reload_config = orig_reload
 
@@ -777,7 +809,7 @@ def test_skills_approval_toggle_serializes_under_shared_cfg_lock(monkeypatch):
         return {}
 
     monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
-    monkeypatch.setattr(webui_config, "_load_yaml_config_file", _load)
+    monkeypatch.setattr(webui_config, "_load_yaml_config_file_raw", _load)
     monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
     monkeypatch.setattr(webui_config, "reload_config", lambda: None)
 
@@ -812,7 +844,7 @@ def test_skills_approval_toggle_reloads_after_releasing_lock(monkeypatch):
     from api.commands import _write_approval_setter
 
     monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
-    monkeypatch.setattr(webui_config, "_load_yaml_config_file", lambda path: {})
+    monkeypatch.setattr(webui_config, "_load_yaml_config_file_raw", lambda path: {})
     monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
 
     acquired = webui_config._cfg_lock.acquire(blocking=False)
@@ -836,15 +868,20 @@ def test_skills_approval_toggle_reloads_after_releasing_lock(monkeypatch):
         "meaning reload_config() is being called INSIDE the locked block (deadlock risk)")
 
 
-@requires_agent_modules
-def test_commands_exec_runs_skills_pending_end_to_end():
-    """Full HTTP round trip against the real hermes-agent write-approval store
-    (not a fake) -- proves the wiring works against the actual shared module, not
-    just a test double of it."""
+def test_commands_exec_routes_skills_pending_over_http():
+    """Full HTTP round trip through the real server: `/skills pending` must reach the
+    write-approval dispatcher, not be rejected as an unsupported command.
+
+    Deliberately NOT gated on `requires_agent_modules`: CI has no hermes-agent installed, so a
+    skip there would make this test collect-and-pass while asserting nothing (the exact failure
+    mode of a silently-skipping suite). Without the agent the dispatcher answers with its generic
+    'runtime unavailable' text; with it, the real pending listing. Either way the request must be
+    routed (200 + a string), which is what fails if the allowlist or dispatch wiring regresses.
+    The handler's behavior against a fake agent is covered in-process by
+    test_skills_pending_dispatches_to_write_approval_handler."""
     status, body = _post('/api/commands/exec', {'command': '/skills pending'})
-    assert status == 200
-    assert 'output' in body
-    assert isinstance(body['output'], str)
+    assert status == 200, body
+    assert isinstance(body.get('output'), str) and body['output'].strip()
     assert 'not a supported' not in body['output'].lower()
 
 
