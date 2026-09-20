@@ -44,7 +44,11 @@ def test_interim_anchor_render_runs_after_legacy_segment_flush_without_duplicate
     flush_fn = MESSAGES[flush_fn_start : MESSAGES.index("function _resetAssistantSegment", flush_fn_start)]
 
     assert "const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);" in flush_fn
-    assert "if(!skipAnchorProcessProse) _upsertAnchorProcessProse(displayText,{sealed:force});" in flush_fn
+    # #7040: the anchor registry now stores the canonical _rawDisplayText (not
+    # the display-bounded projection) as the single source of truth; bounding
+    # is applied downstream at actual render time in
+    # _anchorProseIncrementalNode() via _projectTranscriptTextForDisplay().
+    assert "if(!skipAnchorProcessProse) _upsertAnchorProcessProse(_rawDisplayText,{sealed:force});" in flush_fn
     assert flush_idx < anchor_idx, (
         "Anchor live scene must render after the legacy interim segment is flushed, "
         "so renderLiveAnchorActivityScene can hide that source segment immediately."
