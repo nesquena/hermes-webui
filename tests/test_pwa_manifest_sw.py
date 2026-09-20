@@ -110,21 +110,16 @@ class TestServiceWorker:
             "sw.js must await/then the caches.match() result before applying the fallback"
         )
 
-    def test_sw_shell_assets_are_network_first_with_cache_fallback(self):
-        """Local hotfixes can change JS/CSS while WEBUI_VERSION stays unchanged.
-
-        If shell assets are cache-first, the browser can keep executing stale
-        sessions.js even though the server/curl already returns patched source.
-        Network-first preserves offline fallback without hiding local fixes.
-        """
+    def test_sw_shell_assets_are_stale_while_revalidate(self):
+        """Version-pinned shell assets should paint from CacheStorage first."""
         src = SW.read_text(encoding="utf-8")
-        assert "Shell assets: network-first with cache fallback" in src
-        assert "fetch(new Request(event.request, { cache: 'no-store' })).then((response)" in src
-        assert "caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))" in src
-        assert ".catch(() => caches.match(event.request)" in src
-        assert "if (cached) return cached;" not in src, (
-            "shell assets must not be cache-first; stale JS can survive hard refresh"
-        )
+        marker = "// Shell assets: stale-while-revalidate"
+        assert marker in src
+        block = src[src.find(marker):src.find("  // Lazy panel bundles", src.find(marker))]
+        assert "cache.match(event.request)" in block
+        assert "fetch(new Request(event.request, { cache: 'no-store' }))" in block
+        assert block.index("cache.match(event.request)") < block.index("fetch(")
+        assert "cache.put(event.request, response.clone())" in block
 
     def test_sw_never_caches_api_responses(self):
         """Defensive: the SW must not cache responses from /api/* paths.
@@ -272,20 +267,16 @@ class TestIndexHtmlIntegration:
                 "?v=__WEBUI_VERSION__ to match the URL the page requests"
             )
 
-    def test_sw_shell_assets_are_network_first(self):
-        """Shell JS/CSS must prefer the network, then fall back to CacheStorage.
-
-        Cache-first with an unchanged local dev version can keep stale boot.js
-        loaded after a hotfix, which is exactly how browser chrome/theme-color
-        regressions survive a patch until someone performs cache exorcism.
-        """
+    def test_sw_shell_assets_are_cache_first_with_background_refresh(self):
+        """Versioned shell JS/CSS should return the current cache before revalidation."""
         src = SW.read_text(encoding="utf-8")
-        marker = "// Shell assets: network-first with cache fallback"
+        marker = "// Shell assets: stale-while-revalidate"
         assert marker in src
-        block = src[src.find(marker):src.find(marker) + 900]
-        assert "fetch(new Request(event.request, { cache: 'no-store' })).then" in block
-        assert "caches.match(event.request)" in block
-        assert "caches.match(event.request).then((cached)" not in block[:250]
+        block = src[src.find(marker):src.find("  // Lazy panel bundles", src.find(marker))]
+        assert "cache.match(event.request)" in block
+        assert "fetch(new Request(event.request, { cache: 'no-store' }))" in block
+        assert block.index("cache.match(event.request)") < block.index("fetch(")
+        assert "event.waitUntil(refresh.catch(() => {}))" in block
 
     def test_index_loads_pwa_startup_helper_early(self):
         """The installed-app shell should classify standalone/offline mode before

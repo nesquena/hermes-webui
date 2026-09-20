@@ -1,4 +1,5 @@
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -198,7 +199,7 @@ def test_session_list_cache_follower_wait_stage_when_rebuild_inflight(monkeypatc
     assert "session_list_cache_hit" in owner_diag.stages or "session_list_cache_stored" in owner_diag.stages
 
 
-def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_stale(monkeypatch):
+def test_session_list_cache_source_changed_callers_reuse_stale_while_rebuilding(monkeypatch):
     routes._session_list_cache_clear()
 
     key = routes._session_list_cache_key(
@@ -217,9 +218,9 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
             payload,
         )
     # Simulate state.db/WAL/fingerprint changing after the stale payload was
-    # cached. The owner must rebuild synchronously so committed external state is
-    # visible immediately, but followers can still use stale while that rebuild
-    # is blocked; otherwise sidebar polling can pile up behind a slow rebuild.
+    # cached. Source changes use the same stale-while-revalidate path as TTL
+    # expiry: every caller can reuse the snapshot while one background owner
+    # rebuilds it, so sidebar polling never piles up behind a slow rebuild.
     monkeypatch.setattr(
         routes,
         "_session_list_cache_source_stamp",
@@ -265,10 +266,21 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
         owner_thread.join(2.0)
         follower_thread.join(2.0)
 
-    assert owner_result["payload"] == _session_cache_payload("fresh")
+    assert owner_result["payload"] == _session_cache_payload("stale")
     assert follower_result["payload"] == _session_cache_payload("stale")
-    assert "session_list_cache_rebuild_owner" in owner_diag.stages
-    assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
+    assert "session_list_cache_stale_background_rebuild" in owner_diag.stages
+    assert (
+        "session_list_cache_stale_return" in follower_diag.stages
+        or "session_list_cache_stale_background_rebuild" in follower_diag.stages
+    )
+
+    release.set()
+    for _ in range(20):
+        cached, _fresh = routes._session_list_cache_get(key, allow_stale=True)
+        if cached == _session_cache_payload("fresh"):
+            break
+        time.sleep(0.05)
+    assert cached == _session_cache_payload("fresh")
 
 
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):

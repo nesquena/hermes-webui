@@ -99,6 +99,31 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+_GRACEFUL_DRAIN_DEFAULT_SECONDS = 10.0
+_GRACEFUL_DRAIN_MAX_SECONDS = 30.0
+_GRACEFUL_DRAIN_POLL_SECONDS = 0.05
+
+
+def _bounded_graceful_drain_seconds(value, *, default: float = _GRACEFUL_DRAIN_DEFAULT_SECONDS) -> float:
+    """Return a finite, non-negative drain timeout with a hard upper bound."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = default
+    if seconds != seconds or seconds < 0:  # NaN and negative values
+        seconds = default
+    if seconds == float("inf"):
+        seconds = _GRACEFUL_DRAIN_MAX_SECONDS
+    return min(seconds, _GRACEFUL_DRAIN_MAX_SECONDS)
+
+
+def _configured_graceful_drain_seconds() -> float:
+    raw = os.environ.get(
+        "HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS",
+        str(_GRACEFUL_DRAIN_DEFAULT_SECONDS),
+    )
+    return _bounded_graceful_drain_seconds(raw)
+
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -126,17 +151,159 @@ class QuietHTTPServer(ThreadingHTTPServer):
         b"Content-Length: 0\r\n"
         b"\r\n"
     )
+    _DRAINING_RESPONSE = (
+        b"HTTP/1.1 503 Service Unavailable\r\n"
+        b"Connection: close\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 21\r\n"
+        b"\r\n"
+        b'{"status":"draining"}'
+    )
 
     def __init__(self, *args, **kwargs):
         server_address = args[0] if args else kwargs.get('server_address', None)
         if server_address and ':' in server_address[0]:
             self.address_family = socket.AF_INET6
         self.ssl_context: object | None = None
+        self._drain_lock = threading.RLock()
+        self._drain_wakeup = threading.Event()
+        self._drain_state = "running"
+        self._drain_reason = None
+        self._drain_deadline = None
+        self.graceful_drain_timeout_seconds = _configured_graceful_drain_seconds()
+        self._active_request_workers = 0
+        self._active_request_workers_idle = threading.Event()
+        self._active_request_workers_idle.set()
         super().__init__(*args, **kwargs)
         self._request_worker_slots = threading.BoundedSemaphore(self.max_request_workers)
         self._overflow_reject_slots = threading.BoundedSemaphore(self.max_overflow_reject_workers)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
+
+    @property
+    def is_draining(self) -> bool:
+        with self._drain_lock:
+            return self._drain_state != "running"
+
+    @property
+    def shutdown_state(self) -> str:
+        with self._drain_lock:
+            return self._drain_state
+
+    @property
+    def admission_open(self) -> bool:
+        with self._drain_lock:
+            return self._drain_state == "running"
+
+    def _active_agent_worker_count(self) -> int | None:
+        """Read the authoritative active-run registry, failing closed on error."""
+        try:
+            from api import config as _config
+
+            with _config.ACTIVE_RUNS_LOCK:
+                return len(_config.ACTIVE_RUNS)
+        except Exception:
+            logger.debug("Failed to read active worker registry during shutdown", exc_info=True)
+            return None
+
+    def drain_snapshot(self) -> dict:
+        """Return non-secret shutdown state for health/logging/diagnostics."""
+        with self._drain_lock:
+            state = self._drain_state
+            reason = self._drain_reason
+            active_requests = self._active_request_workers
+            deadline = self._drain_deadline
+        active_runs = self._active_agent_worker_count()
+        active_workers = (
+            active_runs + active_requests if active_runs is not None else None
+        )
+        return {
+            "state": state,
+            "reason": reason,
+            "admission_open": state == "running",
+            "active_workers": active_workers,
+            "active_runs": active_runs,
+            "active_requests": active_requests,
+            "deadline": deadline,
+        }
+
+    def begin_graceful_shutdown(
+        self,
+        *,
+        reason: str = "supervisor",
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        """Close admission and start a bounded graceful drain.
+
+        The caller still owns the final ``shutdown()``/process-exit action;
+        this method only changes admission state and establishes the deadline.
+        """
+        timeout = self.graceful_drain_timeout_seconds if timeout_seconds is None else timeout_seconds
+        timeout = _bounded_graceful_drain_seconds(timeout)
+        with self._drain_lock:
+            if self._drain_state != "running":
+                return False
+            now = time.monotonic()
+            self._drain_state = "draining"
+            self._drain_reason = str(reason or "supervisor")
+            self._drain_deadline = now + timeout
+            self._drain_wakeup.set()
+        snapshot = self.drain_snapshot()
+        logger.info(
+            "[shutdown] state=draining reason=%s active_workers=%s deadline_seconds=%.3f",
+            _shutdown_log_value(reason),
+            snapshot["active_workers"] if snapshot["active_workers"] is not None else "unknown",
+            timeout,
+        )
+        return True
+
+    def force_shutdown(self, *, reason: str = "force") -> bool:
+        """Record an immediate forced shutdown without waiting for workers."""
+        with self._drain_lock:
+            if self._drain_state == "forced":
+                return False
+            self._drain_state = "forced"
+            self._drain_reason = str(reason or "force")
+            self._drain_deadline = time.monotonic()
+            self._drain_wakeup.set()
+        logger.warning("[shutdown] state=forced reason=%s", _shutdown_log_value(reason))
+        return True
+
+    def wait_for_graceful_drain(self) -> dict:
+        """Wait for active requests/runs until the established deadline."""
+        with self._drain_lock:
+            state = self._drain_state
+            deadline = self._drain_deadline
+        if state == "running":
+            return self.drain_snapshot()
+        if state == "forced":
+            return self.drain_snapshot()
+
+        deadline = deadline if deadline is not None else time.monotonic()
+        while True:
+            snapshot = self.drain_snapshot()
+            if snapshot["active_workers"] == 0:
+                with self._drain_lock:
+                    if self._drain_state == "draining":
+                        self._drain_state = "drained"
+                logger.info("[shutdown] state=drained reason=%s", _shutdown_log_value(snapshot["reason"]))
+                return self.drain_snapshot()
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with self._drain_lock:
+                    if self._drain_state == "draining":
+                        self._drain_state = "timed_out"
+                final = self.drain_snapshot()
+                logger.warning(
+                    "[shutdown] state=timed_out reason=%s active_workers=%s",
+                    _shutdown_log_value(final["reason"]),
+                    final["active_workers"] if final["active_workers"] is not None else "unknown",
+                )
+                return final
+
+            self._drain_wakeup.wait(min(remaining, _GRACEFUL_DRAIN_POLL_SECONDS))
+            self._drain_wakeup.clear()
 
     def server_bind(self):
         if sys.platform == 'win32':
@@ -259,13 +426,68 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self._close_request_quietly(request)
             self._overflow_reject_slots.release()
 
+    def _reject_draining_request(self, request) -> None:
+        if getattr(self, "ssl_context", None) is not None:
+            self._close_request_quietly(request)
+            return
+        if not self._overflow_reject_slots.acquire(blocking=False):
+            self._close_request_quietly(request)
+            return
+        try:
+            threading.Thread(
+                target=self._reject_draining_request_worker,
+                args=(request,),
+                daemon=True,
+            ).start()
+        except Exception:
+            self._overflow_reject_slots.release()
+            self._close_request_quietly(request)
+
+    def _reject_draining_request_worker(self, request) -> None:
+        try:
+            self._drain_request_input_nonblocking(request)
+            try:
+                request.sendall(self._DRAINING_RESPONSE)
+                try:
+                    request.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        finally:
+            self._close_request_quietly(request)
+            self._overflow_reject_slots.release()
+
+    def _try_admit_request(self) -> bool | None:
+        """Reserve a handler slot unless draining; None means capacity overflow."""
+        with self._drain_lock:
+            if self._drain_state != "running":
+                return False
+            if not self._request_worker_slots.acquire(blocking=False):
+                return None
+            self._active_request_workers += 1
+            self._active_request_workers_idle.clear()
+            return True
+
+    def _release_request_worker(self) -> None:
+        with self._drain_lock:
+            self._active_request_workers = max(0, self._active_request_workers - 1)
+            if self._active_request_workers == 0:
+                self._active_request_workers_idle.set()
+                self._drain_wakeup.set()
+
     def process_request(self, request, client_address):
-        if not self._request_worker_slots.acquire(blocking=False):
+        admission = self._try_admit_request()
+        if admission is False:
+            self._reject_draining_request(request)
+            return
+        if admission is None:
             self._reject_overflow_request(request)
             return
         try:
             return super().process_request(request, client_address)
         except Exception:
+            self._release_request_worker()
             self._request_worker_slots.release()
             self._close_request_quietly(request)
             raise
@@ -274,6 +496,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
         try:
             return super().process_request_thread(request, client_address)
         finally:
+            self._release_request_worker()
             self._request_worker_slots.release()
 
     def handle_error(self, request, client_address):
@@ -708,6 +931,7 @@ def main() -> None:
         if _shutdown_requested.is_set():
             return
         _shutdown_requested.set()
+        httpd.begin_graceful_shutdown(reason=signal.Signals(signum).name)
         threading.Thread(
             target=httpd.shutdown,
             name="webui-sigterm-shutdown",
@@ -723,7 +947,15 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        if not httpd.is_draining:
+            httpd.begin_graceful_shutdown(reason="serve_forever_exit")
         httpd.server_close()
+        drain_result = httpd.wait_for_graceful_drain()
+        logger.info(
+            "[shutdown] completed state=%s active_workers=%s",
+            drain_result.get("state"),
+            drain_result.get("active_workers"),
+        )
         _log_shutdown_audit()
         try:
             from api.gateway_watcher import stop_watcher
