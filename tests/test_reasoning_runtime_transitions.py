@@ -291,6 +291,14 @@ class _InstalledOrderAgent:
 
     _PASSTHROUGH_PARAMS = ("model", "reasoning_config")
 
+    @property
+    def base_url(self):
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, value):
+        self._base_url = value
+
     def __init__(self, *, model, provider, base_url, reasoning_config):
         # Installed order: model, reasoning_config, base_url, provider.
         for name in self._PASSTHROUGH_PARAMS:
@@ -346,6 +354,8 @@ def test_constructor_phase_guard_matches_gemini_and_copilot_reproductions():
         reasoning_config={"enabled": True, "effort": "max"},
     )
     assert agent.reasoning_config["effort"] == "max"
+    assert "base_url" not in vars(agent)
+    assert agent._base_url == "https://chatgpt.com/backend-api/codex"
 
     # Post-construction writes (fallback / model switch) stay guarded even
     # when they assign the same value that the constructor stored.

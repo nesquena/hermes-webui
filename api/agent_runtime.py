@@ -201,7 +201,9 @@ def _agent_destination_fields_ready(agent) -> bool:
         # Slotted instances cannot be inspected reliably; treat any resolvable
         # provider as ready rather than skip the guard on a technicality.
         return getattr(agent, "provider", None) is not None
-    return "provider" in instance_dict and "base_url" in instance_dict
+    return "provider" in instance_dict and (
+        "base_url" in instance_dict or "_base_url" in instance_dict
+    )
 
 
 @lru_cache(maxsize=1)
