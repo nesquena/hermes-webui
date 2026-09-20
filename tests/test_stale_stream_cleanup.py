@@ -134,7 +134,7 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
 
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: MutatingSessionLock())
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 
@@ -199,7 +199,7 @@ def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 
@@ -257,7 +257,7 @@ def test_chat_start_allows_same_session_after_active_run_unregisters(monkeypatch
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 
@@ -332,7 +332,7 @@ def test_chat_start_not_permanently_blocked_by_stale_active_run(monkeypatch, tmp
             return None
 
     monkeypatch.setattr(routes.uuid, "uuid4", lambda: type("FakeUuid", (), {"hex": "new-stream"})())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(routes.threading, "Thread", NoopThread)
 

@@ -9,6 +9,7 @@ import logging
 import os
 import re as _re
 import ssl
+import sys
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -472,6 +473,22 @@ _redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
 # thousands of small recurring strings that actually benefit, or balloon RSS.
 _REDACT_CACHE_MAX_TEXT_LEN = 16384
 
+# Strings above that threshold deliberately stay UNCACHED and re-run the full
+# redactor on every request, even though they dominate the recurring cost of a
+# large session (measured: 59 large strings, 29 unique, 1.68s per request on a
+# real 22MB session). Memoizing them by input text alone is not safe:
+# ``agent.redact.register_redaction_patterns()`` lets a plugin extend the
+# secret matcher at runtime, and the installed registry exposes neither a
+# policy generation the cache key could include nor a hook that could clear
+# it. A large blob primed before such a registration would keep being served
+# with the newly-registered secret intact through session, SSE and
+# public-share projections. Until the agent registry exposes a generation,
+# large strings fail closed.
+#
+# tests/test_redact_large_string_cache.py pins this against the real agent
+# registry: prime a large string, register a pattern, the next response must
+# be redacted.
+
 
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
@@ -559,7 +576,37 @@ _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
 
-def _might_contain_sensitive_text(text: str) -> bool:
+# The prefilter runs on every string of every API response — ~74k strings /
+# ~19MB on a real large session — and cProfile showed it costing 2.98s of the
+# 3.7s redaction pass once the redactor's own caches are warm. The work is
+# pure and deterministic (fixed marker tuples, fixed patterns), so identical
+# text always yields the same verdict and is safe to memoize without
+# invalidation, exactly like `_redact_fn_cached` above.
+#
+# Note on what was NOT done: replacing the 71 `in` scans with one compiled
+# alternation looks like the obvious fix, but measured 38% SLOWER on the real
+# payload (2.60s vs 1.88s). CPython's substring search is already a tuned
+# C-level algorithm, and a large regex alternation has to try each branch at
+# each position. Memoizing the verdict avoids the scan entirely instead.
+#
+# Bounds: the cache retains the raw text as its key, so what matters for RSS
+# is the object's byte size, not its character count -- a 16k-character
+# string of 4-byte code points is ~64 KiB, and 8192 of them would pin ~512 MiB
+# for the process lifetime. Each entry is therefore gated on
+# ``sys.getsizeof(text)`` (O(1), counts the actual allocation, width-aware),
+# and the entry count is capped, which gives a hard ceiling on retained key
+# bytes of _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+# (16 MiB) plus lru_cache's fixed per-entry link overhead. Values are the two
+# bool singletons and cost nothing. Strings above the byte gate -- clean or
+# sensitive -- simply run the scan uncached and are never retained.
+_SENSITIVE_PREFILTER_CACHE_SIZE = 8192
+_SENSITIVE_PREFILTER_MAX_ENTRY_BYTES = 2048
+_SENSITIVE_PREFILTER_MAX_RETAINED_KEY_BYTES = (
+    _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+)
+
+
+def _might_contain_sensitive_text_uncached(text: str) -> bool:
     """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
@@ -575,6 +622,25 @@ def _might_contain_sensitive_text(text: str) -> bool:
     if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
         return True
     return False
+
+
+_might_contain_sensitive_text_lru = functools.lru_cache(
+    maxsize=_SENSITIVE_PREFILTER_CACHE_SIZE
+)(_might_contain_sensitive_text_uncached)
+
+
+def _might_contain_sensitive_text(text: str) -> bool:
+    """Memoized wrapper around the prefilter.
+
+    Falls back to the uncached scan for non-strings and for any string whose
+    object size exceeds the per-entry byte gate, so the cache can never be
+    poisoned by an unhashable value and its retained bytes stay hard-bounded.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    if sys.getsizeof(text) > _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES:
+        return _might_contain_sensitive_text_uncached(text)
+    return _might_contain_sensitive_text_lru(text)
 
 
 def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
@@ -724,12 +790,59 @@ _JPEG_SOF_MARKERS = {
 }
 
 
-def _is_complete_jpeg(raw: bytes) -> bool:
+def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
+    """Read an MP Index TIFF inside APP2; offsets are relative to its header.
+
+    Only the declared JPEG extents are trusted, not a decoder's willingness to
+    ignore trailing bytes. The caller checks contiguous coverage and each JPEG.
+    """
+    if len(data) < 8 or data[:4] not in {b"II\x2a\x00", b"MM\x00\x2a"}:
+        return None
+    order = "little" if data[:2] == b"II" else "big"
+
+    def uint(pos: int, size: int = 4) -> int:
+        return int.from_bytes(data[pos:pos + size], order)
+
+    ifd = uint(4)
+    if ifd < 8 or ifd + 2 > len(data):
+        return None
+    count = uint(ifd, 2)
+    table_end = ifd + 2 + 12 * count
+    if table_end + 4 > len(data):
+        return None
+    tags = {}
+    for pos in range(ifd + 2, table_end, 12):
+        tag = uint(pos, 2)
+        if tag in tags:
+            return None
+        tags[tag] = (uint(pos + 2, 2), uint(pos + 4), uint(pos + 8))
+    if tags.get(0xB001, ())[:2] != (4, 1):
+        return None
+    images = tags[0xB001][2]
+    entry = tags.get(0xB002)
+    if not entry or images < 2 or entry[:2] != (7, 16 * images):
+        return None
+    offset = entry[2]
+    if offset < table_end + 4 or offset + 16 * images > len(data):
+        return None
+    ranges = []
+    for index in range(images):
+        pos = offset + index * 16
+        attributes, size, relative = uint(pos), uint(pos + 4), uint(pos + 8)
+        if attributes & 0x07000000 or size < 4 or (index == 0 and relative != 0):
+            return None
+        start = 0 if index == 0 else base + relative
+        ranges.append((start, start + size))
+    return ranges
+
+
+def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
     pos = 2
     saw_sof = False
     saw_scan = False
+    mpf_ranges = None
     while pos < len(raw):
         marker_start = pos
         if raw[pos] != 0xFF:
@@ -741,7 +854,20 @@ def _is_complete_jpeg(raw: bytes) -> bool:
         marker = raw[pos]
         pos += 1
         if marker == 0xD9:
-            return saw_sof and saw_scan and pos == len(raw)
+            if not saw_sof or not saw_scan:
+                return False
+            if mpf_ranges is None:
+                return pos == len(raw)
+            if mpf_ranges[0] != (0, pos):
+                return False
+            # No gaps, overlaps, undeclared pictures or post-EOI payloads.
+            for start, end in mpf_ranges[1:]:
+                if start != pos or end > len(raw):
+                    return False
+                if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
+                    return False
+                pos = end
+            return pos == len(raw)
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
             return False
         if pos + 2 > len(raw):
@@ -752,6 +878,12 @@ def _is_complete_jpeg(raw: bytes) -> bool:
         segment_end = pos + segment_length
         if segment_end > len(raw):
             return False
+        if _allow_mpf and marker == 0xE2 and raw[pos + 2:pos + 6] == b"MPF\x00":
+            if mpf_ranges is not None:
+                return False
+            mpf_ranges = _mpf_image_ranges(raw[pos + 6:segment_end], pos + 6)
+            if mpf_ranges is None:
+                return False
         if marker in _JPEG_SOF_MARKERS:
             if segment_length < 8:
                 return False
@@ -956,13 +1088,45 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
     ``_enabled`` is threaded through so a single response-level redact pass
     only reads settings.json once. (Opus pre-release perf fix.)
+
+    Containers are rebuilt only when a descendant actually changed. The
+    overwhelming majority of a transcript carries no credential marker, so the
+    previous unconditional dict/list comprehension deep-copied the entire
+    payload — tens of MB per response — to reproduce an identical structure.
+    That copy is pure CPU under the GIL (allocation and refcounting never
+    release it), which serialized concurrent tab loads on a threaded server.
+
+    Returning the original object when nothing changed is safe because callers
+    treat redacted output as read-only: ``_public_message_projection`` builds a
+    fresh ``item`` dict per message, and ``redact_session_data`` builds a fresh
+    ``result``. Nothing mutates a value returned from here in place, so sharing
+    an unmodified subtree cannot leak a later mutation back into session state.
+    The redacting path is unchanged: as soon as one string is masked, every
+    container on the path to it is rebuilt and the caller's original is left
+    untouched.
     """
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {key: _redact_value(value, _enabled=_enabled) for key, value in v.items()}
+        out = None
+        for key, value in v.items():
+            redacted = _redact_value(value, _enabled=_enabled)
+            if redacted is value:
+                continue
+            if out is None:
+                out = dict(v)
+            out[key] = redacted
+        return v if out is None else out
     if isinstance(v, list):
-        return [_redact_value(item, _enabled=_enabled) for item in v]
+        out = None
+        for index, item in enumerate(v):
+            redacted = _redact_value(item, _enabled=_enabled)
+            if redacted is item:
+                continue
+            if out is None:
+                out = list(v)
+            out[index] = redacted
+        return v if out is None else out
     return v
 
 
