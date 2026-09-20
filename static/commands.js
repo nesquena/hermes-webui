@@ -1225,6 +1225,15 @@ function cmdSkills(args){
   // response into whatever session is current AT RESOLUTION time, not the one that
   // issued the command. Same owner-session guard the delayed steer paths use.
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  // Clear the originating session's persisted draft before either async branch starts;
+  // the outer send() clears the textarea, but the debounced server draft would otherwise
+  // resurrect this already-submitted slash command after a reload.
+  if(ownerSid&&typeof _clearComposerDraft==='function'){
+    const composer=(typeof $==='function'&&$('msg'))||(typeof document!=='undefined'&&document.getElementById('msg'));
+    const draftText=composer?String(composer.value||''):'/skills '+args;
+    const draftFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+    _clearComposerDraft(ownerSid,draftText,draftFiles);
+  }
   if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
     (async()=>{
       let out;
@@ -1233,7 +1242,10 @@ function cmdSkills(args){
       }catch(e){
         out = `Skill write-approval command failed: ${e&&e.message||e}`;
       }
-      if(!_skillsResponseOwnerStillValid(ownerSid)) return;
+      if(!_skillsResponseOwnerStillValid(ownerSid)){
+        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was not added here.',4000,'warning');
+        return;
+      }
       S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
       renderMessages();
     })();
@@ -1251,7 +1263,10 @@ function cmdSkills(args){
           (s.category||'').toLowerCase().includes(q)
         );
       }
-      if(!_skillsResponseOwnerStillValid(ownerSid)) return;
+      if(!_skillsResponseOwnerStillValid(ownerSid)){
+        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was not added here.',4000,'warning');
+        return;
+      }
       if(!skills.length){
         const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
         S.messages.push(msg); renderMessages(); return;
