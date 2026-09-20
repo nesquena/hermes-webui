@@ -8920,6 +8920,17 @@ function renderSessionListFromCache(){
         ? t('session_meta_messages', msgCount)
         : `${msgCount} msg${msgCount===1?'':'s'}`;
       metaBits.push(msgLabel);
+      // #6519: also surface the user-turn count so a one-question/one-answer
+      // session, a cron run, and a long interactive conversation triage
+      // differently in the sidebar. The backend already exposes
+      // ``user_message_count`` on the list payload; the existing
+      // ``session_meta_messages`` row alone is ambiguous for cleanup.
+      if(typeof s.user_message_count==='number'&&Number.isFinite(s.user_message_count)&&s.user_message_count>=0){
+        const userTurnLabel=(typeof t==='function')
+          ? t('session_meta_user_turns', s.user_message_count)
+          : `${s.user_message_count} user turn${s.user_message_count===1?'':'s'}`;
+        metaBits.push(userTurnLabel);
+      }
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
