@@ -288,6 +288,7 @@ function createEnvironment() {
   globalThis._syncCtxIndicator = () => {};
   globalThis._renderPendingPromptsForActiveSession = () => {};
   globalThis._restoreComposerDraft = () => {};
+  globalThis._restoreApprovalTransportFailureForSession = () => false;
   globalThis.renderSessionArtifacts = () => {};
   globalThis.renderMessages = () => {};
   globalThis._checkAndShowHandoffHint = () => {};

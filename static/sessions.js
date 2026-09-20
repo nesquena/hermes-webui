@@ -34,13 +34,70 @@ let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
-// Debounced save — prevents hammering the server on every keystroke.
-let _draftSaveTimer = null;
+// Debounced saves and writes are scoped by the complete owner identity. A
+// single global timer/independent POSTs let an older save finish after a clear
+// and resurrect submitted text.
+const _draftSaveTimersByOwner = new Map();
+const _draftWriteChainsByOwner = new Map();
+const _draftRevisionsByOwner = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
+
+function _composerDraftProfile(profile) {
+  return (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+}
+
+function _composerDraftOwnerKey(profile, sid) {
+  return JSON.stringify([_composerDraftProfile(profile), String(sid || '')]);
+}
+
+function _composerDraftRevision(profile, sid) {
+  if (!sid) return 0;
+  return _draftRevisionsByOwner.get(_composerDraftOwnerKey(profile, sid)) || 0;
+}
+
+function _bumpComposerDraftRevision(profile, sid) {
+  const key = _composerDraftOwnerKey(profile, sid);
+  const revision = (_draftRevisionsByOwner.get(key) || 0) + 1;
+  _draftRevisionsByOwner.set(key, revision);
+  return revision;
+}
+
+function _cancelComposerDraftTimer(profile, sid) {
+  const key = _composerDraftOwnerKey(profile, sid);
+  const timer = _draftSaveTimersByOwner.get(key);
+  if (timer !== undefined) clearTimeout(timer);
+  _draftSaveTimersByOwner.delete(key);
+  return key;
+}
+
+function _queueComposerDraftWrite(profile, sid, revision, payload) {
+  const key = _composerDraftOwnerKey(profile, sid);
+  const previous = _draftWriteChainsByOwner.get(key) || Promise.resolve();
+  const write = previous.catch(() => {}).then(() => {
+    // api() uses the CURRENT profile cookie. If ownership changed while this
+    // write was queued, fail closed instead of sending profile A's draft into B.
+    if (!_profileMatchesActiveProfile(profile, S && S.activeProfile || 'default')) return false;
+    return api('/api/session/draft', {
+      method: 'POST',
+      body: JSON.stringify({...payload, profile:_composerDraftProfile(profile)}),
+    });
+  }).then((response) => {
+    if (response === false) return false;
+    if (_composerDraftRevision(profile, sid) === revision) {
+      _rememberComposerDraftPayloadState(sid, payload.text, payload.files || [], profile);
+    }
+    return true;
+  }).catch(() => false);
+  _draftWriteChainsByOwner.set(key, write);
+  write.then(() => {
+    if (_draftWriteChainsByOwner.get(key) === write) _draftWriteChainsByOwner.delete(key);
+  });
+  return write;
+}
 
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
@@ -82,7 +139,11 @@ function _composerDraftPayloadSignature(text, files) {
 }
 
 function _composerDraftPayloadSignatureForSid(sid) {
+  const profile = arguments[1];
   if (typeof S === 'undefined' || !S.session || S.session.session_id !== sid) return null;
+  const ownerProfile = _composerDraftProfile(profile || S.activeProfile);
+  const activeProfile = _composerDraftProfile(S.activeProfile);
+  if (ownerProfile !== activeProfile && !(ownerProfile === 'default' && S.activeProfileIsDefault)) return null;
   const draft = S.session.composer_draft || null;
   if (!draft) return null;
   return _composerDraftPayloadSignature(draft.text, draft.files);
@@ -90,7 +151,10 @@ function _composerDraftPayloadSignatureForSid(sid) {
 
 function _suppressComposerDraftRestoreAfterSubmit(sid, text, files) {
   if (!sid) return;
-  const previous = _composerDraftRestoreSuppressedUntilBySid.get(sid);
+  const profile = arguments[3];
+  const ownerProfile = _composerDraftProfile(profile || (S && S.activeProfile));
+  const ownerKey = _composerDraftOwnerKey(ownerProfile, sid);
+  const previous = _composerDraftRestoreSuppressedUntilBySid.get(ownerKey);
   // Collect EVERY signature a stale poll could legitimately echo back for this
   // just-sent turn, and suppress a restore matching ANY of them (#5471):
   //  - the submitted-payload signature (final textarea content on send), AND
@@ -104,35 +168,40 @@ function _suppressComposerDraftRestoreAfterSubmit(sid, text, files) {
   // new cross-tab draft matches neither, so it still restores immediately.
   const signatures = [];
   const _addSig = (s) => { if (s && signatures.indexOf(s) === -1) signatures.push(s); };
-  _addSig(_composerDraftPayloadSignatureForSid(sid));   // remembered server draft (read first)
+  _addSig(_composerDraftPayloadSignatureForSid(sid, ownerProfile));   // remembered server draft (read first)
   if (arguments.length >= 2) {
     _addSig(_composerDraftPayloadSignature(text, files));  // submitted payload
   } else if (previous && typeof previous === 'object' && Array.isArray(previous.signatures)) {
     previous.signatures.forEach(_addSig);
   }
   _composerDraftRestoreSuppressedUntilBySid.set(
-    sid,
+    ownerKey,
     { until: Date.now() + _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS, signatures },
   );
   // Local state must reflect the submitted/cleared composer immediately. The
   // POST that clears the server-side draft is async; same-session refreshes can
   // otherwise race in with the old draft and repopulate the textarea.
-  _rememberComposerDraftPayloadState(sid, '', []);
+  _rememberComposerDraftPayloadState(sid, '', [], ownerProfile);
 }
 
 function _clearComposerDraftRestoreSuppression(sid) {
   if (!sid) return;
-  _composerDraftRestoreSuppressedUntilBySid.delete(sid);
+  const profile = arguments[1];
+  _composerDraftRestoreSuppressedUntilBySid.delete(
+    _composerDraftOwnerKey(profile || (S && S.activeProfile), sid),
+  );
 }
 
 function _isComposerDraftRestoreSuppressed(sid, text, files) {
   if (!sid) return false;
-  const suppression = _composerDraftRestoreSuppressedUntilBySid.get(sid);
+  const profile = arguments[3];
+  const ownerKey = _composerDraftOwnerKey(profile || (S && S.activeProfile), sid);
+  const suppression = _composerDraftRestoreSuppressedUntilBySid.get(ownerKey);
   if (!suppression) return false;
   const until = (suppression && typeof suppression === 'object') ? suppression.until : suppression;
   if (!until) return false;
   if (Date.now() > until) {
-    _composerDraftRestoreSuppressedUntilBySid.delete(sid);
+    _composerDraftRestoreSuppressedUntilBySid.delete(ownerKey);
     return false;
   }
   const signatures = (suppression && typeof suppression === 'object' && Array.isArray(suppression.signatures))
@@ -142,7 +211,7 @@ function _isComposerDraftRestoreSuppressed(sid, text, files) {
   // paths now pass payload signatures so a different cross-tab draft can restore.
   if (!signatures || !signatures.length) return true;
   if (signatures.indexOf(_composerDraftPayloadSignature(text, files)) !== -1) return true;
-  _composerDraftRestoreSuppressedUntilBySid.delete(sid);
+  _composerDraftRestoreSuppressedUntilBySid.delete(ownerKey);
   return false;
 }
 
@@ -150,7 +219,12 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
   const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
   if(eventName === activeName) return true;
-  return eventName === 'default' && !!S.activeProfileIsDefault;
+  if(!(S&&S.activeProfileIsDefault)) return false;
+  if(eventName === 'default') return true;
+  if(activeName === 'default'&&typeof _cronProfileNameIsRootAlias==='function'){
+    return _cronProfileNameIsRootAlias(eventName);
+  }
+  return false;
 }
 
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
@@ -219,21 +293,23 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  const profile = arguments[3];
+  const ownerProfile = _composerDraftProfile(profile || (S && S.activeProfile));
+  const ownerKey = _cancelComposerDraftTimer(ownerProfile, sid);
+  const revision = _bumpComposerDraftRevision(ownerProfile, sid);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
-    _clearComposerDraftRestoreSuppression(sid);
-    _composerDraftKnownPayloadSessions.add(sid);
+    _clearComposerDraftRestoreSuppression(sid, ownerProfile);
+    _composerDraftKnownPayloadSessions.add(ownerKey);
   }
-  _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-    }).then(() => {
-      _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+  const timer = setTimeout(() => {
+    _draftSaveTimersByOwner.delete(ownerKey);
+    _queueComposerDraftWrite(ownerProfile, sid, revision, {
+      session_id: sid, text: normalizedText, files: normalizedFiles,
+    });
   }, _DRAFT_SAVE_DELAY_MS);
+  _draftSaveTimersByOwner.set(ownerKey, timer);
 }
 
 function _composerDraftHasPayload(text, files) {
@@ -247,14 +323,18 @@ function _sessionComposerDraftHasPayload(session) {
 
 function _rememberComposerDraftPayloadState(sid, text, files) {
   if (!sid) return;
+  const profile = arguments[3];
+  const ownerProfile = _composerDraftProfile(profile || (S && S.activeProfile));
+  const ownerKey = _composerDraftOwnerKey(ownerProfile, sid);
   const normalizedText = String(text || '');
   const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
-    _composerDraftKnownPayloadSessions.add(sid);
+    _composerDraftKnownPayloadSessions.add(ownerKey);
   } else {
-    _composerDraftKnownPayloadSessions.delete(sid);
+    _composerDraftKnownPayloadSessions.delete(ownerKey);
   }
-  if (S.session && S.session.session_id === sid) {
+  if (S.session && S.session.session_id === sid
+      && _profileMatchesActiveProfile(ownerProfile, S.activeProfile || 'default')) {
     S.session.composer_draft = { text: normalizedText, files: normalizedFiles };
   }
 }
@@ -262,11 +342,14 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return Promise.resolve();
-  clearTimeout(_draftSaveTimer);
+  const profile = arguments[3];
+  const ownerProfile = _composerDraftProfile(profile || (S && S.activeProfile));
+  const ownerKey = _cancelComposerDraftTimer(ownerProfile, sid);
+  const revision = _bumpComposerDraftRevision(ownerProfile, sid);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
-    _clearComposerDraftRestoreSuppression(sid);
+    _clearComposerDraftRestoreSuppression(sid, ownerProfile);
   }
   // Most chat switches leave an empty composer. Avoid putting the switch path
   // behind a network POST unless there is new local draft content or an existing
@@ -274,15 +357,12 @@ function _saveComposerDraftNow(sid, text, files) {
   if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
-      && !_composerDraftKnownPayloadSessions.has(sid)) {
+      && !_composerDraftKnownPayloadSessions.has(ownerKey)) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  return _queueComposerDraftWrite(ownerProfile, sid, revision, {
+    session_id: sid, text: normalizedText, files: normalizedFiles,
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -333,81 +413,93 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  const profile = arguments[3];
+  const expectedRevision = arguments[4];
+  const ownerProfile = _composerDraftProfile(profile || (S && S.activeProfile));
+  if (Number.isFinite(expectedRevision)
+      && _composerDraftRevision(ownerProfile, sid) !== expectedRevision) {
+    return Promise.resolve(false);
+  }
+  _cancelComposerDraftTimer(ownerProfile, sid);
+  const revision = _bumpComposerDraftRevision(ownerProfile, sid);
   _clearRememberedNewChatDraftSession(sid);
-  if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
-  else _suppressComposerDraftRestoreAfterSubmit(sid);
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+  if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files, ownerProfile);
+  else _suppressComposerDraftRestoreAfterSubmit(sid, undefined, undefined, ownerProfile);
+  return _queueComposerDraftWrite(ownerProfile, sid, revision, {
+    session_id: sid, text: '', files: [],
+  });
 }
 
-// Approval-command completions are not persisted by /api/commands/exec. Keep
-// owner-scoped records while a command finishes in a different session, then
-// merge them when that exact profile/session is reopened. This avoids mutating
-// whichever conversation happens to be visible at resolution time.
-const _approvalCommandSink = new Map();
-function _approvalCommandOwnerKey(profile, sid){
-  return `${String(profile||'default')}::${String(sid||'')}`;
+// Command results are persisted by /api/commands/exec in the owning session.
+// Keep only failure-draft restoration here; no parallel browser transcript exists.
+const _APPROVAL_TRANSPORT_FAILURE_KEY='hermes-webui-command-failure-drafts-v1';
+const _APPROVAL_TRANSPORT_FAILURE_TTL_MS=24*60*60*1000;
+function _readApprovalTransportFailures(){
+  try{
+    const parsed=JSON.parse(sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)||'[]');
+    if(!Array.isArray(parsed))return [];
+    const cutoff=Date.now()-_APPROVAL_TRANSPORT_FAILURE_TTL_MS;
+    const records=parsed.filter((record)=>record&&record.sid&&Number(record.created_at||0)>=cutoff).slice(-8);
+    if(records.length!==parsed.length){
+      if(records.length)sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify(records));
+      else sessionStorage.removeItem(_APPROVAL_TRANSPORT_FAILURE_KEY);
+    }
+    return records;
+  }catch(e){return [];}
 }
-function _stashApprovalCommandRecord(profile, sid, record){
-  if(!sid) return;
-  const key=_approvalCommandOwnerKey(profile,sid);
-  const records=_approvalCommandSink.get(key)||[];
-  records.push({...record, profile:String(profile||'default'), session_id:String(sid)});
-  _approvalCommandSink.set(key, records);
+function _writeApprovalTransportFailures(records){
+  try{
+    const bounded=(Array.isArray(records)?records:[]).slice(-8);
+    if(bounded.length) sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify(bounded));
+    else sessionStorage.removeItem(_APPROVAL_TRANSPORT_FAILURE_KEY);
+    return true;
+  }catch(e){return false;}
 }
-function _restoreOrStashApprovalDraft(profile, sid, text, files, command, error){
-  const draftText=String(text||'');
-  const draftFiles=Array.isArray(files)?[...files]:[];
+function _stashApprovalTransportFailure(profile,sid,text,files){
+  if(!sid)return false;
+  const record={profile:String(profile||'default'),sid:String(sid),text:String(text||''),files:Array.isArray(files)?files:[],created_at:Date.now()};
+  const records=_readApprovalTransportFailures().filter((item)=>!(item.sid===record.sid&&item.profile===record.profile));
+  records.push(record);
+  return _writeApprovalTransportFailures(records);
+}
+function _clearApprovalTransportFailuresForSession(profile,sid){
+  if(!sid)return;
+  const activeProfile=profile||S&&S.activeProfile||'default';
+  const records=_readApprovalTransportFailures().filter((record)=>!(record.sid===String(sid)&&_profileMatchesActiveProfile(record.profile,activeProfile)));
+  _writeApprovalTransportFailures(records);
+}
+function _restoreApprovalTransportFailureForSession(session){
+  const sid=session&&session.session_id;
+  if(!sid)return;
+  const activeProfile=S&&S.activeProfile||'default';
+  const records=_readApprovalTransportFailures();
+  const index=records.findIndex((record)=>record.sid===String(sid)&&_profileMatchesActiveProfile(record.profile,activeProfile));
+  if(index<0)return;
+  const [record]=records.splice(index,1);
+  const composer=(typeof $==='function'&&$('msg'))||null;
+  if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
+    composer.value=record.text||'';
+    if(Array.isArray(record.files)&&record.files.length)S.pendingFiles=[...record.files];
+    if(typeof autoResize==='function')autoResize();
+    if(typeof renderTray==='function'&&record.files&&record.files.length)renderTray();
+    if(typeof _saveComposerDraftNow==='function')_saveComposerDraftNow(sid,record.text,record.files,record.profile);
+    _writeApprovalTransportFailures(records);
+  }
+}
+function _restoreApprovalCommandDraft(profile, sid, text, files){
   const activeSid=S&&S.session&&S.session.session_id;
   const activeProfile=S&&S.activeProfile||'default';
-  if(activeSid===sid&&_profileMatchesActiveProfile(profile,activeProfile)){
-    const composer=(typeof $==='function'&&$('msg'))||null;
-    if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
-      composer.value=draftText;
-      if(draftFiles.length) S.pendingFiles=draftFiles;
-      if(typeof autoResize==='function') autoResize();
-      if(typeof renderTray==='function'&&draftFiles.length) renderTray();
-      if(typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(sid,draftText,draftFiles);
-    }
-    return;
+  if(activeSid!==sid||!_profileMatchesActiveProfile(profile,activeProfile)) return;
+  const composer=(typeof $==='function'&&$('msg'))||null;
+  const draftFiles=Array.isArray(files)?[...files]:[];
+  if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
+    composer.value=String(text||'');
+    if(draftFiles.length) S.pendingFiles=draftFiles;
+    if(typeof autoResize==='function') autoResize();
+    if(typeof renderTray==='function'&&draftFiles.length) renderTray();
+    if(typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(sid,text,draftFiles,profile);
   }
-  _stashApprovalCommandRecord(profile,sid,{state:'failed',command,draftText,draftFiles,error});
 }
-function _stashApprovalCommandCompletion(profile, sid, command, output, failed=false){
-  _stashApprovalCommandRecord(profile,sid,{state:failed?'failed':'completed',command,output:String(output||'(no output)')});
-}
-function _mergeApprovalCommandRecordsForSession(messages, session){
-  const sid=session&&session.session_id;
-  if(!sid) return messages;
-  const key=_approvalCommandOwnerKey(S&&S.activeProfile||'default',sid);
-  const records=_approvalCommandSink.get(key);
-  if(!records||!records.length) return messages;
-  const merged=Array.isArray(messages)?messages.slice():[];
-  for(const record of records){
-    if(record.state==='completed'||record.state==='failed'){
-      merged.push({role:'user',content:record.command,_ts:Date.now()/1000});
-      merged.push({role:'assistant',content:record.output||`Command failed: ${record.error||'transport error'}`,_ts:Date.now()/1000});
-    }
-    if(record.state==='failed'&&typeof _restoreComposerDraft==='function'){
-      const composer=(typeof $==='function'&&$('msg'))||null;
-      if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
-        composer.value=record.draftText||'';
-        if(Array.isArray(record.draftFiles)&&record.draftFiles.length) S.pendingFiles=[...record.draftFiles];
-        if(typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(sid,record.draftText,record.draftFiles);
-        if(typeof autoResize==='function') autoResize();
-        if(typeof renderTray==='function'&&record.draftFiles&&record.draftFiles.length) renderTray();
-      }
-    }
-  }
-  _approvalCommandSink.delete(key);
-  return merged;
-}
-
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
@@ -2241,7 +2333,7 @@ async function loadSession(sid){
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
-    S.messages=_mergeApprovalCommandRecordsForSession(S.messages,S.session);
+    _restoreApprovalTransportFailureForSession(S.session);
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.busy=!!activeStreamId;  // #4354: Only assert busy if server confirms active stream.
@@ -2385,7 +2477,7 @@ async function loadSession(sid){
 
     // Attach pending user message if one is queued.
     _mergePendingSessionMessage(S.session,S.messages);
-    S.messages=_mergeApprovalCommandRecordsForSession(S.messages,S.session);
+    _restoreApprovalTransportFailureForSession(S.session);
 
     // Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
     // in an isolated instance). `activeStreamId` was snapshotted BEFORE the
@@ -4454,6 +4546,11 @@ function _renderBatchActionBar(){
       }));
       const retainedCount=_worktreeResponseCount(results);
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      results.forEach((result)=>{
+        if(result&&result.response&&result.session&&typeof _clearApprovalTransportFailuresForSession==='function'){
+          _clearApprovalTransportFailuresForSession(result.session.profile,result.session.session_id);
+        }
+      });
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -9286,6 +9383,9 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  if(response&&typeof _clearApprovalTransportFailuresForSession==='function'){
+    _clearApprovalTransportFailuresForSession(session&&session.profile,sid);
+  }
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;

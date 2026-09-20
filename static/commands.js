@@ -1,5 +1,5 @@
 const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','skills','memory',
   'moa','sessions','resume','pet'
 ]);
 // ── Slash commands ──────────────────────────────────────────────────────────
@@ -525,11 +525,16 @@ async function executeAgentPluginCommand(text,_meta){
 async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  const ownerSid=S&&S.session&&S.session.session_id||null;
+  const commandId=ownerSid?`webui-command-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`:null;
   const data=await api('/api/commands/exec',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify({command,session_id:ownerSid,...(commandId?{command_id:commandId}:{})})
   });
-  return String(data&&data.output||'(no output)');
+  const output=String(data&&data.output||'(no output)');
+  return data&&data.persistence_warning
+    ? `${output}\n\n⚠️ The command ran, but its final result could not be saved. Hermes will not run this command again automatically.`
+    : output;
 }
 
 async function resolveBundleCommand(text,_meta){
@@ -1244,11 +1249,18 @@ function cmdSkills(args){
         out = `Skill write-approval command failed: ${e&&e.message||e}`;
       }
       if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
-        if(typeof _stashApprovalCommandRecord==='function') _stashApprovalCommandRecord(ownerProfile,ownerSid,{state:failed?'failed':'completed',command:commandText,output:String(out||'(no output)'),draftText,draftFiles});
-        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was retained for the originating session.',4000,'warning');
+        let failedDraftKept=false;
+        if(failed&&typeof _stashApprovalTransportFailure==='function'){
+          failedDraftKept=!!_stashApprovalTransportFailure(ownerProfile,ownerSid,draftText,draftFiles);
+        }
+        if(typeof showToast==='function') showToast(failed
+          ? (failedDraftKept
+            ? 'Command could not finish after you switched conversations; its draft was kept for the originating session.'
+            : 'Command could not finish after you switched conversations; reopen the original conversation and try again.')
+          : 'Command completed after you switched conversations; its output was saved in the originating session.',4000,'warning');
         return;
       }
-      if(failed&&typeof _restoreOrStashApprovalDraft==='function') _restoreOrStashApprovalDraft(ownerProfile,ownerSid,draftText,draftFiles,commandText,out);
+      if(failed&&typeof _restoreApprovalCommandDraft==='function') _restoreApprovalCommandDraft(ownerProfile,ownerSid,draftText,draftFiles);
       S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
       renderMessages();
     })();
@@ -1267,9 +1279,7 @@ function cmdSkills(args){
         );
       }
       if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
-        const output=skills.length?`Available skills (${skills.length}).`:(args?`No skills matching "${args}".`:'No skills found.');
-        if(typeof _stashApprovalCommandCompletion==='function') _stashApprovalCommandCompletion(ownerProfile,ownerSid,commandText,output,false);
-        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was retained for the originating session.',4000,'warning');
+        if(typeof showToast==='function') showToast('Skills finished loading after you switched conversations; reopen the command if needed.',4000,'warning');
         return;
       }
       if(!skills.length){
@@ -1300,12 +1310,10 @@ function cmdSkills(args){
       showToast(t('type_slash'));
     }catch(e){
       if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
-        const output=`Failed to load skills: ${e&&e.message||e}`;
-        if(typeof _stashApprovalCommandRecord==='function') _stashApprovalCommandRecord(ownerProfile,ownerSid,{state:'failed',command:commandText,output,draftText,draftFiles});
-        if(typeof showToast==='function') showToast('Command failed after you switched conversations; its output and draft were retained for the originating session.',4000,'warning');
+        if(typeof showToast==='function') showToast('Skills failed to load after you switched conversations.',4000,'warning');
         return;
       }
-      if(typeof _restoreOrStashApprovalDraft==='function') _restoreOrStashApprovalDraft(ownerProfile,ownerSid,draftText,draftFiles,commandText,e&&e.message||e);
+      if(typeof _restoreApprovalCommandDraft==='function') _restoreApprovalCommandDraft(ownerProfile,ownerSid,draftText,draftFiles);
       showToast('Failed to load skills: '+e.message);
     }
   })();

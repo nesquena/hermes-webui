@@ -169,6 +169,33 @@ def _post(path, body):
             return e.code, {}
 
 
+class _RouteHandler:
+    """Minimal in-process POST handler for route persistence tests."""
+    def __init__(self, body):
+        raw = json.dumps(body).encode()
+        self.status = None
+        self.body = bytearray()
+        self.wfile = self
+        self.rfile = io.BytesIO(raw)
+        self.headers = {"Content-Length": str(len(raw))}
+        self.request = None
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, *_args):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def json_body(self):
+        return json.loads(bytes(self.body) or b"{}")
+
+
 @requires_agent_modules
 def test_commands_endpoint_returns_list():
     """GET /api/commands returns a JSON object with a 'commands' list."""
@@ -336,6 +363,251 @@ def test_commands_exec_routes_credits_through_agent_dispatch(monkeypatch):
     assert calls == ["/credits"]
     assert handler.status == 200
     assert handler.json_body() == {"output": "credits ok"}
+
+
+def test_commands_exec_persists_and_deduplicates_owner_transcript(monkeypatch):
+    """A retry with the same command id must not execute or append twice."""
+    from api import commands, routes
+
+    class Session:
+        session_id = "persist-command-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = []
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+
+    session = Session()
+    lock = threading.RLock()
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(commands, "execute_agent_command", lambda command: calls.append(command) or "saved output")
+    monkeypatch.setattr(commands, "execute_plugin_command", lambda _command: (_ for _ in ()).throw(AssertionError("plugin fallback")))
+    payload = {
+        "command": "/memory pending",
+        "session_id": session.session_id,
+        "command_id": "webui-command-test-1",
+    }
+
+    first = _RouteHandler(payload)
+    routes.handle_post(first, SimpleNamespace(path="/api/commands/exec", query=""))
+    second = _RouteHandler(payload)
+    routes.handle_post(second, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert first.status == second.status == 200
+    assert first.json_body() == second.json_body() == {"output": "saved output"}
+    assert calls == ["/memory pending"]
+    assert session.saved == 2
+    assert [(m["role"], m["content"]) for m in session.messages] == [
+        ("user", "/memory pending"),
+        ("assistant", "saved output"),
+    ]
+    assert {m["_webui_command_id"] for m in session.messages} == {"webui-command-test-1"}
+
+
+def test_commands_exec_does_not_execute_when_initial_marker_cannot_be_saved(monkeypatch):
+    """A command must not run until its durable idempotency marker exists."""
+    from api import commands, routes
+
+    class Session:
+        session_id = "failed-marker-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = []
+
+        def save(self):
+            raise OSError("disk unavailable")
+
+    session = Session()
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(commands, "execute_agent_command", lambda command: calls.append(command) or "must not run")
+    payload = {
+        "command": "/memory pending",
+        "session_id": session.session_id,
+        "command_id": "webui-command-save-fail",
+    }
+
+    handler = _RouteHandler(payload)
+    routes.handle_post(handler, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert handler.status == 503
+    assert calls == []
+    assert session.messages == []
+
+
+def test_commands_exec_does_not_repeat_after_final_save_failure(monkeypatch):
+    """Once execution begins, a failed result save must not allow a duplicate run."""
+    from api import commands, routes
+
+    class Session:
+        session_id = "failed-result-save-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = []
+            self.save_calls = 0
+            self.first_saved_snapshot = None
+
+        def save(self):
+            self.save_calls += 1
+            if self.save_calls == 1:
+                self.first_saved_snapshot = [dict(message) for message in self.messages]
+                return
+            raise OSError("disk unavailable")
+
+    session = Session()
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(commands, "execute_agent_command", lambda command: calls.append(command) or "ran once")
+    payload = {
+        "command": "/memory pending",
+        "session_id": session.session_id,
+        "command_id": "webui-command-result-save-fail",
+    }
+
+    first = _RouteHandler(payload)
+    routes.handle_post(first, SimpleNamespace(path="/api/commands/exec", query=""))
+    second = _RouteHandler(payload)
+    routes.handle_post(second, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert first.status == second.status == 200
+    assert calls == ["/memory pending"]
+    assert first.json_body()["persistence_warning"] is True
+    assert second.json_body() == {"output": "ran once"}
+    assert session.first_saved_snapshot[1]["_webui_command_pending"] is True
+
+    # Simulate a process restart: only the durable pre-execution marker is
+    # available, and a user retry necessarily has a newly generated id.
+    reloaded = Session()
+    reloaded.messages = [dict(message) for message in session.first_saved_snapshot]
+    reloaded.save_calls = 99
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: reloaded)
+    retry_payload = dict(payload, command_id="webui-command-new-id-after-restart")
+    after_restart = _RouteHandler(retry_payload)
+    routes.handle_post(after_restart, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert after_restart.status == 409
+    assert calls == ["/memory pending"]
+
+
+def test_session_delete_holds_agent_lock_through_cli_cleanup(monkeypatch, tmp_path):
+    """Delete must not expose a gap where command execution can recover the session."""
+    from api import routes
+
+    sid = "delete-command-race-session"
+    session_file = tmp_path / f"{sid}.json"
+    session_file.write_text("{}", encoding="utf-8")
+
+    class Session:
+        session_id = sid
+        profile = "default"
+
+    class RecordingLock:
+        def __init__(self):
+            self.held = False
+
+        def acquire(self, timeout=None):
+            self.held = True
+            return True
+
+        def release(self):
+            self.held = False
+
+    lock = RecordingLock()
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: Session())
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(routes, "prune_session_from_index", lambda _sid: None)
+    monkeypatch.setattr(routes, "_record_webui_deleted_session_tombstone", lambda _sid: None)
+    monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *_args, **_kwargs: None)
+
+    import api.config as config
+    import api.models as models
+    import api.upload as upload
+    import api.turn_journal as turn_journal
+    import api.run_journal as run_journal
+    import api.background_process as background_process
+    import api.terminal as terminal_mod
+
+    monkeypatch.setattr(config, "_evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda _sid: tmp_path / "attachments")
+    monkeypatch.setattr(turn_journal, "delete_turn_journal", lambda _sid: None)
+    monkeypatch.setattr(run_journal, "delete_run_journal", lambda _sid: None)
+    monkeypatch.setattr(background_process, "forget_bg_task_completion_dedup", lambda _sid: None)
+    monkeypatch.setattr(terminal_mod, "close_terminal", lambda _sid: None)
+
+    observed = []
+    monkeypatch.setattr(models, "delete_cli_session", lambda _sid: observed.append(lock.held) or True)
+    handler = _RouteHandler({"session_id": sid})
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/delete", query=""))
+
+    assert handler.status == 200
+    assert observed == [True]
+    assert lock.held is False
+
+
+def test_commands_exec_holds_session_lock_through_execution_and_save(monkeypatch):
+    """Deletion uses this same lock, so it cannot interleave and leave an orphan result."""
+    from api import commands, routes
+
+    entered = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+
+    class Session:
+        session_id = "locked-command-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+        messages = []
+
+        def save(self):
+            pass
+
+    def execute(command):
+        entered.set()
+        assert release.wait(5)
+        return "done"
+
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: Session())
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(commands, "execute_agent_command", execute)
+    payload = {"command": "/memory pending", "session_id": Session.session_id, "command_id": "webui-command-lock"}
+    handler = _RouteHandler(payload)
+    thread = threading.Thread(
+        target=routes.handle_post,
+        args=(handler, SimpleNamespace(path="/api/commands/exec", query="")),
+        daemon=True,
+    )
+    thread.start()
+    assert entered.wait(5)
+    assert lock.acquire(timeout=0.05) is False
+    release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert handler.status == 200
 
 
 def test_credits_command_returns_not_logged_in_message(monkeypatch):

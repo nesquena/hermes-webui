@@ -1484,8 +1484,9 @@ def _run_webui_agent_command_scenarios():
         "if(_parsedCmd.name==='sessions' || _parsedCmd.name==='resume'){",
         "if(_agentCmd&&_agentCmd.category==='Plugin'){",
     )
-    allowlist_decl = src[src.index("const _AGENT_COMMANDS_RUN_ON_WEBUI"):]
-    allowlist_decl = allowlist_decl[:allowlist_decl.index("\n")]
+    allowlist_start = src.index("const _AGENT_COMMANDS_RUN_ON_WEBUI")
+    allowlist_end = src.index("]);", allowlist_start) + 3
+    allowlist_decl = src[allowlist_start:allowlist_end]
 
     harness = textwrap.dedent(
         """
@@ -1496,8 +1497,10 @@ def _run_webui_agent_command_scenarios():
           const env = {
             S: { session: initialSession, activeProfile: 'default', messages: [] },
             composer: { value: '/memory pending' },
+            draftRevision: 0,
             renders: 0,
             toasts: 0,
+            stashes: [],
             clears: [],
             executeCalls: 0,
             transcripts: {},
@@ -1514,16 +1517,23 @@ def _run_webui_agent_command_scenarios():
           const hideCmdDropdown = () => {};
           const renderMessages = () => { env.renders++; };
           const showToast = () => { env.toasts++; };
+          const _stashApprovalTransportFailure = (profile, sid, text, files) => {
+            env.stashes.push({ profile, sid, text, files });
+            return true;
+          };
           const _clearComposerDraft = (sid, text, files) => { env.clears.push({ sid, text, files }); };
+          const _composerDraftRevision = () => env.draftRevision;
           const renderSessionList = async () => {};
           const newSession = async () => { S.session = { session_id: 'sid-NEW' }; S.messages = []; };
           const getAgentCommandMetadata = () => new Promise((res) => {
             env.pending.metadata = () => res({ name: 'memory' });
             if (opts.metadataImmediate) env.pending.metadata();
           });
-          const executeAgentCommand = () => new Promise((res) => {
+          const executeAgentCommand = () => new Promise((res, rej) => {
             env.executeCalls++;
-            env.pending.execute = () => res('memory result');
+            env.pending.execute = () => opts.executeReject
+              ? rej(new Error('offline'))
+              : res('memory result');
           });
           const text = '/memory pending';
           const _parsedCmd = { name: 'memory', args: 'pending' };
@@ -1548,6 +1558,7 @@ def _run_webui_agent_command_scenarios():
             currentMessages: S.messages.map((m) => m.role + ':' + m.content),
             renders: env.renders,
             warnings: env.toasts,
+            stashes: env.stashes,
             clears: env.clears,
             currentSid: S.session && S.session.session_id,
           };
@@ -1588,7 +1599,36 @@ def _run_webui_agent_command_scenarios():
             },
           });
 
-          // 5. No session yet: newSession() creates one; reply must land in THAT session.
+          // 5. A transport failure after switching must preserve the originating
+          // command as a restorable draft instead of falsely claiming it was saved.
+          out.failureAfterSwitch = await runScenario('failureAfterSwitch', {
+            metadataImmediate: true,
+            executeReject: true,
+            during: async (env, S) => {
+              S.session = { session_id: 'sid-B' }; S.messages = [];
+              env.composer.value = 'draft typed in B';
+            },
+          });
+
+          // 6. New input in the SAME session while metadata is loading belongs to
+          // a new draft and must not be erased when the earlier command resumes.
+          out.sameOwnerNewerDraft = await runScenario('sameOwnerNewerDraft', {
+            during: async (env) => {
+              env.composer.value = 'newer draft';
+              env.draftRevision++;
+            },
+          });
+
+          // 7. Revision, not only text equality, guards the clear. The user may
+          // edit and then return to the same visible text before metadata resolves.
+          out.sameTextNewerRevision = await runScenario('sameTextNewerRevision', {
+            during: async (env) => {
+              env.composer.value = '/memory pending';
+              env.draftRevision++;
+            },
+          });
+
+          // 8. No session yet: newSession() creates one; reply must land in THAT session.
           out.noSessionYet = await runScenario('noSessionYet', {
             initialSession: null,
             metadataImmediate: true,
@@ -1667,12 +1707,232 @@ def test_webui_agent_command_profile_switch_during_command_drops_reply():
     assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
 
 
+def test_webui_agent_command_failure_after_switch_stashes_originating_draft():
+    out = _run_webui_agent_command_scenarios()["failureAfterSwitch"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["warnings"] == 1
+    assert out["stashes"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "text": "/memory pending",
+        "files": [],
+    }]
+
+
+def test_webui_sessionless_agent_transport_omits_command_id():
+    """Legacy sessionless commands must not send half of the persistence owner pair."""
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    assert "const commandId=ownerSid?" in source
+    assert "...(commandId?{command_id:commandId}:{})" in source
+
+
+def _run_webui_plugin_command_scenario(*, reject=False):
+    """Run the real awaited plugin-command branch while ownership changes."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    block = _js_block(
+        src,
+        "if(_agentCmd&&_agentCmd.category==='Plugin'){",
+        "if(_agentCmdName==='moa'){",
+    )
+    harness = textwrap.dedent(
+        """
+        (async () => {
+          const env = { composer: {value:'/plugin run'}, clears:[], stashes:[], warnings:0, renders:0 };
+          const S = {session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
+          const text='/plugin run';
+          const _agentCmd={name:'plugin',category:'Plugin'};
+          const _cmdOwner={sid:'sid-A',profile:'default'};
+          const _cmdOwnerIsCurrent=()=>((S.session&&S.session.session_id)||null)===_cmdOwner.sid
+            &&(S.activeProfile||'default')===_cmdOwner.profile;
+          let _cmdDraftRevision=0;
+          const _composerDraftRevision=()=>0;
+          const $=()=>env.composer;
+          const autoResize=()=>{};
+          const hideCmdDropdown=()=>{};
+          const renderMessages=()=>{env.renders++;};
+          const renderSessionList=async()=>{};
+          const newSession=async()=>{};
+          const showToast=()=>{env.warnings++;};
+          const _clearComposerDraft=(sid,value,files)=>env.clears.push({sid,value,files});
+          const _stashApprovalTransportFailure=(profile,sid,value,files)=>{
+            env.stashes.push({profile,sid,value,files}); return true;
+          };
+          let settle;
+          const executeAgentPluginCommand=()=>new Promise((resolve,rejectFn)=>{
+            settle=()=>%(reject)s ? rejectFn(new Error('offline')) : resolve('plugin result');
+          });
+          const run=async()=>{
+            %(block)s
+            return 'fell-through';
+          };
+          const done=run();
+          await new Promise((r)=>setTimeout(r,5));
+          S.session={session_id:'sid-B'};
+          S.messages=[];
+          env.composer.value='draft typed in B';
+          settle();
+          await done;
+          console.log(JSON.stringify({
+            messages:S.messages.map((m)=>m.role+':'+m.content),
+            composer:env.composer.value,
+            clears:env.clears,
+            stashes:env.stashes,
+            warnings:env.warnings,
+            renders:env.renders,
+          }));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"block": block, "reject": "true" if reject else "false"}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_webui_plugin_command_switch_never_writes_to_new_conversation():
+    out = _run_webui_plugin_command_scenario()
+    assert out["messages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["warnings"] == 1
+    assert out["renders"] == 0
+    assert out["clears"] == [{"sid": "sid-A", "value": "/plugin run", "files": []}]
+
+
+def test_webui_plugin_command_failure_after_switch_stashes_originating_draft():
+    out = _run_webui_plugin_command_scenario(reject=True)
+    assert out["messages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["stashes"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "value": "/plugin run",
+        "files": [],
+    }]
+
+
+def test_transport_failure_draft_survives_reload_with_profile_alias_and_expires():
+    """The bounded per-tab fallback restores only its owner and prunes stale data."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    profile_matcher = _js_block(
+        src,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        src,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const composer={value:''};
+        const _profilesCache={profiles:[{name:'renamed-root',is_default:true}]};
+        const _cronProfileNameIsRootAlias=(name)=>name==='default'||_profilesCache.profiles.some(p=>p.name===name&&p.is_default);
+        const S={activeProfile:'renamed-root',activeProfileIsDefault:true,pendingFiles:[]};
+        const $=()=>composer;
+        const autoResize=()=>{};
+        const renderTray=()=>{};
+        const saved=[];
+        const _saveComposerDraftNow=(...args)=>saved.push(args);
+        %(profile_matcher)s
+        %(helpers)s
+        const kept=_stashApprovalTransportFailure('default','sid-A','/memory pending',[]);
+        _restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+        const restored={kept,text:composer.value,saved,remaining:_readApprovalTransportFailures()};
+        composer.value='';
+        S.activeProfile='default';
+        _stashApprovalTransportFailure('renamed-root','sid-reverse','reverse alias',[]);
+        _restoreApprovalTransportFailureForSession({session_id:'sid-reverse'});
+        const reverseRestored={text:composer.value,remaining:_readApprovalTransportFailures()};
+        S.activeProfile='renamed-root';
+        composer.value='';
+        _stashApprovalTransportFailure('default','sid-B','secret',[]);
+        _clearApprovalTransportFailuresForSession('renamed-root','sid-B');
+        const cleared=_readApprovalTransportFailures();
+        sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify([{
+          profile:'default',sid:'old',text:'old secret',files:[],
+          created_at:Date.now()-_APPROVAL_TRANSPORT_FAILURE_TTL_MS-1,
+        }]));
+        const expired=_readApprovalTransportFailures();
+        console.log(JSON.stringify({restored,reverseRestored,cleared,expired,raw:sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)}));
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["restored"]["kept"] is True
+    assert out["restored"]["text"] == "/memory pending"
+    assert out["restored"]["remaining"] == []
+    assert out["reverseRestored"]["text"] == "reverse alias"
+    assert out["reverseRestored"]["remaining"] == []
+    assert out["cleared"] == []
+    assert out["expired"] == []
+    assert out["raw"] is None
+
+
+def test_webui_agent_command_preserves_newer_same_session_draft():
+    out = _run_webui_agent_command_scenarios()["sameOwnerNewerDraft"]
+    assert out["currentSid"] == "sid-A"
+    assert out["executeCalls"] == 1
+    assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+    assert out["composer"] == "newer draft"
+    assert out["clears"] == []
+
+
+def test_webui_agent_command_uses_revision_when_newer_draft_has_same_text():
+    out = _run_webui_agent_command_scenarios()["sameTextNewerRevision"]
+    assert out["executeCalls"] == 1
+    assert out["composer"] == "/memory pending"
+    assert out["clears"] == []
+
+
 def test_webui_agent_command_creates_session_and_delivers_to_it():
     out = _run_webui_agent_command_scenarios()["noSessionYet"]
     assert out["currentSid"] == "sid-NEW"
     assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
     assert out["warnings"] == 0
     assert out["clears"] == [{"sid": "sid-NEW", "text": "/memory pending", "files": []}]
+
+
+def test_webui_agent_commands_use_server_persisted_session_transcript():
+    """Command transport must bind a stable id + owner session, while the server
+    persists and deduplicates the transcript under the per-session lock."""
+    commands = (REPO_ROOT / "static/commands.js").read_text()
+    routes = (REPO_ROOT / "api/routes.py").read_text()
+    sessions = (REPO_ROOT / "static/sessions.js").read_text()
+    assert "session_id:ownerSid,...(commandId?{command_id:commandId}:{})" in commands
+    assert 'with _get_session_agent_lock(sid):' in routes
+    assert 'message.get("_webui_command_id") == command_id' in routes
+    assert '"_webui_command_id": command_id' in routes
+    assert '"_webui_command_pending": True' in routes
+    assert 'Could not save command before execution' in routes
+    assert 'session.save()' in routes
+    assert "hermes-webui-approval-command-results" not in sessions
 
 
 def test_skills_write_approval_response_delivered_when_no_session_existed():
