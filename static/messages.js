@@ -1589,9 +1589,14 @@ async function send(){
           if(!_cmdOwnerIsCurrent()) return;
         }
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        // Clear the composer BEFORE the command await: it still belongs to the originating
-        // conversation here, whereas after the await it may hold a different one's draft.
+        // Clear both the visible textarea and the originating session's persisted draft before
+        // the command await; otherwise a debounced server save can resurrect the submitted
+        // slash command after reload. This call is scoped to the captured owner SID.
         $('msg').value='';autoResize();hideCmdDropdown();
+        if(_cmdOwner.sid&&typeof _clearComposerDraft==='function'){
+          const _draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+          _clearComposerDraft(_cmdOwner.sid,text,_draftFiles);
+        }
         let _agentOutput='(no output)';
         try{
           _agentOutput=typeof executeAgentCommand==='function'
@@ -1600,9 +1605,12 @@ async function send(){
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
         }
-        // Ownership changed while the command ran: drop the reply rather than mutate whichever
-        // conversation is open now (same rule as the /skills owner-session guard).
-        if(!_cmdOwnerIsCurrent()) return;
+        // Ownership changed while the command ran: do not mutate whichever conversation is
+        // open now, but tell the user that the command completed without local transcript output.
+        if(!_cmdOwnerIsCurrent()){
+          if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was not added here.',4000,'warning');
+          return;
+        }
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         return;
