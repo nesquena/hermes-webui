@@ -1386,10 +1386,10 @@ def test_memory_command_routed_through_webui_agent_command_allowlist():
 def test_skills_write_approval_response_targets_owner_session_not_current():
     """A `/skills approve <id>` reply landing after the user has switched sessions
     must NOT be appended to whichever session happens to be open when the async
-    /api/commands/exec call resolves -- it must be dropped, the same owner-session
-    guard the delayed steer paths use (_steerOwnerIsCurrent). Real execution via a
-    node harness, not a mock of the guard itself: proves the actual message array
-    is left untouched, not just that a check function was called.
+    /api/commands/exec call resolves -- it must be withheld with a visible warning, the same
+    owner-session guard the delayed steer paths use (_steerOwnerIsCurrent). Real execution via a
+    node harness, not a mock of the guard itself: proves the actual message array is left
+    untouched and a warning is emitted.
     """
     import json
     import shutil
@@ -1418,7 +1418,9 @@ def test_skills_write_approval_response_targets_owner_session_not_current():
 
         const S = { session: { session_id: 'sid-A' }, messages: [] };
         let renderCount = 0;
+        let toastCount = 0;
         function renderMessages(){ renderCount++; }
+        function showToast(){ toastCount++; }
 
         %(cmd_skills_fn)s
 
@@ -1437,6 +1439,7 @@ def test_skills_write_approval_response_targets_owner_session_not_current():
             returnedTrueSynchronously: returned === true,
             newSessionMessages: S.messages.length,
             renderCalledAfterSwitch: renderCount,
+            warningShownAfterSwitch: toastCount,
           }));
         }, 20);
         """
@@ -1456,7 +1459,8 @@ def test_skills_write_approval_response_targets_owner_session_not_current():
         "session's) messages array -- it must be dropped instead")
     assert out["renderCalledAfterSwitch"] == 0, \
         "renderMessages() must not run for a response whose owner session is no longer current"
-
+    assert out["warningShownAfterSwitch"] == 1, \
+        "a withheld response must produce a visible non-sensitive warning"
 
 def _run_webui_agent_command_scenarios():
     """Execute the REAL awaited WebUI agent-command block from static/messages.js (the
@@ -1494,6 +1498,8 @@ def _run_webui_agent_command_scenarios():
             S: { session: initialSession, activeProfile: 'default', messages: [] },
             composer: { value: '/memory pending' },
             renders: 0,
+            toasts: 0,
+            clears: [],
             executeCalls: 0,
             transcripts: {},
             pending: {},
@@ -1508,6 +1514,8 @@ def _run_webui_agent_command_scenarios():
           const autoResize = () => {};
           const hideCmdDropdown = () => {};
           const renderMessages = () => { env.renders++; };
+          const showToast = () => { env.toasts++; };
+          const _clearComposerDraft = (sid, text, files) => { env.clears.push({ sid, text, files }); };
           const renderSessionList = async () => {};
           const newSession = async () => { S.session = { session_id: 'sid-NEW' }; S.messages = []; };
           const getAgentCommandMetadata = () => new Promise((res) => {
@@ -1540,6 +1548,8 @@ def _run_webui_agent_command_scenarios():
             executeCalls: env.executeCalls,
             currentMessages: S.messages.map((m) => m.role + ':' + m.content),
             renders: env.renders,
+            warnings: env.toasts,
+            clears: env.clears,
             currentSid: S.session && S.session.session_id,
           };
         }
@@ -1601,7 +1611,8 @@ def test_webui_agent_command_positive_control_delivers_and_clears_composer():
     assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
     assert out["composer"] == ""
     assert out["executeCalls"] == 1
-
+    assert out["warnings"] == 0
+    assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
 
 def test_webui_agent_command_switch_during_metadata_lookup_touches_nothing():
     """Switching sessions while the command-metadata lookup is in flight must not run the
@@ -1613,6 +1624,8 @@ def test_webui_agent_command_switch_during_metadata_lookup_touches_nothing():
     assert out["composer"] == "draft typed in B", (
         "the newly selected conversation's unsent composer draft was erased")
     assert out["executeCalls"] == 0, "command executed for an abandoned request"
+    assert out["warnings"] == 0
+    assert out["clears"] == []
 
 
 def test_webui_agent_command_switch_during_command_never_touches_new_conversation():
@@ -1625,6 +1638,8 @@ def test_webui_agent_command_switch_during_command_never_touches_new_conversatio
     assert out["composer"] == "draft typed in B", (
         "sid-B's unsent composer draft was erased by sid-A's command finishing")
     assert out["renders"] == 0, "renderMessages() must not run once ownership has changed"
+    assert out["warnings"] == 1, "a withheld completion must produce a visible warning"
+    assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
 
 
 def test_webui_agent_command_clears_origin_composer_before_awaiting_command():
@@ -1649,12 +1664,16 @@ def test_webui_agent_command_profile_switch_during_command_drops_reply():
     assert "assistant:memory result" not in out["currentMessages"], (
         "a reply produced under another profile was delivered after the profile changed")
     assert out["composer"] == "draft typed under other profile"
+    assert out["warnings"] == 1
+    assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
 
 
 def test_webui_agent_command_creates_session_and_delivers_to_it():
     out = _run_webui_agent_command_scenarios()["noSessionYet"]
     assert out["currentSid"] == "sid-NEW"
     assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+    assert out["warnings"] == 0
+    assert out["clears"] == [{"sid": "sid-NEW", "text": "/memory pending", "files": []}]
 
 
 def test_skills_write_approval_response_delivered_when_no_session_existed():
@@ -1696,7 +1715,9 @@ def test_skills_write_approval_response_delivered_when_no_session_existed():
         // No active session at invocation -- e.g. the last session was just deleted.
         const S = { session: null, messages: [] };
         let renderCount = 0;
+        let toastCount = 0;
         function renderMessages(){ renderCount++; }
+        function showToast(){ toastCount++; }
 
         %(cmd_skills_fn)s
 
@@ -1709,6 +1730,7 @@ def test_skills_write_approval_response_delivered_when_no_session_existed():
             messageCount: S.messages.length,
             lastMessageContent: S.messages.length ? S.messages[S.messages.length - 1].content : null,
             renderCalled: renderCount,
+            warningShown: toastCount,
           }));
         }, 20);
         """
@@ -1727,6 +1749,7 @@ def test_skills_write_approval_response_delivered_when_no_session_existed():
         "away from -- it must not be silently dropped")
     assert out["lastMessageContent"] == "No pending skill writes."
     assert out["renderCalled"] == 1
+    assert out["warningShown"] == 0
 
 
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
