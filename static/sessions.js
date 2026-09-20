@@ -345,6 +345,69 @@ function _clearComposerDraft(sid, text, files) {
   }).catch(() => {});
 }
 
+// Approval-command completions are not persisted by /api/commands/exec. Keep
+// owner-scoped records while a command finishes in a different session, then
+// merge them when that exact profile/session is reopened. This avoids mutating
+// whichever conversation happens to be visible at resolution time.
+const _approvalCommandSink = new Map();
+function _approvalCommandOwnerKey(profile, sid){
+  return `${String(profile||'default')}::${String(sid||'')}`;
+}
+function _stashApprovalCommandRecord(profile, sid, record){
+  if(!sid) return;
+  const key=_approvalCommandOwnerKey(profile,sid);
+  const records=_approvalCommandSink.get(key)||[];
+  records.push({...record, profile:String(profile||'default'), session_id:String(sid)});
+  _approvalCommandSink.set(key, records);
+}
+function _restoreOrStashApprovalDraft(profile, sid, text, files, command, error){
+  const draftText=String(text||'');
+  const draftFiles=Array.isArray(files)?[...files]:[];
+  const activeSid=S&&S.session&&S.session.session_id;
+  const activeProfile=S&&S.activeProfile||'default';
+  if(activeSid===sid&&_profileMatchesActiveProfile(profile,activeProfile)){
+    const composer=(typeof $==='function'&&$('msg'))||null;
+    if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
+      composer.value=draftText;
+      if(draftFiles.length) S.pendingFiles=draftFiles;
+      if(typeof autoResize==='function') autoResize();
+      if(typeof renderTray==='function'&&draftFiles.length) renderTray();
+      if(typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(sid,draftText,draftFiles);
+    }
+    return;
+  }
+  _stashApprovalCommandRecord(profile,sid,{state:'failed',command,draftText,draftFiles,error});
+}
+function _stashApprovalCommandCompletion(profile, sid, command, output, failed=false){
+  _stashApprovalCommandRecord(profile,sid,{state:failed?'failed':'completed',command,output:String(output||'(no output)')});
+}
+function _mergeApprovalCommandRecordsForSession(messages, session){
+  const sid=session&&session.session_id;
+  if(!sid) return messages;
+  const key=_approvalCommandOwnerKey(S&&S.activeProfile||'default',sid);
+  const records=_approvalCommandSink.get(key);
+  if(!records||!records.length) return messages;
+  const merged=Array.isArray(messages)?messages.slice():[];
+  for(const record of records){
+    if(record.state==='completed'||record.state==='failed'){
+      merged.push({role:'user',content:record.command,_ts:Date.now()/1000});
+      merged.push({role:'assistant',content:record.output||`Command failed: ${record.error||'transport error'}`,_ts:Date.now()/1000});
+    }
+    if(record.state==='failed'&&typeof _restoreComposerDraft==='function'){
+      const composer=(typeof $==='function'&&$('msg'))||null;
+      if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
+        composer.value=record.draftText||'';
+        if(Array.isArray(record.draftFiles)&&record.draftFiles.length) S.pendingFiles=[...record.draftFiles];
+        if(typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(sid,record.draftText,record.draftFiles);
+        if(typeof autoResize==='function') autoResize();
+        if(typeof renderTray==='function'&&record.draftFiles&&record.draftFiles.length) renderTray();
+      }
+    }
+  }
+  _approvalCommandSink.delete(key);
+  return merged;
+}
+
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
@@ -2178,6 +2241,7 @@ async function loadSession(sid){
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
+    S.messages=_mergeApprovalCommandRecordsForSession(S.messages,S.session);
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.busy=!!activeStreamId;  // #4354: Only assert busy if server confirms active stream.
@@ -2321,6 +2385,7 @@ async function loadSession(sid){
 
     // Attach pending user message if one is queued.
     _mergePendingSessionMessage(S.session,S.messages);
+    S.messages=_mergeApprovalCommandRecordsForSession(S.messages,S.session);
 
     // Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
     // in an isolated instance). `activeStreamId` was snapshotted BEFORE the

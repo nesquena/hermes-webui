@@ -1214,38 +1214,41 @@ const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','dro
 // a real active session/stream) but wrong here: a null ownerSid means there was no session to
 // begin with (e.g. right after deleting the last one), so there is nothing to have "switched
 // away from". Only a session that existed and then changed should discard the response.
-function _skillsResponseOwnerStillValid(ownerSid){
-  return !ownerSid || _steerOwnerIsCurrent(ownerSid);
+function _skillsResponseOwnerStillValid(ownerSid, ownerProfile){
+  if(ownerSid && !_steerOwnerIsCurrent(ownerSid)) return false;
+  if(ownerProfile && typeof _profileMatchesActiveProfile==='function'){
+    return _profileMatchesActiveProfile(ownerProfile,S.activeProfile||'default');
+  }
+  return true;
 }
 
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
-  // Captured now, before either branch awaits anything: if the user switches sessions
-  // before the response lands, S.messages/renderMessages() would otherwise write the
-  // response into whatever session is current AT RESOLUTION time, not the one that
-  // issued the command. Same owner-session guard the delayed steer paths use.
+  // Capture the complete owner before either branch awaits anything.
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
-  // Clear the originating session's persisted draft before either async branch starts;
-  // the outer send() clears the textarea, but the debounced server draft would otherwise
-  // resurrect this already-submitted slash command after a reload.
-  if(ownerSid&&typeof _clearComposerDraft==='function'){
-    const composer=(typeof $==='function'&&$('msg'))||(typeof document!=='undefined'&&document.getElementById('msg'));
-    const draftText=composer?String(composer.value||''):'/skills '+args;
-    const draftFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
-    _clearComposerDraft(ownerSid,draftText,draftFiles);
-  }
+  const ownerProfile=(typeof S!=='undefined'&&S.activeProfile)||'default';
+  const commandText='/skills '+(args||'');
+  const composer=(typeof $==='function'&&$('msg'))||(typeof document!=='undefined'&&document.getElementById('msg'));
+  const draftText=composer?String(composer.value||''):commandText;
+  const draftFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  // Clear the originating session's persisted draft before either async branch;
+  // a debounced save must not resurrect this already-submitted slash command.
+  if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,draftText,draftFiles);
   if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
     (async()=>{
-      let out;
+      let out, failed=false;
       try{
-        out = await _runAgentCommandTransport('/skills '+args);
+        out = await _runAgentCommandTransport(commandText);
       }catch(e){
+        failed=true;
         out = `Skill write-approval command failed: ${e&&e.message||e}`;
       }
-      if(!_skillsResponseOwnerStillValid(ownerSid)){
-        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was not added here.',4000,'warning');
+      if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
+        if(typeof _stashApprovalCommandRecord==='function') _stashApprovalCommandRecord(ownerProfile,ownerSid,{state:failed?'failed':'completed',command:commandText,output:String(out||'(no output)'),draftText,draftFiles});
+        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was retained for the originating session.',4000,'warning');
         return;
       }
+      if(failed&&typeof _restoreOrStashApprovalDraft==='function') _restoreOrStashApprovalDraft(ownerProfile,ownerSid,draftText,draftFiles,commandText,out);
       S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
       renderMessages();
     })();
@@ -1263,8 +1266,10 @@ function cmdSkills(args){
           (s.category||'').toLowerCase().includes(q)
         );
       }
-      if(!_skillsResponseOwnerStillValid(ownerSid)){
-        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was not added here.',4000,'warning');
+      if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
+        const output=skills.length?`Available skills (${skills.length}).`:(args?`No skills matching "${args}".`:'No skills found.');
+        if(typeof _stashApprovalCommandCompletion==='function') _stashApprovalCommandCompletion(ownerProfile,ownerSid,commandText,output,false);
+        if(typeof showToast==='function') showToast('Command completed after you switched conversations; its output was retained for the originating session.',4000,'warning');
         return;
       }
       if(!skills.length){
@@ -1294,6 +1299,13 @@ function cmdSkills(args){
       renderMessages();
       showToast(t('type_slash'));
     }catch(e){
+      if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
+        const output=`Failed to load skills: ${e&&e.message||e}`;
+        if(typeof _stashApprovalCommandRecord==='function') _stashApprovalCommandRecord(ownerProfile,ownerSid,{state:'failed',command:commandText,output,draftText,draftFiles});
+        if(typeof showToast==='function') showToast('Command failed after you switched conversations; its output and draft were retained for the originating session.',4000,'warning');
+        return;
+      }
+      if(typeof _restoreOrStashApprovalDraft==='function') _restoreOrStashApprovalDraft(ownerProfile,ownerSid,draftText,draftFiles,commandText,e&&e.message||e);
       showToast('Failed to load skills: '+e.message);
     }
   })();
