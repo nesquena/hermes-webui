@@ -10133,7 +10133,72 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
-def _tool_result_is_error(function_result) -> bool:
+def _emit_tool_complete_to_mirrors_and_sse(
+    *,
+    tool_call_id,
+    name,
+    args,
+    function_result,
+    live_tool_calls_list,
+    shared_tool_calls_list,
+    put,
+    record_live_tool_complete,
+    args_snapshot_fn,
+    is_error_override=None,
+) -> bool:
+    """#7358: shared body for the structured ``on_tool_complete`` path.
+    Computes ``is_error`` once, writes it into the per-stream
+    ``_live_tool_calls`` mirror AND the cross-process
+    ``STREAM_LIVE_TOOL_CALLS`` mirror, then emits the
+    ``tool_complete`` SSE payload with the same value so the
+    WebUI card and the native clients (Hermex) agree.
+
+    Extracted as a module-level helper so the cancellation-vs-live
+    agreement can be tested without driving the full
+    ``_run_agent_streaming`` generator. The on_tool_complete closure
+    is a thin wrapper that just supplies the closure-bound lists and
+    ``put`` sink.
+
+    ``is_error_override`` exists only for tests that want to pin the
+    exact classification; production callers always pass ``None`` so
+    the helper re-derives it from the payload.
+    """
+    is_error = (
+        is_error_override
+        if is_error_override is not None
+        else _tool_result_is_error(name, function_result)
+    )
+    record_live_tool_complete(tool_call_id, name, function_result)
+    result_snippet = _tool_result_snippet(function_result)
+    for live_tc in reversed(live_tool_calls_list):
+        if live_tc.get('done'):
+            continue
+        if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
+            live_tc['done'] = True
+            live_tc['snippet'] = result_snippet
+            live_tc['is_error'] = is_error
+            break
+    for shared_tc in reversed(shared_tool_calls_list):
+        if shared_tc.get('done'):
+            continue
+        if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
+            shared_tc['done'] = True
+            shared_tc['snippet'] = result_snippet
+            shared_tc['is_error'] = is_error
+            break
+    _checkpoint_activity_holder = []
+    put('tool_complete', {
+        'event_type': 'tool.completed',
+        'name': name,
+        'preview': result_snippet,
+        'args': args_snapshot_fn(args),
+        'tid': tool_call_id,
+        'is_error': is_error,
+    })
+    return is_error
+
+
+def _tool_result_is_error(name, function_result) -> bool:
     """#7358: the structured tool_complete callback signature is
     ``(tool_call_id, name, args, function_result)`` and does not
     receive the already-classified ``is_error`` bit that the sibling
@@ -10142,10 +10207,16 @@ def _tool_result_is_error(function_result) -> bool:
     helper (it lives in the agent repo), so re-derive a conservative
     failure flag from the structured payload.
 
-    Only the two most-explicit failure signals are matched:
-    ``is_error: true`` and ``success: false``. Other ambiguous
-    payload shapes (e.g. an ``error`` key that may be informational,
-    or a custom ``status`` field) are deliberately left to the
+    The classification mirrors the Agent's own _detect_tool_failure
+    shape (terminal exit_code, memory store-full, success:false +
+    error/message, JSON-string "error"/"failed" markers) so the
+    WebUI card stays in sync with the CLI's ``[error]`` tag and the
+    red icon on native clients (Hermex).
+
+    The two most-explicit signals win over the broader heuristics:
+    ``is_error: true`` is always a failure regardless of other
+    fields. Ambiguous shapes (an ``error`` key without ``success:
+    false``, a custom ``status`` field) are deliberately left to the
     default ``False`` so the change cannot accidentally flip a
     success card to failed. The gateway translator at
     ``api/gateway_chat.py:508-518`` already classifies its own
@@ -10154,7 +10225,29 @@ def _tool_result_is_error(function_result) -> bool:
     if isinstance(function_result, dict):
         if function_result.get('is_error') is True:
             return True
+        # Terminal: non-zero exit_code is the canonical failure
+        # signal. This mirrors the Agent's own _detect_tool_failure
+        # at agent/display.py:910-915 so the WebUI card stays in
+        # sync with the CLI's ``[error]`` tag.
+        if name == 'terminal':
+            exit_code = function_result.get('exit_code')
+            if exit_code is not None and exit_code != 0:
+                return True
+            return False
         if function_result.get('success') is False:
+            # Memory: only count as failure when the "store full"
+            # signal is present, matching the Agent's own guard.
+            if name == 'memory':
+                return 'exceed the limit' in str(function_result.get('error', ''))
+            # Other tools: success:false with any error/message is
+            # a failure. success:false alone also counts.
+            if function_result.get('error') or function_result.get('message'):
+                return True
+            return True
+        return False
+    if isinstance(function_result, str):
+        head = function_result[:500].lower()
+        if '"error"' in head or '"failed"' in head or function_result.startswith('Error'):
             return True
     return False
 
@@ -13116,44 +13209,34 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
-                    _record_live_tool_complete(tool_call_id, name, function_result)
-                    if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
-                        _live_tool_event_complete_ids.add(tool_call_id)
-                        result_snippet = _tool_result_snippet(function_result)
-                        for live_tc in reversed(_live_tool_calls):
-                            if live_tc.get('done'):
-                                continue
-                            if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
-                                live_tc['done'] = True
-                                live_tc['snippet'] = result_snippet
-                                break
-                        if stream_id in STREAM_LIVE_TOOL_CALLS:
-                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                if shared_tc.get('done'):
-                                    continue
-                                if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
-                                    shared_tc['done'] = True
-                                    shared_tc['snippet'] = result_snippet
-                                    break
+                    # #7358: delegate to the module-level helper so
+                    # live_tc, shared_tc, and the SSE payload all
+                    # agree on is_error. Without the mirror writes,
+                    # a failed tool would render red live and then
+                    # become a successful/completed card after
+                    # cancel + reload — see
+                    # api/streaming.py:14009-14017 where
+                    # _build_partial_message persists the shared
+                    # mirror through _partial_tool_calls.
+                    seen_ids = _live_tool_event_complete_ids
+                    if tool_call_id and tool_call_id not in seen_ids:
+                        seen_ids.add(tool_call_id)
+                        _emit_tool_complete_to_mirrors_and_sse(
+                            tool_call_id=tool_call_id,
+                            name=name,
+                            args=args,
+                            function_result=function_result,
+                            live_tool_calls_list=_live_tool_calls,
+                            shared_tool_calls_list=(
+                                STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
+                                if stream_id in STREAM_LIVE_TOOL_CALLS
+                                else []
+                            ),
+                            put=put,
+                            record_live_tool_complete=_record_live_tool_complete,
+                            args_snapshot_fn=_tool_args_snapshot,
+                        )
                         _checkpoint_activity[0] += 1
-                        put('tool_complete', {
-                            'event_type': 'tool.completed',
-                            'name': name,
-                            'preview': result_snippet,
-                            'args': _tool_args_snapshot(args),
-                            'tid': tool_call_id,
-                            # #7358: source the error bit from the
-                            # structured payload so the WebUI and
-                            # native clients (e.g. Hermex) render the
-                            # correct Completed/Failed card. The
-                            # sibling tool_progress_callback already
-                            # classifies this for its own event;
-                            # _tool_result_is_error() mirrors the
-                            # conservative shape of the Agent's own
-                            # _detect_tool_failure() on the
-                            # four-arg structured callback path.
-                            'is_error': _tool_result_is_error(function_result),
-                        })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
                         # update in real-time without waiting for the
