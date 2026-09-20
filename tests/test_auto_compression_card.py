@@ -1046,8 +1046,8 @@ def test_preserved_task_list_skips_normal_visible_message_path():
 
     vis_idx_start = src.find("for(const m of S.messages)", helper_end)
     assert vis_idx_start != -1, "raw message index loop not found"
-    vis_idx_end = src.find("let lastUserRawIdx", vis_idx_start)
-    assert vis_idx_end != -1, "last user index lookup after raw message loop not found"
+    vis_idx_end = src.find("const insertionAnchorFull=_compressionAnchorIndex(", vis_idx_start)
+    assert vis_idx_end != -1, "insertion anchor lookup after raw message loop not found"
     vis_idx_loop = src[vis_idx_start:vis_idx_end]
     assert "if(_isPreservedCompressionTaskListMessage(m))" in vis_idx_loop
     assert "preservedCompressionRawIdxs.push(rawIdx)" in vis_idx_loop
