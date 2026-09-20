@@ -22567,9 +22567,15 @@ def _handle_cron_run_detail(handler, parsed):
     try:
         content = fpath.read_text(encoding="utf-8", errors="replace")
         snippet = _cron_output_snippet(content)
+        # #7303: surface the shared parser projection so the UI can
+        # render response-first without re-parsing the artifact in
+        # the browser.
+        from api.cron_output_parser import parse_cron_output
+        parsed_projection = parse_cron_output(content).to_dict()
         usage = _cron_output_usage_metadata(content)
         return j(handler, {"job_id": job_id, "filename": filename,
                            "content": content, "snippet": snippet,
+                           "parsed": parsed_projection,
                            "usage": usage})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=500)
@@ -22633,23 +22639,16 @@ def _cron_output_usage_metadata(text: str) -> dict:
 
 
 def _cron_output_snippet(text: str, limit: int = 600) -> str:
-    """Extract the response body from a cron output .md file for preview.
+    """Backwards-compatible snippet helper.
 
-    Contract: cron output files use markdown front-matter followed by a
-    ``## Response`` (or ``# Response``) heading that marks the start of the
-    agent's reply.  This function locates that heading and returns everything
-    after it (up to *limit* chars).  If no heading is found the entire text
-    is returned — callers should be aware that front-matter fields (model,
-    timestamp, …) may appear in the snippet.
+    Issue #7303: the parser is now in :mod:`api.cron_output_parser` so
+    the collapsed and expanded views can share one projection. The
+    snippet function preserves the legacy contract (extract text
+    after the ``## Response`` heading, capped at *limit*) so existing
+    callers and the ``test_cron_run`` snapshot tests keep working.
     """
-    lines = text.split("\n")
-    response_idx = -1
-    for i, line in enumerate(lines):
-        if line.startswith("## Response") or line.startswith("# Response"):
-            response_idx = i
-            break
-    body = ("\n".join(lines[response_idx + 1:]) if response_idx >= 0 else "\n".join(lines)).strip()
-    return body[:limit] or "(empty)"
+    from api.cron_output_parser import response_snippet as _response_snippet
+    return _response_snippet(text, limit=limit)
 
 
 def _handle_cron_output(handler, parsed):
@@ -22678,11 +22677,20 @@ def _handle_cron_output(handler, parsed):
     out_dir = CRON_OUT / job_id
     outputs = []
     if out_dir.exists():
+        # #7303: use the shared parser so the collapsed preview and the
+        # expanded view render the same response-first projection. The
+        # endpoint now returns both the parsed projection and the
+        # truncated raw content window.
+        from api.cron_output_parser import parse_cron_output
         files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
         for f in files:
             try:
                 txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": _cron_output_content_window(txt)})
+                outputs.append({
+                    "filename": f.name,
+                    "content": _cron_output_content_window(txt),
+                    "parsed": parse_cron_output(txt).to_dict(),
+                })
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
     return j(handler, {"job_id": job_id, "outputs": outputs})
