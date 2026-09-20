@@ -874,15 +874,21 @@ def test_commands_exec_routes_skills_pending_over_http():
 
     Deliberately NOT gated on `requires_agent_modules`: CI has no hermes-agent installed, so a
     skip there would make this test collect-and-pass while asserting nothing (the exact failure
-    mode of a silently-skipping suite). Without the agent the dispatcher answers with its generic
-    'runtime unavailable' text; with it, the real pending listing. Either way the request must be
-    routed (200 + a string), which is what fails if the allowlist or dispatch wiring regresses.
-    The handler's behavior against a fake agent is covered in-process by
+    mode of a silently-skipping suite). Both environments prove the request was ROUTED:
+      * agent present  -> 200 with the real pending listing;
+      * agent absent   -> 500 with the dispatcher's own generic 'runtime unavailable' error
+        (raised only AFTER the allowlist + dispatch accepted the command).
+    A regression in the allowlist or dispatch wiring yields 404 (KeyError -> unsupported), which
+    fails both branches. The handler's behavior against a fake agent is covered in-process by
     test_skills_pending_dispatches_to_write_approval_handler."""
     status, body = _post('/api/commands/exec', {'command': '/skills pending'})
-    assert status == 200, body
-    assert isinstance(body.get('output'), str) and body['output'].strip()
-    assert 'not a supported' not in body['output'].lower()
+    assert status != 404, f"/skills was rejected as an unsupported command: {body}"
+    if status == 200:
+        assert isinstance(body.get('output'), str) and body['output'].strip()
+        assert 'not a supported' not in body['output'].lower()
+    else:
+        assert status == 500, (status, body)
+        assert body == {'error': 'Skill write-approval runtime unavailable'}, body
 
 
 def test_reload_mcp_error_is_generic(monkeypatch):
