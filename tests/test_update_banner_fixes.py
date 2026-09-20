@@ -340,28 +340,18 @@ class TestUpdateChecker:
     def test_detect_agent_version_falls_back_to_gateway_health(self, monkeypatch):
         import api.updates as upd
 
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self):
-                return b'{"status":"ok","platform":"hermes-agent","version":"0.14.1"}'
-
         seen = []
 
-        def fake_urlopen(url, timeout=0):
-            seen.append((url, timeout))
-            return FakeResponse()
+        def fake_probe(base, *, timeout_s):
+            seen.append((base, timeout_s))
+            return '0.14.1'
 
         monkeypatch.setattr(upd, '_AGENT_DIR', None)
         monkeypatch.setenv('GATEWAY_HEALTH_URL', 'http://hermes-agent:8642/health')
-        monkeypatch.setattr(upd.urllib.request, 'urlopen', fake_urlopen)
+        monkeypatch.setattr(upd, '_probe_agent_version', fake_probe)
 
         assert upd._detect_agent_version() == '0.14.1'
-        assert seen == [('http://hermes-agent:8642/health', 0.75)]
+        assert seen == [('http://hermes-agent:8642', 0.75)]
 
 
 class TestConflictError:

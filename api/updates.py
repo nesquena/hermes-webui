@@ -578,16 +578,7 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
     parsed = urlparse(base)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return None
-    for path in ('/health', '/health/detailed'):
-        try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        version = _version_from_gateway_health_payload(payload)
-        if version:
-            return version
-    return None
+    return _probe_agent_version(base, timeout_s=timeout)
 
 
 def _probe_agent_version(base: str, *, timeout_s: float) -> str | None:
