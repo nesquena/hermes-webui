@@ -14044,9 +14044,13 @@ def handle_get(handler, parsed) -> bool:
         # Inject the running version so the UI badge stays in sync with git tags
         # without any manual release step.
         try:
-            from api.updates import AGENT_VERSION, WEBUI_VERSION
+            from api.updates import (
+                AGENT_VERSION,
+                WEBUI_VERSION,
+                resolve_runtime_agent_version,
+            )
             settings["webui_version"] = WEBUI_VERSION
-            settings["agent_version"] = AGENT_VERSION
+            settings["agent_version"] = resolve_runtime_agent_version() or AGENT_VERSION
         except Exception:
             pass
         # Channel-scoped display badge — SEPARATE from webui_version (which is

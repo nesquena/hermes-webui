@@ -325,7 +325,8 @@ class TestSettingsEndpointVersion:
             captured['data'] = data
 
         with patch('api.routes.load_settings', return_value=dict(minimal_settings)), \
-             patch('api.routes.j', side_effect=fake_j):
+             patch('api.routes.j', side_effect=fake_j), \
+             patch('api.updates.resolve_runtime_agent_version', return_value=None):
             routes.handle_get(handler, parsed)
 
         assert 'webui_version' in captured.get('data', {}), (
@@ -336,6 +337,55 @@ class TestSettingsEndpointVersion:
             '/api/settings response must contain agent_version key'
         )
         assert captured['data']['agent_version'] == upd.AGENT_VERSION
+
+    def test_api_settings_prefers_live_runtime_agent_version(self):
+        """The running gateway version must beat a newer on-disk/static version."""
+        import api.routes as routes
+
+        handler = MagicMock()
+        from urllib.parse import urlparse
+        parsed = urlparse('/api/settings')
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured['data'] = data
+
+        with patch('api.routes.load_settings', return_value={}), \
+             patch('api.routes.j', side_effect=fake_j), \
+             patch('api.updates.AGENT_VERSION', 'v0.53-on-disk-newer'), \
+             patch(
+                 'api.updates.resolve_runtime_agent_version',
+                 return_value='v0.52-running-older',
+             ):
+            routes.handle_get(handler, parsed)
+
+        assert captured['data']['agent_version'] == 'v0.52-running-older'
+
+    def test_api_settings_refreshes_runtime_agent_version_per_request(self):
+        """A long-lived WebUI process must see an Agent restart on the next request."""
+        import api.routes as routes
+
+        handler = MagicMock()
+        from urllib.parse import urlparse
+        parsed = urlparse('/api/settings')
+        captured = []
+
+        def fake_j(h, data, status=200):
+            captured.append(dict(data))
+
+        with patch('api.routes.load_settings', return_value={}), \
+             patch('api.routes.j', side_effect=fake_j), \
+             patch(
+                 'api.updates.resolve_runtime_agent_version',
+                 side_effect=['v0.52-before-restart', 'v0.52-after-restart'],
+             ):
+            routes.handle_get(handler, parsed)
+            routes.handle_get(handler, parsed)
+
+        assert [item['agent_version'] for item in captured] == [
+            'v0.52-before-restart',
+            'v0.52-after-restart',
+        ]
 
     def test_api_settings_webui_version_not_empty(self):
         """webui_version and agent_version in /api/settings must be non-empty strings."""
@@ -351,7 +401,8 @@ class TestSettingsEndpointVersion:
             captured['data'] = data
 
         with patch('api.routes.load_settings', return_value={}), \
-             patch('api.routes.j', side_effect=fake_j):
+             patch('api.routes.j', side_effect=fake_j), \
+             patch('api.updates.resolve_runtime_agent_version', return_value=None):
             routes.handle_get(handler, parsed)
 
         version = captured.get('data', {}).get('webui_version', '')
