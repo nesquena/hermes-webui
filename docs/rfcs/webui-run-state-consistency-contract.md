@@ -207,6 +207,13 @@ and 5; it does not mark every run-state boundary implemented.
    and idempotent.
    Agent state.db alone cannot restore the original attachment if the WebUI
    sidecar is lost.
+   Sidecar-lineage traversal may avoid loading a truncate-to-empty snapshot
+   ancestor only when metadata proves its complete older fold contributes no
+   rows. The optimization must first preserve explicit-fork isolation and the
+   cumulative visible-prefix return; missing, invalid, or prefix-permitting
+   metadata falls back to the full traversal. Because skipped ancestry lacks
+   complete provenance, shortcut results remain excluded from the lineage
+   display cache and must serialize identically to the unoptimized traversal.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
