@@ -614,6 +614,29 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     )
                 )
 
+    def test_session_media_token_allows_wrapped_and_punctuated_image_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            image = pathlib.Path(tmpd) / "card.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            for content in (
+                f"**MEDIA:{image}**",
+                f"MEDIA:{image}.",
+                f'"MEDIA:{image}".',
+                f"'MEDIA:{image}'.",
+            ):
+                with self.subTest(content=content):
+                    session = SimpleNamespace(
+                        messages=[{"role": "assistant", "content": content}]
+                    )
+                    with mock.patch.object(routes, "get_session", return_value=session):
+                        self.assertTrue(
+                            routes._session_media_token_allows_image_path(
+                                "s-media", image, {"image/png"}
+                            )
+                        )
+
     def test_session_media_token_rejects_unmentioned_image_path(self):
         from api import routes
 
