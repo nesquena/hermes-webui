@@ -125,10 +125,11 @@ api/routes.py
     ↓
 resolve_runtime_agent_version()
     ↓
-┌─ single canonical helper (api.updates):
-│      gateway_url = resolve_gateway_base_url()      # shared chokepoint
-│      headers     = resolve_gateway_auth_headers()  # shared chokepoint
-│      payload     = GET {gateway_url}/health[detailed] with headers, bounded timeout
+┌─ canonical gateway helpers (api.agent_health + api.updates):
+│      gateway_url = resolve_gateway_base_url()
+│      paths       = shared _REMOTE_PROBE_PATHS
+│      probe       = shared _http_probe()             # bounded body + no redirects
+│      auth        = shared _remote_gateway_api_key()
 │      version     = _version_from_gateway_health_payload(payload)
 │
 ├─ version confirmed     → settings["agent_version"] = version
@@ -163,11 +164,19 @@ Required URL precedence, aligned with `api/agent_health._remote_gateway_base_url
 Required trailing-suffix normalization (must mirror `_remote_gateway_base_url`):
 
 - strip `/health/detailed`
-- strip `/health`
 - strip `/v1/health`
+- strip `/health`
 - strip `/status`
 
 Trailing slashes are stripped.
+
+Required probe paths must mirror the shared gateway-health subsystem exactly:
+
+1. `/health/detailed`
+2. `/health`
+3. `/v1/health`
+
+The runtime-version resolver must consume the shared probe path list rather than maintaining a second hardcoded list.
 
 Required authentication, aligned with `api/agent_health._remote_gateway_api_key()`:
 
@@ -175,9 +184,11 @@ Required authentication, aligned with `api/agent_health._remote_gateway_api_key(
 - When present, attach `Authorization: Bearer <key>` to the probe request.
 - A configured/reachable gateway must not be falsely treated as absent solely because the version path forgot the API key.
 
-Probe timeouts:
+Probe safety:
 
 - Per-request bounded; the concrete budget is the same order of magnitude as the existing 0.75 s probe in `_detect_agent_version_from_gateway_health()` but **explicitly tested** for the runtime-version path (see §6 Case C and §11).
+- The shared gateway health HTTP client must reject redirects so a Bearer credential cannot be forwarded to another origin.
+- Successful response bodies are capped using the existing gateway-health body limit before JSON decode; oversized payloads are treated as unconfirmed version data.
 - No global module-level cache.
 
 This specification does **not** authorise a larger gateway-health refactor. Only the minimum sharing/alignment required to make version resolution correct is in scope.
@@ -318,7 +329,8 @@ Ownership:
 
 Expected production files:
 
-- `api/updates.py` — add the canonical URL/auth helpers (or refactor existing `_gateway_health_base_url` to match `_remote_gateway_base_url` semantics and add an auth helper); add a single per-request `resolve_runtime_agent_version()` that uses them and returns the gateway version or `None`.
+- `api/updates.py` — add the per-request runtime resolver and reuse the shared gateway URL/auth/probe semantics from `api.agent_health`.
+- `api/agent_health.py` — harden the shared HTTP probe so authenticated health requests reject redirects and retain the existing bounded-body contract.
 - `api/routes.py` — change the `settings["agent_version"]` injection at `~line 14047` to call `resolve_runtime_agent_version()` first and fall back to `AGENT_VERSION`.
 
 Expected tests:
@@ -362,22 +374,14 @@ def resolve_gateway_base_url() -> str | None:
     local-only setups).
     """
 
-def resolve_gateway_auth_headers() -> dict[str, str]:
-    """Return Authorization headers for the runtime-version probe.
-
-    Honours HERMES_WEBUI_GATEWAY_API_KEY then API_SERVER_KEY, matching
-    api.agent_health._remote_gateway_api_key. Returns {} when no key is set.
-    The returned dict must never include the secret value as a query string.
-    """
-
 def resolve_runtime_agent_version(*, timeout_s: float = 0.75) -> str | None:
     """Return the live Agent runtime version, or None when no confirmed value.
 
-    Single per-request probe. Uses resolve_gateway_base_url +
-    resolve_gateway_auth_headers + a bounded HTTP GET against /health and
-    /health/detailed. Never raises; never returns ''; returns None on any
-    network failure, non-2xx, malformed JSON, or JSON without a recognised
-    version field. Never logs credentials or secrets.
+    Single per-request resolution. Reuses api.agent_health's canonical
+    gateway API key, shared probe paths, redirect-safe HTTP probe, and
+    bounded-body limit. Never raises; never returns ''; returns None on any
+    network failure, redirect, non-2xx, oversized body, malformed JSON, or
+    JSON without a recognised version field. Never logs credentials or secrets.
     """
 ```
 
@@ -428,12 +432,18 @@ Implementation begins only after a regression test is written and shown to fail 
    - With `GATEWAY_HEALTH_URL=http://host:port/health` set, the trailing `/health` must be stripped and the probe must hit `http://host:port/health`.
 
 5. **Authenticated gateway semantics**
-   - With `HERMES_WEBUI_GATEWAY_API_KEY=secret` set, the probe must include `Authorization: Bearer secret`.
-   - With `API_SERVER_KEY=secret` set (and no `HERMES_WEBUI_GATEWAY_API_KEY`), the probe must include `Authorization: Bearer secret`.
+   - With `HERMES_WEBUI_GATEWAY_API_KEY=secret` set, the authenticated health probe must include `Authorization: Bearer secret`.
+   - With `API_SERVER_KEY=secret` set (and no `HERMES_WEBUI_GATEWAY_API_KEY`), the authenticated health probe must include `Authorization: Bearer secret`.
    - Without any key set, no `Authorization` header is sent.
-   - In all three cases, the secret value must not appear in `settings["agent_version"]` or any other settings field.
+   - Redirect responses are not followed by the authenticated probe.
+   - In all cases, the secret value must not appear in `settings["agent_version"]` or any other settings field.
 
-6. **Existing WebUI version behaviour unchanged (Case E)**
+6. **Probe path and body safety**
+   - If only `/v1/health` returns a usable version, the resolver returns that version.
+   - Oversized health bodies are not decoded and return no confirmed runtime version.
+   - Shared gateway-health probe behaviour remains bounded and redirect-safe.
+
+7. **Existing WebUI version behaviour unchanged (Case E)**
    - `settings["webui_version"] == WEBUI_VERSION` (the module constant).
    - `WEBUI_VERSION` resolution code path is byte-identical.
 

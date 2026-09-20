@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import pytest
@@ -44,7 +46,7 @@ def test_remote_gateway_healthy_when_200(monkeypatch):
         calls.append(req.full_url)
         return _FakeResp(200)
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is True
@@ -53,13 +55,66 @@ def test_remote_gateway_healthy_when_200(monkeypatch):
     assert calls and calls[0].startswith("http://gateway:8080/")
 
 
+def test_http_probe_rejects_redirect_without_forwarding_bearer():
+    """Authenticated gateway probes must never forward credentials through redirects."""
+    received_authorization: list[str | None] = []
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received_authorization.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+
+        def log_message(self, format, *args):
+            return
+
+    target_server = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    target_thread = threading.Thread(target=target_server.serve_forever, daemon=True)
+    target_thread.start()
+    target_url = f"http://127.0.0.1:{target_server.server_port}/health"
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", target_url)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_thread = threading.Thread(target=redirect_server.serve_forever, daemon=True)
+    redirect_thread.start()
+
+    try:
+        ok, status, error, body = agent_health._http_probe(
+            f"http://127.0.0.1:{redirect_server.server_port}/health",
+            1.0,
+            api_key="probe-secret",
+        )
+    finally:
+        redirect_server.shutdown()
+        redirect_server.server_close()
+        target_server.shutdown()
+        target_server.server_close()
+        redirect_thread.join(timeout=2)
+        target_thread.join(timeout=2)
+
+    assert ok is False
+    assert status == 302
+    assert error == "HTTPError"
+    assert body is None
+    assert received_authorization == []
+
+
 def test_remote_gateway_unreachable_when_network_error(monkeypatch):
     monkeypatch.setenv("HERMES_API_URL", "http://gateway:8080/")
 
     def fake_urlopen(req, timeout=None):
         raise OSError("connection refused")
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is False
@@ -92,7 +147,7 @@ def test_remote_probe_result_cached_for_5s(monkeypatch):
         call_count["n"] += 1
         return _FakeResp(200)
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         first = agent_health.build_agent_health_payload()
         second = agent_health.build_agent_health_payload()
 
@@ -116,7 +171,7 @@ def test_gateway_state_populated_from_health_detailed(monkeypatch):
     def fake_urlopen(req, timeout=None):
         return _FakeResp(200, body=body)
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is True
@@ -134,7 +189,7 @@ def test_probe_order_prefers_health_detailed(monkeypatch):
         # Return 200 on first hit so the loop stops immediately
         return _FakeResp(200, body=b'{"gateway_state": "running"}')
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         agent_health.build_agent_health_payload()
 
     assert len(probed_urls) == 1
@@ -151,7 +206,7 @@ def test_health_detailed_probe_sends_bearer_when_api_key_configured(monkeypatch)
         captured_headers.append(dict(req.header_items()))
         return _FakeResp(200, body=json.dumps({"gateway_state": "running"}).encode())
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is True
@@ -171,7 +226,7 @@ def test_health_detailed_falls_back_to_api_server_key(monkeypatch):
         captured_headers.append(dict(req.header_items()))
         return _FakeResp(200, body=b'{"gateway_state": "running"}')
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         agent_health.build_agent_health_payload()
 
     assert captured_headers[0].get("Authorization") == "Bearer shared-secret"
@@ -187,7 +242,7 @@ def test_health_probe_does_not_send_bearer_without_api_key(monkeypatch):
         captured_headers.append(dict(req.header_items()))
         return _FakeResp(200, body=b'{"gateway_state": "running"}')
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         agent_health.build_agent_health_payload()
 
     assert "Authorization" not in captured_headers[0]
@@ -204,7 +259,7 @@ def test_gateway_health_url_env_used(monkeypatch):
         probed_urls.append(req.full_url)
         return _FakeResp(200, body=b'{}')
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is True
@@ -243,7 +298,7 @@ def test_gateway_health_url_with_health_suffix_is_normalized(monkeypatch):
             return _FakeResp(200, body=json.dumps({"gateway_state": "running"}).encode())
         return _FakeResp(404)
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert all("/health/health" not in u for u in probed), probed
@@ -274,7 +329,7 @@ def test_gateway_webui_base_url_env_is_used_for_remote_probe(monkeypatch):
         seen.append(req.full_url)
         return _FakeResp(200, body=b'{"gateway_state":"running"}')
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is True
@@ -297,7 +352,7 @@ def test_oversized_remote_body_does_not_hang_and_skips_parse(monkeypatch):
     def fake_urlopen(req, timeout=None):
         return _HugeResp(200, body=huge)
 
-    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+    with mock.patch.object(agent_health, "_open_no_redirect", fake_urlopen):
         payload = agent_health.build_agent_health_payload()
 
     assert captured_amt and all(a is not None for a in captured_amt)

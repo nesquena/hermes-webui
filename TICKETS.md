@@ -45,8 +45,10 @@ This ticket does **not** wire the resolver into `/api/settings` yet.
   3. `HERMES_API_URL`
   4. `HERMES_WEBUI_GATEWAY_BASE_URL`
 - [ ] `/health/detailed`, `/health`, `/v1/health`, and `/status` suffixes are normalized consistently.
-- [ ] A single `resolve_gateway_auth_headers()` honors `HERMES_WEBUI_GATEWAY_API_KEY` before `API_SERVER_KEY`.
-- [ ] `resolve_runtime_agent_version(timeout_s=...)` performs a bounded live probe on every call.
+- [ ] Runtime-version probing reuses the shared gateway-health auth semantics: `HERMES_WEBUI_GATEWAY_API_KEY` before `API_SERVER_KEY`.
+- [ ] `resolve_runtime_agent_version(timeout_s=...)` performs a bounded live probe on every call through the shared health-probe path list.
+- [ ] Authenticated health redirects are rejected and cannot forward the gateway Bearer credential.
+- [ ] Oversized health bodies are rejected before JSON decode using the shared body cap.
 - [ ] A recognized gateway version is returned as a non-empty string.
 - [ ] Network error, timeout, non-2xx response, malformed JSON, or missing version returns `None`; the helper does not raise.
 - [ ] No module-level cache is introduced.

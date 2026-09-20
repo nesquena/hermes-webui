@@ -463,6 +463,20 @@ _REMOTE_PROBE_PATHS: tuple[str, ...] = ("/health/detailed", "/health", "/v1/heal
 # slow-trickled remote response can't hang /api/health/agent or balloon memory.
 _REMOTE_PROBE_BODY_LIMIT_BYTES: int = 64 * 1024
 
+
+class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    """Reject health-probe redirects so Bearer credentials stay on the configured origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_no_redirect(req, timeout=None):
+    """Open a gateway-health request without following redirects."""
+    opener = urllib_request.build_opener(_NoRedirectHandler)
+    return opener.open(req, timeout=timeout)
+
+
 _remote_probe_lock = threading.Lock()
 # Condition wraps the same lock so cache reads/writes and single-flight waits
 # share one mutex (mirrors the Condition(_lock) idiom in api/session_lifecycle).
@@ -547,7 +561,7 @@ def _http_probe(
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib_request.Request(url, method="GET", headers=headers)
     try:
-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
+        with _open_no_redirect(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
             status = getattr(resp, "status", None) or resp.getcode()
             ok = 200 <= int(status) < 300
             # Cap the body read: we only need a small JSON health payload, and an

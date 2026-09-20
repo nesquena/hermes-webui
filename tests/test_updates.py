@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -105,15 +107,15 @@ def test_runtime_version_gateway_base_url_uses_documented_precedence(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ('primary_key', 'fallback_key', 'expected'),
+    ('primary_key', 'fallback_key', 'expected_auth'),
     [
         ('primary-secret', 'fallback-secret', 'Bearer primary-secret'),
         (None, 'fallback-secret', 'Bearer fallback-secret'),
         (None, None, None),
     ],
 )
-def test_runtime_version_gateway_auth_matches_health_contract(
-    monkeypatch, primary_key, fallback_key, expected,
+def test_resolve_runtime_agent_version_uses_shared_gateway_auth(
+    monkeypatch, primary_key, fallback_key, expected_auth,
 ):
     _clear_gateway_env(monkeypatch)
     if primary_key is not None:
@@ -121,91 +123,139 @@ def test_runtime_version_gateway_auth_matches_health_contract(
     if fallback_key is not None:
         monkeypatch.setenv('API_SERVER_KEY', fallback_key)
 
-    headers = updates.resolve_gateway_auth_headers()
+    seen_authorization = []
+    seen_paths = []
 
-    if expected is None:
-        assert 'Authorization' not in headers
-    else:
-        assert headers['Authorization'] == expected
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen_paths.append(self.path)
+            seen_authorization.append(self.headers.get('Authorization'))
+            payload = b'{"version":"v0.52.runtime"}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('HERMES_API_URL', f'http://127.0.0.1:{server.server_port}')
+
+    try:
+        result = updates.resolve_runtime_agent_version(timeout_s=1.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result == 'v0.52.runtime'
+    assert seen_paths == ['/health/detailed']
+    assert seen_authorization == [expected_auth]
 
 
-def test_resolve_runtime_agent_version_reads_live_authenticated_gateway(monkeypatch):
+def test_resolve_runtime_agent_version_returns_none_for_unusable_payload(monkeypatch):
     _clear_gateway_env(monkeypatch)
-    monkeypatch.setenv('HERMES_API_URL', 'http://runtime-gateway:8642')
-    monkeypatch.setenv('HERMES_WEBUI_GATEWAY_API_KEY', 'runtime-secret')
-    seen = []
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def log_message(self, format, *args):
+            return
 
-        def read(self):
-            return b'{"status":"ok","version":"v0.52.runtime"}'
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('HERMES_API_URL', f'http://127.0.0.1:{server.server_port}')
 
-    def fake_urlopen(request, timeout=0):
-        seen.append((request.full_url, dict(request.header_items()), timeout))
-        return FakeResponse()
+    try:
+        result = updates.resolve_runtime_agent_version(timeout_s=1.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
-    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
-
-    assert updates.resolve_runtime_agent_version() == 'v0.52.runtime'
-    assert seen == [
-        (
-            'http://runtime-gateway:8642/health/detailed',
-            {'Authorization': 'Bearer runtime-secret'},
-            0.75,
-        )
-    ]
-    assert 'runtime-secret' not in seen[0][0]
+    assert result is None
 
 
-@pytest.mark.parametrize(
-    'failure',
-    [
-        'network',
-        'timeout',
-        'http-error',
-        'malformed-json',
-        'missing-version',
-    ],
-)
-def test_resolve_runtime_agent_version_returns_none_when_unconfirmed(monkeypatch, failure):
+def test_resolve_runtime_agent_version_uses_v1_health_fallback(monkeypatch):
     _clear_gateway_env(monkeypatch)
-    monkeypatch.setenv('HERMES_API_URL', 'http://runtime-gateway:8642')
+    seen_paths = []
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen_paths.append(self.path)
+            if self.path == '/v1/health':
+                payload = b'{"version":"v0.52-v1-only"}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            self.send_response(404)
+            self.end_headers()
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def log_message(self, format, *args):
+            return
 
-        def read(self):
-            if failure == 'malformed-json':
-                return b'{not-json'
-            return b'{"status":"ok"}'
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('HERMES_API_URL', f'http://127.0.0.1:{server.server_port}')
 
-    def fake_urlopen(request, timeout=0):
-        if failure == 'network':
-            raise OSError('connection refused')
-        if failure == 'timeout':
-            raise TimeoutError('timed out')
-        if failure == 'http-error':
-            raise updates.urllib.error.HTTPError(
-                request.full_url,
-                401,
-                'unauthorized',
-                {},
-                None,
-            )
-        return FakeResponse()
+    try:
+        result = updates.resolve_runtime_agent_version(timeout_s=1.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
-    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+    assert result == 'v0.52-v1-only'
+    assert seen_paths == ['/health/detailed', '/health', '/v1/health']
 
-    assert updates.resolve_runtime_agent_version() is None
+
+def test_resolve_runtime_agent_version_rejects_oversized_health_body(monkeypatch):
+    _clear_gateway_env(monkeypatch)
+
+    body = json.dumps({
+        'version': 'v0.52-too-large',
+        'padding': 'x' * (70 * 1024),
+    }).encode('utf-8')
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('HERMES_API_URL', f'http://127.0.0.1:{server.server_port}')
+
+    try:
+        result = updates.resolve_runtime_agent_version(timeout_s=1.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result is None
 
 
 def test_resolve_runtime_agent_version_skips_probe_without_configured_gateway(monkeypatch):

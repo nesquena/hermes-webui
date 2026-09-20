@@ -549,16 +549,6 @@ def resolve_gateway_base_url() -> str | None:
     return _remote_gateway_base_url()
 
 
-def resolve_gateway_auth_headers() -> dict[str, str]:
-    """Return gateway health-probe auth headers using the canonical key rules."""
-    from api.agent_health import _remote_gateway_api_key
-
-    api_key = _remote_gateway_api_key()
-    if not api_key:
-        return {}
-    return {'Authorization': f'Bearer {api_key}'}
-
-
 def _gateway_health_base_url() -> str:
     """Return the configured/default Hermes Agent gateway base URL."""
     return resolve_gateway_base_url() or 'http://hermes-agent:8642'
@@ -600,11 +590,39 @@ def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | No
     return None
 
 
+def _probe_agent_version(base: str, *, timeout_s: float) -> str | None:
+    """Return a version from the shared bounded, redirect-safe health probe."""
+    from api.agent_health import (
+        _REMOTE_PROBE_BODY_LIMIT_BYTES,
+        _REMOTE_PROBE_PATHS,
+        _http_probe,
+        _remote_gateway_api_key,
+    )
+
+    api_key = _remote_gateway_api_key()
+    for path in _REMOTE_PROBE_PATHS:
+        probe_key = api_key if path == '/health/detailed' else None
+        ok, _status, _error, body = _http_probe(
+            base + path,
+            timeout_s,
+            api_key=probe_key,
+        )
+        if not ok or not body or len(body) > _REMOTE_PROBE_BODY_LIMIT_BYTES:
+            continue
+        try:
+            payload = json.loads(body.decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        version = _version_from_gateway_health_payload(payload)
+        if version:
+            return version
+    return None
+
+
 def resolve_runtime_agent_version(*, timeout_s: float = 0.75) -> str | None:
     """Return the live Agent gateway version, or None when it cannot be confirmed."""
     try:
         base = resolve_gateway_base_url()
-        headers = resolve_gateway_auth_headers()
     except Exception:
         return None
     if not base:
@@ -614,21 +632,10 @@ def resolve_runtime_agent_version(*, timeout_s: float = 0.75) -> str | None:
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return None
 
-    for path in ('/health/detailed', '/health'):
-        try:
-            request = urllib.request.Request(
-                f'{base}{path}',
-                headers=headers,
-                method='GET',
-            )
-            with urllib.request.urlopen(request, timeout=timeout_s) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except Exception:
-            continue
-        version = _version_from_gateway_health_payload(payload)
-        if version:
-            return version
-    return None
+    try:
+        return _probe_agent_version(base, timeout_s=timeout_s)
+    except Exception:
+        return None
 
 
 def _detect_agent_version() -> str:
