@@ -6,7 +6,10 @@ from api.streaming import _compact_for_echo_compare
 def test_streaming_initializes_one_run_journal_writer_per_stream():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     register_idx = src.index("register_active_run(")
-    writer_idx = src.index("RunJournalWriter(session_id, stream_id)", register_idx)
+    writer_idx = src.index(
+        "RunJournalWriter(session_id, stream_id, stable_run_id=stream_id)",
+        register_idx,
+    )
     cancel_idx = src.index("cancel_event = threading.Event()", writer_idx)
 
     assert "from api.run_journal import RunJournalWriter" in src
