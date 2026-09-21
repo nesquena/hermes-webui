@@ -355,6 +355,7 @@ def test_constructor_phase_guard_matches_gemini_and_copilot_reproductions():
     )
     assert agent.reasoning_config["effort"] == "max"
     assert "base_url" not in vars(agent)
+    assert "_base_url" in vars(agent)
     assert agent._base_url == "https://chatgpt.com/backend-api/codex"
 
     # Post-construction writes (fallback / model switch) stay guarded even
@@ -362,6 +363,59 @@ def test_constructor_phase_guard_matches_gemini_and_copilot_reproductions():
     agent.model = "gpt-5.5"
     agent.reasoning_config = {"enabled": True, "effort": "max"}
     assert agent.reasoning_config["effort"] == "xhigh"
+
+
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+def test_property_backed_route_rearms_guard_after_construction(effort):
+    """Review 2026-09-18: the installed ``AIAgent.base_url`` is a property whose
+    setter stores ``_base_url``; a constructed Agent never carries a literal
+    ``base_url`` instance key. Under a DEFAULT PROFILE route that differs from
+    the session destination (Gemini profile, Codex GPT-5.6 session), the
+    constructor value must pass through untouched, and the first
+    post-construction fallback/switch write must be clamped again.
+    """
+    from unittest.mock import patch
+
+    from api import config as webui_config
+
+    guarded = _destination_aware_ai_agent_class(_InstalledOrderAgent)
+    # The profile default route resolves to Gemini. It is consulted only when
+    # the coercion runs without an instance ``provider`` — i.e. exactly the
+    # constructor phase — and would clamp max/ultra down to ``xhigh``.
+    with patch.object(
+        webui_config,
+        "resolve_model_provider",
+        return_value=("gpt-5.6-sol", "gemini", None),
+    ):
+        agent = guarded(
+            model="gpt-5.6-sol",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            reasoning_config={"enabled": True, "effort": effort},
+        )
+        # Constructor pass-through: route fields did not exist yet.
+        assert agent.reasoning_config["effort"] == effort
+        # Production-shaped instance: property-backed route, no literal key.
+        assert "base_url" not in vars(agent)
+        assert "_base_url" in vars(agent)
+        assert "provider" in vars(agent)
+
+        # Fallback / model switch GPT-5.6 -> GPT-5.5: the guard re-arms on the
+        # property-backed route and clamps the SAME assignment to xhigh.
+        agent.model = "gpt-5.5"
+        agent.reasoning_config = {"enabled": True, "effort": effort}
+        assert agent.reasoning_config["effort"] == "xhigh"
+
+        # Positive control: an unchanged GPT-5.6 Codex destination keeps the
+        # supra-ceiling tier on a post-construction write.
+        control = guarded(
+            model="gpt-5.6-sol",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            reasoning_config={"enabled": True, "effort": effort},
+        )
+        control.reasoning_config = {"enabled": True, "effort": effort}
+        assert control.reasoning_config["effort"] == effort
 
 
 def test_constructor_write_after_route_fields_preserves_max():
