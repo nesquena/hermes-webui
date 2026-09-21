@@ -67,6 +67,49 @@ from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
 
+# Process-local ownership for WebUI slash commands whose durable transcript row
+# is marked pending. The session transcript remains the durable source of truth;
+# this registry only distinguishes a command that is live in this process from
+# an orphaned pending marker recovered after a restart. Never hold this lock
+# while executing command handlers or acquiring a per-session lock.
+_WEBUI_COMMAND_RUNS_LOCK = threading.Lock()
+_WEBUI_COMMAND_RUNS: dict[tuple[str, str], str] = {}
+
+
+def _webui_command_run_is_active(
+    session_id: str,
+    command_id: str,
+    run_token: str | None = None,
+) -> bool:
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        active_token = _WEBUI_COMMAND_RUNS.get((session_id, command_id))
+        return bool(active_token and (run_token is None or active_token == run_token))
+
+
+def _register_webui_command_run(session_id: str, command_id: str) -> str | None:
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        key = (session_id, command_id)
+        if key in _WEBUI_COMMAND_RUNS:
+            return None
+        run_token = uuid.uuid4().hex
+        _WEBUI_COMMAND_RUNS[key] = run_token
+        return run_token
+
+
+def _unregister_webui_command_run(session_id: str, command_id: str, run_token: str) -> None:
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        key = (session_id, command_id)
+        if _WEBUI_COMMAND_RUNS.get(key) == run_token:
+            _WEBUI_COMMAND_RUNS.pop(key, None)
+
+
+def _invalidate_webui_command_runs(session_id: str) -> None:
+    """Revoke live command ownership after transcript deletion/truncation."""
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        stale = [key for key in _WEBUI_COMMAND_RUNS if key[0] == session_id]
+        for key in stale:
+            _WEBUI_COMMAND_RUNS.pop(key, None)
+
 
 def _publish_session_list_changed(
     reason: str,
@@ -16452,6 +16495,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
+            _invalidate_webui_command_runs(sid)
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
@@ -16558,6 +16602,7 @@ def handle_post(handler, parsed) -> bool:
         if keep < 0:
             return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
+            _invalidate_webui_command_runs(body["session_id"])
             from api.session_ops import truncate_session_at_keep
 
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
@@ -17019,9 +17064,11 @@ def handle_post(handler, parsed) -> bool:
             except RuntimeError as e:
                 return bad(handler, _sanitize_error(e), 500)
 
-        # Serialize execution, transcript persistence, retries, and deletion for
-        # this session. A repeated request with the same command_id returns the
-        # already-persisted output without running the command twice.
+        # Persist and register the idempotency marker while holding the session
+        # lock. Command handlers themselves run OUTSIDE it: plugin/built-in
+        # commands may perform slow I/O or acquire this same non-reentrant lock.
+        # Finalization reacquires the lock and reconciles by command_id.
+        run_token = None
         with _get_session_agent_lock(sid):
             try:
                 session = get_session(sid)
@@ -17038,8 +17085,38 @@ def handle_post(handler, parsed) -> bool:
                         and message.get("_webui_command_id") == command_id
                         and message.get("role") == "assistant"):
                     if message.get("_webui_command_pending"):
-                        return bad(handler, "Command execution is already recorded; refusing to run it again", 409)
-                    return j(handler, {"output": str(message.get("content") or "(no output)")})
+                        if _webui_command_run_is_active(
+                            sid,
+                            command_id,
+                            message.get("_webui_command_run_token"),
+                        ):
+                            return bad(handler, "Command execution is already in progress", 409)
+                        # The marker survived but no live process owns it. We
+                        # cannot know whether the side effect ran before the
+                        # interruption, so settle visibly and NEVER repeat it.
+                        output = (
+                            "The previous command attempt was interrupted and may have run, "
+                            "but its final result was not saved. Hermes did not run it again; "
+                            "verify the effect before submitting a new command."
+                        )
+                        message["content"] = output
+                        message.pop("_webui_command_pending", None)
+                        message["_webui_command_interrupted"] = True
+                        message["_error"] = True
+                        try:
+                            session.save()
+                        except Exception:
+                            logger.exception("Could not settle interrupted WebUI command for session %s", sid)
+                            return bad(handler, "Could not recover interrupted command state", 503)
+                        return j(handler, {
+                            "output": output,
+                            "command_id": command_id,
+                            "recovered_interrupted": True,
+                        })
+                    return j(handler, {
+                        "output": str(message.get("content") or "(no output)"),
+                        "command_id": command_id,
+                    })
             pending_ids = {
                 message.get("_webui_command_id")
                 for message in session.messages
@@ -17057,6 +17134,9 @@ def handle_post(handler, parsed) -> bool:
             ):
                 return bad(handler, "A matching command may already have run; refusing to run it again", 409)
             now = time.time()
+            run_token = _register_webui_command_run(sid, command_id)
+            if not run_token:
+                return bad(handler, "Command execution is already in progress", 409)
             user_message = {
                 "role": "user",
                 "content": command,
@@ -17069,6 +17149,7 @@ def handle_post(handler, parsed) -> bool:
                 "_ts": now,
                 "_webui_command_id": command_id,
                 "_webui_command_pending": True,
+                "_webui_command_run_token": run_token,
             }
             session.messages.extend([user_message, assistant_message])
             try:
@@ -17077,11 +17158,14 @@ def handle_post(handler, parsed) -> bool:
                 session.save()
             except Exception:
                 del session.messages[-2:]
+                _unregister_webui_command_run(sid, command_id, run_token)
+                run_token = None
                 logger.exception("Could not persist WebUI command marker for session %s", sid)
                 return bad(handler, "Could not save command before execution", 503)
 
-            response_status = 200
-            response_detail = None
+        response_status = 200
+        response_detail = None
+        try:
             try:
                 output = str(_run_webui_command() or "(no output)")
             except ValueError as e:
@@ -17096,26 +17180,63 @@ def handle_post(handler, parsed) -> bool:
                 response_detail = _sanitize_error(e)
                 output = f"Command error: {response_detail}"
                 response_status = 500
-
-            assistant_message["content"] = output
-            assistant_message.pop("_webui_command_pending", None)
-            if response_status != 200:
-                assistant_message["_error"] = True
-            try:
-                session.save()
             except Exception:
-                # The durable pre-execution marker prevents a same-id retry from
-                # repeating a side effect. Keep the completed output in the live
-                # session cache and tell the client that transcript persistence
-                # needs attention rather than reporting the command as failed.
-                logger.exception("Could not persist WebUI command result for session %s", sid)
-                if response_status == 200:
-                    return j(handler, {"output": output, "persistence_warning": True})
-                return bad(handler, response_detail or "Command failed", response_status)
+                logger.exception("Unexpected WebUI command failure for session %s", sid)
+                response_detail = "Command failed unexpectedly"
+                output = f"Command error: {response_detail}"
+                response_status = 500
 
+            persistence_warning = False
+            with _get_session_agent_lock(sid):
+                try:
+                    latest_session = get_session(sid)
+                except KeyError:
+                    latest_session = None
+                if latest_session is None or not _session_visible_to_active_profile(
+                        getattr(latest_session, "profile", None), handler):
+                    # The session may have been deleted while the unlocked
+                    # command was running. Never save the stale object and
+                    # recreate an orphaned session.
+                    persistence_warning = True
+                else:
+                    messages = getattr(latest_session, "messages", None)
+                    target = next((
+                        message for message in (messages if isinstance(messages, list) else [])
+                        if isinstance(message, dict)
+                        and message.get("role") == "assistant"
+                        and message.get("_webui_command_id") == command_id
+                        and message.get("_webui_command_run_token") == run_token
+                    ), None)
+                    if target is None:
+                        persistence_warning = True
+                    elif not target.get("_webui_command_pending"):
+                        # A terminal row already won reconciliation. Return its
+                        # authoritative content instead of appending a second row.
+                        output = str(target.get("content") or "(no output)")
+                    else:
+                        target["content"] = output
+                        target.pop("_webui_command_pending", None)
+                        if response_status != 200:
+                            target["_error"] = True
+                        try:
+                            latest_session.save()
+                        except Exception:
+                            # The durable marker prevents a same-id retry from
+                            # repeating a side effect. A restart can now settle
+                            # that marker as an interrupted terminal state.
+                            persistence_warning = True
+                            logger.exception("Could not persist WebUI command result for session %s", sid)
+
+            payload = {"output": output, "command_id": command_id}
+            if persistence_warning:
+                payload["persistence_warning"] = True
             if response_status != 200:
-                return bad(handler, response_detail or "Command failed", response_status)
-            return j(handler, {"output": output})
+                payload["error"] = response_detail or "Command failed"
+                return j(handler, payload, status=response_status)
+            return j(handler, payload)
+        finally:
+            if run_token:
+                _unregister_webui_command_run(sid, command_id, run_token)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":

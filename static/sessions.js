@@ -433,7 +433,22 @@ function _clearComposerDraft(sid, text, files) {
 // Command results are persisted by /api/commands/exec in the owning session.
 // Keep only failure-draft restoration here; no parallel browser transcript exists.
 const _APPROVAL_TRANSPORT_FAILURE_KEY='hermes-webui-command-failure-drafts-v1';
+const _APPROVAL_COMMAND_RETRY_KEY='hermes-webui-command-retry-ids-v1';
 const _APPROVAL_TRANSPORT_FAILURE_TTL_MS=24*60*60*1000;
+const _approvalCommandMutationGenerations=new Map();
+function _approvalCommandMutationGeneration(profile,sid){
+  if(!sid)return 0;
+  return _approvalCommandMutationGenerations.get(
+    JSON.stringify([String(profile||'default'),String(sid)])
+  )||0;
+}
+function _bumpApprovalCommandMutationGeneration(profile,sid){
+  if(!sid)return 0;
+  const key=JSON.stringify([String(profile||'default'),String(sid)]);
+  const next=(_approvalCommandMutationGenerations.get(key)||0)+1;
+  _approvalCommandMutationGenerations.set(key,next);
+  return next;
+}
 function _readApprovalTransportFailures(){
   try{
     const parsed=JSON.parse(sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)||'[]');
@@ -455,36 +470,126 @@ function _writeApprovalTransportFailures(records){
     return true;
   }catch(e){return false;}
 }
-function _stashApprovalTransportFailure(profile,sid,text,files){
+function _readApprovalCommandRetries(){
+  try{
+    const parsed=JSON.parse(sessionStorage.getItem(_APPROVAL_COMMAND_RETRY_KEY)||'[]');
+    if(!Array.isArray(parsed))return [];
+    const cutoff=Date.now()-_APPROVAL_TRANSPORT_FAILURE_TTL_MS;
+    const records=parsed.filter((record)=>record&&record.sid&&record.command_id&&Number(record.created_at||0)>=cutoff).slice(-8);
+    if(records.length!==parsed.length){
+      if(records.length)sessionStorage.setItem(_APPROVAL_COMMAND_RETRY_KEY,JSON.stringify(records));
+      else sessionStorage.removeItem(_APPROVAL_COMMAND_RETRY_KEY);
+    }
+    return records;
+  }catch(e){return [];}
+}
+function _writeApprovalCommandRetries(records){
+  try{
+    const bounded=(Array.isArray(records)?records:[]).slice(-8);
+    if(bounded.length)sessionStorage.setItem(_APPROVAL_COMMAND_RETRY_KEY,JSON.stringify(bounded));
+    else sessionStorage.removeItem(_APPROVAL_COMMAND_RETRY_KEY);
+    return true;
+  }catch(e){return false;}
+}
+function _rememberApprovalCommandRetry(record){
+  if(!record||!record.sid||!record.command_id)return false;
+  const normalized={
+    profile:String(record.profile||'default'),sid:String(record.sid),
+    text:String(record.text||''),command_id:String(record.command_id),created_at:Date.now(),
+  };
+  const records=_readApprovalCommandRetries().filter((item)=>!(
+    item.sid===normalized.sid&&item.profile===normalized.profile&&item.text===normalized.text
+  ));
+  records.push(normalized);
+  return _writeApprovalCommandRetries(records);
+}
+function _approvalCommandRetryId(profile,sid,text){
+  if(!sid)return null;
+  const activeProfile=profile||S&&S.activeProfile||'default';
+  const commandText=String(text||'');
+  const candidates=[..._readApprovalTransportFailures(),..._readApprovalCommandRetries()];
+  const record=candidates.slice().reverse().find((item)=>
+    item&&item.sid===String(sid)&&String(item.text||'')===commandText
+    &&_profileMatchesActiveProfile(item.profile,activeProfile)&&item.command_id
+  );
+  return record?String(record.command_id):null;
+}
+function _clearApprovalCommandRetry(profile,sid,text,commandId){
+  if(!sid)return;
+  const activeProfile=profile||S&&S.activeProfile||'default';
+  const matches=(record)=>record&&record.sid===String(sid)
+    &&_profileMatchesActiveProfile(record.profile,activeProfile)
+    &&String(record.text||'')===String(text||'')
+    &&(!commandId||String(record.command_id||'')===String(commandId));
+  _writeApprovalTransportFailures(_readApprovalTransportFailures().filter((record)=>!matches(record)));
+  _writeApprovalCommandRetries(_readApprovalCommandRetries().filter((record)=>!matches(record)));
+}
+function _stashApprovalTransportFailure(profile,sid,text,files,commandId){
   if(!sid)return false;
-  const record={profile:String(profile||'default'),sid:String(sid),text:String(text||''),files:Array.isArray(files)?files:[],created_at:Date.now()};
-  const records=_readApprovalTransportFailures().filter((item)=>!(item.sid===record.sid&&item.profile===record.profile));
+  const record={
+    profile:String(profile||'default'),sid:String(sid),text:String(text||''),
+    files:Array.isArray(files)?files:[],command_id:String(commandId||''),created_at:Date.now(),
+  };
+  // Keep independent failed commands for the same session. Approval commands
+  // can overlap, and collapsing them to one session-level record loses both the
+  // earlier draft and the command identity required for an idempotent retry.
+  const records=_readApprovalTransportFailures().filter((item)=>!(
+    item.sid===record.sid&&item.profile===record.profile
+    &&(record.command_id
+      ? String(item.command_id||'')===record.command_id
+      : !item.command_id&&String(item.text||'')===record.text)
+  ));
   records.push(record);
   return _writeApprovalTransportFailures(records);
 }
 function _clearApprovalTransportFailuresForSession(profile,sid){
+  _clearApprovalCommandStateForSession(profile,sid);
+}
+function _clearApprovalCommandStateForSession(profile,sid){
   if(!sid)return;
   const activeProfile=profile||S&&S.activeProfile||'default';
-  const records=_readApprovalTransportFailures().filter((record)=>!(record.sid===String(sid)&&_profileMatchesActiveProfile(record.profile,activeProfile)));
-  _writeApprovalTransportFailures(records);
+  _bumpApprovalCommandMutationGeneration(activeProfile,sid);
+  const belongsToClearedSession=(record)=>record&&record.sid===String(sid)
+    &&_profileMatchesActiveProfile(record.profile,activeProfile);
+  _writeApprovalTransportFailures(
+    _readApprovalTransportFailures().filter((record)=>!belongsToClearedSession(record))
+  );
+  _writeApprovalCommandRetries(
+    _readApprovalCommandRetries().filter((record)=>!belongsToClearedSession(record))
+  );
 }
-function _restoreApprovalTransportFailureForSession(session){
+async function _restoreApprovalTransportFailureForSession(session){
   const sid=session&&session.session_id;
   if(!sid)return;
   const activeProfile=S&&S.activeProfile||'default';
   const records=_readApprovalTransportFailures();
   const index=records.findIndex((record)=>record.sid===String(sid)&&_profileMatchesActiveProfile(record.profile,activeProfile));
   if(index<0)return;
-  const [record]=records.splice(index,1);
+  const record=records[index];
   const composer=(typeof $==='function'&&$('msg'))||null;
   if(composer&&!composer.value&&!((S.pendingFiles||[]).length)){
     composer.value=record.text||'';
     if(Array.isArray(record.files)&&record.files.length)S.pendingFiles=[...record.files];
     if(typeof autoResize==='function')autoResize();
     if(typeof renderTray==='function'&&record.files&&record.files.length)renderTray();
-    if(typeof _saveComposerDraftNow==='function')_saveComposerDraftNow(sid,record.text,record.files,record.profile);
-    _writeApprovalTransportFailures(records);
+    let saved=true;
+    if(typeof _saveComposerDraftNow==='function'){
+      try{saved=(await _saveComposerDraftNow(sid,record.text,record.files,record.profile))!==false;}
+      catch(e){saved=false;}
+    }
+    // Keep the only recovery copy until the server draft confirms success.
+    // Once durable, retain just the stable command identity so a later retry
+    // reconciles the original server-owned transcript row instead of appending.
+    if(saved){
+      if(record.command_id)_rememberApprovalCommandRetry(record);
+      const remaining=_readApprovalTransportFailures().filter((item)=>!(
+        item.sid===record.sid&&item.profile===record.profile&&Number(item.created_at||0)===Number(record.created_at||0)
+      ));
+      _writeApprovalTransportFailures(remaining);
+    }
+    return saved;
   }
+  return false;
 }
 function _restoreApprovalCommandDraft(profile, sid, text, files){
   const activeSid=S&&S.session&&S.session.session_id;
@@ -2333,7 +2438,6 @@ async function loadSession(sid){
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
-    _restoreApprovalTransportFailureForSession(S.session);
     // Refresh todos from cold-load or persisted INFLIGHT before painting.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.busy=!!activeStreamId;  // #4354: Only assert busy if server confirms active stream.
@@ -2477,8 +2581,6 @@ async function loadSession(sid){
 
     // Attach pending user message if one is queued.
     _mergePendingSessionMessage(S.session,S.messages);
-    _restoreApprovalTransportFailureForSession(S.session);
-
     // Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
     // in an isolated instance). `activeStreamId` was snapshotted BEFORE the
     // awaited _ensureMessagesLoaded above. During a force reload (the
@@ -2561,6 +2663,16 @@ async function loadSession(sid){
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+  }
+  // Failure recovery is intentionally LAST: the normal server draft restore may
+  // clear an empty draft, so applying recovery earlier silently erases it again.
+  // The helper retains its sessionStorage record until the replacement server
+  // draft write confirms success.
+  if(typeof _restoreApprovalTransportFailureForSession==='function'){
+    // Run after the normal restore, but do not block loadSession's completion on
+    // the draft-write round trip. The helper keeps its own durable recovery
+    // record until that write confirms success and re-checks session ownership.
+    void _restoreApprovalTransportFailureForSession(S.session);
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).

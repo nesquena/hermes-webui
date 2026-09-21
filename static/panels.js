@@ -4873,11 +4873,16 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
 
 async function clearConversation() {
   if(!S.session) return;
+  const clearedSid=S.session.session_id;
+  const clearedProfile=S.activeProfile||'default';
   const _clrMsg=await showConfirmDialog({title:t('clear_conversation_title'),message:t('clear_conversation_message'),confirmLabel:t('clear'),danger:true,focusCancel:true});
   if(!_clrMsg) return;
   try {
     const data = await api('/api/session/clear', {method:'POST',
-      body: JSON.stringify({session_id: S.session.session_id})});
+      body: JSON.stringify({session_id: clearedSid})});
+    if(typeof _clearApprovalCommandStateForSession==='function'){
+      _clearApprovalCommandStateForSession(clearedProfile,clearedSid);
+    }
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];

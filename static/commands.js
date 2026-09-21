@@ -526,15 +526,88 @@ async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
   const ownerSid=S&&S.session&&S.session.session_id||null;
-  const commandId=ownerSid?`webui-command-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`:null;
-  const data=await api('/api/commands/exec',{
-    method:'POST',
-    body:JSON.stringify({command,session_id:ownerSid,...(commandId?{command_id:commandId}:{})})
-  });
-  const output=String(data&&data.output||'(no output)');
-  return data&&data.persistence_warning
-    ? `${output}\n\n⚠️ The command ran, but its final result could not be saved. Hermes will not run this command again automatically.`
-    : output;
+  const ownerProfile=S&&S.activeProfile||'default';
+  const retryId=ownerSid&&typeof _approvalCommandRetryId==='function'
+    ? _approvalCommandRetryId(ownerProfile,ownerSid,command)
+    : null;
+  const commandId=ownerSid
+    ? (retryId||`webui-command-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`)
+    : null;
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command,session_id:ownerSid,...(commandId?{command_id:commandId}:{})})
+    });
+    const responseId=String(data&&data.command_id||commandId||'')||null;
+    let output=String(data&&data.output||'(no output)');
+    if(data&&data.persistence_warning){
+      output+=`\n\n⚠️ The command ran, but its final result could not be saved. Hermes will not run this command again automatically.`;
+    }
+    if(ownerSid&&responseId){
+      const tracksDraftClear=!!(_meta&&Object.prototype.hasOwnProperty.call(_meta,'draftClearPromise'));
+      let draftCleared=true;
+      if(tracksDraftClear){
+        try{draftCleared=(await Promise.resolve(_meta.draftClearPromise))!==false;}
+        catch(e){draftCleared=false;}
+      }
+      if(draftCleared&&typeof _clearApprovalCommandRetry==='function'){
+        _clearApprovalCommandRetry(ownerProfile,ownerSid,command,responseId);
+      }else if(!draftCleared&&typeof _rememberApprovalCommandRetry==='function'){
+        // The side effect succeeded but the submitted server draft still exists.
+        // Preserve its command id so a reload/resend reconciles the same durable
+        // transcript row instead of executing the command again.
+        _rememberApprovalCommandRetry({
+          profile:ownerProfile,sid:ownerSid,text:command,command_id:responseId,
+        });
+      }
+    }
+    return {
+      output,
+      command_id:responseId,
+      persistence_warning:!!(data&&data.persistence_warning),
+      recovered_interrupted:!!(data&&data.recovered_interrupted),
+    };
+  }catch(e){
+    // Preserve the identity even when api() throws for a timeout/non-2xx. A
+    // restored draft must retry the SAME server-owned transcript row.
+    if(e&&typeof e==='object'&&commandId)e.webuiCommandId=commandId;
+    throw e;
+  }
+}
+
+function _agentCommandResultOutput(result){
+  return String(result&&typeof result==='object'&&Object.prototype.hasOwnProperty.call(result,'output')
+    ? result.output
+    : (result||'(no output)'));
+}
+
+function _agentCommandResultId(result){
+  return String(result&&typeof result==='object'&&result.command_id||'')||null;
+}
+
+async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){
+  const commandId=_agentCommandResultId(result);
+  if(!ownerSid||!commandId||typeof loadSession!=='function')return false;
+  // The endpoint is explicitly telling us that the returned output is not a
+  // durable terminal transcript row. Keep the returned warning visible rather
+  // than hiding it behind an otherwise successful reload.
+  if(result&&result.persistence_warning)return false;
+  try{
+    // The server transcript owns both rows. Reload it rather than appending a
+    // second browser-owned assistant result beside a pending/final server row.
+    await loadSession(ownerSid,{force:true,preserveActiveInput:true,commandReconcileId:commandId});
+    return !!(S&&Array.isArray(S.messages)&&S.messages.some((message)=>
+      message&&message.role==='assistant'
+      &&String(message._webui_command_id||'')===commandId
+      &&!message._webui_command_pending
+    ));
+  }catch(e){
+    if(typeof showToast==='function')showToast(
+      'Command output was saved, but this conversation could not refresh. Reopen it to see the result.',
+      4000,'warning'
+    );
+    return false;
+  }
 }
 
 async function resolveBundleCommand(text,_meta){
@@ -1232,35 +1305,69 @@ function cmdSkills(args){
   // Capture the complete owner before either branch awaits anything.
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const ownerProfile=(typeof S!=='undefined'&&S.activeProfile)||'default';
+  const ownerMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
+    ? _approvalCommandMutationGeneration(ownerProfile,ownerSid)
+    : 0;
+  const ownerLifecycleStillValid=()=>_skillsResponseOwnerStillValid(ownerSid,ownerProfile)
+    &&(typeof _approvalCommandMutationGeneration!=='function'
+      ||_approvalCommandMutationGeneration(ownerProfile,ownerSid)===ownerMutationGeneration);
   const commandText='/skills '+(args||'');
   const composer=(typeof $==='function'&&$('msg'))||(typeof document!=='undefined'&&document.getElementById('msg'));
   const draftText=composer?String(composer.value||''):commandText;
   const draftFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
   // Clear the originating session's persisted draft before either async branch;
   // a debounced save must not resurrect this already-submitted slash command.
-  if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,draftText,draftFiles);
+  const draftClearPromise=ownerSid&&typeof _clearComposerDraft==='function'
+    ? _clearComposerDraft(ownerSid,draftText,draftFiles,ownerProfile)
+    : Promise.resolve(true);
   if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
     (async()=>{
-      let out, failed=false;
+      let result=null, failure=null;
       try{
-        out = await _runAgentCommandTransport(commandText);
+        result = await _runAgentCommandTransport(commandText,{draftClearPromise});
       }catch(e){
-        failed=true;
-        out = `Skill write-approval command failed: ${e&&e.message||e}`;
+        failure=e;
       }
-      if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
-        let failedDraftKept=false;
-        if(failed&&typeof _stashApprovalTransportFailure==='function'){
-          failedDraftKept=!!_stashApprovalTransportFailure(ownerProfile,ownerSid,draftText,draftFiles);
-        }
-        if(typeof showToast==='function') showToast(failed
+      const commandId=(typeof _agentCommandResultId==='function'
+        ? _agentCommandResultId(result)
+        : String(result&&result.command_id||''))||(failure&&failure.webuiCommandId)||null;
+      const out=failure
+        ? `Skill write-approval command failed: ${failure&&failure.message||failure}`
+        : (typeof _agentCommandResultOutput==='function'
+          ? _agentCommandResultOutput(result)
+          : String(result&&result.output||result||'(no output)'));
+      let failedDraftKept=false;
+      if(failure&&typeof _stashApprovalTransportFailure==='function'){
+        failedDraftKept=!!_stashApprovalTransportFailure(
+          ownerProfile,ownerSid,draftText,draftFiles,commandId
+        );
+      }
+      if(!ownerLifecycleStillValid()){
+        if(typeof showToast==='function') showToast(failure
           ? (failedDraftKept
             ? 'Command could not finish after you switched conversations; its draft was kept for the originating session.'
             : 'Command could not finish after you switched conversations; reopen the original conversation and try again.')
           : 'Command completed after you switched conversations; its output was saved in the originating session.',4000,'warning');
         return;
       }
-      if(failed&&typeof _restoreApprovalCommandDraft==='function') _restoreApprovalCommandDraft(ownerProfile,ownerSid,draftText,draftFiles);
+      if(ownerSid&&commandId){
+        const reconciled=await _reconcileAgentCommandTranscript(
+          ownerProfile,ownerSid,result||{command_id:commandId,output:out}
+        );
+        if(!ownerLifecycleStillValid()){
+          if(typeof showToast==='function')showToast(
+            'Command finished while you switched conversations; reopen the original conversation to see its result.',
+            4000,'warning'
+          );
+          return;
+        }
+        if(reconciled)return;
+      }
+      if(failure&&typeof _restoreApprovalCommandDraft==='function'){
+        await Promise.resolve(draftClearPromise).catch(()=>{});
+        if(!ownerLifecycleStillValid())return;
+        _restoreApprovalCommandDraft(ownerProfile,ownerSid,draftText,draftFiles);
+      }
       S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
       renderMessages();
     })();
@@ -1278,7 +1385,7 @@ function cmdSkills(args){
           (s.category||'').toLowerCase().includes(q)
         );
       }
-      if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
+      if(!ownerLifecycleStillValid()){
         if(typeof showToast==='function') showToast('Skills finished loading after you switched conversations; reopen the command if needed.',4000,'warning');
         return;
       }
@@ -1309,7 +1416,7 @@ function cmdSkills(args){
       renderMessages();
       showToast(t('type_slash'));
     }catch(e){
-      if(!_skillsResponseOwnerStillValid(ownerSid,ownerProfile)){
+      if(!ownerLifecycleStillValid()){
         if(typeof showToast==='function') showToast('Skills failed to load after you switched conversations.',4000,'warning');
         return;
       }

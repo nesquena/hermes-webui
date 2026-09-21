@@ -1461,6 +1461,63 @@ def test_skills_write_approval_response_targets_owner_session_not_current():
     assert out["warningShownAfterSwitch"] == 1, \
         "a withheld response must produce a visible non-sensitive warning"
 
+
+def test_skills_write_approval_switch_during_reconcile_never_appends_fallback_output():
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    src = (REPO_ROOT / "static" / "commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+        const S={session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
+        const composer={value:'/skills approve abc123'};
+        const $=()=>composer;
+        let renders=0,warnings=0;
+        const renderMessages=()=>{renders++;};
+        const showToast=()=>{warnings++;};
+        const _clearComposerDraft=()=>Promise.resolve(true);
+        const _runAgentCommandTransport=async()=>({output:'approved',command_id:'command-1'});
+        const _agentCommandResultId=(result)=>result.command_id;
+        const _agentCommandResultOutput=(result)=>result.output;
+        const _reconcileAgentCommandTranscript=async()=>{
+          S.session={session_id:'sid-B'};
+          S.messages=[];
+          composer.value='draft in B';
+          return false;
+        };
+        %(cmd_skills_fn)s
+        cmdSkills('approve abc123');
+        setTimeout(()=>console.log(JSON.stringify({
+          sid:S.session.session_id,messages:S.messages,composer:composer.value,renders,warnings,
+        })),20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out == {
+        "sid": "sid-B",
+        "messages": [],
+        "composer": "draft in B",
+        "renders": 0,
+        "warnings": 1,
+    }
+
 def _run_webui_agent_command_scenarios():
     """Execute the REAL awaited WebUI agent-command block from static/messages.js (the
     `_AGENT_COMMANDS_RUN_ON_WEBUI` path that /memory, /credits, /reload-mcp ... use) in node,
@@ -1498,10 +1555,12 @@ def _run_webui_agent_command_scenarios():
             S: { session: initialSession, activeProfile: 'default', messages: [] },
             composer: { value: '/memory pending' },
             draftRevision: 0,
+            commandGeneration: 0,
             renders: 0,
             toasts: 0,
             stashes: [],
             clears: [],
+            reconciles: [],
             executeCalls: 0,
             transcripts: {},
             pending: {},
@@ -1517,11 +1576,30 @@ def _run_webui_agent_command_scenarios():
           const hideCmdDropdown = () => {};
           const renderMessages = () => { env.renders++; };
           const showToast = () => { env.toasts++; };
+          const _approvalCommandMutationGeneration=()=>env.commandGeneration;
           const _stashApprovalTransportFailure = (profile, sid, text, files) => {
             env.stashes.push({ profile, sid, text, files });
             return true;
           };
           const _clearComposerDraft = (sid, text, files) => { env.clears.push({ sid, text, files }); };
+          const _reconcileAgentCommandTranscript = async (profile,sid,result) => {
+            env.reconciles.push({profile,sid,id:result.command_id});
+            if(opts.switchDuringReconcile){
+              S.session={session_id:'sid-B'};
+              S.messages=[];
+              env.composer.value='draft typed in B';
+            }
+            if(opts.clearDuringReconcile){
+              env.commandGeneration++;
+              S.messages=[];
+            }
+            if(opts.reconcileFalse)return false;
+            S.messages=[
+              {role:'user',content:'/memory pending',_webui_command_id:result.command_id},
+              {role:'assistant',content:result.output,_webui_command_id:result.command_id},
+            ];
+            return true;
+          };
           const _composerDraftRevision = () => env.draftRevision;
           const renderSessionList = async () => {};
           const newSession = async () => { S.session = { session_id: 'sid-NEW' }; S.messages = []; };
@@ -1533,7 +1611,7 @@ def _run_webui_agent_command_scenarios():
             env.executeCalls++;
             env.pending.execute = () => opts.executeReject
               ? rej(new Error('offline'))
-              : res('memory result');
+              : res({output:'memory result',command_id:'webui-command-original'});
           });
           const text = '/memory pending';
           const _parsedCmd = { name: 'memory', args: 'pending' };
@@ -1560,6 +1638,7 @@ def _run_webui_agent_command_scenarios():
             warnings: env.toasts,
             stashes: env.stashes,
             clears: env.clears,
+            reconciles: env.reconciles,
             currentSid: S.session && S.session.session_id,
           };
         }
@@ -1610,6 +1689,22 @@ def _run_webui_agent_command_scenarios():
             },
           });
 
+          // A switch WHILE transcript reconciliation is awaiting its reload must
+          // not let fallback output land in the newly selected session.
+          out.switchDuringReconcile = await runScenario('switchDuringReconcile', {
+            metadataImmediate:true,
+            switchDuringReconcile:true,
+            reconcileFalse:true,
+            during:async()=>{},
+          });
+
+          out.clearDuringReconcile = await runScenario('clearDuringReconcile', {
+            metadataImmediate:true,
+            clearDuringReconcile:true,
+            reconcileFalse:true,
+            during:async()=>{},
+          });
+
           // 6. New input in the SAME session while metadata is loading belongs to
           // a new draft and must not be erased when the earlier command resumes.
           out.sameOwnerNewerDraft = await runScenario('sameOwnerNewerDraft', {
@@ -1652,6 +1747,11 @@ def test_webui_agent_command_positive_control_delivers_and_clears_composer():
     assert out["executeCalls"] == 1
     assert out["warnings"] == 0
     assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
+    assert out["reconciles"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "id": "webui-command-original",
+    }]
 
 def test_webui_agent_command_switch_during_metadata_lookup_touches_nothing():
     """Switching sessions while the command-metadata lookup is in flight must not run the
@@ -1721,11 +1821,399 @@ def test_webui_agent_command_failure_after_switch_stashes_originating_draft():
     }]
 
 
+def test_webui_agent_command_switch_during_reconcile_never_appends_fallback_output():
+    out = _run_webui_agent_command_scenarios()["switchDuringReconcile"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["renders"] == 0
+    assert out["warnings"] == 1
+
+
+def test_webui_agent_command_clear_during_reconcile_never_resurrects_output():
+    out = _run_webui_agent_command_scenarios()["clearDuringReconcile"]
+    assert out["currentSid"] == "sid-A"
+    assert out["currentMessages"] == []
+    assert out["renders"] == 0
+    assert out["warnings"] == 1
+
+
 def test_webui_sessionless_agent_transport_omits_command_id():
     """Legacy sessionless commands must not send half of the persistence owner pair."""
     source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
-    assert "const commandId=ownerSid?" in source
+    assert "const commandId=ownerSid" in source
     assert "...(commandId?{command_id:commandId}:{})" in source
+
+
+def test_webui_agent_transport_reuses_restored_command_id_and_returns_identity():
+    """A retry must keep the original durable row identity so the server can reconcile it."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    transport = _js_block(
+        source,
+        "async function _runAgentCommandTransport(text,_meta){",
+        "\nasync function resolveBundleCommand",
+    )
+    script = textwrap.dedent(
+        """
+        const S={session:{session_id:'sid-A'},activeProfile:'default'};
+        const calls=[];
+        const cleared=[];
+        const _approvalCommandRetryId=(profile,sid,text)=>'webui-command-original';
+        const _clearApprovalCommandRetry=(profile,sid,text,id)=>cleared.push({profile,sid,text,id});
+        const api=async(_path,opts)=>{
+          const body=JSON.parse(opts.body);
+          calls.push(body);
+          return {output:'saved output',command_id:body.command_id};
+        };
+        %(transport)s
+        (async()=>{
+          const result=await _runAgentCommandTransport('/memory pending',{});
+          console.log(JSON.stringify({calls,cleared,result}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"transport": transport}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["calls"][0]["command_id"] == "webui-command-original"
+    assert out["result"] == {
+        "output": "saved output",
+        "command_id": "webui-command-original",
+        "persistence_warning": False,
+        "recovered_interrupted": False,
+    }
+    assert out["cleared"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "text": "/memory pending",
+        "id": "webui-command-original",
+    }]
+
+
+def test_webui_agent_transport_reuses_success_identity_until_draft_clear_succeeds():
+    """A stale restored draft must reconcile the prior side effect, never run a fresh one."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    command_source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    session_source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    transport = _js_block(
+        command_source,
+        "async function _runAgentCommandTransport(text,_meta){",
+        "\nasync function resolveBundleCommand",
+    )
+    profile_matcher = _js_block(
+        session_source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        session_source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={session:{session_id:'sid-A'},activeProfile:'default',activeProfileIsDefault:true};
+        const calls=[];
+        const api=async(_path,opts)=>{
+          const body=JSON.parse(opts.body);
+          calls.push(body);
+          return {output:'saved output',command_id:body.command_id};
+        };
+        %(profile_matcher)s
+        %(helpers)s
+        %(transport)s
+        (async()=>{
+          const first=await _runAgentCommandTransport('/memory pending',{
+            draftClearPromise:Promise.resolve(false),
+          });
+          const retained=_approvalCommandRetryId('default','sid-A','/memory pending');
+          const second=await _runAgentCommandTransport('/memory pending',{
+            draftClearPromise:Promise.resolve(true),
+          });
+          const remaining=_approvalCommandRetryId('default','sid-A','/memory pending');
+          console.log(JSON.stringify({calls,first,retained,second,remaining}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {
+        "transport": transport,
+        "profile_matcher": profile_matcher,
+        "helpers": helpers,
+    }
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["retained"] == out["first"]["command_id"]
+    assert out["second"]["command_id"] == out["first"]["command_id"]
+    assert [call["command_id"] for call in out["calls"]] == [
+        out["first"]["command_id"],
+        out["first"]["command_id"],
+    ]
+    assert out["remaining"] is None
+
+
+def test_webui_command_failure_restore_runs_after_server_draft_restore():
+    """Session load must apply the normal server draft before failure recovery overrides it."""
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    normal_restore = source.index("_restoreComposerDraft(_draft, sid")
+    failure_restore = source.index("_restoreApprovalTransportFailureForSession(S.session)", normal_restore)
+    assert failure_restore > normal_restore
+
+
+def test_webui_command_failure_record_survives_until_draft_save_succeeds():
+    """Do not discard the only recovery copy before its server draft write confirms success."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const composer={value:''};
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        const $=()=>composer;
+        const autoResize=()=>{};
+        const renderTray=()=>{};
+        let finishSave;
+        const _saveComposerDraftNow=()=>new Promise((resolve)=>{finishSave=resolve;});
+        %(profile_matcher)s
+        %(helpers)s
+        (async()=>{
+          _stashApprovalTransportFailure(
+            'default','sid-A','/memory pending',[],'webui-command-original'
+          );
+          const restoring=_restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+          await Promise.resolve();
+          const before={
+            text:composer.value,
+            failures:_readApprovalTransportFailures(),
+          };
+          finishSave(true);
+          await restoring;
+          const after={
+            failures:_readApprovalTransportFailures(),
+            retryId:_approvalCommandRetryId('default','sid-A','/memory pending'),
+          };
+          console.log(JSON.stringify({before,after}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["before"]["text"] == "/memory pending"
+    assert len(out["before"]["failures"]) == 1
+    assert out["after"]["failures"] == []
+    assert out["after"]["retryId"] == "webui-command-original"
+
+
+def test_webui_overlapping_command_failures_keep_each_command_identity():
+    """Concurrent failures in one session must not erase an earlier recovery record."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        %(profile_matcher)s
+        %(helpers)s
+        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'command-first');
+        _stashApprovalTransportFailure('default','sid-A','/skills approve second',[],'command-second');
+        console.log(JSON.stringify({
+          failures:_readApprovalTransportFailures(),
+          first:_approvalCommandRetryId('default','sid-A','/skills approve first'),
+          second:_approvalCommandRetryId('default','sid-A','/skills approve second'),
+        }));
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert [record["command_id"] for record in out["failures"]] == [
+        "command-first",
+        "command-second",
+    ]
+    assert out["first"] == "command-first"
+    assert out["second"] == "command-second"
+
+
+def test_webui_clear_command_state_removes_both_retry_stores_for_only_its_session():
+    """Transcript deletion must invalidate identities whose server rows were deleted."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        %(profile_matcher)s
+        %(helpers)s
+        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'failure-A');
+        _stashApprovalTransportFailure('default','sid-B','/skills approve second',[],'failure-B');
+        _rememberApprovalCommandRetry({profile:'default',sid:'sid-A',text:'/memory pending',command_id:'retry-A'});
+        _rememberApprovalCommandRetry({profile:'default',sid:'sid-B',text:'/memory pending',command_id:'retry-B'});
+        _clearApprovalCommandStateForSession('default','sid-A');
+        console.log(JSON.stringify({
+          failures:_readApprovalTransportFailures(),
+          retries:_readApprovalCommandRetries(),
+        }));
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert [record["command_id"] for record in out["failures"]] == ["failure-B"]
+    assert [record["command_id"] for record in out["retries"]] == ["retry-B"]
+
+
+def test_webui_transcript_clear_and_truncate_invalidate_command_retry_state():
+    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    ui = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    clear_block = _js_block(panels, "async function clearConversation() {", "\n// ── Skills panel")
+    truncate_block = _js_block(ui, "async function submitEdit(msgIdx, newText) {", "\nasync function regenerateResponse")
+    assert "_clearApprovalCommandStateForSession" in clear_block
+    assert "_clearApprovalCommandStateForSession" in truncate_block
+
+
+def test_webui_command_reconcile_requires_durable_terminal_row_and_surfaces_warning():
+    """A reload alone is not proof that a command result was persisted."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    result_id = _js_block(source, "function _agentCommandResultId(result){", "\nasync function _reconcileAgentCommandTranscript")
+    reconcile = _js_block(source, "async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){", "\nasync function resolveBundleCommand")
+    script = textwrap.dedent(
+        """
+        const S={messages:[]};
+        let mode='terminal';
+        let loads=0;
+        const toasts=[];
+        const showToast=(...args)=>toasts.push(args);
+        const loadSession=async()=>{
+          loads++;
+          if(mode==='terminal')S.messages=[{role:'assistant',content:'saved',_webui_command_id:'command-1'}];
+          if(mode==='pending')S.messages=[{role:'assistant',content:'pending',_webui_command_id:'command-1',_webui_command_pending:true}];
+          if(mode==='missing')S.messages=[];
+        };
+        %(result_id)s
+        %(reconcile)s
+        (async()=>{
+          const warning=await _reconcileAgentCommandTranscript('default','sid-A',{
+            command_id:'command-1',output:'ran but not saved',persistence_warning:true,
+          });
+          mode='terminal';
+          const terminal=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          mode='pending';
+          const pending=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          mode='missing';
+          const missing=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          console.log(JSON.stringify({warning,terminal,pending,missing,loads,toasts}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"result_id": result_id, "reconcile": reconcile}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["warning"] is False
+    assert out["terminal"] is True
+    assert out["pending"] is False
+    assert out["missing"] is False
+    assert out["loads"] == 3
 
 
 def _run_webui_plugin_command_scenario(*, reject=False):
@@ -1755,6 +2243,7 @@ def _run_webui_plugin_command_scenario(*, reject=False):
           const _cmdOwner={sid:'sid-A',profile:'default'};
           const _cmdOwnerIsCurrent=()=>((S.session&&S.session.session_id)||null)===_cmdOwner.sid
             &&(S.activeProfile||'default')===_cmdOwner.profile;
+          const _cmdLifecycleIsCurrent=_cmdOwnerIsCurrent;
           let _cmdDraftRevision=0;
           const _composerDraftRevision=()=>0;
           const $=()=>env.composer;
@@ -1858,28 +2347,30 @@ def test_transport_failure_draft_survives_reload_with_profile_alias_and_expires(
         const autoResize=()=>{};
         const renderTray=()=>{};
         const saved=[];
-        const _saveComposerDraftNow=(...args)=>saved.push(args);
+        const _saveComposerDraftNow=(...args)=>{saved.push(args);return Promise.resolve(true);};
         %(profile_matcher)s
         %(helpers)s
-        const kept=_stashApprovalTransportFailure('default','sid-A','/memory pending',[]);
-        _restoreApprovalTransportFailureForSession({session_id:'sid-A'});
-        const restored={kept,text:composer.value,saved,remaining:_readApprovalTransportFailures()};
-        composer.value='';
-        S.activeProfile='default';
-        _stashApprovalTransportFailure('renamed-root','sid-reverse','reverse alias',[]);
-        _restoreApprovalTransportFailureForSession({session_id:'sid-reverse'});
-        const reverseRestored={text:composer.value,remaining:_readApprovalTransportFailures()};
-        S.activeProfile='renamed-root';
-        composer.value='';
-        _stashApprovalTransportFailure('default','sid-B','secret',[]);
-        _clearApprovalTransportFailuresForSession('renamed-root','sid-B');
-        const cleared=_readApprovalTransportFailures();
-        sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify([{
-          profile:'default',sid:'old',text:'old secret',files:[],
-          created_at:Date.now()-_APPROVAL_TRANSPORT_FAILURE_TTL_MS-1,
-        }]));
-        const expired=_readApprovalTransportFailures();
-        console.log(JSON.stringify({restored,reverseRestored,cleared,expired,raw:sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)}));
+        (async()=>{
+          const kept=_stashApprovalTransportFailure('default','sid-A','/memory pending',[]);
+          await _restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+          const restored={kept,text:composer.value,saved,remaining:_readApprovalTransportFailures()};
+          composer.value='';
+          S.activeProfile='default';
+          _stashApprovalTransportFailure('renamed-root','sid-reverse','reverse alias',[]);
+          await _restoreApprovalTransportFailureForSession({session_id:'sid-reverse'});
+          const reverseRestored={text:composer.value,remaining:_readApprovalTransportFailures()};
+          S.activeProfile='renamed-root';
+          composer.value='';
+          _stashApprovalTransportFailure('default','sid-B','secret',[]);
+          _clearApprovalTransportFailuresForSession('renamed-root','sid-B');
+          const cleared=_readApprovalTransportFailures();
+          sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify([{
+            profile:'default',sid:'old',text:'old secret',files:[],
+            created_at:Date.now()-_APPROVAL_TRANSPORT_FAILURE_TTL_MS-1,
+          }]));
+          const expired=_readApprovalTransportFailures();
+          console.log(JSON.stringify({restored,reverseRestored,cleared,expired,raw:sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
         """
     ) % {"profile_matcher": profile_matcher, "helpers": helpers}
     proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
