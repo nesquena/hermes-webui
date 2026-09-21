@@ -1884,6 +1884,19 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Click "+" in project bar to create a project. Type name, Enter.
 - Click a project chip to filter sessions.
 - Hover a session → click folder icon → assign to project via picker.
+- With a long project list, verify the picker stays within the visible viewport
+  at desktop and narrow widths, and scroll to reach `+ New project`.
+- Keep the picker open while resizing the window or changing the mobile visual
+  viewport (keyboard/browser chrome/zoom). Verify both horizontal edges and the
+  height cap follow the visible area, including nonzero viewport offsets.
+- Scroll the session list while the picker is open: it must follow its row,
+  then close when the trigger leaves the list's visible rectangle. Scrolling
+  inside the picker must keep it open and preserve access to the final item.
+- Re-render/remove the owning row without resizing or scrolling: the picker
+  must close immediately. Selection, outside click, and opening a replacement
+  must also release its listeners, observer, and queued animation frame.
+- Automated geometry/lifecycle regression:
+  `./scripts/test.sh tests/test_project_picker_viewport_position.py -q`.
 - Verify colored left border appears on assigned session.
 - Double-click project chip to rename. Right-click to delete.
 - Code blocks have a "Copy" button. Click → "Copied!" feedback.

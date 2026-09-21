@@ -58,15 +58,26 @@ class FakeElement {
   get offsetHeight() {
     const cap = Number.parseFloat(this.style.maxHeight);
     const natural = this.naturalHeight;
-    return Number.isFinite(cap) && cap > 0 ? Math.min(natural, cap) : natural;
+    return Number.isFinite(cap) ? Math.min(natural, cap) : natural;
+  }
+  get offsetWidth() {
+    const cap = Number.parseFloat(this.style.maxWidth);
+    return Number.isFinite(cap) ? Math.min(this.scrollWidth, cap) : this.scrollWidth;
   }
 }
 
 function makeEmitter(bucket) {
   return {
-    addEventListener(type, fn) { (bucket[type] = bucket[type] || []).push(fn); },
-    removeEventListener(type, fn) { bucket[type] = (bucket[type] || []).filter(f => f !== fn); },
-    dispatch(type, event) { (bucket[type] || []).slice().forEach(fn => fn(event || {type})); },
+    addEventListener(type, fn, options) { (bucket[type] = bucket[type] || []).push({fn, capture: options === true || !!(options && options.capture)}); },
+    removeEventListener(type, fn, options) {
+      const capture = options === true || !!(options && options.capture);
+      bucket[type] = (bucket[type] || []).filter(f => f.fn !== fn || f.capture !== capture);
+    },
+    dispatch(type, event, captureOnly = false) {
+      (bucket[type] || []).slice().forEach(f => {
+        if (!captureOnly || f.capture) f.fn(event || {type});
+      });
+    },
     count() { return Object.keys(bucket).reduce((n, k) => n + bucket[k].length, 0); },
   };
 }
@@ -75,6 +86,24 @@ const listenerBuckets = {window: {}, visualViewport: {}, document: {}};
 const windowEmitter = makeEmitter(listenerBuckets.window);
 const vvEmitter = makeEmitter(listenerBuckets.visualViewport);
 const docEmitter = makeEmitter(listenerBuckets.document);
+let listRect = {top: 0, bottom: 900, left: 0, right: 1440};
+const sessionList = {
+  getBoundingClientRect: () => listRect,
+  contains: target => target === anchorEl,
+  // Element scroll does not bubble; only a capture listener on document sees it.
+  scroll() { docEmitter.dispatch('scroll', {target: sessionList}, true); },
+};
+const observers = new Set();
+class MutationObserver {
+  constructor(callback) { this.callback = callback; }
+  observe(target, options) { this.target = target; this.options = options; observers.add(this); }
+  disconnect() { observers.delete(this); }
+}
+function flushMutations() {
+  for (const observer of [...observers]) {
+    if (observer.options.childList && observer.options.subtree) observer.callback([{target: sessionList}]);
+  }
+}
 
 let mountedPicker = null;
 let nextPickerHeight = 0;
@@ -132,8 +161,15 @@ const showPromptDialog = async () => null;
 const renderSessionList = async () => {};
 const renderSessionListFromCache = () => {};
 const t = key => key;
-const setTimeout = fn => { fn(); return 0; };
-const requestAnimationFrame = fn => { fn(); return 0; };
+let nextTask = 0;
+const frames = new Map();
+const timers = new Map();
+const setTimeout = fn => { const id = ++nextTask; timers.set(id, fn); return id; };
+const clearTimeout = id => timers.delete(id);
+const requestAnimationFrame = fn => { const id = ++nextTask; frames.set(id, fn); return id; };
+const cancelAnimationFrame = id => frames.delete(id);
+function flushFrames() { const batch = [...frames.values()]; frames.clear(); batch.forEach(fn => fn()); }
+function flushTimers() { const batch = [...timers.values()]; timers.clear(); batch.forEach(fn => fn()); }
 
 // Module-scope teardown hook declared just above _showProjectPicker in
 // static/sessions.js; the extracted function body assigns it.
@@ -144,13 +180,17 @@ let anchorConnected = true;
 const anchorEl = {
   get isConnected() { return anchorConnected; },
   getBoundingClientRect: () => anchorRect,
+  closest: selector => selector === '.session-list' ? sessionList : null,
+  contains: target => target === anchorEl,
 };
 const session = {session_id: 'session-a', project_id: null, profile: 'default'};
 
 function setViewport(height, width) {
   window.innerHeight = height;
   viewport.height = height;
+  listRect.bottom = height;
   if (width) { window.innerWidth = width; viewport.width = width; }
+  listRect.right = window.innerWidth;
 }
 
 function setAnchor(rect) { anchorRect = Object.assign({width: 30, height: 40}, rect); }
@@ -159,6 +199,7 @@ function openPicker(naturalHeight) {
   mountedPicker = null;
   nextPickerHeight = naturalHeight;
   _showProjectPicker(session, anchorEl);
+  flushTimers();
   if (!mountedPicker) throw new Error('project picker was not mounted');
   return mountedPicker;
 }
@@ -183,6 +224,11 @@ function placement() {
     bottomStyle,
     maxHeight,
     renderedHeight,
+    left: Number.parseFloat(el.style.left),
+    right: Number.parseFloat(el.style.left) + el.offsetWidth,
+    width: el.offsetWidth,
+    observers: observers.size,
+    frames: frames.size,
     overflowY: el.style.overflowY || '',
     gap,
     overlaps,
@@ -199,6 +245,7 @@ function dispatchViewportChange() {
   windowEmitter.dispatch('resize');
   vvEmitter.dispatch('resize');
   vvEmitter.dispatch('scroll');
+  flushFrames();
 }
 """
 
@@ -325,9 +372,9 @@ console.log(JSON.stringify({
 """
 
 
-def _run_picker_cases() -> dict:
+def _run_picker_cases(suffix: str = _DRIVER_SUFFIX) -> dict:
     assert NODE is not None
-    script = _DRIVER_PREFIX + _show_project_picker_source() + _DRIVER_SUFFIX
+    script = _DRIVER_PREFIX + _show_project_picker_source() + suffix
     result = subprocess.run(
         [NODE, "-e", script],
         check=True,
@@ -452,8 +499,182 @@ def test_project_picker_teardown_runs_on_selection_outside_click_and_replacement
     assert replacement["listenerCounts"] == {
         "window": 1,
         "visualViewport": 2,
-        "document": 1,
+        "document": 2,
     }, (
         "Exactly one picker's listeners may be live after a replacement; got "
         f"{replacement['listenerCounts']}"
     )
+
+
+@pytest.mark.parametrize("offset_top", [0, 100])
+@pytest.mark.parametrize("picker_height", [120, 760])
+def test_visual_viewport_alone_changes_placement(offset_top, picker_height):
+    data = _run_picker_cases(f"""
+setAnchor({{top: 450, bottom: 490, left: 410, right: 440}});
+openPicker({picker_height});
+viewport.height = 500;
+viewport.offsetTop = {offset_top};
+vvEmitter.dispatch('resize');
+flushFrames();
+console.log(JSON.stringify({{...placement(), layoutHeight: window.innerHeight}}));
+""")
+    assert data["layoutHeight"] == 900, "Only the visual viewport may change."
+    assert not data["removed"]
+    assert data["top"] >= offset_top + 8
+    assert data["bottom"] <= offset_top + 500 - 8
+    assert data["gap"] == 4
+
+
+@pytest.mark.parametrize("anchor_left", [100, 270])
+@pytest.mark.parametrize("viewport_width", [120, 220])
+def test_visual_viewport_horizontal_edges_and_width_cap(anchor_left, viewport_width):
+    data = _run_picker_cases(f"""
+setAnchor({{top: 100, bottom: 140, left: {anchor_left}, right: {anchor_left + 30}}});
+openPicker(260);
+viewport.offsetLeft = 100;
+viewport.width = {viewport_width};
+vvEmitter.dispatch('scroll');
+flushFrames();
+console.log(JSON.stringify(placement()));
+""")
+    if anchor_left >= 100 + viewport_width:
+        assert data["removed"], "An anchor outside the visual viewport must close."
+    else:
+        assert not data["removed"]
+        assert data["left"] >= 108
+        assert data["right"] <= 100 + viewport_width - 8
+
+
+def test_anchor_hidden_by_keyboard_closes_without_layout_resize():
+    data = _run_picker_cases("""
+openPicker(260);
+viewport.height = 500;
+vvEmitter.dispatch('resize');
+flushFrames();
+console.log(JSON.stringify(placement()));
+""")
+    assert data["removed"]
+    assert data["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+    assert data["observers"] == 0
+
+
+def test_session_list_scroll_repositions_then_closes_at_container_edge():
+    data = _run_picker_cases("""
+listRect = {top: 200, bottom: 650, left: 0, right: 500};
+setAnchor({top: 400, bottom: 440, left: 410, right: 440});
+openPicker(120);
+setAnchor({top: 300, bottom: 340, left: 410, right: 440});
+sessionList.scroll();
+flushFrames();
+const moved = placement();
+// Still inside the WINDOW, but fully clipped by the scroll container.
+setAnchor({top: 150, bottom: 190, left: 410, right: 440});
+sessionList.scroll();
+flushFrames();
+console.log(JSON.stringify({moved, clipped: placement()}));
+""")
+    assert data["moved"]["gap"] == 4
+    assert not data["moved"]["removed"]
+    assert data["clipped"]["removed"]
+    assert data["clipped"]["observers"] == 0
+    assert data["clipped"]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+
+
+def test_sidebar_render_closes_disconnected_anchor_without_viewport_event():
+    data = _run_picker_cases("""
+openPicker(260);
+anchorConnected = false;
+flushMutations();
+console.log(JSON.stringify(placement()));
+""")
+    assert data["removed"], "Sidebar replacement must close before a later resize/scroll."
+    assert data["observers"] == 0
+    assert data["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+
+
+@pytest.mark.parametrize("exit_action", [
+    "mountedPicker.children[0].onclick()",
+    "mountedPicker.children[2].onclick()",
+    "mountedPicker.children.at(-1).onclick()",  # cancelled New project dialog
+    "docEmitter.dispatch('click', {target: {}})",
+    "anchorConnected = false; flushMutations()",
+])
+def test_teardown_cancels_queued_frame_and_disconnects_observer(exit_action):
+    data = _run_picker_cases(f"""
+openPicker(260);
+windowEmitter.dispatch('resize');
+vvEmitter.dispatch('resize');
+const queued = frames.size;
+{exit_action};
+const closed = placement();
+flushFrames();
+flushTimers();
+console.log(JSON.stringify({{queued, closed, after: placement()}}));
+""")
+    assert data["queued"] == 1, "Viewport events must coalesce into one frame."
+    for key in ("closed", "after"):
+        assert data[key]["removed"]
+        assert data[key]["frames"] == 0
+        assert data[key]["observers"] == 0
+        assert data[key]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+
+
+def test_replacement_retires_pending_work_and_preserves_new_owner():
+    data = _run_picker_cases("""
+openPicker(260);
+windowEmitter.dispatch('resize');
+const oldPicker = mountedPicker;
+openPicker(120);
+flushFrames();
+flushMutations();
+console.log(JSON.stringify({oldRemoved: oldPicker.removed, ...placement()}));
+""")
+    assert data["oldRemoved"]
+    assert not data["removed"]
+    assert data["frames"] == 0
+    assert data["observers"] == 1
+    assert data["listenerCounts"] == {"window": 1, "visualViewport": 2, "document": 2}
+
+
+def test_picker_scroll_does_not_schedule_reposition_or_close():
+    data = _run_picker_cases("""
+openPicker(1200);
+docEmitter.dispatch('scroll', {target: mountedPicker}, true);
+console.log(JSON.stringify(placement()));
+""")
+    assert not data["removed"]
+    assert data["frames"] == 0
+    assert data["overflowY"] == "auto"
+
+
+def test_window_dimensions_remain_the_fallback_without_visual_viewport():
+    data = _run_picker_cases("""
+window.visualViewport = null;
+setAnchor({top: 680, bottom: 720, left: 410, right: 440});
+openPicker(260);
+console.log(JSON.stringify(placement()));
+""")
+    assert not data["removed"]
+    assert data["gap"] == 4
+    assert data["top"] >= 8
+    assert data["bottom"] <= 892
+
+
+def test_replacement_before_delayed_click_registration_keeps_one_owner():
+    data = _run_picker_cases("""
+nextPickerHeight = 260;
+_showProjectPicker(session, anchorEl);
+const first = mountedPicker;
+_showProjectPicker(session, anchorEl);
+flushTimers();
+const live = placement();
+docEmitter.dispatch('click', {target: {}});
+console.log(JSON.stringify({firstRemoved: first.removed, live, closed: placement(), timers: timers.size}));
+""")
+    assert data["firstRemoved"]
+    assert data["live"]["observers"] == 1
+    assert data["live"]["listenerCounts"] == {"window": 1, "visualViewport": 2, "document": 2}
+    assert data["closed"]["removed"]
+    assert data["closed"]["observers"] == 0
+    assert data["closed"]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
+    assert data["timers"] == 0

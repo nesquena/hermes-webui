@@ -9309,28 +9309,50 @@ function _showProjectPicker(session, anchorEl){
   document.body.appendChild(picker);
   picker.style.position='fixed';
   picker.style.zIndex='999';
+  picker.style.right='auto';
   const margin=8;
   const gap=4;
-  let repositionScheduled=false;
+  const visualViewport=window.visualViewport;
+  const scrollContainer=anchorEl?.closest('.session-list');
+  let repositionFrame=null;
+  let closeTimer=null;
+  let anchorObserver=null;
 
-  // The picker floats above the session list in `position:fixed`, so a snapshot
-  // of the anchor rect is only true for the frame it was taken in. Treat an
-  // anchor that is gone (unmounted row, collapsed sidebar, scrolled-away row) as
-  // a reason to close instead of keeping stale geometry on screen.
-  const _anchorGone=()=>{
+  // Fixed coordinates and getBoundingClientRect use the layout viewport. The
+  // visible part can be smaller AND offset (keyboard, browser chrome, zoom).
+  const viewportBounds=()=>{
+    const top=visualViewport?visualViewport.offsetTop:0;
+    const left=visualViewport?visualViewport.offsetLeft:0;
+    return {
+      top,left,
+      bottom:top+(visualViewport?visualViewport.height:window.innerHeight),
+      right:left+(visualViewport?visualViewport.width:window.innerWidth),
+    };
+  };
+  const _anchorGone=(rect,bounds)=>{
     if(!anchorEl||anchorEl.isConnected===false) return true;
-    const r=anchorEl.getBoundingClientRect();
-    if(!r) return true;
-    if(!r.width&&!r.height) return true;
-    return r.bottom<0||r.top>window.innerHeight;
+    if(!rect||!rect.width||!rect.height) return true;
+    const clip=scrollContainer?scrollContainer.getBoundingClientRect():bounds;
+    const top=Math.max(bounds.top,clip.top);
+    const bottom=Math.min(bounds.bottom,clip.bottom);
+    const left=Math.max(bounds.left,clip.left);
+    const right=Math.min(bounds.right,clip.right);
+    return bottom<=top||right<=left||rect.bottom<=top||rect.top>=bottom||rect.right<=left||rect.left>=right;
   };
 
   // Idempotent placement: remeasure both the anchor and the rendered picker on
   // every call, so the picker keeps owning its row while the user resizes the
   // window, opens the on-screen keyboard, or collapses the URL bar.
   const positionPicker=()=>{
-    if(_anchorGone()){teardown();return;}
-    const rect=anchorEl.getBoundingClientRect();
+    const bounds=viewportBounds();
+    const rect=anchorEl?.getBoundingClientRect();
+    if(_anchorGone(rect,bounds)){teardown();return;}
+    // Apply the horizontal cap BEFORE measuring height, since narrow menus
+    // can wrap. Override the CSS minimum as well when zoom leaves <160px.
+    const availableWidth=Math.max(0,bounds.right-bounds.left-margin*2);
+    if(!availableWidth){teardown();return;}
+    picker.style.minWidth=Math.min(160,availableWidth)+'px';
+    picker.style.maxWidth=Math.min(220,availableWidth)+'px';
     // Measure the rendered picker instead of guessing its height. A fixed
     // threshold fails as soon as the user has enough projects to make the menu
     // taller, and a cap left over from the previous viewport would keep a
@@ -9338,30 +9360,32 @@ function _showProjectPicker(session, anchorEl){
     picker.style.maxHeight='';
     picker.style.overflowY='';
     const pickerH=picker.offsetHeight||0;
-    const spaceBelow=Math.max(0,window.innerHeight-margin-rect.bottom-gap);
-    const spaceAbove=Math.max(0,rect.top-gap-margin);
+    const belowTop=Math.max(bounds.top+margin,rect.bottom+gap);
+    const aboveBottom=Math.min(bounds.bottom-margin,rect.top-gap);
+    const spaceBelow=Math.max(0,bounds.bottom-margin-belowTop);
+    const spaceAbove=Math.max(0,aboveBottom-bounds.top-margin);
     picker.style.top='auto';
     picker.style.bottom='auto';
     if(pickerH<=spaceBelow){
       // Preferred placement: directly below the session action button.
-      picker.style.top=(rect.bottom+gap)+'px';
+      picker.style.top=belowTop+'px';
     }else if(pickerH<=spaceAbove){
       // Keep above-positioned pickers bottom-anchored so they stay attached to
       // the row they belong to.
-      picker.style.bottom=(window.innerHeight-rect.top+gap)+'px';
+      picker.style.bottom=(window.innerHeight-aboveBottom)+'px';
     }else{
       // Neither side fits the natural height. Use the roomier side and keep
       // every project reachable by scrolling inside the picker.
       const openAbove=spaceAbove>spaceBelow;
       const available=openAbove?spaceAbove:spaceBelow;
+      if(!available){teardown();return;}
       picker.style.maxHeight=available+'px';
       picker.style.overflowY='auto';
-      picker.style.top=(openAbove?margin:rect.bottom+gap)+'px';
+      picker.style.top=(openAbove?bounds.top+margin:belowTop)+'px';
     }
     // Align right edge of picker with right edge of button; keep within viewport
-    const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
-    let left=rect.right-pickerW;
-    if(left<8) left=8;
+    const pickerW=picker.offsetWidth;
+    const left=Math.max(bounds.left+margin,Math.min(rect.right-pickerW,bounds.right-margin-pickerW));
     picker.style.left=left+'px';
   };
 
@@ -9370,13 +9394,17 @@ function _showProjectPicker(session, anchorEl){
   // orientation changes. Coalesce with rAF so a burst of events costs one
   // reposition per frame.
   const onViewportChange=()=>{
-    if(repositionScheduled) return;
-    repositionScheduled=true;
-    requestAnimationFrame(()=>{
-      repositionScheduled=false;
+    if(repositionFrame!==null) return;
+    repositionFrame=requestAnimationFrame(()=>{
+      repositionFrame=null;
       if(picker.isConnected===false){teardown();return;}
       positionPicker();
     });
+  };
+  // Element scroll does not bubble. Capture it from the session list and any
+  // other ancestor that moves the anchor, but ignore the picker's own scroll.
+  const onScroll=(e)=>{
+    if(e.target===document||e.target?.contains?.(anchorEl)) onViewportChange();
   };
   const onOutsideClick=(e)=>{
     if(!picker.contains(e.target)&&e.target!==anchorEl) teardown();
@@ -9386,24 +9414,41 @@ function _showProjectPicker(session, anchorEl){
   // element it was bound for.
   const teardown=()=>{
     if(_projectPickerTeardown===teardown) _projectPickerTeardown=null;
+    if(repositionFrame!==null){cancelAnimationFrame(repositionFrame);repositionFrame=null;}
+    if(closeTimer!==null){clearTimeout(closeTimer);closeTimer=null;}
+    if(anchorObserver){anchorObserver.disconnect();anchorObserver=null;}
     window.removeEventListener('resize',onViewportChange);
-    if(window.visualViewport){
-      window.visualViewport.removeEventListener('resize',onViewportChange);
-      window.visualViewport.removeEventListener('scroll',onViewportChange);
+    if(visualViewport){
+      visualViewport.removeEventListener('resize',onViewportChange);
+      visualViewport.removeEventListener('scroll',onViewportChange);
     }
+    document.removeEventListener('scroll',onScroll,true);
     document.removeEventListener('click',onOutsideClick);
     picker.remove();
   };
   window.addEventListener('resize',onViewportChange);
-  if(window.visualViewport){
-    window.visualViewport.addEventListener('resize',onViewportChange);
-    window.visualViewport.addEventListener('scroll',onViewportChange);
+  if(visualViewport){
+    visualViewport.addEventListener('resize',onViewportChange);
+    visualViewport.addEventListener('scroll',onViewportChange);
   }
+  document.addEventListener('scroll',onScroll,true);
+  // A sidebar render can remove the row without any viewport event. Observe
+  // only child-list mutations while this picker is open, and avoid layout
+  // reads for unrelated transcript updates.
+  anchorObserver=new MutationObserver(()=>{
+    if(!anchorEl?.isConnected||!picker.isConnected) teardown();
+  });
+  anchorObserver.observe(document.body,{childList:true,subtree:true});
   _projectPickerTeardown=teardown;
   positionPicker();
   // Registered on the next tick so the click that opened the picker cannot close
   // it; skip if the picker was already retired by then.
-  setTimeout(()=>{if(_projectPickerTeardown===teardown) document.addEventListener('click',onOutsideClick);},0);
+  if(_projectPickerTeardown===teardown){
+    closeTimer=setTimeout(()=>{
+      closeTimer=null;
+      if(_projectPickerTeardown===teardown) document.addEventListener('click',onOutsideClick);
+    },0);
+  }
 }
 
 // Resize a .project-create-input to fit its current value (or placeholder).
