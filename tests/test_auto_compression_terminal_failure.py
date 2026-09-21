@@ -107,10 +107,25 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
         def interrupt(self, _message):
             return None
 
+    original_save = Session.save
+    saved_live_continuation = []
+
+    def record_save(self, *args, **kwargs):
+        if self.session_id == new_sid and self.parent_session_id == old_sid:
+            saved_live_continuation.append(
+                {
+                    "active_stream_id": self.active_stream_id,
+                    "pending_user_message": self.pending_user_message,
+                    "pre_compression_snapshot": self.pre_compression_snapshot,
+                }
+            )
+        return original_save(self, *args, **kwargs)
+
     fake_hermes_state = types.ModuleType("hermes_state")
     fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
 
     with monkeypatch.context() as m:
+        m.setattr(Session, "save", record_save)
         m.setattr(streaming, "get_session", lambda _sid: session)
         m.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
         m.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("gpt-4o", "openai", None))
@@ -154,6 +169,12 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
+    assert saved_live_continuation
+    assert saved_live_continuation[0] == {
+        "active_stream_id": stream_id,
+        "pending_user_message": "Do the long task.",
+        "pre_compression_snapshot": False,
+    }
 
 
 def test_compression_exhausted_result_is_terminal_failure_even_after_streamed_text():

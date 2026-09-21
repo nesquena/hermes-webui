@@ -193,7 +193,7 @@ def test_self_heal_retry_success_checks_stream_ownership_before_writeback():
 
     assert guard in block
     assert block.index(guard) < block.index("_result_messages = _heal_result.get('messages')")
-    assert block.index(guard) < block.index("s.save()")
+    assert block.index(guard) < block.index("_save_terminal_run_writeback(s, stream_id)")
 
 
 def test_outer_exception_path_checks_stream_ownership_before_error_writeback():

@@ -3851,7 +3851,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
-      if(role==='tool'||role==='thinking') return true;
+      if(role==='tool'||role==='thinking'||role==='control') return true;
       if(role==='lifecycle'){
         const source=String(row.source_event_type||'');
         // compression cards are worklog-worthy; a bare terminal/done lifecycle is not.
@@ -6496,6 +6496,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finalizeStreamEndFallback(source);
     });
 
+    source.addEventListener('steer_delivered',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const sid=d.session_id||activeSid;
+        const txt=String(d.text||'').trim();
+        if(!txt||sid!==activeSid) return;
+        _applyToAnchor('steer_delivered',d,e);
+        // Persist the live anchor snapshot so settlement and reconnect retain
+        // the control row instead of reverting to a pre-Steer scene.
+        snapshotLiveTurn();
+      }catch(_){}
+    });
+
     source.addEventListener('pending_steer_leftover',e=>{
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
@@ -6992,15 +7005,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
   const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _RUN_OWNED_EPHEMERAL_TURN_FIELDS=new Set(['_anchor_stream_id','_anchor_activity_scene']);
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
     const turnId=identity&&typeof identity.turn_id==='string'?identity.turn_id:'';
     return turnId.indexOf('historical:')===0;
   }
-  function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
+  function _carryForwardEphemeralTurnFields(prevMessages, nextMessages, options=null){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
+    const carryRunOwned=!(options&&options.carryRunOwned===false);
     const prevIdx=new Map();
     for(const pm of prevMessages){
       const k=_messageIdentityKey(pm); if(!k) continue;
@@ -7012,6 +7027,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const k=_messageIdentityKey(nm); if(!k) continue;
       const pm=prevIdx.get(k); if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
+        if(!carryRunOwned&&_RUN_OWNED_EPHEMERAL_TURN_FIELDS.has(f)) continue;
         if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
         if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
       }

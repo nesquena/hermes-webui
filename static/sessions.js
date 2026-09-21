@@ -1082,6 +1082,91 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   };
 }
 
+function _attachSettledRuntimeJournalControls(messages, snapshot){
+  if(!Array.isArray(messages)||!snapshot||typeof snapshot!=='object') return 0;
+  const sourceScene=snapshot.anchor_activity_scene||snapshot.anchorActivityScene;
+  const sourceRows=Array.isArray(sourceScene&&sourceScene.activity_rows)?sourceScene.activity_rows:[];
+  const controlRows=sourceRows.filter(row=>{
+    return !!(
+      row&&row.role==='control'&&
+      String(row.event_id||(row.identity&&row.identity.event_id)||'').trim()
+    );
+  });
+  if(!controlRows.length) return 0;
+  let target=null;
+  for(let idx=messages.length-1;idx>=0;idx-=1){
+    if(messages[idx]&&messages[idx].role==='assistant'){
+      target=messages[idx];
+      break;
+    }
+  }
+  if(!target) return 0;
+  const existingScene=(target._anchor_activity_scene&&target._anchor_activity_scene.version==='activity_scene_v1')
+    ? target._anchor_activity_scene
+    : null;
+  const existingRows=Array.isArray(existingScene&&existingScene.activity_rows)
+    ? existingScene.activity_rows
+    : [];
+  const seenEventIds=new Set();
+  for(const row of existingRows){
+    const eventId=String(row&&(row.event_id||(row.identity&&row.identity.event_id))||'').trim();
+    if(eventId) seenEventIds.add(eventId);
+  }
+  const journalSeq=(row)=>{
+    const explicit=Number(row&&row.source_journal_seq);
+    if(Number.isFinite(explicit)&&explicit>0) return explicit;
+    const identitySeq=Number(row&&row.identity&&row.identity.seq);
+    if(Number.isFinite(identitySeq)&&identitySeq>0) return identitySeq;
+    const eventId=String(row&&(row.event_id||(row.identity&&row.identity.event_id))||'').trim();
+    const splitAt=eventId.lastIndexOf(':');
+    if(splitAt>0){
+      const suffix=Number(eventId.slice(splitAt+1));
+      if(Number.isFinite(suffix)&&suffix>0) return suffix;
+    }
+    return null;
+  };
+  const mergedEntries=existingRows.map((row,index)=>({
+    row:{...row},
+    journalSeq:journalSeq(row),
+    mergeIndex:index,
+  }));
+  for(const row of controlRows){
+    const eventId=String(row.event_id||(row.identity&&row.identity.event_id)||'').trim();
+    if(seenEventIds.has(eventId)) continue;
+    seenEventIds.add(eventId);
+    mergedEntries.push({
+      row:{...row,event_id:eventId},
+      journalSeq:journalSeq(row),
+      mergeIndex:mergedEntries.length,
+    });
+  }
+  if(mergedEntries.length===existingRows.length) return 0;
+  mergedEntries.sort((left,right)=>{
+    const leftSeq=Number(left&&left.journalSeq);
+    const rightSeq=Number(right&&right.journalSeq);
+    const leftKnown=Number.isFinite(leftSeq)&&leftSeq>0;
+    const rightKnown=Number.isFinite(rightSeq)&&rightSeq>0;
+    if(leftKnown&&rightKnown&&leftSeq!==rightSeq) return leftSeq-rightSeq;
+    return Number(left&&left.mergeIndex)-Number(right&&right.mergeIndex);
+  });
+  const mergedRows=mergedEntries.map((entry,index)=>{
+    const row=entry.row;
+    row.order_index=index;
+    row.seq=index;
+    if(row.identity&&typeof row.identity==='object') row.identity={...row.identity,seq:index};
+    return row;
+  });
+  target._anchor_stream_id=String(snapshot.stream_id||snapshot.streamId||target._anchor_stream_id||'');
+  target._anchor_activity_scene={
+    ...(sourceScene||{}),
+    ...(existingScene||{}),
+    version:'activity_scene_v1',
+    final_answer:(existingScene&&existingScene.final_answer)||String(target.content||''),
+    activity_rows:mergedRows,
+  };
+  return mergedRows.length-existingRows.length;
+}
+
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
   if(!serverLiveSnapshot) return localInflight||null;
   if(!localInflight||!_inflightHasVisibleLiveState(localInflight)) return serverLiveSnapshot;
@@ -2339,6 +2424,10 @@ async function loadSession(sid){
     }else{
       S.busy=false;
       S.activeStreamId=null;
+      // A completed run still carries its durable journal snapshot through
+      // last_run_stream_id. Consume only control rows into the settled turn;
+      // never turn this idle replay into live INFLIGHT state or reopen run SSE.
+      _attachSettledRuntimeJournalControls(S.messages,S.session.runtime_journal_snapshot);
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
@@ -3187,6 +3276,17 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  // Metadata and transcript are separate requests. Carry a replay snapshot only
+  // when both responses describe the same completed run; otherwise a late
+  // metadata response from run A could attach its Steer rows to run B's answer.
+  const metadataRunStreamId=String((S.session&&S.session.last_run_stream_id)||'').trim();
+  const transcriptRunStreamId=String(data.session.last_run_stream_id||'').trim();
+  const snapshotStreamId=String((S.session&&S.session.runtime_journal_snapshot&&S.session.runtime_journal_snapshot.stream_id)||'').trim();
+  const runtimeJournalSnapshot=(
+    metadataRunStreamId&&
+    transcriptRunStreamId===metadataRunStreamId&&
+    snapshotStreamId===metadataRunStreamId
+  ) ? S.session.runtime_journal_snapshot : null;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3196,6 +3296,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
   let msgs = (data.session.messages || []).filter(m => m && m.role);
+  const carryForwardSameRun=!(metadataRunStreamId&&transcriptRunStreamId&&metadataRunStreamId!==transcriptRunStreamId);
   // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
   // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
   // Clearing here and then overwriting is wasteful, and if S.busy becomes true
@@ -3213,7 +3314,7 @@ async function _ensureMessagesLoaded(sid, opts) {
     const _prev = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)
       ? _pendingCarryForwardSnapshot
       : (S.messages || []);
-    msgs=window._carryForwardEphemeralTurnFields(_prev, msgs);
+    msgs=window._carryForwardEphemeralTurnFields(_prev, msgs, {carryRunOwned:carryForwardSameRun});
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -3239,6 +3340,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    S.session.last_run_stream_id=data.session.last_run_stream_id||null;
+    if(runtimeJournalSnapshot) S.session.runtime_journal_snapshot=runtimeJournalSnapshot;
+    else delete S.session.runtime_journal_snapshot;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated

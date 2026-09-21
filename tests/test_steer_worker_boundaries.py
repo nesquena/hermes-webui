@@ -244,6 +244,10 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
     def running():
         if rotated:
             scene.agent.session_id = "compressed-child"
+            config.STREAM_LIVE_SESSION_LINEAGE["run"] = {
+                "original",
+                "compressed-child",
+            }
         if not registered:
             with config.STREAMS_LOCK:
                 config.AGENT_INSTANCES.pop("run")
@@ -269,8 +273,13 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             release.set()
         worker.result(timeout=10)
     emitted = list(scene.events.queue)
-    assert not [payload for event, payload in emitted if event == "apperror"]
-    leftovers = [payload["text"] for event, payload in emitted if event == "pending_steer_leftover"]
+    normalized = [item[:2] for item in emitted]
+    assert not [payload for event, payload in normalized if event == "apperror"]
+    leftovers = [
+        payload["text"]
+        for event, payload in normalized
+        if event == "pending_steer_leftover"
+    ]
     assert leftovers == (["guidance"] if first == "steer" else [])
     assert scene.drained == (["guidance"] if first == "steer" else [""])
     assert scene.agent.pending == []

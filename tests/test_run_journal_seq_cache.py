@@ -61,6 +61,52 @@ def test_writer_and_free_function_share_one_gapless_sequence(tmp_path):
     assert file_seqs == [1, 2, 3, 4]
 
 
+def test_writer_and_free_append_keep_physical_sequence_order(tmp_path, monkeypatch):
+    """A direct append cannot overtake a writer after it reserves its seq."""
+    writer = run_journal.RunJournalWriter(
+        "sess_order", "run_order", session_dir=tmp_path
+    )
+    real_append = run_journal.append_run_event
+    writer_at_append = threading.Event()
+    release_writer = threading.Event()
+    errors: list[BaseException] = []
+
+    def controlled_append(*args, **kwargs):
+        if threading.current_thread().name == "journal-writer":
+            writer_at_append.set()
+            if not release_writer.wait(timeout=10):
+                raise TimeoutError("writer interleave was not released")
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "append_run_event", controlled_append)
+
+    def write_from_writer():
+        try:
+            writer.append_sse_event("token", {"text": "writer"})
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=write_from_writer, name="journal-writer")
+    thread.start()
+    assert writer_at_append.wait(timeout=10), "writer never reached append"
+    run_journal.append_run_event(
+        "sess_order",
+        "run_order",
+        "steer_delivered",
+        {"text": "direct"},
+        session_dir=tmp_path,
+    )
+    release_writer.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert errors == []
+    journal = run_journal.read_run_events(
+        "sess_order", "run_order", session_dir=tmp_path
+    )
+    assert [event["seq"] for event in journal["events"]] == [1, 2]
+
+
 def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
     # A caller-supplied seq must push the cache forward so a later cache append
     # does not collide with it.
@@ -71,6 +117,198 @@ def test_explicit_seq_keeps_cache_from_reissuing(tmp_path):
         "sess_expl", "run_expl", "token", {"text": "y"}, session_dir=tmp_path
     )
     assert nxt["seq"] == 6
+
+
+def test_accept_transaction_does_not_call_runtime_after_terminal(tmp_path):
+    run_journal.append_run_event(
+        "sess_terminal", "run_terminal", "done", {"session": {}}, session_dir=tmp_path
+    )
+    writer = run_journal.RunJournalWriter(
+        "sess_terminal", "run_terminal", session_dir=tmp_path
+    )
+    called = []
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "too late"},
+        lambda: called.append(True) or True,
+    )
+
+    assert (accepted, event, reason, error) == (False, None, "terminal", None)
+    assert called == []
+    journal = run_journal.read_run_events(
+        "sess_terminal", "run_terminal", session_dir=tmp_path
+    )
+    assert [item["event"] for item in journal["events"]] == ["done"]
+
+
+def test_accept_transaction_orders_delivery_before_concurrent_terminal(tmp_path):
+    writer = run_journal.RunJournalWriter(
+        "sess_accept", "run_accept", session_dir=tmp_path
+    )
+    terminal_started = threading.Event()
+    terminal_finished = threading.Event()
+
+    def append_terminal():
+        terminal_started.set()
+        run_journal.append_run_event(
+            "sess_accept",
+            "run_accept",
+            "done",
+            {"session": {}},
+            session_dir=tmp_path,
+        )
+        terminal_finished.set()
+
+    def accept():
+        thread = threading.Thread(target=append_terminal)
+        thread.start()
+        assert terminal_started.wait(timeout=10)
+        assert not terminal_finished.wait(timeout=0.1), "terminal bypassed transaction lock"
+        return True
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "in time"},
+        accept,
+    )
+    assert accepted is True
+    assert event is not None
+    assert reason is None
+    assert error is None
+    assert terminal_finished.wait(timeout=10)
+
+    journal = run_journal.read_run_events(
+        "sess_accept", "run_accept", session_dir=tmp_path
+    )
+    assert [item["event"] for item in journal["events"]] == [
+        "steer_delivered",
+        "done",
+    ]
+
+
+def test_failed_accept_append_does_not_consume_sequence_authority(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_failed_accept", "run_failed_accept", session_dir=tmp_path
+    )
+    real_open = run_journal.os.open
+    journal_open_attempted = False
+
+    def fail_journal_open(path, flags, *args, **kwargs):
+        nonlocal journal_open_attempted
+        if str(path) == str(writer._path) and flags & run_journal.os.O_WRONLY:
+            journal_open_attempted = True
+            raise OSError("fault-injected append failure")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(run_journal.os, "open", fail_journal_open)
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "accepted but not persisted"},
+        lambda: True,
+    )
+    assert journal_open_attempted is True
+    assert accepted is True and event is None and reason == "persistence_error"
+    assert isinstance(error, OSError)
+
+    monkeypatch.setattr(run_journal.os, "open", real_open)
+    terminal = writer.append_sse_event("done", {"session": {}})
+    assert terminal["seq"] == 1
+    journal = run_journal.read_run_events(
+        "sess_failed_accept", "run_failed_accept", session_dir=tmp_path
+    )
+    assert [item["seq"] for item in journal["events"]] == [1]
+    assert journal["malformed"] == []
+
+
+def test_flush_failure_resyncs_sequence_from_durable_row(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_flush_failure", "run_flush_failure", session_dir=tmp_path
+    )
+    real_fdopen = run_journal.os.fdopen
+
+    class FlushFailsAfterWriting:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            self._wrapped.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._wrapped.__exit__(exc_type, exc, tb)
+
+        def write(self, value):
+            return self._wrapped.write(value)
+
+        def flush(self):
+            self._wrapped.flush()
+            raise OSError("fault-injected flush failure")
+
+        def fileno(self):
+            return self._wrapped.fileno()
+
+    monkeypatch.setattr(
+        run_journal.os,
+        "fdopen",
+        lambda fd, *args, **kwargs: FlushFailsAfterWriting(real_fdopen(fd, *args, **kwargs)),
+    )
+    with pytest.raises(OSError, match="fault-injected flush failure"):
+        writer.append_sse_event("token", {"text": "durable despite late error"})
+
+    monkeypatch.setattr(run_journal.os, "fdopen", real_fdopen)
+    terminal = writer.append_sse_event("done", {"session": {}})
+    assert terminal["seq"] == 2
+    journal = run_journal.read_run_events(
+        "sess_flush_failure", "run_flush_failure", session_dir=tmp_path
+    )
+    assert [item["seq"] for item in journal["events"]] == [1, 2]
+
+
+def test_partial_write_failure_truncates_torn_row_and_reuses_sequence(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_partial_failure", "run_partial_failure", session_dir=tmp_path
+    )
+    real_fdopen = run_journal.os.fdopen
+
+    class PartialWriter:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            self._wrapped.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._wrapped.__exit__(exc_type, exc, tb)
+
+        def write(self, value):
+            self._wrapped.write(value[:17])
+            self._wrapped.flush()
+            raise OSError("fault-injected partial write")
+
+        def flush(self):
+            return self._wrapped.flush()
+
+        def fileno(self):
+            return self._wrapped.fileno()
+
+    monkeypatch.setattr(
+        run_journal.os,
+        "fdopen",
+        lambda fd, *args, **kwargs: PartialWriter(real_fdopen(fd, *args, **kwargs)),
+    )
+    with pytest.raises(OSError, match="fault-injected partial write"):
+        writer.append_sse_event("token", {"text": "torn"})
+
+    monkeypatch.setattr(run_journal.os, "fdopen", real_fdopen)
+    terminal = writer.append_sse_event("done", {"session": {}})
+    assert terminal["seq"] == 1
+    journal = run_journal.read_run_events(
+        "sess_partial_failure", "run_partial_failure", session_dir=tmp_path
+    )
+    assert [item["seq"] for item in journal["events"]] == [1]
+    assert journal["malformed"] == []
 
 
 def test_delete_evicts_seq_cache_so_recreated_run_restarts(tmp_path):

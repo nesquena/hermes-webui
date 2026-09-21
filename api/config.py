@@ -10890,6 +10890,7 @@ STREAM_SESSION_OWNERS: dict = {}
 STREAM_SESSION_OWNERS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
+STREAM_LIVE_SESSION_LINEAGE: dict[str, set[str]] = {}  # stream_id -> authoritative live rotation SIDs
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated during streaming (#1361 §A)
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
@@ -10899,13 +10900,18 @@ PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuati
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
-    """Record the session that owns a stream before worker startup."""
+    """Record the immutable session that owns a stream before worker startup.
+
+    Re-registration can occur while a long-running stream crosses compression
+    aliases; the first admitted owner remains the journal authority until
+    teardown unregisters the stream.
+    """
     stream_id = str(stream_id or "").strip()
     session_id = str(session_id or "").strip()
     if not stream_id or not session_id:
         return
     with STREAM_SESSION_OWNERS_LOCK:
-        STREAM_SESSION_OWNERS[stream_id] = session_id
+        STREAM_SESSION_OWNERS.setdefault(stream_id, session_id)
 
 
 def stream_owner_session_id(stream_id: str) -> str | None:
@@ -10917,6 +10923,20 @@ def stream_owner_session_id(stream_id: str) -> str | None:
         owner = STREAM_SESSION_OWNERS.get(stream_id)
     owner = str(owner or "").strip()
     return owner or None
+
+
+def stream_journal_owner_session_id(stream_id: str, fallback_session_id: str | None = None) -> str | None:
+    """Return the immutable session directory that owns ``stream_id``'s journal.
+
+    Compression may move the live agent to a continuation session while the
+    WebUI keeps the same transport/run id.  The owner registered when that run
+    was admitted remains authoritative for every append and replay of the run.
+    """
+    owner = stream_owner_session_id(stream_id)
+    if owner:
+        return owner
+    fallback = str(fallback_session_id or "").strip()
+    return fallback or None
 
 
 def unregister_stream_owner(stream_id: str) -> None:
@@ -10950,6 +10970,23 @@ def register_session_writeback_owner(session_id: str, stream_id: str) -> None:
         return
     with SESSION_WRITEBACK_OWNERS_LOCK:
         SESSION_WRITEBACK_OWNERS[session_id] = stream_id
+
+
+def claim_session_writeback_owner_if_unowned(
+    session_id: str,
+    stream_id: str,
+) -> bool:
+    """Claim an unowned writeback generation without replacing a successor."""
+    session_id = str(session_id or "").strip()
+    stream_id = str(stream_id or "").strip()
+    if not session_id or not stream_id:
+        return False
+    with SESSION_WRITEBACK_OWNERS_LOCK:
+        owner = str(SESSION_WRITEBACK_OWNERS.get(session_id) or "").strip()
+        if owner and owner != stream_id:
+            return False
+        SESSION_WRITEBACK_OWNERS[session_id] = stream_id
+        return True
 
 
 def session_writeback_owner(session_id: str) -> str | None:

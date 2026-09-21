@@ -52,6 +52,7 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.STREAM_LIVE_SESSION_LINEAGE.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     # New shared dicts for §A and §B
     if hasattr(config, 'STREAM_REASONING_TEXT'):
@@ -62,6 +63,7 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.STREAM_LIVE_SESSION_LINEAGE.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, 'STREAM_REASONING_TEXT'):
         config.STREAM_REASONING_TEXT.clear()
@@ -323,7 +325,9 @@ class TestCancelWithReasoningOnlyNoText:
 
         cancel_stream(stream_id)
 
-        event_type, payload = q.get_nowait()
+        item = q.get_nowait()
+        event_type, payload = item[:2]
+        assert len(item) in (2, 3)
         assert event_type == "cancel"
         assert payload["type"] == "cancelled"
         assert payload["status"] == "cancelled"
@@ -582,6 +586,22 @@ def test_cancel_copy_falls_back_to_hermes_for_blank_bot_name(monkeypatch):
         'The run was cancelled by the user before Hermes finished. '
         'No provider failure occurred.'
     )
+
+
+def test_cancel_stream_removes_live_rotation_lineage():
+    sid = "test_1361_cancel_lineage"
+    stream_id = "stream_cancel_lineage"
+    _make_session(session_id=sid)
+    _setup_cancel_state(sid, stream_id)
+    config.STREAM_LIVE_SESSION_LINEAGE[stream_id] = {
+        "compression-root",
+        sid,
+    }
+
+    assert cancel_stream(stream_id) is True
+    assert stream_id not in config.STREAMS
+    assert stream_id not in config.AGENT_INSTANCES
+    assert stream_id not in config.STREAM_LIVE_SESSION_LINEAGE
 
 
 class TestCancelStreamIdempotentWithWorkerFinalizer:

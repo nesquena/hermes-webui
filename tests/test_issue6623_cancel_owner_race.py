@@ -27,9 +27,12 @@ Covers the two CHANGES_REQUESTED items on PR #6636:
    pause into the canonical current session, never save the worker's detached
    snapshot.
 """
+import json
 import queue
 import threading
 import time
+from io import BytesIO
+from urllib.parse import urlparse
 
 import pytest
 
@@ -301,7 +304,77 @@ def test_issue6623_delayed_cancel_finalizer_gated_by_stream_ownership():
     streaming._finalize_cancelled_turn(s3, ephemeral=False, stream_id=old_stream)
     s3.save.assert_called_once()
     assert s3.active_stream_id is None
+    assert s3.last_run_stream_id == old_stream
     assert streaming._session_has_cancel_marker(s3) is True
+
+
+def test_direct_worker_claim_does_not_replace_successor_generation(monkeypatch):
+    sid = "direct-worker-successor-owner"
+    stale_stream = "direct-worker-stale-stream"
+    successor_stream = "direct-worker-successor-stream"
+
+    config.register_session_writeback_owner(sid, successor_stream)
+    config.STREAMS[stale_stream] = queue.Queue()
+    monkeypatch.setattr(streaming, "RunJournalWriter", Mock(side_effect=RuntimeError("stop after admission")))
+
+    streaming._run_agent_streaming(
+        session_id=sid,
+        msg_text="stale request",
+        model="test-model",
+        workspace=".",
+        stream_id=stale_stream,
+    )
+
+    assert config.session_writeback_owner(sid) == successor_stream
+
+
+def test_rotated_terminal_writeback_uses_same_generation_on_continuation(tmp_path):
+    """A compressed run keeps one generation while terminal state moves to child."""
+    old_sid = "terminal-rotation-origin"
+    new_sid = "terminal-rotation-continuation"
+    stream_id = "terminal-rotation-stream"
+    s = Session(session_id=new_sid, messages=[])
+    s.parent_session_id = old_sid
+    s.active_stream_id = stream_id
+    s.recommended_recovery_action = "start_focused_continuation"
+
+    config.register_session_writeback_owner(old_sid, stream_id)
+    config.register_session_writeback_owner(new_sid, stream_id)
+
+    assert streaming._save_terminal_run_writeback(s, stream_id) is True
+    disk = models.Session.load(new_sid)
+    assert disk is not None
+    assert disk.last_run_stream_id == stream_id
+    assert disk.recommended_recovery_action == "start_focused_continuation"
+
+    config.clear_session_writeback_owner_if_owned(old_sid, stream_id)
+    config.clear_session_writeback_owner_if_owned(new_sid, stream_id)
+    assert config.session_writeback_owner(old_sid) is None
+    assert config.session_writeback_owner(new_sid) is None
+
+
+def test_rotated_terminal_writeback_cannot_overwrite_child_successor(tmp_path):
+    old_sid = "terminal-rotation-stale-origin"
+    new_sid = "terminal-rotation-stale-continuation"
+    old_stream = "terminal-rotation-old-stream"
+    new_stream = "terminal-rotation-new-stream"
+
+    current = Session(session_id=new_sid, messages=[])
+    current.active_stream_id = new_stream
+    current.last_run_stream_id = new_stream
+    current.save()
+    config.register_session_writeback_owner(new_sid, new_stream)
+
+    stale = Session(session_id=new_sid, messages=[])
+    stale.parent_session_id = old_sid
+    stale.active_stream_id = old_stream
+    config.register_session_writeback_owner(old_sid, old_stream)
+
+    assert streaming._save_terminal_run_writeback(stale, old_stream) is False
+    disk = models.Session.load(new_sid)
+    assert disk is not None
+    assert disk.active_stream_id == new_stream
+    assert disk.last_run_stream_id == new_stream
 
 
 def test_issue6623_recent_cancel_not_reaped_despite_old_started_at(tmp_path, monkeypatch):
@@ -386,7 +459,10 @@ def test_issue6623_stale_recovery_successor_survives_delayed_cancel_finalizer(
     with patch("api.streaming.get_session", return_value=s):
         assert streaming.cancel_stream(old_stream) is True
     assert s.active_stream_id is None
+    assert s.last_run_stream_id == old_stream
     assert streaming._session_has_cancel_marker(s)
+    disk_after_cancel = models.Session.load(sid)
+    assert disk_after_cancel.last_run_stream_id == old_stream
 
     # 3) Stale recovery: the cancel has been outstanding past the unwind
     # ceiling (stuck worker never reached its finally) -> the run row is
@@ -471,6 +547,126 @@ def test_issue6623_writeback_owner_released_only_while_still_owned():
     # The current owner's finally clears it.
     config.clear_session_writeback_owner_if_owned("sess_owner_release", "stream-b")
     assert config.session_writeback_owner("sess_owner_release") is None
+
+
+def test_terminal_run_marker_is_generation_safe():
+    sid = "terminal-run-generation-safe"
+    old_stream = "terminal-old-stream"
+    newer_stream = "terminal-newer-stream"
+    current = Session(session_id=sid, messages=[])
+    current.active_stream_id = newer_stream
+    current.last_run_stream_id = newer_stream
+    current.save()
+    models.SESSIONS[sid] = current
+    config.register_session_writeback_owner(sid, newer_stream)
+
+    stale = Session(session_id=sid, messages=[])
+    stale.active_stream_id = old_stream
+
+    assert streaming._mark_terminal_run_for_writeback(stale, old_stream) is False
+    assert stale.last_run_stream_id is None
+
+    saved = models.Session.load(sid)
+    assert saved.last_run_stream_id == newer_stream
+    assert saved.active_stream_id == newer_stream
+
+
+def test_cancel_persists_last_run_stream_id_for_settled_session_projection(
+    monkeypatch,
+):
+    """After direct cancellation clears active_stream_id, the real session GET
+    endpoint must still locate the cancelled run journal from last_run_stream_id.
+    """
+    import api.routes as routes
+
+    sid = "cancelled-settled-projection"
+    stream_id = "cancelled-settled-stream"
+    s = Session(
+        session_id=sid,
+        title="Cancelled settled projection",
+        messages=[{"role": "user", "content": "cancel me", "timestamp": 1}],
+    )
+    s.active_stream_id = stream_id
+    s.pending_user_message = "cancel me"
+    s.pending_attachments = []
+    s.pending_started_at = 1
+    s.save()
+    models.SESSIONS[sid] = s
+    config.register_stream_owner(stream_id, sid)
+    config.STREAMS[stream_id] = queue.Queue()
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    config.register_active_run(stream_id, session_id=sid, phase="running")
+
+    with patch("api.streaming.get_session", return_value=s):
+        assert streaming.cancel_stream(stream_id) is True
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda run_id: {
+            "session_id": sid,
+            "run_id": run_id,
+            "last_seq": 3,
+            "last_event_id": f"{run_id}:3",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_run_journal_live_snapshot",
+        lambda run_id, handler=None: {
+            "stream_id": run_id,
+            "run_id": run_id,
+            "last_seq": 3,
+            "last_event_id": f"{run_id}:3",
+            "anchor_activity_scene": {
+                "version": "activity_scene_v1",
+                "identity": {"session_id": sid, "stream_id": run_id, "run_id": run_id},
+                "activity_rows": [],
+            },
+        },
+    )
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda profile, handler: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda session: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_for_display",
+        lambda session: getattr(session, "model", None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_provider_for_display",
+        lambda session: getattr(session, "model_provider", None),
+    )
+
+    class _Handler:
+        def __init__(self):
+            self.status = None
+            self.response_headers = []
+            self.wfile = BytesIO()
+            self._safe_webui_print = lambda *args, **kwargs: None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            pass
+
+        def payload(self):
+            return json.loads(self.wfile.getvalue().decode() or "{}")
+
+    h = _Handler()
+    routes.handle_get(
+        h,
+        urlparse(f"/api/session?session_id={sid}&messages=0&resolve_model=0"),
+    )
+    payload = h.payload()["session"]
+    assert h.status == 200
+    assert payload["active_stream_id"] is None
+    assert payload["last_run_stream_id"] == stream_id
+    assert payload["runtime_journal_snapshot"]["stream_id"] == stream_id
 
 
 def test_issue6623_replaced_session_successor_survives_delayed_cancel_finalizer(
@@ -652,6 +848,7 @@ def test_issue6623_replaced_session_completed_successor_still_protected_by_owner
         # The successor turn then completes normally: active_stream_id and
         # pending fields are cleared, the transcript persists. The ownership
         # record is NOT touched by normal completion.
+        s_new.last_run_stream_id = newer_stream
         s_new.active_stream_id = None
         s_new.pending_user_message = None
         s_new.pending_attachments = []
@@ -666,6 +863,9 @@ def test_issue6623_replaced_session_completed_successor_still_protected_by_owner
     assert config.session_writeback_owner(sid) == newer_stream
     disk = models.Session.load(sid)
     assert disk.active_stream_id is None
+    assert disk.last_run_stream_id == newer_stream, (
+        "a stale cancel finalizer must not overwrite the successor generation's run pointer"
+    )
     assert len(disk.messages) == _messages_after_successor_completion, (
         "delayed finalizer must not mutate the completed successor transcript"
     )

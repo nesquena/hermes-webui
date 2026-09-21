@@ -20,6 +20,10 @@ def scene(monkeypatch):
     monkeypatch.setattr(config, "STREAMS", {"run": queue.Queue(), "other-run": queue.Queue()})
     monkeypatch.setattr(config, "AGENT_INSTANCES", {"run": agent, "other-run": other})
     monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {"run": "original", "other-run": "other-session"})
+    monkeypatch.setattr(config, "STREAM_LIVE_SESSION_LINEAGE", {
+        "run": {"original", "compressed-child"},
+        "other-run": {"other-session"},
+    })
     monkeypatch.setattr(config, "ACTIVE_RUNS", {
         "run": {"session_id": "original", "phase": "running", "backend": "legacy"},
         "other-run": {"session_id": "other-session", "phase": "running", "backend": "legacy"},

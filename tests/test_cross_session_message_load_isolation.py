@@ -21,6 +21,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_SRC = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -92,6 +93,16 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+ATTACH_SETTLED_RUNTIME_JOURNAL_CONTROLS_SRC = _extract_function(
+    SESSIONS_SRC, "_attachSettledRuntimeJournalControls"
+)
+MESSAGE_IDENTITY_KEY_SRC = _extract_function(MESSAGES_SRC, "_messageIdentityKey")
+IS_HISTORICAL_ANCHOR_ACTIVITY_SCENE_SRC = _extract_function(
+    MESSAGES_SRC, "_isHistoricalAnchorActivityScene"
+)
+CARRY_FORWARD_EPHEMERAL_TURN_FIELDS_SRC = _extract_function(
+    MESSAGES_SRC, "_carryForwardEphemeralTurnFields"
+)
 
 
 def _normalise_ws(s: str) -> str:
@@ -190,6 +201,10 @@ function snapshotState() {
     visibleCacheClears,
     liveCardClears,
     toolSyncCalls,
+    attachLiveCalls,
+    setBusyCalls: setBusyCalls.slice(),
+    renderedControlRows: renderedControlRows.slice(),
+    renderedActivityRows: renderedActivityRows.slice(),
   };
 }
 
@@ -289,7 +304,25 @@ function createEnvironment() {
   globalThis._renderPendingPromptsForActiveSession = () => {};
   globalThis._restoreComposerDraft = () => {};
   globalThis.renderSessionArtifacts = () => {};
-  globalThis.renderMessages = () => {};
+  globalThis.renderMessages = () => {
+    const controls=[];
+    const activity=[];
+    for(const message of (Array.isArray(S.messages)?S.messages:[])){
+      const scene=message&&message._anchor_activity_scene;
+      for(const row of (Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[])){
+        if(row&&row.role==='control') controls.push({event_id:String(row.event_id||''),text:String(row.text||'')});
+        if(row) activity.push({
+          role:String(row.role||''),
+          event_id:String(row.event_id||''),
+          text:String(row.text||''),
+          seq:row.seq,
+          order_index:row.order_index,
+        });
+      }
+    }
+    renderedControlRows.push(controls);
+    renderedActivityRows.push(activity);
+  };
   globalThis._checkAndShowHandoffHint = () => {};
   globalThis._hideHandoffHint = () => {};
   globalThis._isMessagingSession = () => true;
@@ -297,7 +330,8 @@ function createEnvironment() {
 
   globalThis.setStatus = () => {};
   globalThis.setComposerStatus = () => {};
-  globalThis.setBusy = () => {};
+  globalThis.setBusy = (value) => { setBusyCalls.push(!!value); };
+  globalThis.attachLiveStream = () => { attachLiveCalls += 1; };
   globalThis.updateSendBtn = () => {};
   globalThis.updateQueueBadge = () => {};
   globalThis.startApprovalPolling = () => {};
@@ -323,6 +357,9 @@ function createEnvironment() {
   };
 
   globalThis.window = {};
+  window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
+  globalThis._RUN_OWNED_EPHEMERAL_TURN_FIELDS = new Set(['_anchor_stream_id','_anchor_activity_scene']);
+  globalThis._EPHEMERAL_TURN_FIELDS = ['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   globalThis.history = { replaceState: () => {} };
   globalThis.localStorage = {
     removeItem: () => {},
@@ -336,6 +373,10 @@ function createEnvironment() {
   visibleCacheClears = 0;
   liveCardClears = 0;
   toolSyncCalls = 0;
+  attachLiveCalls = 0;
+  setBusyCalls = [];
+  renderedControlRows = [];
+  renderedActivityRows = [];
   toastCalls = [];
 }
 
@@ -344,12 +385,21 @@ let clearHintCalls = 0;
 let visibleCacheClears = 0;
 let liveCardClears = 0;
 let toolSyncCalls = 0;
+let attachLiveCalls = 0;
+let setBusyCalls = [];
+let renderedControlRows = [];
+let renderedActivityRows = [];
 let toastCalls = [];
 
 // Source under test
+globalThis.window = {};
+__MESSAGE_IDENTITY_KEY_SRC__
+__IS_HISTORICAL_ANCHOR_ACTIVITY_SCENE_SRC__
+__CARRY_FORWARD_EPHEMERAL_TURN_FIELDS_SRC__
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__ATTACH_SETTLED_RUNTIME_JOURNAL_CONTROLS_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -430,6 +480,120 @@ const API_ATLAS_RELOAD_MSGS = {
     message_count: 31,
     tool_calls: [{ name: 'tool-atlas-new' }],
   },
+};
+
+const SETTLED_STEER_EVENT_ID = 'settled-run:7';
+const API_SETTLED_META = {
+  session: {
+    session_id: 'sid-settled',
+    message_count: 2,
+    active_stream_id: null,
+    last_run_stream_id: 'settled-run',
+    resolve_model: 'test-provider/test-model',
+    runtime_journal_snapshot: {
+      stream_id: 'settled-run',
+      last_seq: 8,
+      last_event_id: 'settled-run:8',
+      anchor_activity_scene: {
+        version: 'activity_scene_v1',
+        mode: 'compact_worklog',
+        identity: {session_id:'sid-settled',stream_id:'settled-run',run_id:'settled-run'},
+        activity_rows: [
+          {role:'control',kind:'control_boundary',source_event_type:'steer_delivered',event_id:SETTLED_STEER_EVENT_ID,row_id:SETTLED_STEER_EVENT_ID,local_id:SETTLED_STEER_EVENT_ID,seq:7,text:'durable settled steer',status:'delivered'},
+          {role:'control',kind:'control_boundary',source_event_type:'steer_delivered',event_id:SETTLED_STEER_EVENT_ID,row_id:SETTLED_STEER_EVENT_ID,local_id:SETTLED_STEER_EVENT_ID,seq:7,text:'durable settled steer',status:'delivered'},
+        ],
+      },
+    },
+  },
+};
+
+const API_SETTLED_MSGS = {
+  session: {
+    session_id: 'sid-settled',
+    last_run_stream_id: 'settled-run',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [
+      {role:'user',content:'original request'},
+      {
+        role:'assistant',
+        content:'settled answer',
+        _anchor_activity_scene:{
+          version:'activity_scene_v1',
+          mode:'compact_worklog',
+          identity:{session_id:'sid-settled',stream_id:'settled-run',run_id:'settled-run'},
+          final_answer:'settled answer',
+          activity_rows:[
+            {
+              role:'thinking',kind:'reasoning',source_event_type:'reasoning',
+              event_id:'settled-run:6',row_id:'settled-run:6',seq:0,order_index:0,
+              text:'reasoning before steer',status:'completed',
+              identity:{event_id:'settled-run:6',run_id:'settled-run',seq:6},
+            },
+            {
+              role:'tool',kind:'tool_completed',source_event_type:'tool_complete',
+              event_id:'settled-run:8',row_id:'settled-run:8',seq:1,order_index:1,
+              text:'tool after steer',status:'completed',
+              identity:{event_id:'settled-run:8',run_id:'settled-run',seq:8},
+            },
+          ],
+        },
+      },
+    ],
+    message_count: 2,
+    tool_calls: [],
+  },
+};
+
+const API_SPLIT_RUN_META = JSON.parse(JSON.stringify(API_SETTLED_META));
+API_SPLIT_RUN_META.session.session_id = 'sid-split-run';
+API_SPLIT_RUN_META.session.last_run_stream_id = 'run-a';
+API_SPLIT_RUN_META.session.runtime_journal_snapshot.stream_id = 'run-a';
+API_SPLIT_RUN_META.session.runtime_journal_snapshot.last_event_id = 'run-a:8';
+API_SPLIT_RUN_META.session.runtime_journal_snapshot.anchor_activity_scene.identity = {
+  session_id:'sid-split-run',stream_id:'run-a',run_id:'run-a'
+};
+API_SPLIT_RUN_META.session.runtime_journal_snapshot.anchor_activity_scene.activity_rows = [
+  {
+    role:'control',kind:'control_boundary',source_event_type:'steer_delivered',
+    event_id:'run-a:7',row_id:'run-a:7',local_id:'run-a:7',seq:7,
+    text:'run A steer must not attach',status:'delivered',
+    identity:{event_id:'run-a:7',run_id:'run-a',seq:7},
+  },
+];
+
+const API_SPLIT_RUN_MSGS = JSON.parse(JSON.stringify(API_SETTLED_MSGS));
+API_SPLIT_RUN_MSGS.session.session_id = 'sid-split-run';
+API_SPLIT_RUN_MSGS.session.last_run_stream_id = 'run-b';
+API_SPLIT_RUN_MSGS.session.messages[1].content = 'run B answer';
+API_SPLIT_RUN_MSGS.session.messages[1]._anchor_activity_scene.identity = {
+  session_id:'sid-split-run',stream_id:'run-b',run_id:'run-b'
+};
+API_SPLIT_RUN_MSGS.session.messages[1]._anchor_activity_scene.activity_rows = [
+  {
+    role:'thinking',kind:'reasoning',source_event_type:'reasoning',
+    event_id:'run-b:6',row_id:'run-b:6',seq:0,order_index:0,
+    text:'run B reasoning',status:'completed',
+    identity:{event_id:'run-b:6',run_id:'run-b',seq:6},
+  },
+];
+
+const API_SPLIT_RUN_MSGS_NO_SCENE = JSON.parse(JSON.stringify(API_SPLIT_RUN_MSGS));
+API_SPLIT_RUN_MSGS_NO_SCENE.session.messages[1] = {
+  role:'assistant',
+  content:'identical settled answer',
+};
+
+const RUN_A_CARRY_SCENE = {
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  identity:{session_id:'sid-split-run-no-scene',stream_id:'run-a',run_id:'run-a'},
+  final_answer:'identical settled answer',
+  activity_rows:[{
+    role:'control',kind:'control_boundary',source_event_type:'steer_delivered',
+    event_id:'run-a:7',row_id:'run-a:7',seq:0,order_index:0,
+    text:'run A steer must not carry',status:'delivered',
+  }],
 };
 
 function buildMessageUrl(sid, mode, suffix='') {
@@ -561,11 +725,109 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runSettledJournalRefresh() {
+  createEnvironment();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+  const meta=apiHost.enqueue(buildMessageUrl('sid-settled',0));
+  const messages=apiHost.enqueue(buildMessageUrl('sid-settled',1));
+  const loaded=loadSession('sid-settled',{force:true});
+  meta._resolve(API_SETTLED_META);
+  await waitForQueued(apiHost,messages.url);
+  messages._resolve(API_SETTLED_MSGS);
+  await loaded;
+  return {
+    scenario:'settled-journal-refresh',
+    busy:S.busy,
+    activeStreamId:S.activeStreamId,
+    attachLiveCalls,
+    setBusyCalls:setBusyCalls.slice(),
+    renderedControlRows:renderedControlRows.slice(),
+    renderedActivityRows:renderedActivityRows.slice(),
+  };
+}
+
+async function runSplitResponseStreamCoherence() {
+  createEnvironment();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+  const meta=apiHost.enqueue(buildMessageUrl('sid-split-run',0));
+  const messages=apiHost.enqueue(buildMessageUrl('sid-split-run',1));
+  const loaded=loadSession('sid-split-run',{force:true});
+  meta._resolve(API_SPLIT_RUN_META);
+  await waitForQueued(apiHost,messages.url);
+  messages._resolve(API_SPLIT_RUN_MSGS);
+  await loaded;
+  return {
+    scenario:'split-response-stream-coherence',
+    sessionLastRunStreamId:S.session&&S.session.last_run_stream_id,
+    renderedControlRows:renderedControlRows.slice(),
+    renderedActivityRows:renderedActivityRows.slice(),
+  };
+}
+
+async function runSplitResponseCarryForwardCoherence({sameRun}) {
+  createEnvironment();
+  const sid='sid-split-run-no-scene';
+  const metadata=JSON.parse(JSON.stringify(API_SPLIT_RUN_META));
+  metadata.session.session_id=sid;
+  metadata.session.last_run_stream_id='run-a';
+  metadata.session.runtime_journal_snapshot={
+    stream_id:'run-a',
+    last_seq:8,
+    last_event_id:'run-a:8',
+    anchor_activity_scene:{
+      version:'activity_scene_v1',
+      mode:'compact_worklog',
+      identity:{session_id:sid,stream_id:'run-a',run_id:'run-a'},
+      activity_rows:[],
+    },
+  };
+  const messages=JSON.parse(JSON.stringify(API_SPLIT_RUN_MSGS_NO_SCENE));
+  messages.session.session_id=sid;
+  messages.session.last_run_stream_id=sameRun?'run-a':'run-b';
+  S.session={session_id:sid,message_count:2,last_run_stream_id:'run-a'};
+  S.messages=[
+    {role:'user',content:'original request'},
+    {
+      role:'assistant',content:'identical settled answer',
+      _turnUsage:{total_tokens:99},
+      _anchor_stream_id:'run-a',
+      _anchor_activity_scene:JSON.parse(JSON.stringify(RUN_A_CARRY_SCENE)),
+    },
+  ];
+  _pendingCarryForwardSnapshot=S.messages.slice();
+  const apiHost=makeHarness();
+  globalThis.apiHost=apiHost;
+  globalThis.api=apiHost.api;
+  const meta=apiHost.enqueue(buildMessageUrl(sid,0));
+  const transcript=apiHost.enqueue(buildMessageUrl(sid,1));
+  const loaded=loadSession(sid,{force:true});
+  meta._resolve(metadata);
+  await waitForQueued(apiHost,transcript.url);
+  transcript._resolve(messages);
+  await loaded;
+  const assistant=S.messages.find(m=>m&&m.role==='assistant')||{};
+  return {
+    sameRun,
+    sessionLastRunStreamId:S.session&&S.session.last_run_stream_id,
+    anchorStreamId:assistant._anchor_stream_id||null,
+    anchorScene:assistant._anchor_activity_scene||null,
+    turnUsage:assistant._turnUsage||null,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    settledJournalRefresh: await runSettledJournalRefresh(),
+    splitResponseStreamCoherence: await runSplitResponseStreamCoherence(),
+    splitResponseCarryForwardMismatch: await runSplitResponseCarryForwardCoherence({sameRun:false}),
+    splitResponseCarryForwardSameRun: await runSplitResponseCarryForwardCoherence({sameRun:true}),
   };
 }
 
@@ -600,6 +862,17 @@ def _run_node(script: str, tmp_path: Path) -> dict:
 def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     script = (
         _NODE_SCRIPT_TEMPLATE.replace(
+            "__MESSAGE_IDENTITY_KEY_SRC__", MESSAGE_IDENTITY_KEY_SRC
+        )
+        .replace(
+            "__IS_HISTORICAL_ANCHOR_ACTIVITY_SCENE_SRC__",
+            IS_HISTORICAL_ANCHOR_ACTIVITY_SCENE_SRC,
+        )
+        .replace(
+            "__CARRY_FORWARD_EPHEMERAL_TURN_FIELDS_SRC__",
+            CARRY_FORWARD_EPHEMERAL_TURN_FIELDS_SRC,
+        )
+        .replace(
             "__INFLIGHT_HAS_VISIBLE_STATE_SRC__", INFLIGHT_HAS_VISIBLE_STATE_SRC
         )
         .replace(
@@ -607,6 +880,10 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         )
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
+        )
+        .replace(
+            "__ATTACH_SETTLED_RUNTIME_JOURNAL_CONTROLS_SRC__",
+            ATTACH_SETTLED_RUNTIME_JOURNAL_CONTROLS_SRC,
         )
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
@@ -616,6 +893,10 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    settled = body["settledJournalRefresh"]
+    split = body["splitResponseStreamCoherence"]
+    carry_mismatch = body["splitResponseCarryForwardMismatch"]
+    carry_same = body["splitResponseCarryForwardSameRun"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -681,6 +962,49 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
     ) == 2, "both old and active loads should have attempted message fetch"
+
+    assert settled["busy"] is False
+    assert settled["activeStreamId"] is None
+    assert settled["attachLiveCalls"] == 0, "idle journal replay must not reopen the run SSE"
+    assert True not in settled["setBusyCalls"], "idle journal replay must not show a busy spinner"
+    assert settled["renderedControlRows"][-1] == [
+        {"event_id": "settled-run:7", "text": "durable settled steer"}
+    ], "hard refresh must render the durable control row exactly once by event_id"
+    assert [row["role"] for row in settled["renderedActivityRows"][-1]] == [
+        "thinking",
+        "control",
+        "tool",
+    ], "journal seq 7 Steer must remain between settled activity from seq 6 and seq 8"
+    assert [row["event_id"] for row in settled["renderedActivityRows"][-1]] == [
+        "settled-run:6",
+        "settled-run:7",
+        "settled-run:8",
+    ]
+    assert [row["seq"] for row in settled["renderedActivityRows"][-1]] == [0, 1, 2]
+    assert [row["order_index"] for row in settled["renderedActivityRows"][-1]] == [0, 1, 2]
+
+    assert split["sessionLastRunStreamId"] == "run-b", (
+        "the transcript response must advance the accepted metadata to its own run generation"
+    )
+    assert split["renderedControlRows"][-1] == [], (
+        "run A metadata Steer must not attach to the run B assistant transcript"
+    )
+    assert [row["event_id"] for row in split["renderedActivityRows"][-1]] == [
+        "run-b:6"
+    ]
+
+    assert carry_mismatch["sessionLastRunStreamId"] == "run-b"
+    assert carry_mismatch["anchorStreamId"] is None
+    assert carry_mismatch["anchorScene"] is None, (
+        "run A's scene/control row must not transplant onto a scene-less run B assistant"
+    )
+    assert carry_mismatch["turnUsage"] == {"total_tokens": 99}, (
+        "safe client-only usage metadata should still survive the split reload"
+    )
+    assert carry_same["sessionLastRunStreamId"] == "run-a"
+    assert carry_same["anchorStreamId"] == "run-a"
+    assert carry_same["anchorScene"]["activity_rows"][0]["event_id"] == "run-a:7"
+    assert carry_same["turnUsage"] == {"total_tokens": 99}
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"

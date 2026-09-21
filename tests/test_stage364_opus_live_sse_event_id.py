@@ -44,9 +44,11 @@ def test_put_writes_event_id_to_side_channel_dict():
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     assert put_def_idx != -1, "put(event, data) not found in api/streaming.py"
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert "journaled = run_journal.append_sse_event(event, data)" in put_body, (
-        "put() must capture append_sse_event return value"
+    assert "journaled = append_event(event, data)" in put_body, (
+        "put() must capture the selected journal append return value"
     )
+    assert "run_journal.append_terminal_sse_event" in put_body
+    assert "run_journal.append_sse_event" in put_body
     assert "STREAM_LAST_EVENT_ID[stream_id]" in put_body, (
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
         "this is the side-channel the SSE consumer reads at emit time"

@@ -947,6 +947,16 @@ def main() -> int:
                 arg=FINAL_TEXT,
                 timeout=15000,
             )
+            # The settled scene write is intentionally asynchronous. Wait for the
+            # browser to dispatch it before the API/disk durability gate.
+            deadline = time.time() + 10
+            while time.time() < deadline and not any(
+                event.get("type") == "request" for event in anchor_scene_requests
+            ):
+                page.wait_for_timeout(25)
+            assert any(
+                event.get("type") == "request" for event in anchor_scene_requests
+            ), "settled Anchor scene persistence request was not dispatched"
         else:
             gateway.release_terminal.set()
             page.wait_for_function(

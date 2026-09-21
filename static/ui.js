@@ -14221,7 +14221,7 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
     const role=String(row.role||'');
-    if(role==='tool'||role==='thinking') return true;
+    if(role==='tool'||role==='thinking'||role==='control') return true;
     if(role==='lifecycle'){
       const source=String(row.source_event_type||'');
       if(source==='compressing'||source==='compressed') return true;

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import sys
 import types
+from io import BytesIO
+from urllib.parse import urlparse
 from unittest import mock
 
 import pytest
@@ -32,6 +35,7 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, "STREAM_REASONING_TEXT"):
         config.STREAM_REASONING_TEXT.clear()
@@ -41,6 +45,7 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     if hasattr(config, "STREAM_REASONING_TEXT"):
         config.STREAM_REASONING_TEXT.clear()
@@ -191,6 +196,7 @@ def _run_stream(monkeypatch, session, stream_id, agent_cls, *, workspace):
     fake_queue = queue.Queue()
     streaming.STREAMS[stream_id] = fake_queue
     config.STREAM_PARTIAL_TEXT[stream_id] = ""
+    config.register_session_writeback_owner(session.session_id, stream_id)
 
     with mock.patch.object(streaming, "get_session", return_value=session), \
          mock.patch.object(streaming, "_get_ai_agent", return_value=agent_cls), \
@@ -423,6 +429,135 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
+def test_raised_auth_retry_success_reloads_accepted_steer_from_run_journal(
+    tmp_path,
+    monkeypatch,
+):
+    session_id = "raised_auth_retry_steer"
+    stream_id = "stream_raised_auth_retry_steer"
+    session = _prepare_session(
+        session_id,
+        stream_id,
+        pending_user_message="Please recover and keep my guidance",
+    )
+    steer_payloads = []
+
+    class _Handler:
+        def __init__(self):
+            self.status = None
+            self.response_headers = []
+            self.wfile = BytesIO()
+            self.headers = mock.MagicMock()
+            self.headers.get.return_value = ""
+            self._safe_webui_print = lambda *args, **kwargs: None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            pass
+
+        def payload(self):
+            return json.loads(self.wfile.getvalue().decode() or "{}")
+
+    class RaisedAuthThenRecoveredAgent(MockAgent):
+        runs = 0
+
+        def steer(self, text):
+            assert text == "preserve this accepted steer"
+            return True
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                steer_handler = _Handler()
+                streaming._handle_chat_steer(
+                    steer_handler,
+                    {"session_id": session_id, "text": "preserve this accepted steer"},
+                )
+                steer_payloads.append(steer_handler.payload())
+                raise RuntimeError("401 unauthorized")
+            return {
+                "status": "ok",
+                "messages": history
+                + [{"role": "assistant", "content": "Recovered after raised auth error"}],
+            }
+
+    heal_rt = {
+        "provider": "test-provider",
+        "api_key": "fresh-key",
+        "base_url": None,
+    }
+    fake_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = fake_queue
+    config.STREAM_PARTIAL_TEXT[stream_id] = ""
+    config.register_stream_owner(stream_id, session_id)
+    config.register_session_writeback_owner(session_id, stream_id)
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=RaisedAuthThenRecoveredAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    assert steer_payloads == [{
+        "accepted": True,
+        "fallback": None,
+        "stream_id": stream_id,
+    }]
+    saved = Session.load(session_id)
+    assert saved is not None
+    assert saved.last_run_stream_id == stream_id
+    assert saved.messages[-1]["content"] == "Recovered after raised auth error"
+
+    from api import routes
+
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda profile, handler: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda current: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_for_display",
+        lambda current: getattr(current, "model", None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_provider_for_display",
+        lambda current: getattr(current, "model_provider", None),
+    )
+    route_handler = _Handler()
+    routes.handle_get(
+        route_handler,
+        urlparse(
+            f"/api/session?session_id={session_id}&messages=1&resolve_model=0"
+        ),
+    )
+    payload = route_handler.payload()["session"]
+    assert route_handler.status == 200
+    assert payload["last_run_stream_id"] == stream_id
+    snapshot = payload["runtime_journal_snapshot"]
+    assert snapshot["stream_id"] == stream_id
+    steer_rows = [
+        row
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+        if row.get("source_event_type") == "steer_delivered"
+    ]
+    assert len(steer_rows) == 1
+    assert steer_rows[0]["text"] == "preserve this accepted steer"
+    assert steer_rows[0]["event_id"].startswith(f"{stream_id}:")
+
+
 def test_auth_exception_retry_structured_failure_still_emits_error(
     tmp_path,
     monkeypatch,
@@ -454,6 +589,10 @@ def test_auth_exception_retry_structured_failure_still_emits_error(
     fake_queue = queue.Queue()
     streaming.STREAMS["stream_auth_retry_structured_failure"] = fake_queue
     config.STREAM_PARTIAL_TEXT["stream_auth_retry_structured_failure"] = ""
+    config.register_session_writeback_owner(
+        session.session_id,
+        "stream_auth_retry_structured_failure",
+    )
     heal_rt = {
         "provider": "test-provider",
         "api_key": "fresh-key",
@@ -617,6 +756,110 @@ def test_live_settlement_empty_hint_does_not_append_empty_emphasis(tmp_path, mon
     assert error_content == "**Error:** synthetic hard failure"
     assert "\n\n**" not in error_content
     assert not error_content.endswith("**")
+    assert saved.last_run_stream_id == "stream_empty_hint_failure", (
+        "a structured returned error must preserve the run journal pointer"
+    )
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda run_id: {
+            "session_id": saved.session_id,
+            "run_id": run_id,
+            "last_seq": 2,
+            "last_event_id": f"{run_id}:2",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_run_journal_live_snapshot",
+        lambda run_id, handler=None: {
+            "stream_id": run_id,
+            "run_id": run_id,
+            "last_seq": 2,
+            "last_event_id": f"{run_id}:2",
+            "anchor_activity_scene": {
+                "version": "activity_scene_v1",
+                "identity": {
+                    "session_id": saved.session_id,
+                    "stream_id": run_id,
+                    "run_id": run_id,
+                },
+                "activity_rows": [],
+            },
+        },
+    )
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda profile, handler: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda current: None)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_for_display",
+        lambda current: getattr(current, "model", None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_effective_session_model_provider_for_display",
+        lambda current: getattr(current, "model_provider", None),
+    )
+
+    class _Handler:
+        def __init__(self):
+            self.status = None
+            self.response_headers = []
+            self.wfile = BytesIO()
+            self._safe_webui_print = lambda *args, **kwargs: None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            pass
+
+        def payload(self):
+            return json.loads(self.wfile.getvalue().decode() or "{}")
+
+    handler = _Handler()
+    routes.handle_get(
+        handler,
+        urlparse(
+            "/api/session?session_id=empty_hint_failure&messages=0&resolve_model=0"
+        ),
+    )
+    payload = handler.payload()["session"]
+    assert handler.status == 200
+    assert payload["last_run_stream_id"] == "stream_empty_hint_failure"
+    assert payload["runtime_journal_snapshot"]["stream_id"] == "stream_empty_hint_failure"
+
+
+def test_raised_error_settlement_persists_last_run_stream_id(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "raised_error_last_run",
+        "stream_raised_error_last_run",
+        pending_user_message="Please raise",
+    )
+
+    class RaisedErrorAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            raise RuntimeError("synthetic raised failure")
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_raised_error_last_run",
+        RaisedErrorAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("raised_error_last_run")
+    assert saved is not None
+    assert any(event == "apperror" for event, _ in _queue_events(fake_queue))
+    assert saved.messages[-1]["_error"] is True
+    assert saved.last_run_stream_id == "stream_raised_error_last_run", (
+        "an exception settlement must preserve the run journal pointer"
+    )
 
 
 def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_path, monkeypatch):
