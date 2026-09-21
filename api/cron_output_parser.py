@@ -23,10 +23,15 @@ treated as a response boundary when ALL of the following are true:
    string inside script output or a quoted snippet must not be
    interpreted as a section boundary.
 3. The line is OUTSIDE an HTML-style ``<pre>`` / ``<code>`` block.
-4. The line is within the first ``MAX_PROBE_LINES`` lines of the file
-   (front-matter + system context). A heading that appears deep inside
-   an agent transcript is almost certainly quoted text, not a section
-   boundary.
+4. The line is within the first ``MAX_PROBE_LINES`` lines of the
+   file (front-matter + system context). Real artifacts carry several
+   hundred context lines before the reply, so the cap is generous;
+   it exists only to stop an unbounded scan of pathological input.
+
+The fail-closed guarantee that a quoted ``## Response`` inside an
+agent transcript is *not* taken as the boundary comes from the fence
+and ``<pre>`` tracking plus the exact heading match, not from the
+probe cap.
 
 If no boundary is found, ``has_response_boundary`` is False and
 ``response`` is the empty string. The caller is expected to render the
@@ -39,11 +44,14 @@ import re
 from dataclasses import dataclass
 
 
-# Cap how far into the file we look for a response boundary. A real
-# ``## Response`` heading lives right after the front-matter and the
-# system context, so 200 lines is generous. Anything further in is
-# either quoted text, a tool result, or noise.
-_MAX_PROBE_LINES = 200
+# Cap how far into the file we look for a response boundary. Real cron
+# artifacts routinely carry several hundred lines of front-matter,
+# system context, skill dumps and tool output before the agent replies
+# — the motivating #7303 artifact has ~320 context lines. The probe
+# range must therefore cover them; the guards that actually keep the
+# boundary fail-closed are the fence / <pre> tracking and the exact
+# heading match below.
+_MAX_PROBE_LINES = 2000
 
 # A boundary is a markdown ATX heading of the right level with the
 # canonical title. We match both ``## Response`` and ``# Response`` to
@@ -52,7 +60,8 @@ _RESPONSE_HEADING_RE = re.compile(r"^#{1,2}\s+Response\s*$")
 
 # A fenced code block starts with ``` or ~~~ (optionally with a language
 # tag) and ends with the same fence on its own line. We track fence
-# state by character to ignore heading-shaped lines inside.
+# character AND opening delimiter length so a ```` ```` ``` ```` ```` line
+# cannot close a four-backtick block early (skill dumps nest fences).
 _FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 
 
@@ -115,21 +124,33 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     in_html_pre = False
     response_idx: int | None = None
     fence_char: str | None = None
+    fence_len = 0
 
     for i, line in enumerate(lines):
         if i >= _MAX_PROBE_LINES:
             break
         # Track fenced code blocks. Toggle on opening AND closing fences
-        # of the same character so ```` ``` ```` doesn't re-open.
+        # of the same character so ``` doesn't re-open. The closing
+        # fence must be at least as long as the opening one, otherwise
+        # a ``` line inside a ```` block would close it early and a
+        # subsequent ``## Response`` inside the still-open block could
+        # be mistaken for the real boundary.
         m = _FENCE_RE.match(line)
         if m:
             fence = m.group(1)[0]
+            length = len(m.group(1))
+            # A closing fence carries no info string; an indented or
+            # tagged run of fence characters is a nested opening fence
+            # and must not close the current block.
+            rest = line[m.end():].strip()
             if not in_fence:
                 in_fence = True
                 fence_char = fence
-            elif fence_char == fence:
+                fence_len = length
+            elif fence_char == fence and length >= fence_len and not rest:
                 in_fence = False
                 fence_char = None
+                fence_len = 0
             continue
         # Track HTML <pre>/<code> blocks (some skill output uses them
         # for shell snippets and the parser must respect the boundary).

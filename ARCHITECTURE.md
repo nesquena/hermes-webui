@@ -1516,6 +1516,17 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
 
     /api/crons                 All cron jobs. Returns {jobs: [...]}.
     /api/crons/output          ?job_id=X&limit=N -> {outputs: [{filename, content}]}
+                               `content` is bounded by _cron_output_content_window()
+                               (8 KB). No projection here: the listing must stay
+                               bounded for up to 500 items.
+    /api/crons/run             ?job_id=X&filename=Y -> one completed run artifact:
+                               {job_id, filename, content, snippet, parsed, usage}.
+                               `content` is the verbatim artifact; `parsed` is the
+                               response-first projection {response, context,
+                               has_response_boundary, response_line} (no `raw` —
+                               `content` already carries it). The UI renders the
+                               response first and tucks the pre-response context
+                               behind a <details> disclosure.
     /api/skills                All skills. Returns {skills: [{name, description, category}]}
     /api/skills/content        ?name=X -> full skill data including SKILL.md content
     /api/memory                MEMORY.md + USER.md + SOUL.md. Returns {memory, user, soul, *_path, *_mtime}

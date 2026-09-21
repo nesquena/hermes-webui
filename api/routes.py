@@ -22569,9 +22569,12 @@ def _handle_cron_run_detail(handler, parsed):
         snippet = _cron_output_snippet(content)
         # #7303: surface the shared parser projection so the UI can
         # render response-first without re-parsing the artifact in
-        # the browser.
+        # the browser. ``raw`` is omitted on purpose: ``content`` above
+        # already carries the verbatim artifact, and shipping both
+        # doubles the payload for a large run.
         from api.cron_output_parser import parse_cron_output
         parsed_projection = parse_cron_output(content).to_dict()
+        parsed_projection.pop("raw", None)
         usage = _cron_output_usage_metadata(content)
         return j(handler, {"job_id": job_id, "filename": filename,
                            "content": content, "snippet": snippet,
@@ -22677,11 +22680,13 @@ def _handle_cron_output(handler, parsed):
     out_dir = CRON_OUT / job_id
     outputs = []
     if out_dir.exists():
-        # #7303: use the shared parser so the collapsed preview and the
-        # expanded view render the same response-first projection. The
-        # endpoint now returns both the parsed projection and the
-        # truncated raw content window.
-        from api.cron_output_parser import parse_cron_output
+        # #7303: the list endpoint stays bounded. Each item keeps the
+        # 8 KB ``_cron_output_content_window`` and no ``parsed``
+        # projection — the projection carries full ``raw`` + ``context``
+        # + ``response``, so emitting it here (up to 500 items) would
+        # return one large artifact several times over and make the
+        # listing unbounded. The single-run detail route
+        # ``_handle_cron_run_detail`` is where the projection belongs.
         files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
         for f in files:
             try:
@@ -22689,7 +22694,6 @@ def _handle_cron_output(handler, parsed):
                 outputs.append({
                     "filename": f.name,
                     "content": _cron_output_content_window(txt),
-                    "parsed": parse_cron_output(txt).to_dict(),
                 })
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)

@@ -1152,6 +1152,13 @@ function _cronExpansionSet(key, expanded){
   try { localStorage.setItem(key, expanded ? '1' : '0'); } catch(_) {}
 }
 
+// #7303: last payload fetched for a run body, keyed the same way as the
+// expansion state. The toggle needs the projection to re-render the
+// already-mounted body (collapsed snippet vs. response-first) without
+// a second round-trip. Cleared whenever the runs list is rebuilt, so
+// it is bounded by the number of rows on screen.
+let _cronRunBodyCache = {};
+
 function toggleCronPromptExpanded(jobId){
   const key = _cronPanelExpandKey(jobId, 'prompt');
   _cronExpansionSet(key, !_cronExpansionGet(key));
@@ -1172,6 +1179,17 @@ function toggleCronRunExpanded(jobId, filename, runId){
     btn.textContent = expanded ? '▴' : '▾';
     btn.title = expanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
     btn.setAttribute('aria-label', btn.title);
+  }
+  // #7303: the mounted body was rendered for the previous expansion
+  // state, so a bare class toggle would leave the truncated snippet
+  // visible while expanded (and the full response mounted while
+  // collapsed). Re-render from the cached projection; if the row has
+  // never been opened, fall back to a fetch.
+  const cached = _cronRunBodyCache[key];
+  if (body && item && item.classList.contains('open') && cached) {
+    _renderCronRunBody(body, cached, jobId, filename);
+  } else if (item && item.classList.contains('open')) {
+    _loadRunContent(jobId, filename, runId);
   }
 }
 
@@ -1378,9 +1396,123 @@ async function _loadCronDetailRuns(jobId, detailKey){
         <div class="detail-run-body ${runExpanded ? 'expanded' : ''}" style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
       </div>`;
     }).join('');
+    // A fresh list invalidates any cached run payloads: the previous
+    // rows are gone from the DOM, so their projections must not leak
+    // into a re-mounted row that happens to share an expansion key.
+    _cronRunBodyCache = {};
     const countLabel = data.total > 50 ? ` (${data.total} runs, showing latest 50)` : ` (${data.total} runs)`;
     card.innerHTML = `<div class="detail-card-title">${esc(outputTitle)}${countLabel}</div>${rows}`;
   } catch(e) { /* ignore */ }
+}
+
+// #7303: single renderer for a cron run body. Both the fetch path
+// (_loadRunContent) and the expansion toggle (toggleCronRunExpanded)
+// call this so the mounted content always matches the *current*
+// expansion state — the body previously kept whichever view was
+// rendered when the row was first opened.
+//
+// *data* is the ``/api/crons/run`` payload; *jobId* / *filename*
+// are only needed for the legacy "View full output" affordance's
+// expansion key.
+function _renderCronRunBody(body, data, jobId, filename){
+  const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
+  // When the run has a parsed projection with a recognized response
+  // boundary, show the response body first and tuck the pre-response
+  // context (front-matter, prompt, skill text) into a
+  // keyboard-accessible disclosure. Script/no-agent/malformed runs
+  // (no boundary) keep the legacy raw-primary view.
+  const parsed = data.parsed || null;
+  const showResponseFirst = !!(parsed && parsed.has_response_boundary);
+  let output;
+  if (showResponseFirst) {
+    // Collapsed: short snippet (unchanged). Expanded: the response
+    // body, with the full context behind a toggle.
+    output = expanded ? parsed.response : (data.snippet || parsed.response || '');
+  } else {
+    output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
+  }
+  body.classList.toggle('expanded', expanded);
+  // Cron run output is never authored Markdown — render as literal
+  // preformatted text using DOM-created <pre><code> so all content
+  // (including shapes starting with #, |, >, ``` and embedded fences)
+  // renders verbatim without Markdown interpretation.
+  body.innerHTML = '';
+  if (showResponseFirst && expanded) {
+    // Response block: the agent's reply rendered as a labelled pre.
+    const responseWrap = document.createElement('div');
+    responseWrap.className = 'cron-run-response-block';
+    const responseLabel = document.createElement('div');
+    responseLabel.className = 'cron-run-section-label';
+    responseLabel.textContent = t('cron_run_response_label') || 'Response';
+    responseWrap.appendChild(responseLabel);
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = parsed.response || '';
+    pre.appendChild(code);
+    responseWrap.appendChild(pre);
+    body.appendChild(responseWrap);
+    // Disclosure for the pre-response context (front-matter, prompt,
+    // skill text, intermediate tool output). Rendered as <details>
+    // so it is keyboard-accessible and screen-reader labelled.
+    if (parsed.context) {
+      const details = document.createElement('details');
+      details.className = 'cron-run-context-disclosure';
+      const summary = document.createElement('summary');
+      summary.textContent = t('cron_run_show_prompt_context') || 'Show prompt & context';
+      summary.setAttribute('aria-label', t('cron_run_show_prompt_context') || 'Show prompt & context');
+      details.appendChild(summary);
+      const contextPre = document.createElement('pre');
+      contextPre.className = 'cron-run-pre cron-run-context-pre';
+      const contextCode = document.createElement('code');
+      contextCode.textContent = parsed.context;
+      contextPre.appendChild(contextCode);
+      details.appendChild(contextPre);
+      body.appendChild(details);
+    }
+  } else {
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = output;
+    pre.appendChild(code);
+    body.appendChild(pre);
+  }
+  const usageStrip = _formatCronRunUsageStrip(data.usage);
+  if (usageStrip) {
+    const usage = document.createElement('div');
+    usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+    usage.textContent = usageStrip;
+    body.appendChild(usage);
+  }
+  // "View full output" button: legacy path only. The response-first
+  // view never needs it because the context disclosure already shows
+  // the full pre-response material.
+  if (!showResponseFirst && !expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
+    const btn = document.createElement('button');
+    btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
+    btn.textContent = t('cron_view_full_output') || 'View full output';
+    btn.onclick = () => {
+      _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
+      body.classList.add('expanded');
+      body.innerHTML = '';
+      const pre = document.createElement('pre');
+      pre.className = 'cron-run-pre';
+      const code = document.createElement('code');
+      code.textContent = data.content || '';
+      pre.appendChild(code);
+      body.appendChild(pre);
+      const usageStrip = _formatCronRunUsageStrip(data.usage);
+      if (usageStrip) {
+        const usage = document.createElement('div');
+        usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+        usage.textContent = usageStrip;
+        body.appendChild(usage);
+      }
+      btn.remove();
+    };
+    body.appendChild(btn);
+  }
 }
 
 async function _loadRunContent(jobId, filename, runId){
@@ -1409,104 +1541,8 @@ async function _loadRunContent(jobId, filename, runId){
       body.textContent = data.error;
       return;
     }
-    const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
-    // #7303: when the run has a parsed projection with a recognized
-    // response boundary, show the response body first and tuck the
-    // pre-response context (front-matter, prompt, skill text) into a
-    // keyboard-accessible disclosure. Script/no-agent/malformed runs
-    // (no boundary) keep the legacy raw-primary view.
-    const parsed = data.parsed || null;
-    const showResponseFirst = !!(parsed && parsed.has_response_boundary);
-    let output;
-    if (showResponseFirst) {
-      // Collapsed: short snippet (unchanged). Expanded: the response
-      // body, with the full context behind a toggle.
-      output = expanded ? parsed.response : (data.snippet || parsed.response || '');
-    } else {
-      output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
-    }
-    body.classList.toggle('expanded', expanded);
-    // Cron run output is never authored Markdown — render as literal
-    // preformatted text using DOM-created <pre><code> so all content
-    // (including shapes starting with #, |, >, ``` and embedded fences)
-    // renders verbatim without Markdown interpretation.
-    body.innerHTML = '';
-    if (showResponseFirst && expanded) {
-      // Response block: the agent's reply rendered as a labelled pre.
-      const responseWrap = document.createElement('div');
-      responseWrap.className = 'cron-run-response-block';
-      const responseLabel = document.createElement('div');
-      responseLabel.className = 'cron-run-section-label';
-      responseLabel.textContent = t('cron_run_response_label') || 'Response';
-      responseWrap.appendChild(responseLabel);
-      const pre = document.createElement('pre');
-      pre.className = 'cron-run-pre';
-      const code = document.createElement('code');
-      code.textContent = parsed.response || '';
-      pre.appendChild(code);
-      responseWrap.appendChild(pre);
-      body.appendChild(responseWrap);
-      // Disclosure for the pre-response context (front-matter, prompt,
-      // skill text, intermediate tool output). Rendered as <details>
-      // so it is keyboard-accessible and screen-reader labelled.
-      if (parsed.context) {
-        const details = document.createElement('details');
-        details.className = 'cron-run-context-disclosure';
-        const summary = document.createElement('summary');
-        summary.textContent = t('cron_run_show_prompt_context') || 'Show prompt & context';
-        summary.setAttribute('aria-label', t('cron_run_show_prompt_context') || 'Show prompt & context');
-        details.appendChild(summary);
-        const contextPre = document.createElement('pre');
-        contextPre.className = 'cron-run-pre cron-run-context-pre';
-        const contextCode = document.createElement('code');
-        contextCode.textContent = parsed.context;
-        contextPre.appendChild(contextCode);
-        details.appendChild(contextPre);
-        body.appendChild(details);
-      }
-    } else {
-      const pre = document.createElement('pre');
-      pre.className = 'cron-run-pre';
-      const code = document.createElement('code');
-      code.textContent = output;
-      pre.appendChild(code);
-      body.appendChild(pre);
-    }
-    const usageStrip = _formatCronRunUsageStrip(data.usage);
-    if (usageStrip) {
-      const usage = document.createElement('div');
-      usage.className = 'cron-run-usage-strip cron-run-usage-footer';
-      usage.textContent = usageStrip;
-      body.appendChild(usage);
-    }
-    // "View full output" button: legacy path only. The response-first
-    // view never needs it because the context disclosure already shows
-    // the full pre-response material.
-    if (!showResponseFirst && !expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
-      const btn = document.createElement('button');
-      btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
-      btn.textContent = t('cron_view_full_output') || 'View full output';
-      btn.onclick = () => {
-        _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
-        body.classList.add('expanded');
-        body.innerHTML = '';
-        const pre = document.createElement('pre');
-        pre.className = 'cron-run-pre';
-        const code = document.createElement('code');
-        code.textContent = data.content || '';
-        pre.appendChild(code);
-        body.appendChild(pre);
-        const usageStrip = _formatCronRunUsageStrip(data.usage);
-        if (usageStrip) {
-          const usage = document.createElement('div');
-          usage.className = 'cron-run-usage-strip cron-run-usage-footer';
-          usage.textContent = usageStrip;
-          body.appendChild(usage);
-        }
-        btn.remove();
-      };
-      body.appendChild(btn);
-    }
+    _cronRunBodyCache[_cronRunExpandKey(jobId, filename)] = data;
+    _renderCronRunBody(body, data, jobId, filename);
   } catch(e) {
     body.textContent = 'Error: ' + e.message;
   }
