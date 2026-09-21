@@ -260,6 +260,197 @@ def test_shortcut_matches_full_walk_for_cumulative_parent_prefix(
     assert _contents(reference) == ["anc0-0", "anc0-1", "child-0", "child-0"]
 
 
+# ── Post-normalization count: raw message_count is NOT the loaded length ──
+#
+# ``Session.load()`` collapses adjacent identical ``_partial`` rows before the
+# cumulative-prefix test runs, while ``message_count`` persists the RAW row
+# count. A sentinel parent can therefore advertise more rows than the child yet
+# load as a true prefix of it. The shortcut must reason only from the count
+# that ``Session.save()`` persists AFTER the collapse
+# (``post_collapse_message_count``), and fall back to the full parent load when
+# that count is absent.
+
+
+def _partial_row(ts):
+    return {
+        "role": "assistant",
+        "content": "partial answer",
+        "timestamp": ts,
+        "_partial": True,
+    }
+
+
+def _sentinel_parent_with_duplicate_partials(Session, *, duplicates):
+    """Production-composed sentinel snapshot: ``[user, partial x duplicates]``.
+
+    Written through ``Session.save()`` so the on-disk ``message_count`` is the
+    raw row count (``1 + duplicates``) while a full load collapses to 2 rows.
+    """
+    parent = Session(
+        session_id="anc_0",
+        title="bloated sentinel",
+        messages=[{"role": "user", "content": "p-0", "timestamp": 1000.0}]
+        + [_partial_row(1010.0) for _ in range(duplicates)],
+    )
+    parent.pre_compression_snapshot = True
+    parent.truncation_watermark = 0.0
+    parent.truncation_boundary = 0.0
+    parent.save()
+    return parent
+
+
+def _counting_load(routes, Session, monkeypatch):
+    loaded: list[str] = []
+    real_load = Session.load
+
+    def counting(s, *args, **kwargs):
+        loaded.append(str(s))
+        return real_load(s, *args, **kwargs)
+
+    monkeypatch.setattr(routes.Session, "load", staticmethod(counting))
+    return loaded
+
+
+def test_shortcut_matches_full_walk_when_raw_count_hides_a_collapsed_prefix(
+    deep_lineage, monkeypatch
+):
+    """Raw ``message_count`` > child length, loaded parent == child prefix.
+
+    Parent on disk: 5 raw rows (1 user + 4 identical partials) → 2 rows after
+    ``_collapse_adjacent_duplicate_partials``. Child: those 2 rows + a
+    duplicated own row (4 rows). The old raw-count proof (5 > 4) fired the
+    shortcut and deduplicated the child; the full-load path returns the raw
+    child rows unchanged. Both paths must now agree byte-for-byte.
+    """
+    import json
+
+    routes, Session, child = deep_lineage(hops=0, sentinel=True, child_rows=1)
+    _sentinel_parent_with_duplicate_partials(Session, duplicates=4)
+    raw = json.loads((routes.SESSION_DIR / "anc_0.json").read_text(encoding="utf-8"))
+    assert raw["message_count"] == 5
+    assert raw["post_collapse_message_count"] == 2
+    assert len(raw["messages"]) == 5
+
+    own_row = dict(child.messages[0])
+    child.messages = [
+        {"role": "user", "content": "p-0", "timestamp": 1000.0},
+        _partial_row(1010.0),
+        own_row,
+        dict(own_row),
+    ]
+    child.parent_session_id = "anc_0"
+    child.save()
+    assert raw["message_count"] > len(child.messages)
+
+    loaded = _counting_load(routes, Session, monkeypatch)
+    shortcut = routes._webui_sidecar_lineage_messages_for_display(child)
+    shortcut_loads = list(loaded)
+
+    routes._lineage_display_cache.clear()
+    loaded.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    reference = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert loaded == ["anc_0"], loaded
+
+    assert json.dumps(shortcut, sort_keys=True) == json.dumps(reference, sort_keys=True), (
+        f"shortcut-enabled output diverges from the full-load path "
+        f"({_contents(shortcut)} vs {_contents(reference)})"
+    )
+    assert reference == child.messages
+    assert len(reference) == 4
+    assert _contents(reference) == ["p-0", "partial answer", "child-0", "child-0"]
+    assert child.session_id not in routes._lineage_display_cache
+    # The trusted post-collapse count (2) permits the prefix return, so the
+    # immediate parent is fully loaded exactly as the unoptimised walk does.
+    assert shortcut_loads == ["anc_0"], shortcut_loads
+
+
+def test_missing_post_collapse_count_fails_closed_to_the_full_parent_load(
+    deep_lineage, monkeypatch
+):
+    """A sidecar without ``post_collapse_message_count`` proves nothing.
+
+    Same shape as above but the key is stripped from the parent file (a sidecar
+    written before the key existed). The raw ``message_count`` (5 > 4) must NOT
+    be used as a substitute: the walk full-loads the parent and keeps the
+    prefix return, matching the shortcut-disabled output exactly.
+    """
+    import json
+
+    routes, Session, child = deep_lineage(hops=0, sentinel=True, child_rows=1)
+    _sentinel_parent_with_duplicate_partials(Session, duplicates=4)
+    parent_path = routes.SESSION_DIR / "anc_0.json"
+    raw = json.loads(parent_path.read_text(encoding="utf-8"))
+    del raw["post_collapse_message_count"]
+    parent_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    stub = Session.load_metadata_only("anc_0")
+    assert stub._metadata_message_count == 5
+    assert stub._metadata_post_collapse_message_count is None
+
+    own_row = dict(child.messages[0])
+    child.messages = [
+        {"role": "user", "content": "p-0", "timestamp": 1000.0},
+        _partial_row(1010.0),
+        own_row,
+        dict(own_row),
+    ]
+    child.parent_session_id = "anc_0"
+    child.save()
+
+    loaded = _counting_load(routes, Session, monkeypatch)
+    shortcut = routes._webui_sidecar_lineage_messages_for_display(child)
+    shortcut_loads = list(loaded)
+
+    routes._lineage_display_cache.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    reference = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert json.dumps(shortcut, sort_keys=True) == json.dumps(reference, sort_keys=True), (
+        f"raw message_count was trusted as the loaded length "
+        f"({_contents(shortcut)} vs {_contents(reference)})"
+    )
+    assert reference == child.messages
+    assert _contents(reference) == ["p-0", "partial answer", "child-0", "child-0"]
+    assert shortcut_loads == ["anc_0"], shortcut_loads
+
+
+def test_post_collapse_count_still_skips_the_load_when_it_exceeds_the_child(
+    deep_lineage, monkeypatch
+):
+    """Zero-full-load control for the trusted count.
+
+    Parent: 1 user + 4 identical partials + 2 ordinary rows → raw 7, collapsed
+    4. Child: 3 rows. The post-collapse count (4 > 3) proves the prefix return
+    cannot apply, so the shortcut fires with no full ancestor load and still
+    matches the shortcut-disabled walk.
+    """
+    import json
+
+    routes, Session, child = deep_lineage(hops=0, sentinel=True, child_rows=3)
+    parent = _sentinel_parent_with_duplicate_partials(Session, duplicates=4)
+    parent.messages = list(parent.messages) + [
+        {"role": "user", "content": "p-1", "timestamp": 1020.0},
+        {"role": "assistant", "content": "p-2", "timestamp": 1030.0},
+    ]
+    parent.save()
+    raw = json.loads((routes.SESSION_DIR / "anc_0.json").read_text(encoding="utf-8"))
+    assert (raw["message_count"], raw["post_collapse_message_count"]) == (7, 4)
+    child.parent_session_id = "anc_0"
+    child.save()
+
+    loaded = _counting_load(routes, Session, monkeypatch)
+    shortcut = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert loaded == [], loaded
+
+    routes._lineage_display_cache.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    reference = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert loaded == ["anc_0"], loaded
+
+    assert json.dumps(shortcut, sort_keys=True) == json.dumps(reference, sort_keys=True)
+    assert _contents(reference) == ["child-0", "child-1", "child-2"]
+
+
 def test_mixed_chain_with_contributing_segments_before_the_sentinel(
     deep_lineage, monkeypatch
 ):

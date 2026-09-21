@@ -10056,11 +10056,26 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent_source = str(
             getattr(parent_meta, "session_source", "") or ""
         ).strip().lower()
-        parent_message_count = getattr(parent_meta, "_metadata_message_count", None)
+        # Only the POST-normalization count may stand in for the parent's
+        # loaded length. ``Session.load()`` collapses adjacent duplicate
+        # ``_partial`` rows before the cumulative-prefix test below, so the
+        # raw ``message_count`` can exceed the loaded length while the loaded
+        # parent is still a true prefix of the child. ``Session.save()``
+        # persists ``post_collapse_message_count`` with exactly that
+        # provenance (api/models.py); a stub without it (pre-key sidecar,
+        # legacy layout, unparseable value) proves nothing and falls through
+        # to the full parent load, which keeps the prefix return intact.
+        parent_loaded_length = getattr(
+            parent_meta, "_metadata_post_collapse_message_count", None
+        )
+        if isinstance(parent_loaded_length, bool) or not isinstance(
+            parent_loaded_length, int
+        ) or parent_loaded_length < 0:
+            parent_loaded_length = None
         fork_boundary_cannot_apply = not root_is_fork or parent_source == "fork"
         prefix_return_cannot_apply = bool(segments) or (
-            isinstance(parent_message_count, int)
-            and parent_message_count > len(session_messages)
+            parent_loaded_length is not None
+            and parent_loaded_length > len(session_messages)
         )
         if (
             parent_meta is not None

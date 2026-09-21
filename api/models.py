@@ -1440,6 +1440,19 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        # Post-normalization count persisted by save() (see the comment there):
+        # the message length AFTER _collapse_adjacent_duplicate_partials(), i.e.
+        # exactly len(Session.load(sid).messages). Distinct from message_count,
+        # which is the raw on-disk row count and may exceed the loaded length
+        # when adjacent duplicate partials are collapsed on full load. None on
+        # sidecars written before this key existed; readers must treat None as
+        # "unknown" and fall back to a full load rather than trust message_count.
+        _raw_post_collapse_count = kwargs.get('post_collapse_message_count')
+        self._metadata_post_collapse_message_count = (
+            None
+            if isinstance(_raw_post_collapse_count, bool)  # bool is an int subclass
+            else _parse_nonnegative_int(_raw_post_collapse_count)
+        )
 
     @property
     def path(self):
@@ -1505,6 +1518,18 @@ class Session:
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(self.messages or [])
+        # Explicit-provenance twin of message_count: the row count AFTER
+        # _collapse_adjacent_duplicate_partials(), which is what Session.load()
+        # applies before any consumer sees the messages. message_count stays the
+        # RAW row count (the .bak shrink guard and eviction checks rely on it),
+        # so on a sidecar carrying adjacent duplicate partials the two differ.
+        # Consumers that need to reason about the length of the fully loaded
+        # transcript without paying for the load — the lineage cold-load
+        # shortcut in api/routes.py — must use only this count and fail closed
+        # (full load) when it is absent.
+        _collapsed_messages, _ = _collapse_adjacent_duplicate_partials(self.messages or [])
+        meta['post_collapse_message_count'] = len(_collapsed_messages or [])
+        self._metadata_post_collapse_message_count = meta['post_collapse_message_count']
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -1517,7 +1542,10 @@ class Session:
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {
+            'message_count', 'post_collapse_message_count', 'anchor_scene_index',
+            'messages', 'tool_calls', 'anchor_activity_scenes',
+        }
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
@@ -1643,6 +1671,10 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # A full load IS the post-normalization authority: the collapse above
+        # already ran, so this count is exact regardless of what the file
+        # carried (a pre-key sidecar, or a stale value from another writer).
+        session._metadata_post_collapse_message_count = len(session.messages or [])
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching

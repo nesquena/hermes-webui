@@ -174,11 +174,19 @@ and 5; it does not mark every run-state boundary implemented.
    evidence.
    Sidecar-lineage traversal may avoid loading a truncate-to-empty snapshot
    ancestor only when metadata proves its complete older fold contributes no
-   rows. The optimization must first preserve explicit-fork isolation and the
-   cumulative visible-prefix return; missing, invalid, or prefix-permitting
-   metadata falls back to the full traversal. Because skipped ancestry lacks
-   complete provenance, shortcut results remain excluded from the lineage
-   display cache and must serialize identically to the unoptimized traversal.
+   rows: the ancestor and every snapshot above it, up to the chain end, must
+   carry the truncate-to-empty sentinel in their cheap metadata stubs. The
+   optimization must first preserve explicit-fork isolation and the
+   cumulative visible-prefix return. Because `Session.load()` collapses
+   adjacent duplicate partial rows before the prefix test, the raw
+   `message_count` is not the loaded length; only the post-normalization
+   `post_collapse_message_count` that `Session.save()` persists may prove the
+   prefix return cannot apply. Missing, invalid, or prefix-permitting
+   metadata fails closed: the immediate parent is fully loaded and the prefix
+   return is kept, exactly as in the full traversal. Because skipped ancestry
+   lacks complete provenance, shortcut results remain excluded from the
+   lineage display cache and must serialize identically to the unoptimized
+   traversal.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
