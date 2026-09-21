@@ -1346,8 +1346,8 @@
     color-scheme:light;
     --bg:#FBF1C7;--sidebar:#EBDBB2;--surface:#F2E5BC;--topbar-bg:rgba(251,241,199,.97);--main-bg:rgba(251,241,199,.55);
     --border:#D5C4A1;--border2:#BDAE93;
-    --text:#3C3836;--muted:#7C6F64;--strong:#282828;--em:#665C54;
-    --accent:#427B58;--accent-hover:#689D6A;--accent-text:#427B58;
+    --text:#3C3836;--muted:#5F564B;--strong:#282828;--em:#665C54;
+    --accent:#427B58;--accent-hover:#689D6A;--accent-text:#2C5A43;
     --accent-bg:rgba(66,123,88,.08);--accent-bg-strong:rgba(66,123,88,.15);--accent-rgb:66,123,88;
     --blue:#076678;--gold:#B57614;
     --focus-ring:rgba(66,123,88,.30);--focus-glow:rgba(66,123,88,.10);
@@ -1356,7 +1356,7 @@
     --error:#9D0006;--success:#79740E;--warning:#B57614;--info:#076678;
     --surface-subtle:rgba(60,56,54,.03);--surface-subtle-hover:rgba(60,56,54,.05);
     --border-subtle:rgba(60,56,54,.08);--border-muted:rgba(60,56,54,.14);
-    --user-bubble-bg:#EBDBB2;--user-bubble-border:#D5C4A1;--user-bubble-text:#3C3836;--user-bubble-placeholder:#7C6F64;
+    --user-bubble-bg:#EBDBB2;--user-bubble-border:#D5C4A1;--user-bubble-text:#3C3836;--user-bubble-placeholder:#5F564B;
     --user-selection-bg:rgba(66,123,88,.22);--user-selection-text:#282828;
   }
   :root.dark[data-skin="gruvbox"]{
@@ -1384,8 +1384,13 @@
   :root.dark[data-skin="gruvbox"] button.send-btn:not(:disabled){color:#1D2021;}
   /* Scrollbar: aqua tint */
   :root[data-skin="gruvbox"]::-webkit-scrollbar-thumb{background:rgba(66,123,88,.30);border-radius:3px;}
+  :root[data-skin="gruvbox"] ::-webkit-scrollbar-thumb{background:rgba(66,123,88,.30);border-radius:3px;}
+  :root[data-skin="gruvbox"]{scrollbar-width:thin;scrollbar-color:rgba(66,123,88,.30) transparent;}
+  :root[data-skin="gruvbox"] *{scrollbar-color:rgba(66,123,88,.30) transparent;}
+  :root.dark[data-skin="gruvbox"] ::-webkit-scrollbar-thumb{background:rgba(142,192,124,.20);border-radius:3px;}
   :root.dark[data-skin="gruvbox"]::-webkit-scrollbar-thumb{background:rgba(142,192,124,.20);border-radius:3px;}
   :root.dark[data-skin="gruvbox"]{scrollbar-width:thin;scrollbar-color:rgba(142,192,124,.20) transparent;}
+  :root.dark[data-skin="gruvbox"] *{scrollbar-color:rgba(142,192,124,.20) transparent;}
   /* Tool cards: quiet tint */
   :root[data-skin="gruvbox"] .tool-card{background:rgba(60,56,54,.03);}
   :root.dark[data-skin="gruvbox"] .tool-card{background:rgba(142,192,124,.03);border-color:rgba(142,192,124,.08);}
