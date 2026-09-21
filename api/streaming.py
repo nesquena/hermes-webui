@@ -10198,6 +10198,55 @@ def _emit_tool_complete_to_mirrors_and_sse(
     return is_error
 
 
+def _decode_tool_result_payload(function_result):
+    """#7358 round-3: structurally decode a structured tool result.
+
+    The real Agent hands the ``tool_complete_callback`` a JSON **string**
+    for most tools — ``tools/terminal_tool.py`` returns
+    ``json.dumps({"output": ..., "exit_code": N, "error": None})`` and
+    ``run_agent.py:6816`` forwards that string verbatim as
+    ``function_result``. A captured successful call is therefore the
+    literal text::
+
+        {"output": "hello-world", "exit_code": 0, "error": null}
+
+    Any classification that scans that text for the substring ``error``
+    matches the *key name* and reports a failure on the happy path —
+    the reviewer's Finding 1 false positive. Decoding first is the only
+    way to tell ``"error": null`` from ``"error": "boom"``.
+
+    Returns a dict when the payload is a mapping or decodes as a JSON
+    object; returns ``None`` for anything else (non-JSON text, malformed
+    JSON-like text, lists, scalars) so the caller can fall back
+    fail-safe rather than substring-matching.
+    """
+    if isinstance(function_result, dict):
+        return function_result
+    if isinstance(function_result, (bytes, bytearray)):
+        try:
+            function_result = function_result.decode('utf-8', errors='replace')
+        except Exception:
+            return None
+    if not isinstance(function_result, str):
+        return None
+    text = function_result.strip()
+    if not text.startswith('{'):
+        # Not JSON-object-shaped (plain prose, list text, …). The Agent's
+        # own generic marker heuristic still applies to these, so signal
+        # "not decodable" and let the caller run that heuristic.
+        return None
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Malformed JSON-like input: reject conservatively. Never fall
+        # back to a substring scan here — a truncated payload can still
+        # contain the literal ``"error"`` key text.
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    return decoded
+
+
 def _tool_result_is_error(name, function_result) -> bool:
     """#7358: the structured tool_complete callback signature is
     ``(tool_call_id, name, args, function_result)`` and does not
@@ -10207,48 +10256,85 @@ def _tool_result_is_error(name, function_result) -> bool:
     helper (it lives in the agent repo), so re-derive a conservative
     failure flag from the structured payload.
 
-    The classification mirrors the Agent's own _detect_tool_failure
-    shape (terminal exit_code, memory store-full, success:false +
-    error/message, JSON-string "error"/"failed" markers) so the
-    WebUI card stays in sync with the CLI's ``[error]`` tag and the
-    red icon on native clients (Hermex).
+    #7358 round-3 (reviewer Finding 1, SILENT): ``function_result``
+    arrives as a JSON **string** for most tools, so the payload is
+    first structurally decoded via ``_decode_tool_result_payload``.
+    The previous implementation substring-scanned that text for
+    ``"error"``, which matched the *key name* in the Agent's canonical
+    success shape ``{"exit_code": 0, "error": null}`` and painted every
+    successful terminal call red — a false positive on the happy path,
+    which is strictly worse than the false negative this PR fixes.
+    Substring scanning is gone: classification only ever reads decoded
+    fields, and malformed JSON-like input is rejected conservatively
+    (default ``False``) rather than scanned.
 
-    The two most-explicit signals win over the broader heuristics:
-    ``is_error: true`` is always a failure regardless of other
-    fields. Ambiguous shapes (an ``error`` key without ``success:
-    false``, a custom ``status`` field) are deliberately left to the
-    default ``False`` so the change cannot accidentally flip a
-    success card to failed. The gateway translator at
-    ``api/gateway_chat.py:508-518`` already classifies its own
-    payloads and is not affected by this helper.
+    Classification then mirrors the Agent's own ``_detect_tool_failure``
+    shape (agent/display.py:710-744):
+
+    * explicit ``is_error: true`` always fails, in dict or string form;
+    * ``terminal``: non-zero ``exit_code`` is the canonical failure;
+    * ``memory``: ``success: false`` only fails on the store-full signal;
+    * other tools: ``success: false`` fails; a non-empty ``error`` or
+      ``failed`` marker fails;
+    * anything ambiguous (``error: null``, a bare informational ``error``
+      key without ``success: false``, a custom ``status`` field,
+      non-JSON prose) defaults to ``False``.
+
+    Ambiguity deliberately resolves to ``False`` so the change can never
+    flip a success card to failed. The gateway translator at
+    ``api/gateway_chat.py:508-518`` already classifies its own payloads
+    and is not affected by this helper.
     """
-    if isinstance(function_result, dict):
-        if function_result.get('is_error') is True:
-            return True
-        # Terminal: non-zero exit_code is the canonical failure
-        # signal. This mirrors the Agent's own _detect_tool_failure
-        # at agent/display.py:910-915 so the WebUI card stays in
-        # sync with the CLI's ``[error]`` tag.
-        if name == 'terminal':
-            exit_code = function_result.get('exit_code')
-            if exit_code is not None and exit_code != 0:
+    payload = _decode_tool_result_payload(function_result)
+    if payload is None:
+        # Not decodable as a JSON object. The Agent's generic heuristic
+        # (agent/display.py:740-742) still inspects the raw text for
+        # ``"error"`` / ``"failed"`` markers and an ``Error`` prefix on
+        # non-JSON results, so mirror that on the raw text only.
+        if isinstance(function_result, str):
+            head = function_result[:500].lower()
+            if '"error"' in head or '"failed"' in head or function_result.startswith('Error'):
                 return True
-            return False
-        if function_result.get('success') is False:
-            # Memory: only count as failure when the "store full"
-            # signal is present, matching the Agent's own guard.
-            if name == 'memory':
-                return 'exceed the limit' in str(function_result.get('error', ''))
-            # Other tools: success:false with any error/message is
-            # a failure. success:false alone also counts.
-            if function_result.get('error') or function_result.get('message'):
-                return True
+        return False
+
+    if payload.get('is_error') is True:
+        return True
+    # Terminal: non-zero exit_code is the canonical failure signal. This
+    # mirrors the Agent's own _detect_tool_failure at
+    # agent/display.py:720-728 so the WebUI card stays in sync with the
+    # CLI's ``[error]`` tag. A successful call decodes to
+    # ``{"output": ..., "exit_code": 0, "error": null}`` — note the
+    # ``error`` key is present-but-null and must NOT be a failure.
+    if name == 'terminal':
+        exit_code = payload.get('exit_code')
+        if exit_code is not None and exit_code != 0:
             return True
         return False
-    if isinstance(function_result, str):
-        head = function_result[:500].lower()
-        if '"error"' in head or '"failed"' in head or function_result.startswith('Error'):
-            return True
+    if payload.get('success') is False:
+        # Memory: only count as failure when the "store full" signal is
+        # present, matching the Agent's own guard at
+        # agent/display.py:731-737.
+        if name == 'memory':
+            return 'exceed the limit' in str(payload.get('error', ''))
+        # Other tools: success:false with any error/message is a
+        # failure. success:false alone also counts.
+        return True
+    if payload.get('success') is True:
+        # Explicit success is authoritative: no real Agent tool pairs
+        # ``success: True`` with a non-empty ``error`` (verified across
+        # tools/ and agent/), so honour the explicit flag rather than
+        # second-guessing it with the generic marker check below.
+        return False
+    # Generic marker check on the decoded payload: a non-empty ``error``
+    # value or a truthy ``failed`` flag is a failure even without an
+    # explicit ``success: false``. This is the shape the Agent's own
+    # ``tool_error()`` helper emits for plain failures —
+    # ``json.dumps({"error": "file not found"})`` — so it must classify.
+    error_value = payload.get('error')
+    if error_value not in (None, '', False, {}, []):
+        return True
+    if payload.get('failed') is True:
+        return True
     return False
 
 
@@ -10280,13 +10366,46 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
     return -1
 
 
+def _live_tool_calls_by_tid(live_tool_calls):
+    """#7358 round-3: index the live mirror by tool-call id.
+
+    ``_emit_tool_complete_to_mirrors_and_sse`` writes the classified
+    ``is_error`` onto the per-stream ``_live_tool_calls`` entries keyed
+    by ``tid``. Settled summaries are built from the final message
+    history, which does not carry that bit, so the only way to carry the
+    live classification into ``s.tool_calls`` is to look the live entry
+    up by its tid.
+    """
+    by_tid = {}
+    for tc in live_tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        tid = tc.get('tid') or ''
+        if tid:
+            by_tid.setdefault(tid, tc)
+    return by_tid
+
+
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
-    """Build persisted tool-call summaries from final messages plus live progress fallback."""
+    """Build persisted tool-call summaries from final messages plus live progress fallback.
+
+    #7358 round-3 (reviewer Finding 2, SILENT): the live ``is_error``
+    classified by the structured ``tool_complete`` path is copied into
+    every settled summary by ``tid`` — including the live-fallback
+    branch. Without this, a card shown red live becomes "Completed"
+    after a normal settlement and reload: the persisted summary carried
+    no ``is_error``, hydration built a successful transcript-owned row,
+    and ``merge_duplicate_tool_row`` had no error status to merge.
+    Round 2 only covered the cancellation path
+    (``_build_partial_message`` -> ``_partial_tool_calls``); normal
+    settlement is the common case.
+    """
     tool_calls = []
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
     tool_msg_sequence = []
+    live_by_tid = _live_tool_calls_by_tid(live_tool_calls)
 
     for msg_idx, m in enumerate(messages or []):
         if not isinstance(m, dict):
@@ -10323,12 +10442,17 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
+                    live_tc = live_by_tid.get(tid)
                     tool_calls.append({
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
+                        # Carry the live classification into the settled
+                        # summary so a failed tool stays failed after
+                        # settlement + reload (Finding 2).
+                        'is_error': bool(live_tc.get('is_error', False)) if live_tc else False,
                     })
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
@@ -10347,6 +10471,10 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+                # The live-fallback branch is the only source of this
+                # row's identity, so it must carry the live is_error too
+                # (Finding 2, fallback summaries).
+                'is_error': bool(live_tc.get('is_error', False)),
             })
 
     return tool_calls
