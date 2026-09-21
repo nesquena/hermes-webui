@@ -1568,13 +1568,19 @@ async function send(){
       const _cmdOwner={sid:(S.session&&S.session.session_id)||null,profile:S.activeProfile||'default'};
       const _cmdOwnerIsCurrent=()=>((S.session&&S.session.session_id)||null)===_cmdOwner.sid
         &&(S.activeProfile||'default')===_cmdOwner.profile;
+      let _cmdMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
+        ? _approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)
+        : 0;
+      const _cmdLifecycleIsCurrent=()=>_cmdOwnerIsCurrent()
+        &&(typeof _approvalCommandMutationGeneration!=='function'
+          ||_approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)===_cmdMutationGeneration);
       let _cmdDraftRevision=typeof _composerDraftRevision==='function'
         ? _composerDraftRevision(_cmdOwner.profile,_cmdOwner.sid)
         : 0;
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
-      if(!_cmdOwnerIsCurrent()) return;
+      if(!_cmdLifecycleIsCurrent()) return;
       if(_agentCmd&&_agentCmd.cli_only){
         if(!S.session){await newSession();await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
@@ -1588,11 +1594,14 @@ async function send(){
           await newSession();
           // The session created here IS the owner now (it did not exist when ownership was captured).
           _cmdOwner.sid=(S.session&&S.session.session_id)||null;
+          _cmdMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
+            ? _approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)
+            : 0;
           _cmdDraftRevision=typeof _composerDraftRevision==='function'
             ? _composerDraftRevision(_cmdOwner.profile,_cmdOwner.sid)
             : 0;
           await renderSessionList();
-          if(!_cmdOwnerIsCurrent()) return;
+          if(!_cmdLifecycleIsCurrent()) return;
         }
         const _cmdUserMessage={role:'user',content:text,_ts:Date.now()/1000};
         S.messages.push(_cmdUserMessage);
@@ -1603,38 +1612,68 @@ async function send(){
         const _cmdDraftUnchanged=String($('msg').value||'').trim()===text
           &&(typeof _composerDraftRevision!=='function'
             ||_composerDraftRevision(_cmdOwner.profile,_cmdOwner.sid)===_cmdDraftRevision);
+        let _cmdDraftClearPromise=Promise.resolve(true);
         if(_cmdDraftUnchanged){
           $('msg').value='';autoResize();
           if(_cmdOwner.sid&&typeof _clearComposerDraft==='function'){
-            _clearComposerDraft(_cmdOwner.sid,text,_cmdDraftFiles,_cmdOwner.profile,_cmdDraftRevision);
+            _cmdDraftClearPromise=_clearComposerDraft(
+              _cmdOwner.sid,text,_cmdDraftFiles,_cmdOwner.profile,_cmdDraftRevision
+            );
           }
         }
         hideCmdDropdown();
-        let _agentOutput='(no output)';
-        let _agentFailed=false;
+        let _agentResult=null;
+        let _agentFailure=null;
         try{
-          _agentOutput=typeof executeAgentCommand==='function'
-            ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
+          _agentResult=typeof executeAgentCommand==='function'
+            ? await executeAgentCommand(text,{
+              ...(_agentCmd||{name:_agentCmdName}),draftClearPromise:_cmdDraftClearPromise,
+            })
             : 'Agent command runtime unavailable in WebUI.';
         }catch(e){
-          _agentFailed=true;
-          _agentOutput=`Agent command error: ${e&&e.message||e}`;
+          _agentFailure=e;
+        }
+        const _agentCommandId=(typeof _agentCommandResultId==='function'
+          ? _agentCommandResultId(_agentResult)
+          : String(_agentResult&&_agentResult.command_id||''))||(_agentFailure&&_agentFailure.webuiCommandId)||null;
+        const _agentOutput=_agentFailure
+          ? `Agent command error: ${_agentFailure&&_agentFailure.message||_agentFailure}`
+          : (typeof _agentCommandResultOutput==='function'
+            ? _agentCommandResultOutput(_agentResult)
+            : String(_agentResult&&_agentResult.output||_agentResult||'(no output)'));
+        let _failedDraftKept=false;
+        if(_agentFailure&&typeof _stashApprovalTransportFailure==='function'){
+          _failedDraftKept=!!_stashApprovalTransportFailure(
+            _cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles,_agentCommandId
+          );
         }
         // The server persisted the command/result pair in the originating session before
         // responding. If ownership changed, leave the currently visible conversation alone.
-        if(!_cmdOwnerIsCurrent()){
-          let _failedDraftKept=false;
-          if(_agentFailed&&typeof _stashApprovalTransportFailure==='function'){
-            _failedDraftKept=!!_stashApprovalTransportFailure(_cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles);
-          }
-          if(typeof showToast==='function') showToast(_agentFailed
+        if(!_cmdLifecycleIsCurrent()){
+          if(typeof showToast==='function') showToast(_agentFailure
             ? (_failedDraftKept
               ? 'Command could not finish after you switched conversations; its draft was kept for the originating session.'
               : 'Command could not finish after you switched conversations; reopen the original conversation and try again.')
             : 'Command completed after you switched conversations; its output was saved in the originating session.',4000,'warning');
           return;
         }
-        if(_agentFailed&&typeof _restoreApprovalCommandDraft==='function'){
+        if(_cmdOwner.sid&&_agentCommandId&&typeof _reconcileAgentCommandTranscript==='function'){
+          const reconciled=await _reconcileAgentCommandTranscript(
+            _cmdOwner.profile,_cmdOwner.sid,
+            _agentResult||{command_id:_agentCommandId,output:_agentOutput}
+          );
+          if(!_cmdLifecycleIsCurrent()){
+            if(typeof showToast==='function')showToast(
+              'Command finished while you switched conversations; reopen the original conversation to see its result.',
+              4000,'warning'
+            );
+            return;
+          }
+          if(reconciled)return;
+        }
+        if(_agentFailure&&typeof _restoreApprovalCommandDraft==='function'){
+          await Promise.resolve(_cmdDraftClearPromise).catch(()=>{});
+          if(!_cmdLifecycleIsCurrent())return;
           _restoreApprovalCommandDraft(_cmdOwner.profile,_cmdOwner.sid,text,_cmdDraftFiles);
         }
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
@@ -1645,47 +1684,80 @@ async function send(){
         if(!S.session){
           await newSession();
           _cmdOwner.sid=(S.session&&S.session.session_id)||null;
+          _cmdMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
+            ? _approvalCommandMutationGeneration(_cmdOwner.profile,_cmdOwner.sid)
+            : 0;
           _cmdDraftRevision=typeof _composerDraftRevision==='function'
             ? _composerDraftRevision(_cmdOwner.profile,_cmdOwner.sid)
             : 0;
           await renderSessionList();
-          if(!_cmdOwnerIsCurrent()) return;
+          if(!_cmdLifecycleIsCurrent()) return;
         }
         const _pluginDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
         const _pluginDraftUnchanged=String($('msg').value||'').trim()===text
           &&(typeof _composerDraftRevision!=='function'
             ||_composerDraftRevision(_cmdOwner.profile,_cmdOwner.sid)===_cmdDraftRevision);
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _pluginDraftClearPromise=Promise.resolve(true);
         if(_pluginDraftUnchanged){
           $('msg').value='';autoResize();
           if(_cmdOwner.sid&&typeof _clearComposerDraft==='function'){
-            _clearComposerDraft(_cmdOwner.sid,text,_pluginDraftFiles,_cmdOwner.profile,_cmdDraftRevision);
+            _pluginDraftClearPromise=_clearComposerDraft(
+              _cmdOwner.sid,text,_pluginDraftFiles,_cmdOwner.profile,_cmdDraftRevision
+            );
           }
         }
         hideCmdDropdown();
-        let _pluginOutput='(no output)';
-        let _pluginFailed=false;
+        let _pluginResult=null;
+        let _pluginFailure=null;
         try{
-          _pluginOutput=typeof executeAgentPluginCommand==='function'
-            ? await executeAgentPluginCommand(text,_agentCmd)
+          _pluginResult=typeof executeAgentPluginCommand==='function'
+            ? await executeAgentPluginCommand(text,{
+              ...(_agentCmd||{}),draftClearPromise:_pluginDraftClearPromise,
+            })
             : 'Plugin command runtime unavailable in WebUI.';
         }catch(e){
-          _pluginFailed=true;
-          _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
+          _pluginFailure=e;
         }
-        if(!_cmdOwnerIsCurrent()){
-          let _failedDraftKept=false;
-          if(_pluginFailed&&typeof _stashApprovalTransportFailure==='function'){
-            _failedDraftKept=!!_stashApprovalTransportFailure(_cmdOwner.profile,_cmdOwner.sid,text,_pluginDraftFiles);
-          }
-          if(typeof showToast==='function') showToast(_pluginFailed
+        const _pluginCommandId=(typeof _agentCommandResultId==='function'
+          ? _agentCommandResultId(_pluginResult)
+          : String(_pluginResult&&_pluginResult.command_id||''))||(_pluginFailure&&_pluginFailure.webuiCommandId)||null;
+        const _pluginOutput=_pluginFailure
+          ? `Plugin command error: ${_pluginFailure&&_pluginFailure.message||_pluginFailure}`
+          : (typeof _agentCommandResultOutput==='function'
+            ? _agentCommandResultOutput(_pluginResult)
+            : String(_pluginResult&&_pluginResult.output||_pluginResult||'(no output)'));
+        let _failedDraftKept=false;
+        if(_pluginFailure&&typeof _stashApprovalTransportFailure==='function'){
+          _failedDraftKept=!!_stashApprovalTransportFailure(
+            _cmdOwner.profile,_cmdOwner.sid,text,_pluginDraftFiles,_pluginCommandId
+          );
+        }
+        if(!_cmdLifecycleIsCurrent()){
+          if(typeof showToast==='function') showToast(_pluginFailure
             ? (_failedDraftKept
               ? 'Plugin command could not finish after you switched conversations; its draft was kept for the originating session.'
               : 'Plugin command could not finish after you switched conversations; reopen the original conversation and try again.')
             : 'Plugin command completed after you switched conversations; its output was saved in the originating session.',4000,'warning');
           return;
         }
-        if(_pluginFailed&&typeof _restoreApprovalCommandDraft==='function'){
+        if(_cmdOwner.sid&&_pluginCommandId&&typeof _reconcileAgentCommandTranscript==='function'){
+          const reconciled=await _reconcileAgentCommandTranscript(
+            _cmdOwner.profile,_cmdOwner.sid,
+            _pluginResult||{command_id:_pluginCommandId,output:_pluginOutput}
+          );
+          if(!_cmdLifecycleIsCurrent()){
+            if(typeof showToast==='function')showToast(
+              'Plugin command finished while you switched conversations; reopen the original conversation to see its result.',
+              4000,'warning'
+            );
+            return;
+          }
+          if(reconciled)return;
+        }
+        if(_pluginFailure&&typeof _restoreApprovalCommandDraft==='function'){
+          await Promise.resolve(_pluginDraftClearPromise).catch(()=>{});
+          if(!_cmdLifecycleIsCurrent())return;
           _restoreApprovalCommandDraft(_cmdOwner.profile,_cmdOwner.sid,text,_pluginDraftFiles);
         }
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});

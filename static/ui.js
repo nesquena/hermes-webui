@@ -20209,6 +20209,12 @@ async function submitEdit(msgIdx, newText) {
         session_id: initialSid,
         keep_count: absoluteKeepCount
       })});
+      // A truncated transcript no longer authoritatively owns browser-retained
+      // command ids. Reusing one after its row was removed could repeat a side
+      // effect under an apparently idempotent retry.
+      if(typeof _clearApprovalCommandStateForSession==='function'){
+        _clearApprovalCommandStateForSession(S.activeProfile||'default',initialSid);
+      }
       // #5924 SILENT-race guard: a session switch during the truncate await must not
       // let this recovery apply session A's intent (truncate/re-arm/send) to the
       // newly-visible session.
