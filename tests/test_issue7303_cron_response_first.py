@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import textwrap
 
-import pytest
-
 from api.cron_output_parser import parse_cron_output, response_snippet
 
 
