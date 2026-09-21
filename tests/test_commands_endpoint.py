@@ -402,7 +402,10 @@ def test_commands_exec_persists_and_deduplicates_owner_transcript(monkeypatch):
     routes.handle_post(second, SimpleNamespace(path="/api/commands/exec", query=""))
 
     assert first.status == second.status == 200
-    assert first.json_body() == second.json_body() == {"output": "saved output"}
+    assert first.json_body() == second.json_body() == {
+        "output": "saved output",
+        "command_id": "webui-command-test-1",
+    }
     assert calls == ["/memory pending"]
     assert session.saved == 2
     assert [(m["role"], m["content"]) for m in session.messages] == [
@@ -490,7 +493,10 @@ def test_commands_exec_does_not_repeat_after_final_save_failure(monkeypatch):
     assert first.status == second.status == 200
     assert calls == ["/memory pending"]
     assert first.json_body()["persistence_warning"] is True
-    assert second.json_body() == {"output": "ran once"}
+    assert second.json_body() == {
+        "output": "ran once",
+        "command_id": "webui-command-result-save-fail",
+    }
     assert session.first_saved_snapshot[1]["_webui_command_pending"] is True
 
     # Simulate a process restart: only the durable pre-execution marker is
@@ -567,8 +573,8 @@ def test_session_delete_holds_agent_lock_through_cli_cleanup(monkeypatch, tmp_pa
     assert lock.held is False
 
 
-def test_commands_exec_holds_session_lock_through_execution_and_save(monkeypatch):
-    """Deletion uses this same lock, so it cannot interleave and leave an orphan result."""
+def test_commands_exec_releases_session_lock_while_command_runs(monkeypatch):
+    """Arbitrary command handlers must never run under the non-reentrant session lock."""
     from api import commands, routes
 
     entered = threading.Event()
@@ -586,6 +592,8 @@ def test_commands_exec_holds_session_lock_through_execution_and_save(monkeypatch
             pass
 
     def execute(command):
+        assert lock.acquire(blocking=False), "command executed while holding the session lock"
+        lock.release()
         entered.set()
         assert release.wait(5)
         return "done"
@@ -603,11 +611,208 @@ def test_commands_exec_holds_session_lock_through_execution_and_save(monkeypatch
     )
     thread.start()
     assert entered.wait(5)
-    assert lock.acquire(timeout=0.05) is False
+    assert lock.acquire(timeout=0.05) is True
+    lock.release()
     release.set()
     thread.join(5)
     assert not thread.is_alive()
     assert handler.status == 200
+
+
+def test_webui_command_run_tokens_survive_stale_finalizer_after_invalidation():
+    """Clear/truncate invalidation must prevent an old run from owning a replacement marker."""
+    from api import routes
+
+    sid = "command-generation-session"
+    command_id = "webui-command-generation"
+    routes._invalidate_webui_command_runs(sid)
+    first = routes._register_webui_command_run(sid, command_id)
+    assert first
+    assert routes._webui_command_run_is_active(sid, command_id, first)
+
+    routes._invalidate_webui_command_runs(sid)
+    assert not routes._webui_command_run_is_active(sid, command_id, first)
+
+    second = routes._register_webui_command_run(sid, command_id)
+    assert second and second != first
+    routes._unregister_webui_command_run(sid, command_id, first)
+    assert routes._webui_command_run_is_active(sid, command_id, second)
+    routes._unregister_webui_command_run(sid, command_id, second)
+
+
+def test_commands_exec_rolls_back_marker_when_run_registration_loses(monkeypatch):
+    """A duplicate live owner must not leave a pending transcript row behind."""
+    from api import commands, routes
+
+    class Session:
+        session_id = "registration-race-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = []
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+
+    session = Session()
+    command_id = "webui-command-registration-race"
+    routes._invalidate_webui_command_runs(session.session_id)
+    live_token = routes._register_webui_command_run(session.session_id, command_id)
+    assert live_token
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(commands, "execute_agent_command", lambda _command: "must not run")
+
+    try:
+        handler = _RouteHandler({
+            "command": "/memory pending",
+            "session_id": session.session_id,
+            "command_id": command_id,
+        })
+        routes.handle_post(handler, SimpleNamespace(path="/api/commands/exec", query=""))
+        assert handler.status == 409
+        assert session.messages == []
+        assert session.saved == 0  # registration loses before any marker is persisted
+    finally:
+        routes._unregister_webui_command_run(session.session_id, command_id, live_token)
+
+
+def test_commands_exec_stale_finalizer_cannot_overwrite_replacement_marker(monkeypatch):
+    """An in-flight result must not resurrect itself into a same-id row created after clear."""
+    from api import commands, routes
+
+    entered = threading.Event()
+    release = threading.Event()
+    lock = threading.RLock()
+    command_id = "webui-command-clear-race"
+
+    class Session:
+        session_id = "clear-race-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = []
+
+        def save(self):
+            pass
+
+    session = Session()
+
+    def execute(_command):
+        entered.set()
+        assert release.wait(5)
+        return "stale result"
+
+    routes._invalidate_webui_command_runs(session.session_id)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(commands, "execute_agent_command", execute)
+    handler = _RouteHandler({
+        "command": "/memory pending",
+        "session_id": session.session_id,
+        "command_id": command_id,
+    })
+    thread = threading.Thread(
+        target=routes.handle_post,
+        args=(handler, SimpleNamespace(path="/api/commands/exec", query="")),
+        daemon=True,
+    )
+    thread.start()
+    assert entered.wait(5)
+
+    with lock:
+        routes._invalidate_webui_command_runs(session.session_id)
+        session.messages = []
+        replacement_token = routes._register_webui_command_run(session.session_id, command_id)
+        assert replacement_token
+        session.messages.extend([
+            {"role": "user", "content": "/memory pending", "_webui_command_id": command_id},
+            {
+                "role": "assistant",
+                "content": "replacement pending",
+                "_webui_command_id": command_id,
+                "_webui_command_pending": True,
+                "_webui_command_run_token": replacement_token,
+            },
+        ])
+
+    release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert handler.status == 200
+    assert handler.json_body()["persistence_warning"] is True
+    assert session.messages[1]["content"] == "replacement pending"
+    assert session.messages[1]["_webui_command_pending"] is True
+    assert routes._webui_command_run_is_active(
+        session.session_id, command_id, replacement_token
+    )
+    routes._unregister_webui_command_run(
+        session.session_id, command_id, replacement_token
+    )
+
+
+def test_commands_exec_recovers_orphaned_pending_marker_without_reexecution(monkeypatch):
+    """A same-id retry after restart settles an orphan marker without repeating its side effect."""
+    from api import commands, routes
+
+    command_id = "webui-command-interrupted"
+
+    class Session:
+        session_id = "interrupted-command-session"
+        profile = "default"
+        read_only = False
+        is_read_only = False
+
+        def __init__(self):
+            self.messages = [
+                {
+                    "role": "user",
+                    "content": "/memory approve stable-id",
+                    "_webui_command_id": command_id,
+                },
+                {
+                    "role": "assistant",
+                    "content": "Command started; its final result has not been saved yet.",
+                    "_webui_command_id": command_id,
+                    "_webui_command_pending": True,
+                },
+            ]
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+
+    session = Session()
+    calls = []
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: threading.Lock())
+    monkeypatch.setattr(commands, "execute_agent_command", lambda command: calls.append(command) or "must not run")
+    payload = {
+        "command": "/memory approve stable-id",
+        "session_id": session.session_id,
+        "command_id": command_id,
+    }
+
+    handler = _RouteHandler(payload)
+    routes.handle_post(handler, SimpleNamespace(path="/api/commands/exec", query=""))
+
+    assert handler.status == 200
+    response = handler.json_body()
+    assert response["command_id"] == command_id
+    assert response["recovered_interrupted"] is True
+    assert "may have run" in response["output"]
+    assert calls == []
+    assert session.saved == 1
+    assert "_webui_command_pending" not in session.messages[1]
+    assert session.messages[1]["_webui_command_interrupted"] is True
 
 
 def test_credits_command_returns_not_logged_in_message(monkeypatch):
