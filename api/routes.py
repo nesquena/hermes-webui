@@ -12973,6 +12973,18 @@ def handle_get(handler, parsed) -> bool:
                     message_offset=_messages_offset,
                     tool_calls=getattr(s, "tool_calls", None),
                 )
+                # Restore-checkpoint availability: resolve which served user
+                # rows can be restored and at which durable row their archive
+                # starts. Read-only; any failure degrades to "no annotations"
+                # (legacy stamp-only buttons) and must never fail session load.
+                try:
+                    from api.checkpoint_map import annotate_restore_targets
+                    _truncated_msgs = annotate_restore_targets(s, _all_msgs, _truncated_msgs)
+                except Exception as _restore_annotate_err:
+                    logger.debug(
+                        "restore-target annotation skipped for %s: %s",
+                        sid, _restore_annotate_err,
+                    )
             else:
                 _truncated_msgs = []
                 _messages_offset = 0
@@ -15439,23 +15451,49 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/checkpoint/restore":
         # Restore-checkpoint primitive (parity with Hermes Desktop's
         # `restoreToMessage` in apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts).
-        # Accepts the durable ``row_id`` (integer state.db primary key) of a user
-        # message and rewinds the conversation to the strict prefix preceding it.
-        # See api/session_ops.py:restore_checkpoint_at_row_id for the locked
-        # mutation + validation. The endpoint surfaces ValueError as 400
-        # (unknown row, non-user row), KeyError as 404, PermissionError as 403.
+        # Rewinds the conversation to the strict prefix preceding a user
+        # message. Two addressing modes:
+        #   * durable-only: {session_id, row_id} — original contract; the row
+        #     must be a live durable row in state.db (strict, fail-closed).
+        #   * display-addressed: {session_id, message_id | msg_idx, row_id?} —
+        #     the target is resolved server-side by api/checkpoint_map.py so
+        #     legacy rows without a stamped `_row_id` (and rows whose stamp
+        #     went stale after a history rewrite) can still be restored.
+        # See api/session_ops.py:restore_checkpoint_at_row_id /
+        # restore_checkpoint_to_display_message for the locked mutations.
+        # The endpoint surfaces ValueError as 400 (bad/stale target, active
+        # turn), KeyError as 404, PermissionError as 403.
         try:
-            require(body, "session_id", "row_id")
+            require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         if _session_is_subagent_view_only(body["session_id"]):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
-        raw_row_id = body["row_id"]
-        if isinstance(raw_row_id, bool) or not isinstance(raw_row_id, int):
+        raw_row_id = body.get("row_id")
+        raw_message_id = body.get("message_id")
+        raw_msg_idx = body.get("msg_idx")
+        raw_message_ts = body.get("message_ts")
+        if raw_row_id is not None and (isinstance(raw_row_id, bool) or not isinstance(raw_row_id, int)):
             return bad(handler, "row_id must be an integer", 400)
+        if raw_msg_idx is not None and (isinstance(raw_msg_idx, bool) or not isinstance(raw_msg_idx, int)):
+            return bad(handler, "msg_idx must be an integer", 400)
+        if raw_message_id is not None and (isinstance(raw_message_id, bool) or not isinstance(raw_message_id, (str, int))):
+            return bad(handler, "message_id must be a string or integer", 400)
+        if raw_row_id is None and raw_message_id is None and raw_msg_idx is None:
+            return bad(handler, "row_id, message_id or msg_idx is required", 400)
         try:
-            from api.session_ops import restore_checkpoint_at_row_id
-            result = restore_checkpoint_at_row_id(body["session_id"], raw_row_id)
+            if raw_message_id is None and raw_msg_idx is None:
+                from api.session_ops import restore_checkpoint_at_row_id
+                result = restore_checkpoint_at_row_id(body["session_id"], raw_row_id)
+            else:
+                from api.session_ops import restore_checkpoint_to_display_message
+                result = restore_checkpoint_to_display_message(
+                    body["session_id"],
+                    message_id=raw_message_id,
+                    msg_idx=raw_msg_idx,
+                    message_ts=raw_message_ts,
+                    row_id=raw_row_id,
+                )
         except KeyError:
             return bad(handler, "Session not found", 404)
         except PermissionError as e:
@@ -15475,22 +15513,34 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found after restore", 404)
         logger.info(
-            "checkpoint_restore %s: row_id=%d, messages %d->%d, survivor_count=%d",
-            body["session_id"], raw_row_id,
+            "checkpoint_restore %s: row_id=%s mode=%s, messages %d->%d, survivor_count=%d",
+            body["session_id"], result.get("restored_to_row_id"), result.get("restore_mode"),
             result["old_message_count"], result["new_message_count"],
             len(result["survivor_user_row_ids"]),
         )
+        # Re-annotate the survivor transcript so the inline restore buttons and
+        # the FAB picker stay available immediately, without waiting for a full
+        # session reload. Best-effort: annotations missing != failed restore.
+        _restore_session_messages = s.messages
+        try:
+            from api.checkpoint_map import annotate_restore_targets
+            _restore_session_messages = annotate_restore_targets(s, s.messages, s.messages)
+        except Exception as _restore_annotate_err:
+            logger.debug("post-restore annotation skipped: %s", _restore_annotate_err)
         return j(
             handler,
             {
                 "ok": True,
                 "restored_to_row_id": result["restored_to_row_id"],
+                "restore_mode": result.get("restore_mode"),
+                "archive_mode": result.get("archive_mode"),
                 "old_message_count": result["old_message_count"],
                 "new_message_count": result["new_message_count"],
+                "archived_state_row_ids": result.get("archived_state_row_ids", []),
                 "survivor_user_row_ids": result["survivor_user_row_ids"],
                 "survivor_row_id_map": result["survivor_row_id_map"],
                 "session": public_session_projection(
-                    s.compact() | {"messages": s.messages}
+                    s.compact() | {"messages": _restore_session_messages}
                 ),
             },
         )

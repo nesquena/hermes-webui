@@ -688,78 +688,121 @@ def retry_last(session_id: str) -> dict[str, Any]:
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
+def _read_active_state_db_rows(session_id: str) -> list[dict] | None:
+    """Read ACTIVE state.db rows (oldest first) with durable ids always exposed.
+
+    ``get_state_db_session_messages`` intentionally hides the durable row id
+    unless the row carries a replay sidecar (``api_content``), so it cannot
+    serve as the restore path's id authority for plain rows — anchor checks
+    and suffix archiving silently no-op'd on them. This reader selects ``id``
+    unconditionally. Returns ``None`` when state.db is unavailable; ``[]``
+    when the session has no active rows.
+    """
+    try:
+        import sqlite3
+        from api.models import _active_state_db_path
+    except Exception:
+        return None
+    try:
+        db_path = _active_state_db_path()
+    except Exception:
+        return None
+    if not db_path or not os.path.exists(str(db_path)):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    except Exception:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(messages)")
+        columns = {str(row["name"]) for row in cur.fetchall()}
+        if not {"id", "role", "content"} <= columns:
+            return None
+        parts = ["id", "role", "content"]
+        parts.append("api_content" if "api_content" in columns else "NULL AS api_content")
+        where = "session_id=?"
+        if "active" in columns:
+            where += " AND (active IS NULL OR active != 0)"
+        cur.execute(
+            f"SELECT {', '.join(parts)} FROM messages WHERE {where} ORDER BY id",
+            (str(session_id),),
+        )
+        out: list[dict] = []
+        for row in cur.fetchall():
+            try:
+                rid = int(row["id"])
+            except (TypeError, ValueError):
+                continue
+            out.append({
+                "id": rid,
+                "role": str(row["role"] or "").lower(),
+                "content": row["content"],
+                "api_content": row["api_content"],
+            })
+        return out
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _state_db_active_row_by_id(session_id: str, row_id: int):
     """Return the ACTIVE state.db row dict whose durable id equals ``row_id``.
 
-    ``get_state_db_session_messages`` already excludes ``active=0`` rows by
-    default, so a row that is present here is live in the durable transcript.
-    Returns ``None`` when the id is absent, inactive, or unreadable. This is the
-    single durable authority used by the restore path — it never trusts the
-    WebUI sidecar ordinal, because tool / reasoning / compaction rows make the
-    two lists diverge (see tui_gateway _resolve_truncate_row_id for the
-    gateway's equivalent guard).
+    Backed by :func:`_read_active_state_db_rows` — ids are always exposed on
+    plain rows (the generic reader hides them without an ``api_content``
+    replay sidecar, which previously made this validation fail closed on
+    ordinary rows). Returns ``None`` when the id is absent, inactive, or
+    unreadable. This is the single durable authority used by the restore
+    path — it never trusts the WebUI sidecar ordinal, because tool /
+    reasoning / compaction rows make the two lists diverge (see tui_gateway
+    _resolve_truncate_row_id for the gateway's equivalent guard).
     """
-    try:
-        from api.models import get_state_db_session_messages
-        state_messages = get_state_db_session_messages(session_id)
-    except Exception:
+    rows = _read_active_state_db_rows(session_id)
+    if rows is None:
         return None
-    for r in state_messages or []:
-        if not isinstance(r, dict):
-            continue
-        rid = (r.get('_state_db_row_id') or r.get('_row_id')
-               or r.get('row_id') or r.get('id'))
-        if rid is None:
-            continue
-        try:
-            if int(rid) == row_id:
-                return r
-        except (TypeError, ValueError):
-            continue
+    for r in rows:
+        if r["id"] == row_id:
+            return r
     return None
 
 
 def _state_db_active_rows_after(session_id: str, row_id: int) -> list[int]:
-    """Durable ids of the ACTIVE rows strictly at/after ``row_id`` in state.db.
+    """Durable ids of the ACTIVE rows at/after ``row_id`` in state.db.
 
-    Uses the *state.db* ordinal of the matched row — not the sidecar ordinal —
-    so the archived suffix is exactly the durable transcript that follows the
-    checkpoint. Returns [] when the anchor row is not active/present.
+    Uses the *state.db* id order of the matched row — not the sidecar ordinal
+    — so the archived suffix is exactly the durable transcript that follows
+    the checkpoint. Returns [] when the anchor row is not active/present.
     """
-    try:
-        from api.models import get_state_db_session_messages
-        state_messages = get_state_db_session_messages(session_id)
-    except Exception:
+    rows = _read_active_state_db_rows(session_id)
+    if not rows:
         return []
     anchor_idx = None
-    for i, r in enumerate(state_messages or []):
-        if not isinstance(r, dict):
-            continue
-        rid = (r.get('_state_db_row_id') or r.get('_row_id')
-               or r.get('row_id') or r.get('id'))
-        if rid is None:
-            continue
-        try:
-            if int(rid) == row_id:
-                anchor_idx = i
-                break
-        except (TypeError, ValueError):
-            continue
+    for i, r in enumerate(rows):
+        if r["id"] == row_id:
+            anchor_idx = i
+            break
     if anchor_idx is None:
         return []
-    out: list[int] = []
-    for r in state_messages[anchor_idx:]:
-        if not isinstance(r, dict):
-            continue
-        rid = (r.get('_state_db_row_id') or r.get('_row_id')
-               or r.get('row_id') or r.get('id'))
-        if rid is None:
-            continue
-        try:
-            out.append(int(rid))
-        except (TypeError, ValueError):
-            continue
-    return out
+    return [r["id"] for r in rows[anchor_idx:]]
+
+
+def _state_db_active_rows_from(session_id: str, first_row_id: int) -> list[int]:
+    """Durable ids of every ACTIVE row at/after ``first_row_id`` (inclusive).
+
+    Id order is transcript order in state.db, so "all active rows with
+    ``id >= cut``" is exactly the durable suffix a restore soft-archives.
+    Returns [] when nothing matches or when state.db is unavailable.
+    """
+    rows = _read_active_state_db_rows(session_id)
+    if not rows:
+        return []
+    return [r["id"] for r in rows if r["id"] >= first_row_id]
 
 
 def _archive_state_db_suffix(session_id: str, archived_ids: list[int]) -> None:
@@ -957,6 +1000,211 @@ def restore_checkpoint_at_row_id(session_id: str, target_row_id: int) -> dict[st
     )
     return {
         'restored_to_row_id': target_row_id,
+        'old_message_count': old_count,
+        'new_message_count': len(s.messages),
+        'archived_state_row_ids': archived_state_ids,
+        'survivor_user_row_ids': survivor_row_ids,
+        'survivor_row_id_map': {
+            str(rid): rid for rid in survivor_row_ids if rid is not None
+        },
+    }
+
+
+def restore_checkpoint_to_display_message(
+    session_id: str,
+    *,
+    message_id: Any = None,
+    msg_idx: Any = None,
+    message_ts: Any = None,
+    row_id: Any = None,
+) -> dict[str, Any]:
+    """Restore the conversation to the checkpoint BEFORE a displayed user turn.
+
+    Display-addressed companion to :func:`restore_checkpoint_at_row_id`:
+    instead of requiring a stamped durable ``row_id`` on the sidecar row, the
+    target is resolved server-side by ``api/checkpoint_map`` (content-anchored,
+    monotonic, fail-closed) so legacy rows without a stamp — and rows whose
+    stamp went stale after a history rewrite — can still be restored.
+
+    Resolution modes: ``exact`` / ``anchor`` / ``anchor-next`` archive the
+    durable suffix from the resolved cut row; ``display-only`` archives nothing
+    (no durable row is attributable to the target or later) and only truncates
+    the sidecar + model context. The durable archive is committed FIRST; any
+    failure aborts before the sidecar is touched (dual-store fail-closed).
+
+    Raises:
+        KeyError: session not found
+        PermissionError: read-only session
+        ValueError: bad/missing target address, stale view, unresolvable
+                    message, or an active turn in flight
+        RuntimeError: durable write failed (restore aborted, sidecar untouched)
+    """
+    if row_id is not None and (isinstance(row_id, bool) or not isinstance(row_id, int)):
+        raise ValueError("row_id must be an integer")
+    if msg_idx is not None and (isinstance(msg_idx, bool) or not isinstance(msg_idx, int)):
+        raise ValueError("msg_idx must be an integer")
+    if message_id is not None and isinstance(message_id, bool):
+        raise ValueError("message_id must be a string or integer")
+    if message_id is None and msg_idx is None and row_id is None:
+        raise ValueError("message_id, msg_idx or row_id is required")
+
+    with _get_session_agent_lock(session_id):
+        s = get_session(session_id)  # raises KeyError
+        with LOCK:
+            s = SESSIONS.get(session_id, s)  # stale-object guard
+            # Ownership / mutability gates BEFORE any mutation.
+            if getattr(s, "read_only", False):
+                raise PermissionError(f"Session {session_id} is read-only")
+            # Reject while a turn is live (open stream or pending user message).
+            if _live_active_stream_id(s) or getattr(s, "pending_user_message", None):
+                raise ValueError(
+                    "Session has an active turn; wait for it to finish before restoring."
+                )
+            history = s.messages or []
+            if not history:
+                raise ValueError("Session has no messages to restore.")
+
+            # --- locate the target DISPLAY row (stable sidecar id first) -------
+            target_idx = None
+            if message_id is not None:
+                for i, m in enumerate(history):
+                    if not isinstance(m, dict):
+                        continue
+                    mid = m.get('id')
+                    if mid is None:
+                        continue
+                    if str(mid) == str(message_id):
+                        target_idx = i
+                        break
+                if target_idx is not None and history[target_idx].get('role') != 'user':
+                    raise ValueError("Only user messages can be used as checkpoints")
+            if target_idx is None and msg_idx is not None:
+                if msg_idx < 0 or msg_idx >= len(history):
+                    raise ValueError(
+                        "The selected message is no longer in the transcript; "
+                        "reload the session and retry"
+                    )
+                candidate = history[msg_idx]
+                if not isinstance(candidate, dict) or candidate.get('role') != 'user':
+                    raise ValueError("Only user messages can be used as checkpoints")
+                # Staleness check: the ordinal alone is only trustworthy when
+                # the timestamp the client saw still matches that row.
+                if message_ts is not None:
+                    try:
+                        want_ts = float(message_ts)
+                    except (TypeError, ValueError):
+                        want_ts = None
+                    if want_ts is not None:
+                        try:
+                            got_ts = float(candidate.get('timestamp'))
+                        except (TypeError, ValueError):
+                            got_ts = None
+                        if got_ts is not None and abs(got_ts - want_ts) > 5.0:
+                            raise ValueError(
+                                "The transcript changed since this view was rendered; "
+                                "reload the session and retry"
+                            )
+                target_idx = msg_idx
+            if target_idx is None:
+                raise ValueError(
+                    "Could not locate the selected message in the current transcript; "
+                    "reload the session and retry"
+                )
+            target_message = history[target_idx]
+
+            # --- resolve the durable cut ---------------------------------------
+            from api.checkpoint_map import build_restore_plan
+            plan = build_restore_plan(s, history).get(target_idx)
+            cut_row_id = None
+            mode = None
+            if plan:
+                cut_row_id = plan.get('cut_row_id')
+                mode = plan.get('mode')
+            if plan is None and row_id is not None and row_id > 0:
+                # Stamp-only fallback (the resolver had no durable view): the
+                # row's own stamp must still point at an active,
+                # content-matching durable user row — the same checks as
+                # restore_checkpoint_at_row_id.
+                stamp = (target_message.get('_row_id')
+                         or target_message.get('_db_persisted_row_id')
+                         or target_message.get('row_id'))
+                try:
+                    stamp = int(stamp) if stamp is not None else None
+                except (TypeError, ValueError):
+                    stamp = None
+                if stamp == row_id:
+                    anchor = _state_db_active_row_by_id(session_id, row_id)
+                    if anchor is None:
+                        raise ValueError(
+                            f"row_id {row_id} is not an active durable row in state.db; "
+                            "the checkpoint is stale or belongs to a different session"
+                        )
+                    if anchor.get('role') != 'user':
+                        raise ValueError(
+                            f"row_id {row_id} resolves to a {anchor.get('role')!r} durable row, "
+                            "not a user message"
+                        )
+                    if not _sidecar_row_matches_durable(target_message, anchor):
+                        raise ValueError(
+                            f"row_id {row_id} content does not match the durable row; "
+                            "refusing to cut on a mismatched checkpoint"
+                        )
+                    cut_row_id = row_id
+                    mode = 'legacy-stamp'
+
+            # Compute the durable suffix to archive from the resolved cut row.
+            archived_state_ids = (
+                _state_db_active_rows_from(session_id, int(cut_row_id))
+                if cut_row_id is not None else []
+            )
+            keep = target_idx
+
+        # --- DURABLE WRITE FIRST (fail closed) ---
+        # Outside the global LOCK (a busy state.db must not stall all WebUI
+        # mutations) but inside the per-session agent lock, which serializes
+        # every other writer of this session. If the archive raises, we abort
+        # BEFORE touching the in-memory transcript or the sidecar file →
+        # no dual-store divergence, no partial success.
+        _archive_state_db_suffix(session_id, archived_state_ids)
+
+        # --- SIDE CAR WRITE from the committed survivor transcript ---
+        with LOCK:
+            s = SESSIONS.get(session_id, s)  # re-bind after the durable write
+            history = s.messages or []
+            # Re-resolve the cut point on the bound instance: the transcript is
+            # frozen for us (agent lock) but be defensive — an empty/changed
+            # history here means something unexpected happened; abort cleanly.
+            if keep > len(history):
+                raise RuntimeError(
+                    "session transcript changed during checkpoint archive; retry"
+                )
+            survivor_messages = history[:keep]
+            survivor_row_ids: list[int | None] = [
+                (int(m['_row_id']) if isinstance(m, dict)
+                 and m.get('_row_id') is not None else None)
+                for m in survivor_messages
+            ]
+            old_count = len(history)
+            s.messages = survivor_messages
+            _stamp_intentional_shrink_generation(s, old_count, len(s.messages))
+            s.truncation_watermark = _truncation_watermark_for(s.messages)
+            s.truncation_boundary = s.truncation_watermark
+
+            ctx = getattr(s, 'context_messages', None)
+            if isinstance(ctx, list) and ctx:
+                aligned_ctx = truncate_context_for_display_keep(ctx, history, keep)
+                if aligned_ctx is not None:
+                    s.context_messages = aligned_ctx
+        s.save()
+
+    logger.info(
+        "checkpoint_restore %s: display_idx=%s mode=%s cut_row=%s, messages %d->%d, archived_state_rows=%d",
+        session_id, keep, mode, cut_row_id, old_count, len(s.messages), len(archived_state_ids),
+    )
+    return {
+        'restored_to_row_id': cut_row_id,
+        'restore_mode': mode,
+        'archive_mode': 'archive' if archived_state_ids else 'display-only',
         'old_message_count': old_count,
         'new_message_count': len(s.messages),
         'archived_state_row_ids': archived_state_ids,

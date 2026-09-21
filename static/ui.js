@@ -16869,13 +16869,16 @@ function renderMessages(options){
     // integer rowid (236, 237, …) before #6737 was rolled out; new sessions
     // store a string uuid. The delete endpoint serialises either form.
     const _hasDeleteId = !!(m && m.id !== null && m.id !== undefined && m.id !== '' && (typeof m.id === 'string' || typeof m.id === 'number'));
-    // Restore needs a *durable* id specifically (m._row_id = state.db primary
-    // key). The delete-side `_hasDeleteId` is intentionally NOT reused: a
-    // legacy per-session `m.id` is not a durable checkpoint address, so rows
-    // without a stamped `_row_id` must not offer Restore at all.
+    // Restore is offered when the server resolved a checkpoint target for this
+    // row (`m._restore_ready` — server-side resolution in api/checkpoint_map.py
+    // that also covers legacy rows with no stamped id) OR the row still carries
+    // a fresh durable `_row_id` stamp (state.db primary key). The endpoint
+    // re-resolves at click time and fail-closes on stale targets, so the
+    // button never archives the wrong suffix.
+    const _restoreReady = !!(m && m._restore_ready === true);
     const _hasDurableRowId = !!(m && typeof m._row_id === 'number' && Number.isInteger(m._row_id) && m._row_id > 0);
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const restoreBtn = (isUser && _hasDurableRowId) ? `<button class="msg-action-btn msg-restore-btn" title="${t('restore_from_here')}" onclick="restoreToMessage(this)">${li('rotate-ccw',13)}</button>` : '';
+    const restoreBtn = (isUser && (_restoreReady || _hasDurableRowId)) ? `<button class="msg-action-btn msg-restore-btn" title="${t('restore_from_here')}" onclick="restoreToMessage(this)">${li('rotate-ccw',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
@@ -19266,13 +19269,38 @@ async function deleteMessage(btn) {
 }
 
 // Restore Checkpoint — parity with Hermes Desktop's "restoreToMessage". Every
-// user message is treated as a checkpoint: clicking the discard icon on a
-// user message truncates the transcript from that message onward, leaving
-// the prefix intact. The user can then resubmit the original prompt (or a
-// rewritten one) to re-run the turn from scratch. This is the opposite of
-// per-message delete (#6737): delete drops a single row, restore drops the
-// tail of the conversation from the chosen row. Server endpoint:
-// POST /api/session/checkpoint/restore {session_id, row_id} (durable id only).
+// user message is treated as a checkpoint: clicking the restore icon on a
+// user message truncates the transcript at that message, leaving the prefix
+// intact. The composer is prefilled with the restored prompt so it can be
+// re-sent (or rewritten) to re-run the turn from scratch. This is the
+// opposite of per-message delete (#6737): delete drops a single row, restore
+// drops the tail of the conversation from the chosen row. Server endpoint:
+// POST /api/session/checkpoint/restore {session_id, message_id?, msg_idx?,
+// row_id?} — the durable cut is resolved server-side (api/checkpoint_map.py);
+// `_row_id` is an extra hint, not a requirement.
+function _restoreMessageText(m){
+  if(!m) return '';
+  const c = m.content;
+  if(typeof c === 'string') return c.trim();
+  if(Array.isArray(c)){
+    return c.map(p => (p && p.type==='text') ? (p.text||'') : '').join(' ').trim();
+  }
+  if(typeof m.text === 'string') return m.text.trim();
+  return '';
+}
+
+// Build the addressing payload for /api/session/checkpoint/restore. Returns
+// null when the row carries no addressable identity at all.
+function _restoreTargetFor(msg, idx){
+  if(!msg) return null;
+  const msgId = (msg.id !== null && msg.id !== undefined && msg.id !== '') ? msg.id : null;
+  const rowId = (typeof msg._row_id === 'number' && Number.isSafeInteger(msg._row_id) && msg._row_id > 0) ? msg._row_id : null;
+  const ts = (typeof msg.timestamp === 'number') ? msg.timestamp
+           : ((typeof msg._ts === 'number') ? msg._ts : null);
+  if(msgId === null && rowId === null && !Number.isFinite(idx)) return null;
+  return { msgId: msgId, rowId: rowId, idx: Number.isFinite(idx) ? idx : null, ts: ts };
+}
+
 async function restoreToMessage(btn) {
   // Re-entrancy guard: a stale SSE ack or a double-click must not run
   // restore twice. We poll S.restoreInFlight so the disabled-button
@@ -19301,13 +19329,12 @@ async function restoreToMessage(btn) {
   if(idx<0 || !S.messages || !S.messages[idx]) return;
   const msg = S.messages[idx];
   if(!msg || msg.role !== 'user') return;  // only user messages are checkpoints
-  // Durable id ONLY. A legacy per-session `m.id` may be an integer that
-  // collides with a state.db rowid of a *different* message after any
-  // compaction/merge — resolving it would silently archive the wrong suffix.
-  // Rows without a stamped `_row_id` simply cannot be checkpoint targets;
-  // the endpoint fail-closes on anything else.
-  const rowId = msg._row_id;
-  if(typeof rowId !== 'number' || !Number.isSafeInteger(rowId) || rowId <= 0){
+  // The server locates the row by its stable sidecar `id` first (legacy rows
+  // may have no durable stamp), falls back to the display ordinal with a
+  // timestamp staleness check, and uses `_row_id` only as a hint. Fail-closed:
+  // an unresolvable target returns 400 and the transcript is NOT touched.
+  const target = _restoreTargetFor(msg, idx);
+  if(!target){
     setStatus(t('restore_no_row_id'));
     return;
   }
@@ -19315,7 +19342,7 @@ async function restoreToMessage(btn) {
   // scope (drop everything from this row onward) obvious. The user can still
   // Cancel.
   if(!window.confirm(t('restore_title'))) return;
-  await _doRestoreCheckpoint(rowId, msg);
+  await _doRestoreCheckpoint(target, msg);
 }
 
 // === Restore Checkpoint global picker (FAB + modal) ===
@@ -19335,19 +19362,16 @@ function _openRestoreCheckpointPicker() {
     for(let i=0;i<S.messages.length;i++){
       const m=S.messages[i];
       if(m && m.role==='user'){
-        // Durable `_row_id` ONLY — same fail-closed rule as the inline path.
-        // Legacy `m.id` (even when numeric) is not a durable state.db address
-        // and could point at a different row after a compaction.
-        const rid = (typeof m._row_id === 'number' && Number.isSafeInteger(m._row_id) && m._row_id > 0)
-                    ? m._row_id : null;
-        if(rid===null){ continue; }
-        const txt = (typeof m.content==='string') ? m.content
-                  : (Array.isArray(m.content)
-                      ? m.content.map(p => (p && p.type==='text') ? (p.text||'') : '').join(' ')
-                      : (typeof m.text==='string' ? m.text : ''));
+        // Server-resolved addressing: `_restore_ready` (api/checkpoint_map.py)
+        // covers legacy rows without a stamp; `_row_id` keeps older payloads
+        // working. The endpoint re-resolves at click time and fail-closes.
+        const target = _restoreTargetFor(m, i);
+        if(!target){ continue; }
+        const txt = _restoreMessageText(m);
         userTurns.push({
           idx: i,
-          row_id: rid,
+          row_id: target.rowId,
+          message_id: target.msgId,
           preview: (txt||'').slice(0, 80).replace(/\s+/g,' ').trim() ||
                    '[message with no text content]',
         });
@@ -19375,8 +19399,8 @@ function _openRestoreCheckpointPicker() {
           ? `<div class="restore-checkpoint-modal__empty">${esc(t('restore_no_user_turns')||'No user turns with durable checkpoint ids in the loaded transcript. Scroll up to load older messages first.')}</div>`
           : `<ul class="restore-checkpoint-modal__list">
               ${userTurns.slice().reverse().map(t => `
-                <li class="restore-checkpoint-modal__item" data-row-id="${t.row_id}" data-idx="${t.idx}" role="button" tabindex="0">
-                  <span class="restore-checkpoint-modal__rowid">#${t.row_id}</span>
+                <li class="restore-checkpoint-modal__item" data-row-id="${t.row_id===null?'':t.row_id}" data-message-id="${(t.message_id===null||t.message_id===undefined)?'':esc(String(t.message_id))}" data-idx="${t.idx}" role="button" tabindex="0">
+                  <span class="restore-checkpoint-modal__rowid">${t.row_id!==null?('#'+t.row_id):('#'+t.idx)}</span>
                   <span class="restore-checkpoint-modal__preview">${esc(t.preview)}</span>
                 </li>
               `).join('')}
@@ -19394,13 +19418,21 @@ function _openRestoreCheckpointPicker() {
     .addEventListener('click', close);
   wrap.querySelectorAll('.restore-checkpoint-modal__item').forEach(el=>{
     el.addEventListener('click', async ()=>{
-      const rowId = parseInt(el.getAttribute('data-row-id')||'0', 10);
+      const rowIdAttr = el.getAttribute('data-row-id')||'';
+      const rowId = rowIdAttr ? parseInt(rowIdAttr, 10) : null;
+      const msgIdAttr = el.getAttribute('data-message-id')||'';
+      const msgId = msgIdAttr ? msgIdAttr : null;
       const idx = parseInt(el.getAttribute('data-idx')||'-1', 10);
-      const msg = S.messages[idx];
-      if(!rowId || !msg) return;
+      const msg = (Number.isFinite(idx) && S.messages) ? S.messages[idx] : null;
+      const target = _restoreTargetFor(msg, idx) || {
+        msgId: msgId, rowId: Number.isFinite(rowId) ? rowId : null,
+        idx: Number.isFinite(idx) ? idx : null,
+        ts: null,
+      };
+      if(target.rowId===null && target.msgId===null && target.idx===null) return;
       close();
       if(!window.confirm(t('restore_title'))) return;
-      await _doRestoreCheckpoint(rowId, msg);
+      await _doRestoreCheckpoint(target, msg);
     });
     el.addEventListener('keydown', async (ev)=>{
       if(ev.key==='Enter'||ev.key===' '){
@@ -19411,7 +19443,7 @@ function _openRestoreCheckpointPicker() {
   });
 }
 
-async function _doRestoreCheckpoint(rowId, msg) {
+async function _doRestoreCheckpoint(target, msg) {
   if(S.restoreInFlight) return;
   // Capture the session id BEFORE the await: if the user switches sessions
   // while the restore is in flight, applying the response to the (now
@@ -19428,7 +19460,14 @@ async function _doRestoreCheckpoint(rowId, msg) {
   }
   S.restoreInFlight = true;
   try {
-    const body = JSON.stringify({ session_id: restoreSid, row_id: rowId });
+    const payload = { session_id: restoreSid };
+    if(target){
+      if(typeof target.rowId === 'number') payload.row_id = target.rowId;
+      if(target.msgId !== null && target.msgId !== undefined && target.msgId !== '') payload.message_id = target.msgId;
+      if(Number.isFinite(target.idx)) payload.msg_idx = target.idx;
+      if(typeof target.ts === 'number') payload.message_ts = target.ts;
+    }
+    const body = JSON.stringify(payload);
     const resp = await fetch('/api/session/checkpoint/restore', {
       method:'POST', headers:{'Content-Type':'application/json'}, body
     });
@@ -19453,7 +19492,18 @@ async function _doRestoreCheckpoint(rowId, msg) {
       }
     }
     renderMessages();
-    setStatus(t('restore_done') + ' ' + (msg.text || ''));
+    // Prefill the composer with the restored prompt so it can be re-sent (or
+    // edited) immediately — parity with Desktop's restore→rerun flow.
+    try{
+      const ta = $('msg');
+      const text = _restoreMessageText(msg);
+      if(ta && text){
+        ta.value = text;
+        ta.dispatchEvent(new Event('input', {bubbles:true}));
+        ta.focus();
+      }
+    }catch(_){ /* composer prefill is best-effort */ }
+    setStatus(t('restore_done') + ' ' + ((msg && (msg.text || _restoreMessageText(msg))) || ''));
   } catch(e) {
     setStatus(t('restore_failed') + (e && e.message ? e.message : String(e)));
   } finally {
