@@ -1388,15 +1388,16 @@
   :root.dark[data-skin="gruvbox"] .new-chat-btn,
   :root.dark[data-skin="gruvbox"] .clarify-submit,
   :root.dark[data-skin="gruvbox"] .update-primary,
-  :root.dark[data-skin="gruvbox"] .kanban-modal .btn.primary{
+  :root.dark[data-skin="gruvbox"] .kanban-modal .btn.primary,
+  :root.dark[data-skin="gruvbox"] .kanban-comment-form .btn.primary,
+  :root.dark[data-skin="gruvbox"] .main-view-empty .btn.primary{
     background:var(--accent);border-color:var(--accent);color:#1D2021;
   }
   /* Hover must keep the bright fill too: base :hover rules drop to translucent
      accent-bg-strong, which would strand the dark ink on a dark background. */
-  :root.dark[data-skin="gruvbox"] .new-chat-btn:hover,
-  :root.dark[data-skin="gruvbox"] .clarify-submit:hover,
-  :root.dark[data-skin="gruvbox"] .update-primary:hover,
-  :root.dark[data-skin="gruvbox"] .kanban-modal .btn.primary:hover{
+  :root.dark[data-skin="gruvbox"] .kanban-modal .btn.primary:hover,
+  :root.dark[data-skin="gruvbox"] .kanban-comment-form .btn.primary:hover,
+  :root.dark[data-skin="gruvbox"] .main-view-empty .btn.primary:hover{
     background:var(--accent-hover);border-color:var(--accent-hover);color:#1D2021;
   }
   /* Scrollbar: aqua tint */
