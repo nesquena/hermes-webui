@@ -112,6 +112,57 @@ def test_response_heading_inside_fenced_code_block_is_ignored():
     assert projection.context == ""
 
 
+def test_long_fence_is_not_closed_by_short_fence():
+    """A four-backtick fence must not be closed by three backticks.
+
+    Skill dumps nest fences: a ```` ``` ```` line inside a ```` ````
+    ```` block is content, not a terminator. Tracking only the fence
+    character closed the block early, which let a ``## Response``
+    inside the still-open block be accepted as the boundary — the
+    projection then split the artifact in the wrong place.
+    """
+    text = (
+        "Intro.\n\n"
+        "````markdown\n"
+        "```\n"
+        "## Response\n"
+        "quoted inside the still-open four-backtick block\n"
+        "```\n"
+        "````\n"
+        "\n"
+        "## Response\n"
+        "\n"
+        "The real reply.\n"
+    )
+    projection = parse_cron_output(text)
+    assert projection.has_response_boundary is True
+    # The boundary is the heading AFTER the closed fence, not the one
+    # inside the four-backtick block.
+    assert projection.response == "The real reply."
+    assert "quoted inside" in projection.context
+
+
+def test_fence_with_info_string_does_not_close_block():
+    """A closing fence carries no info string. A tagged run of fence
+    characters inside an open block is a nested opening fence.
+    """
+    text = (
+        "Intro.\n\n"
+        "````markdown\n"
+        "```python\n"
+        "print(1)\n"
+        "```\n"
+        "````\n"
+        "\n"
+        "## Response\n"
+        "\n"
+        "Done.\n"
+    )
+    projection = parse_cron_output(text)
+    assert projection.has_response_boundary is True
+    assert projection.response == "Done."
+
+
 def test_response_heading_inside_html_pre_block_is_ignored():
     text = textwrap.dedent(
         """\
@@ -151,15 +202,26 @@ def test_response_heading_only_inside_code_falls_back_to_raw():
 
 
 def test_response_heading_deep_in_file_is_ignored():
-    """A ``## Response`` that appears far into the artifact (well past
-    the front-matter + system context region) is almost certainly
-    quoted text inside an agent transcript. The parser caps the probe
-    range so such false positives do not steal the projection.
+    """The probe cap must stop an unbounded scan of pathological input,
+    but it must NOT be so tight that a real artifact loses its boundary.
+
+    #7303's motivating artifact carries ~320 context lines before
+    ``## Response``; the previous 200-line cap made
+    ``has_response_boundary`` False for exactly that case, so the
+    response-first view silently fell back to raw-primary and the
+    feature did nothing. This test pins the real-artifact contract.
     """
-    # Build a file where the only ``## Response`` is past the probe
-    # cap. We use the constant to keep the test honest if the cap
-    # changes (the test still passes for any sufficiently large cap).
+    # A boundary after 321 context lines must be found.
+    padding = "\n".join("context line" for _ in range(321))
+    text = f"Front-matter\n\n{padding}\n\n## Response\n\nThe answer is 42.\n"
+    projection = parse_cron_output(text)
+    assert projection.has_response_boundary is True
+    assert projection.response == "The answer is 42."
+    assert "Front-matter" in projection.context
+
+    # The cap still exists: a boundary beyond it is not taken.
     from api.cron_output_parser import _MAX_PROBE_LINES
+
     padding = "\n".join("padding line " * 3 for _ in range(_MAX_PROBE_LINES + 50))
     text = f"front-matter\n\n{padding}\n\n## Response\n\nThis is too deep.\n"
     projection = parse_cron_output(text)
@@ -269,3 +331,32 @@ def test_handle_cron_run_detail_surfaces_parsed_projection():
         "the success body so the UI can render response-first without "
         "re-parsing the artifact in the browser."
     )
+
+
+def test_handle_cron_run_detail_omits_raw_from_projection():
+    """``content`` already carries the verbatim artifact, so the
+    projection must not ship ``raw`` as well — that doubles the payload
+    of a large run for no benefit.
+    """
+    routes_src = open("api/routes.py").read()
+    detail = routes_src[
+        routes_src.index("def _handle_cron_run_detail"): routes_src.index("def _cron_output_usage_metadata")
+    ]
+    assert 'parsed_projection.pop("raw", None)' in detail
+
+
+def test_handle_cron_output_listing_stays_bounded():
+    """The list endpoint must NOT emit a ``parsed`` projection.
+
+    ``_cron_output_content_window`` bounds each item to 8 KB; the
+    projection carries full ``raw`` + ``context`` + ``response``, so
+    adding it (up to 500 items) would return one large artifact
+    several times over and make the listing unbounded. The projection
+    belongs to the single-run detail route only.
+    """
+    routes_src = open("api/routes.py").read()
+    start = routes_src.index("def _handle_cron_output")
+    listing = routes_src[start : routes_src.index("def _handle_cron_status", start)]
+    # The bounded content window is still the payload.
+    assert '"content": _cron_output_content_window(txt),' in listing
+    assert '"parsed"' not in listing
