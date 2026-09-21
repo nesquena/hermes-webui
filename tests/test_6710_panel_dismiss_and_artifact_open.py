@@ -64,6 +64,10 @@ def _shipped_functions() -> dict:
         # behaviour under test for the reopen-during-read case, so the harness
         # must run the real function or it could pass against a stale copy.
         "_setWorkspacePanelDismissed": extract_function(boot_js, "_setWorkspacePanelDismissed"),
+        # closeWorkspacePanel() now delegates the close bookkeeping here, so the
+        # split policy (fence on every viewport, flag on compact only) is the
+        # real shipped code too, not a harness mirror.
+        "_markWorkspacePanelClosedByUser": extract_function(boot_js, "_markWorkspacePanelClosedByUser"),
     }
 
 
@@ -140,6 +144,7 @@ async function _workspacePathExists(rel){
 }
 
 eval(fn._setWorkspacePanelDismissed);
+eval(fn._markWorkspacePanelClosedByUser);
 eval(fn.syncWorkspacePanelState);
 eval(fn.ensureWorkspacePreviewVisible);
 eval(fn.openWorkspacePanel);
@@ -149,6 +154,7 @@ eval(fn.openArtifactPath);
 // ── scenario driver ──────────────────────────────────────────────────────────
 (async () => {
   const out = { steps: [] };
+  const dismissGenStart = _workspacePanelDismissGen;
   const snap = (label) => out.steps.push({
     label,
     mode: _workspacePanelMode,
@@ -158,9 +164,13 @@ eval(fn.openArtifactPath);
   });
   const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-  // 1. user dismisses the panel while a preview is open
+  // 1. user dismisses the panel while a preview is open. This is a SINGLE
+  //    deliberate close, so it isolates the "one bump per close" policy from
+  //    the second close the dismissDuringRead scenario performs later.
   previewVisible = true;
+  const genBeforeFirstClose = _workspacePanelDismissGen;
   closeWorkspacePanel();
+  out.genDeltaForSingleClose = _workspacePanelDismissGen - genBeforeFirstClose;
   snap('after closeWorkspacePanel');
 
   // 2. viewport churn (keyboard/rotation/URL-bar) must NOT reopen it
@@ -212,6 +222,10 @@ eval(fn.openArtifactPath);
   out.openFileCalls = openFileCalls;
   out.existsCalls = existsCalls;
   out.setModeCalls = setModeCalls;
+  // How far the action-generation fence moved across the whole scenario. A
+  // deliberate close must move it exactly once on any viewport; a clear must
+  // not move it at all.
+  out.dismissGenDelta = _workspacePanelDismissGen - dismissGenStart;
   console.log(JSON.stringify(out));
 })();
 """
@@ -481,6 +495,89 @@ def test_desktop_close_then_resize_keeps_its_original_behaviour():
     )
 
 
+def test_desktop_close_during_a_pending_read_is_fenced():
+    """The gate's 21 Sep finding: the action-generation fence must advance on
+
+    EVERY viewport, not just compact. Previously the fence only moved through
+    the compact-only dismissal write, so on desktop a close during an in-flight
+    artifact read left the generation unchanged and the read promoted the panel
+    back open over the newer close."""
+    result = _run_scenario(
+        exists_mode="ok",
+        slow_read=True,
+        dismiss_during_read=True,
+        compact_viewport=False,
+    )
+    during = _step(result, "dismissed during read")
+    settled = _step(result, "after open settled")
+
+    # preconditions: the read really was in flight and the close really happened
+    assert during["mode"] == "closed", f"precondition: the close must take effect, got {during}"
+    assert result["existsCalls"] == 1, (
+        "precondition: the existence check must have run"
+    )
+
+    assert settled["mode"] == "closed", (
+        "a desktop close during a pending artifact read was not fenced: the read "
+        "promoted the panel back to preview over the newer close"
+    )
+    assert result["openReturned"] is False, (
+        "openArtifactPath() reported a reveal for a read the user overtook by "
+        "closing the panel on desktop"
+    )
+
+
+def test_desktop_close_does_not_set_the_mobile_resize_guard():
+    """The split: desktop close advances the fence but must leave the
+
+    mobile-only dismissal flag alone, so desktop close→resize still restores."""
+    result = _run_scenario(
+        exists_mode="ok",
+        slow_read=True,
+        dismiss_during_read=True,
+        compact_viewport=False,
+    )
+    during = _step(result, "dismissed during read")
+    assert during["dismissed"] is False, (
+        "a desktop close set the mobile resize guard, which would suppress the "
+        "long-standing desktop close→resize restore"
+    )
+
+
+def test_compact_close_advances_the_fence_exactly_once():
+    """Guard against the obvious fix-side bug: bumping on both the setter call
+
+    and an explicit increment would double-count a close. Measured on a single
+    deliberate close, on both viewport classes."""
+    for compact in (True, False):
+        result = _run_scenario(
+            exists_mode="ok",
+            slow_read=True,
+            dismiss_during_read=True,
+            compact_viewport=compact,
+        )
+        assert result["genDeltaForSingleClose"] == 1, (
+            f"one deliberate close on compact_viewport={compact} advanced the "
+            f"action-generation fence {result['genDeltaForSingleClose']} times; "
+            f"it must advance exactly once"
+        )
+
+
+def test_reopen_and_reveal_clear_without_advancing_the_fence():
+    """The other half of the policy: clears must not advance the fence, or an
+
+    explicit reopen during a pending read would invalidate the reveal it agrees
+    with (the earlier Greptile finding)."""
+    result = _run_scenario(
+        exists_mode="ok", slow_read=True, reopen_during_read=True
+    )
+    settled = _step(result, "after open settled")
+    assert settled["dismissed"] is False, settled
+    assert result["openReturned"] is True, (
+        "a clear advanced the fence and made the in-flight reveal look stale"
+    )
+
+
 def test_mobile_close_then_resize_stays_closed():
     """The counterpart: on a compact viewport the dismissal still holds."""
     result = _run_scenario(exists_mode="ok", compact_viewport=True)
@@ -493,12 +590,20 @@ def test_mobile_close_then_resize_stays_closed():
 
 
 def test_the_mobile_scope_covers_both_the_write_and_the_guard():
-    """Both halves of the scope must be conditional, in the shipped source."""
+    """Both halves of the scope must be conditional, in the shipped source.
+
+    The write moved into `_markWorkspacePanelClosedByUser()` when the fence was
+    split from the resize guard, so assert the branch where it now lives."""
     boot = _read(BOOT_JS_PATH)
     close_body = extract_function(boot, "closeWorkspacePanel")
+    mark_body = extract_function(boot, "_markWorkspacePanelClosedByUser")
     sync_body = extract_function(boot, "syncWorkspacePanelState")
-    assert "_isCompactWorkspaceViewport()" in close_body, (
-        "closeWorkspacePanel marks the dismissal unconditionally, which changes "
+    assert "_markWorkspacePanelClosedByUser()" in close_body, (
+        "closeWorkspacePanel no longer routes its close bookkeeping through the "
+        "marker, so this test can no longer reach the viewport branch"
+    )
+    assert "_isCompactWorkspaceViewport()" in mark_body, (
+        "the close bookkeeping marks the dismissal unconditionally, which changes "
         "desktop behaviour (the gate's scope blocker)"
     )
     assert "_isCompactWorkspaceViewport()" in sync_body, (
@@ -584,6 +689,7 @@ def test_reopen_during_a_pending_read_still_reveals_the_artifact():
 
 def test_the_generation_only_advances_on_a_dismissal():
     """Both halves, in the shipped source: a dismiss bumps the counter, a clear
+
     must not — otherwise the counter conflates 'user closed' with 'user opened'
     and the in-flight reveal cannot tell them apart."""
     boot = _read(BOOT_JS_PATH)
@@ -596,4 +702,32 @@ def test_the_generation_only_advances_on_a_dismissal():
     assert "if(dismissed)_workspacePanelDismissGen++;" in compact, (
         "the counter still advances on every flag write, so a reopen during a "
         "pending read is indistinguishable from a dismissal"
+    )
+
+
+def test_the_close_bookkeeping_separates_the_fence_from_the_resize_guard():
+    """The gate's required shape, asserted in the shipped source: every
+
+    deliberate close advances the action-generation fence on ALL viewports,
+    while only a compact close sets the mobile resize guard."""
+    boot = _read(BOOT_JS_PATH)
+    mark = "".join(extract_function(boot, "_markWorkspacePanelClosedByUser").split())
+    close = "".join(extract_function(boot, "closeWorkspacePanel").split())
+
+    assert "_markWorkspacePanelClosedByUser()" in close, (
+        "closeWorkspacePanel no longer routes its close bookkeeping through the "
+        "split helper"
+    )
+    assert "_isCompactWorkspaceViewport()" in mark, (
+        "the marker no longer branches on the viewport, so the mobile-only "
+        "resize guard would apply on desktop too"
+    )
+    # The fence must move exactly once on either viewport: the setter's own bump
+    # for compact, an explicit increment for desktop — never both.
+    assert "_setWorkspacePanelDismissed(compact)" in mark, (
+        "the marker no longer records a compact dismissal through the setter"
+    )
+    assert "if(!compact)_workspacePanelDismissGen++;" in mark, (
+        "a non-compact close no longer advances the action-generation fence — "
+        "that is the desktop race the gate found"
     )
