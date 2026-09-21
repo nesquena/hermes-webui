@@ -1347,13 +1347,13 @@
     --bg:#FBF1C7;--sidebar:#EBDBB2;--surface:#F2E5BC;--topbar-bg:rgba(251,241,199,.97);--main-bg:rgba(251,241,199,.55);
     --border:#D5C4A1;--border2:#BDAE93;
     --text:#3C3836;--muted:#5F564B;--strong:#282828;--em:#665C54;
-    --accent:#427B58;--accent-hover:#689D6A;--accent-text:#2C5A43;
+    --accent:#356747;--accent-hover:#2C5A43;--accent-text:#2F5D43;
     --accent-bg:rgba(66,123,88,.08);--accent-bg-strong:rgba(66,123,88,.15);--accent-rgb:66,123,88;
-    --blue:#076678;--gold:#B57614;
+    --blue:#076678;--gold:#804000;
     --focus-ring:rgba(66,123,88,.30);--focus-glow:rgba(66,123,88,.10);
     --input-bg:rgba(60,56,54,.04);--hover-bg:rgba(60,56,54,.06);
-    --code-bg:#EBDBB2;--code-inline-bg:rgba(60,56,54,.08);--code-text:#B57614;--pre-text:#3C3836;
-    --error:#9D0006;--success:#79740E;--warning:#B57614;--info:#076678;
+    --code-bg:#EBDBB2;--code-inline-bg:rgba(60,56,54,.08);--code-text:#804000;--pre-text:#3C3836;
+    --error:#9D0006;--success:#5D5400;--warning:#804000;--info:#076678;
     --surface-subtle:rgba(60,56,54,.03);--surface-subtle-hover:rgba(60,56,54,.05);
     --border-subtle:rgba(60,56,54,.08);--border-muted:rgba(60,56,54,.14);
     --user-bubble-bg:#EBDBB2;--user-bubble-border:#D5C4A1;--user-bubble-text:#3C3836;--user-bubble-placeholder:#5F564B;
@@ -1363,25 +1363,29 @@
     color-scheme:dark;
     --bg:#282828;--sidebar:#3C3836;--surface:#32302F;--topbar-bg:rgba(40,40,40,.98);--main-bg:rgba(40,40,40,.55);
     --border:#45403D;--border2:#504945;
-    --text:#EBDBB2;--muted:#A89984;--strong:#FBF1C7;--em:#D5C4A1;
-    --accent:#8EC07C;--accent-hover:#689D6A;--accent-text:#8EC07C;
+    --text:#EBDBB2;--muted:#BDAE93;--strong:#FBF1C7;--em:#D5C4A1;
+    --accent:#8EC07C;--accent-hover:#689D6A;--accent-text:#9ECE8A;
     --accent-bg:rgba(142,192,124,.08);--accent-bg-strong:rgba(142,192,124,.15);--accent-rgb:142,192,124;
-    --blue:#83A598;--gold:#FABD2F;
+    --blue:#9FC2B5;--gold:#FABD2F;
     --focus-ring:rgba(142,192,124,.30);--focus-glow:rgba(142,192,124,.10);
     --input-bg:rgba(255,255,255,.03);--hover-bg:rgba(235,219,178,.055);
     --code-bg:#1D2021;--code-inline-bg:rgba(0,0,0,.35);--code-text:#D79921;--pre-text:#EBDBB2;
-    --error:#FB4934;--success:#B8BB26;--warning:#FABD2F;--info:#83A598;
+    --error:#FF907E;--success:#B8BB26;--warning:#FABD2F;--info:#9FC2B5;
     --surface-subtle:rgba(235,219,178,.03);--surface-subtle-hover:rgba(235,219,178,.05);
     --border-subtle:rgba(235,219,178,.07);--border-muted:rgba(235,219,178,.12);
     --user-bubble-bg:#3C3836;--user-bubble-border:#504945;--user-bubble-text:#FBF1C7;--user-bubble-placeholder:#A89984;
     --user-selection-bg:rgba(142,192,124,.24);--user-selection-text:#FBF1C7;
   }
   /* ── Gruvbox skin: component-level overrides ── */
-  /* New chat button: solid aqua in dark; dark ink keeps contrast on the bright step */
-  :root.dark[data-skin="gruvbox"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#1D2021;font-weight:600;}
-  :root.dark[data-skin="gruvbox"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#1D2021;}
-  /* Send button: dark ink on the bright aqua (white fails contrast there) */
-  :root.dark[data-skin="gruvbox"] button.send-btn:not(:disabled){color:#1D2021;}
+  /* Solid-action foregrounds: white fails AA on the bright aqua fills, dark ink passes */
+  :root.dark[data-skin="gruvbox"] .new-chat-btn,
+  :root.dark[data-skin="gruvbox"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="gruvbox"] .toolsets-apply-btn,
+  :root.dark[data-skin="gruvbox"] .btn.primary,
+  :root.dark[data-skin="gruvbox"] .update-primary,
+  :root.dark[data-skin="gruvbox"] .clarify-submit,
+  :root.dark[data-skin="gruvbox"] .cancel-btn,
+  :root.dark[data-skin="gruvbox"] .session-swipe-badge{color:#1D2021;}
   /* Scrollbar: aqua tint */
   :root[data-skin="gruvbox"]::-webkit-scrollbar-thumb{background:rgba(66,123,88,.30);border-radius:3px;}
   :root[data-skin="gruvbox"] ::-webkit-scrollbar-thumb{background:rgba(66,123,88,.30);border-radius:3px;}
@@ -1396,19 +1400,23 @@
   :root.dark[data-skin="gruvbox"] .tool-card{background:rgba(142,192,124,.03);border-color:rgba(142,192,124,.08);}
   :root.dark[data-skin="gruvbox"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
   :root.dark[data-skin="gruvbox"] .tool-card-running-dot{background:var(--accent);}
-  /* Tree viewer + diff: gruvbox syntax family */
-  :root[data-skin="gruvbox"] .tree-key{color:#427B58;}
-  :root[data-skin="gruvbox"] .tree-str{color:#79740E;}
+  /* Bare --accent as text fails on cream (streaming session title): route to accent-text */
+  :root[data-skin="gruvbox"] .session-item.streaming .session-title{color:var(--accent-text);}
+  /* Light swipe fills are dark olive/umber/sangria — white ink passes, dark ink fails */
+  :root[data-skin="gruvbox"] .session-swipe-badge{color:#FBF1C7;}
+  /* Tree viewer + diff: semantic tokens (kept on gruvbox family by the palette) */
+  :root[data-skin="gruvbox"] .tree-key,
+  :root[data-skin="gruvbox"] .diff-block .diff-plus{color:var(--accent-text);}
+  :root[data-skin="gruvbox"] .tree-str{color:var(--success);}
   :root[data-skin="gruvbox"] .tree-num{color:#8F3F71;}
   :root[data-skin="gruvbox"] .tree-bool{color:#AF3A03;}
-  :root.dark[data-skin="gruvbox"] .tree-key{color:#8EC07C;}
-  :root.dark[data-skin="gruvbox"] .tree-str{color:#B8BB26;}
+  :root.dark[data-skin="gruvbox"] .tree-key,
+  :root.dark[data-skin="gruvbox"] .diff-block .diff-plus{color:var(--accent-text);}
+  :root.dark[data-skin="gruvbox"] .tree-str{color:var(--success);}
   :root.dark[data-skin="gruvbox"] .tree-num{color:#D3869B;}
   :root.dark[data-skin="gruvbox"] .tree-bool{color:#FE8019;}
-  :root[data-skin="gruvbox"] .diff-block .diff-plus{color:#79740E;}
-  :root[data-skin="gruvbox"] .diff-block .diff-minus{color:#9D0006;}
-  :root.dark[data-skin="gruvbox"] .diff-block .diff-plus{color:#B8BB26;}
-  :root.dark[data-skin="gruvbox"] .diff-block .diff-minus{color:#FB4934;}
+  :root[data-skin="gruvbox"] .diff-block .diff-minus,
+  :root.dark[data-skin="gruvbox"] .diff-block .diff-minus{color:var(--error);}
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
