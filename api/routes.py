@@ -22964,9 +22964,15 @@ def _handle_background(handler, body):
             except Exception:
                 _answer = "(background task failed)"
             # Do not acknowledge success until the hidden transcript and every
-            # recovery artifact are durably fenced and removed.
+            # recovery artifact are durably fenced and removed.  A ``False``
+            # result (sidecar revision changed under the lock) leaves the
+            # transcript on disk exactly like a raised error does, so it must
+            # take the same failure path instead of publishing the answer.
             try:
-                _delete_hidden_background_session_sidecar(bg_sid)
+                if not _delete_hidden_background_session_sidecar(bg_sid):
+                    raise RuntimeError(
+                        f"Hidden background session {bg_sid!r} changed during cleanup"
+                    )
             except Exception:
                 logger.warning(
                     "Failed to durably delete hidden background session %s",
