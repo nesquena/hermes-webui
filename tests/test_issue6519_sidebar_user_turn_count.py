@@ -40,12 +40,21 @@ def test_detailed_mode_skips_user_message_count_when_absent():
     """#6519 regression guard: legacy rows that pre-date the field must
     not render a stale 0 — the new label only appears when the
     payload actually carries a number, so it never collides with
-    sessions that have not yet been backfilled."""
+    sessions that have not yet been backfilled.
+
+    #7681: the guard now reads through a resolved ``userTurns`` local (the
+    lineage total supersedes the row's own count), so the predicate is
+    ``typeof userTurns==='number'`` rather than the old direct field access.
+    """
     src = _read_sessions_js()
-    assert "typeof s.user_message_count==='number'" in src, (
-        "the user-turn label must only render when user_message_count "
-        "is a finite non-negative number — absent payload must not "
-        "render a 0 user-turns row"
+    assert "typeof userTurns==='number'" in src, (
+        "the user-turn label must only render when the resolved count "
+        "(user_message_count or the collapsed lineage total) is a finite "
+        "non-negative number — absent payload must not render a 0 "
+        "user-turns row"
+    )
+    assert "Number.isFinite(userTurns)&&userTurns>=0" in src, (
+        "the render guard must still reject NaN/negative counts"
     )
 
 
