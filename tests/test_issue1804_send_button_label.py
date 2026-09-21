@@ -152,7 +152,7 @@ def test_label_key_present_in_every_locale_block(key):
     the new key so the invariant ``test_*_locale_covers_english_keys``
     holds.
     """
-    m = re.search(
+    re.search(
         r"const\s+locale\s*=\s*\{|\n  en:\s*\{",
         I18N_JS,
     )
