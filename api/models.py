@@ -1968,6 +1968,12 @@ class Session:
         ``_row_may_need_sidecar_metadata_refresh``) consumes this field as
         if the sidecar were the source of truth. Mixing the two sources
         would silently flip the field's semantics.
+
+        #7681: synthetic compression / task-summary cards are stored with
+        role='user' for provider alternation but are NOT user turns —
+        ``api.compression_anchor.is_context_compression_marker()`` classifies
+        them explicitly. Counting them here would over-report the turn count
+        for every session that has been compressed at least once.
         """
         if not isinstance(messages, list):
             return 0
@@ -1978,7 +1984,7 @@ class Session:
                 # on every iteration. dict.get('role') with default '' is
                 # materially faster than a function call for the hot loop.
                 role = m.get('role')
-                if isinstance(role, str) and role == 'user':
+                if isinstance(role, str) and role == 'user' and not is_context_compression_marker(m):
                     n += 1
         return n
 

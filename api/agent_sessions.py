@@ -8,6 +8,8 @@ from contextlib import closing
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
 
+from api.compression_anchor import is_context_compression_marker
+
 logger = logging.getLogger(__name__)
 
 # state.db paths that already produced the "no 'source' column" warning below.
@@ -265,10 +267,15 @@ def _count_user_turns(row: dict) -> int:
     if user_turns is None:
         messages = row.get("messages") or []
         if isinstance(messages, list):
+            # #7681: skip synthetic compression / task-summary cards. The agent
+            # stores them with role='user' for alternation, but
+            # api/compression_anchor.is_context_compression_marker() classifies
+            # them as NOT user turns.
             return sum(
                 1
                 for msg in messages
                 if _safe_lower(msg.get("role") if isinstance(msg, dict) else msg) == "user"
+                and not is_context_compression_marker(msg)
             )
         return 0
     return _as_positive_int(user_turns)
@@ -831,18 +838,49 @@ def read_importable_agent_session_rows(
 
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
+            # #7681: the no-messages-table fallback keeps its conservative
+            # total in this separate internal field; the messages-join paths
+            # know the real count, so nothing to estimate there.
+            user_message_count_estimate_expr = "NULL"
             if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+                # #7681: exclude synthetic compression / task-summary cards that
+                # the agent persists with role='user' for alternation.
+                # api/compression_anchor.is_context_compression_marker()
+                # classifies them as NOT user turns, so counting them here
+                # would make the sidebar over-report the real turn count.
+                # The persistent ``_compressed_summary`` flag column (default 0
+                # on hermes-agent's messages table) is the durable marker —
+                # the stored text is not reliably prefixed — so guard on it and
+                # degrade to the plain role count on legacy schemas that lack
+                # the column.
+                marker_guard = (
+                    " AND COALESCE(m._compressed_summary, 0) = 0"
+                    if '_compressed_summary' in message_cols
+                    else ""
+                )
+                user_message_count_expr = (
+                    "COUNT(CASE WHEN LOWER(m.role) = 'user'"
+                    f"{marker_guard} THEN 1 END)"
+                )
             else:
-                user_message_count_expr = f"COUNT(m.{count_col})"
+                # No ``role`` column: roles are unavailable, so we cannot
+                # distinguish user turns from assistant/tool rows. Emit NULL
+                # rather than the total message count — a count derived from
+                # roles that aren't there roughly doubles every imported
+                # session's turn count.
+                user_message_count_expr = "NULL"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
         else:
             # No usable messages table: use the denormalized per-session counts
             # and ``started_at`` so the rows still surface in the sidebar.
+            # ``s.message_count`` is a denormalized total with no role
+            # information, so the user-turn count is genuinely unknown here —
+            # emit NULL and keep a conservative estimate in a separate field.
             actual_count_expr = "s.message_count"
-            user_message_count_expr = "s.message_count"
+            user_message_count_expr = "NULL"
+            user_message_count_estimate_expr = "s.message_count"
             last_activity_expr = "NULL"
             join_clause = ""
             group_by_clause = ""
@@ -1002,6 +1040,7 @@ def read_importable_agent_session_rows(
                    {archived_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
+                   {user_message_count_estimate_expr} AS user_message_count_estimate,
                    {last_activity_expr} AS last_activity
         """
 
