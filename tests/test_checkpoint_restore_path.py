@@ -14,7 +14,6 @@ parse, error→status mapping) without opening a socket.
 import json
 import sqlite3
 import sys
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,7 +34,8 @@ class _FakeHandler:
 
     def __init__(self, body: dict):
         raw = json.dumps(body).encode("utf-8")
-        self.rfile = type("RFile", (), {"read": staticmethod(lambda n=len(raw): raw)})()
+        raw_len = len(raw)
+        self.rfile = type("RFile", (), {"read": staticmethod(lambda n=raw_len: raw)})()
         self.close_connection = False
         self._status = None
         self._json = None
@@ -124,7 +124,7 @@ def _read_state_rows(state_db, session_id):
 
 def _restore(handler_cls, sid, body):
     """Route-level invocation: mirrors the POST /api/session/checkpoint/restore block."""
-    handler = handler_cls(body)
+    handler_cls(body)  # construct the handler exactly like the route block does
     try:
         result = session_ops.restore_checkpoint_at_row_id(
             body.get("session_id", sid), body.get("row_id"))
@@ -201,7 +201,7 @@ def test_state_db_failure_aborts_before_sidecar_write(env, monkeypatch):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(session_ops, "_archive_state_db_suffix", boom)
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.OperationalError):
         session_ops.restore_checkpoint_at_row_id(env.sid, 13)
     # in-memory transcript untouched
     assert len(env.session.messages) == 4

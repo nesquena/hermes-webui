@@ -11,7 +11,6 @@ import logging
 import os
 import uuid
 from bisect import bisect_left
-from contextlib import closing
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock

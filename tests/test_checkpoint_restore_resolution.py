@@ -287,7 +287,7 @@ def test_display_addressed_restore_archives_before_sidecar(env, monkeypatch):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(session_ops, "_archive_state_db_suffix", boom)
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.OperationalError):
         session_ops.restore_checkpoint_to_display_message(env.sid, message_id="u2")
     assert len(env.session.messages) == 4
     on_disk = json.loads(Path(env.session.path).read_text())
