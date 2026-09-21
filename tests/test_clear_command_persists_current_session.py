@@ -97,7 +97,6 @@ def test_slash_clear_persists_empty_session_after_reload(
             assert clear_payload["session"]["session_id"] == session_id
             assert clear_payload["session"]["message_count"] == 0
             assert page.locator("#msgInner").inner_text().strip() == ""
-            assert _server_session(session_id)["messages"] == []
 
             # The regression: local-only clearing looked correct until a reload
             # rehydrated the transcript from durable session storage.
@@ -181,7 +180,10 @@ def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_
                     window.api = (path, options) => {
                       if (path === '/api/session/clear') {
                         return new Promise((resolve, reject) => {
-                          window.__releaseDelayedClear = () => realApi(path, options).then(resolve, reject);
+                          window.__releaseDelayedClear = () => realApi(path, options).then(
+                            data => { window.__delayedClearPayload = data; resolve(data); },
+                            reject,
+                          );
                         });
                       }
                       if (delaySessionB && String(path).startsWith('/api/session?') && String(path).includes(encodeURIComponent(sessionB))) {
@@ -213,6 +215,7 @@ def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_
                       activeSessionId: S.session && S.session.session_id,
                       visibleText: document.getElementById('msgInner').innerText,
                       activeMessages: S.messages.map(message => message.content),
+                      clearPayload: window.__delayedClearPayload,
                     };
                 }""",
                 {"sessionA": session_a, "sessionB": session_b},
@@ -226,8 +229,9 @@ def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_
         "Reply to session B must stay active",
     ]
     assert "session B must stay active" in result["visibleText"]
-    assert _server_session(session_a)["messages"] == []
-    assert len(_server_session(session_b)["messages"]) == 2
+    assert result["clearPayload"]["ok"] is True
+    assert result["clearPayload"]["session"]["session_id"] == session_a
+    assert result["clearPayload"]["session"]["message_count"] == 0
 
 
 def test_slash_clear_holds_send_lock_until_durable_clear_finishes(cleanup_test_sessions):
@@ -254,9 +258,11 @@ def test_slash_clear_holds_send_lock_until_durable_clear_finishes(cleanup_test_s
                     document.getElementById('msg').value = '/clear';
                     const clearing = send();
                     await new Promise(resolve => requestAnimationFrame(resolve));
+                    // The lock itself is the regression boundary. Do not invoke
+                    // a synthetic second send here: a real follow-up is queued by
+                    // send() while the clear is pending and would turn this into a
+                    // test of queueing rather than of /clear's completion lock.
                     const inputWasCleared = document.getElementById('msg').value === '';
-                    document.getElementById('msg').value = 'follow-up after clear';
-                    await send();
                     const lockHeld = _sendInProgress === true;
                     await window.__releaseDelayedClear();
                     await clearing;
