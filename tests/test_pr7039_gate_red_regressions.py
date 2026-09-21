@@ -396,6 +396,86 @@ def test_background_hidden_delete_fences_hidden_log(tmp_path, monkeypatch):
     assert models._webui_deleted_session_is_tombstoned(sid)
 
 
+def _run_background_route(monkeypatch, tmp_path, cleanup):
+    """Drive ``_handle_background`` with a stubbed agent run and a patched
+    hidden-cleanup helper; return the answer published to the parent task."""
+    from api import background, models, routes
+
+    _patch_store(monkeypatch, tmp_path)
+    parent = models.Session(
+        session_id="bg-parent", messages=[{"role": "user", "content": "hi"}]
+    )
+    parent.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS[parent.session_id] = parent
+    background._BACKGROUND_TASKS.clear()
+
+    worker_done = threading.Event()
+    real_thread = threading.Thread
+
+    class _Thread(real_thread):
+        def run(self):
+            try:
+                super().run()
+            finally:
+                worker_done.set()
+
+    monkeypatch.setattr(routes.threading, "Thread", _Thread)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_k: None)
+
+    def _fake_run(bg_sid, *_args, **_kwargs):
+        bg = models.Session.load(bg_sid)
+        assert bg is not None
+        bg.messages.append({"role": "assistant", "content": "real answer"})
+        bg.save(skip_index=True)
+
+    monkeypatch.setattr(routes, "_run_agent_streaming", _fake_run)
+    monkeypatch.setattr(
+        routes, "_delete_hidden_background_session_sidecar", cleanup
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, extra_headers=None: payload,
+    )
+    response = routes._handle_background(
+        object(), {"session_id": parent.session_id, "prompt": "do it"}
+    )
+    assert isinstance(response, dict)
+    assert worker_done.wait(10), "background worker did not finish"
+    with routes.STREAMS_LOCK:
+        routes.STREAMS.pop(response["stream_id"], None)
+    results = background.get_results(parent.session_id)
+    assert len(results) == 1
+    assert results[0]["task_id"] == response["task_id"]
+    return results[0]["answer"]
+
+
+def test_background_cleanup_false_result_is_reported_as_failure(
+    tmp_path, monkeypatch
+):
+    """Greptile P1: a ``False`` return from the hidden cleanup (sidecar
+    revision changed under the lock) must follow the same failure path as an
+    exception — never publish the assistant answer as a success."""
+    answer = _run_background_route(monkeypatch, tmp_path, lambda _sid: False)
+    assert answer == "(background task cleanup failed)"
+
+
+def test_background_cleanup_exception_is_reported_as_failure(
+    tmp_path, monkeypatch
+):
+    def _boom(_sid):
+        raise RuntimeError("unlink failed")
+
+    answer = _run_background_route(monkeypatch, tmp_path, _boom)
+    assert answer == "(background task cleanup failed)"
+
+
+def test_background_cleanup_true_result_publishes_answer(tmp_path, monkeypatch):
+    answer = _run_background_route(monkeypatch, tmp_path, lambda _sid: True)
+    assert answer == "real answer"
+
+
 def test_recovery_reader_honors_hidden_fence_fallback(tmp_path, monkeypatch):
     """session_recovery's direct-file fallback ORs the hidden log (used when
     the caller's session_dir differs from models.SESSION_DIR)."""
