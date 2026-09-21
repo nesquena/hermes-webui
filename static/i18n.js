@@ -5,6 +5,11 @@
 
 const LOCALES = {
   en: {
+    preview_fullscreen_enter: 'Fullscreen',
+    preview_fullscreen_exit: 'Exit fullscreen',
+    preview_fullscreen_region: 'Fullscreen preview',
+    preview_zoom_out: 'Zoom out',
+    preview_zoom_in: 'Zoom in',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -1828,6 +1833,11 @@ const LOCALES = {
   },
 
   it: {
+    preview_fullscreen_enter: 'Schermo intero',
+    preview_fullscreen_exit: 'Esci da schermo intero',
+    preview_fullscreen_region: 'Anteprima a schermo intero',
+    preview_zoom_out: 'Riduci zoom',
+    preview_zoom_in: 'Aumenta zoom',
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3633,6 +3643,11 @@ const LOCALES = {
   },
 
   ja: {
+    preview_fullscreen_enter: '全画面',
+    preview_fullscreen_exit: '全画面を終了',
+    preview_fullscreen_region: '全画面プレビュー',
+    preview_zoom_out: 'ズームアウト',
+    preview_zoom_in: 'ズームイン',
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -5443,6 +5458,11 @@ const LOCALES = {
   },
 
   ru: {
+    preview_fullscreen_enter: 'Полноэкранный режим',
+    preview_fullscreen_exit: 'Выйти из полноэкранного режима',
+    preview_fullscreen_region: 'Полноэкранный предпросмотр',
+    preview_zoom_out: 'Уменьшить масштаб',
+    preview_zoom_in: 'Увеличить масштаб',
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -7227,6 +7247,11 @@ const LOCALES = {
   },
 
   es: {
+    preview_fullscreen_enter: 'Pantalla completa',
+    preview_fullscreen_exit: 'Salir de pantalla completa',
+    preview_fullscreen_region: 'Vista previa a pantalla completa',
+    preview_zoom_out: 'Reducir zoom',
+    preview_zoom_in: 'Aumentar zoom',
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -8978,6 +9003,11 @@ const LOCALES = {
   },
 
   de: {
+    preview_fullscreen_enter: 'Vollbild',
+    preview_fullscreen_exit: 'Vollbild verlassen',
+    preview_fullscreen_region: 'Vollbildvorschau',
+    preview_zoom_out: 'Verkleinern',
+    preview_zoom_in: 'Vergrößern',
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10723,6 +10753,11 @@ const LOCALES = {
   },
 
   zh: {
+    preview_fullscreen_enter: '全屏',
+    preview_fullscreen_exit: '退出全屏',
+    preview_fullscreen_region: '全屏预览',
+    preview_zoom_out: '缩小',
+    preview_zoom_in: '放大',
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12462,6 +12497,11 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    preview_fullscreen_enter: '全螢幕',
+    preview_fullscreen_exit: '退出全螢幕',
+    preview_fullscreen_region: '全螢幕預覽',
+    preview_zoom_out: '縮小',
+    preview_zoom_in: '放大',
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -14270,6 +14310,11 @@ const LOCALES = {
   },
 
   pt: {
+    preview_fullscreen_enter: 'Tela cheia',
+    preview_fullscreen_exit: 'Sair da tela cheia',
+    preview_fullscreen_region: 'Pré-visualização em tela cheia',
+    preview_zoom_out: 'Reduzir zoom',
+    preview_zoom_in: 'Aumentar zoom',
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15894,6 +15939,11 @@ const LOCALES = {
     wiki_not_configured: 'Wiki not configured',
   },
   ko: {
+    preview_fullscreen_enter: '전체 화면',
+    preview_fullscreen_exit: '전체 화면 종료',
+    preview_fullscreen_region: '전체 화면 미리보기',
+    preview_zoom_out: '축소',
+    preview_zoom_in: '확대',
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17689,6 +17739,11 @@ const LOCALES = {
   },
 
   fr: {
+    preview_fullscreen_enter: 'Plein écran',
+    preview_fullscreen_exit: 'Quitter le plein écran',
+    preview_fullscreen_region: 'Aperçu en plein écran',
+    preview_zoom_out: 'Zoom arrière',
+    preview_zoom_in: 'Zoom avant',
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -19467,6 +19522,11 @@ const LOCALES = {
   },
 
   cs: {
+    preview_fullscreen_enter: 'Celá obrazovka',
+    preview_fullscreen_exit: 'Ukončit celou obrazovku',
+    preview_fullscreen_region: 'Náhled na celou obrazovku',
+    preview_zoom_out: 'Oddálit',
+    preview_zoom_in: 'Přiblížit',
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
     sessions_source_cli: 'Relace CLI ({0})',
@@ -21231,6 +21291,11 @@ const LOCALES = {
     tool_summary_join: _i18nToolSummaryJoinCs,
   },
   tr: {
+    preview_fullscreen_enter: 'Tam ekran',
+    preview_fullscreen_exit: 'Tam ekrandan çık',
+    preview_fullscreen_region: 'Tam ekran önizleme',
+    preview_zoom_out: 'Uzaklaştır',
+    preview_zoom_in: 'Yakınlaştır',
 
 
 
@@ -23031,6 +23096,11 @@ const LOCALES = {
   
   },
   pl: {
+    preview_fullscreen_enter: 'Pełny ekran',
+    preview_fullscreen_exit: 'Wyjdź z pełnego ekranu',
+    preview_fullscreen_region: 'Podgląd na pełnym ekranie',
+    preview_zoom_out: 'Pomniejsz',
+    preview_zoom_in: 'Powiększ',
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -24831,6 +24901,11 @@ const LOCALES = {
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
   },
   vi: {
+    preview_fullscreen_enter: 'Toàn màn hình',
+    preview_fullscreen_exit: 'Thoát toàn màn hình',
+    preview_fullscreen_region: 'Xem trước toàn màn hình',
+    preview_zoom_out: 'Thu nhỏ',
+    preview_zoom_in: 'Phóng to',
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',
@@ -27073,6 +27148,14 @@ function applyLocaleToDOM() {
     if (val && val !== key) el.setAttribute('aria-label', val);
   });
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
+  // The fullscreen toggle's label is stateful ("Fullscreen" vs "Exit
+  // fullscreen"), so it owns its own localized strings instead of carrying a
+  // static data-i18n key that would latch the wrong one after a locale change.
+  if (typeof _setPreviewFullscreenButtonState === 'function') {
+    _setPreviewFullscreenButtonState(
+      !!document.querySelector('.rightpanel.preview-fullscreen')
+    );
+  }
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
 }
 

@@ -959,6 +959,22 @@ let _previewPreviewKind = '';  // preview family returned by the backend
 
 // ── Preview fullscreen toggle ──────────────────────────────────────────────
 let _previewFsResizeHandler = null;
+// Native Fullscreen API ownership. The pseudo-overlay alone could not honour
+// the documented "Escape to exit": the only Escape handler is a document-level
+// keydown listener, and key events inside #previewHtmlIframe / #previewPdfFrame
+// never bubble across the browsing-context boundary. Handing the mode to the
+// browser's own fullscreen (requestFullscreen + fullscreenchange +
+// exitFullscreen) makes Escape work from iframe focus. The overlay class is
+// still applied either way, so browsers without the API (e.g. iOS Safari for
+// non-video elements) keep the previous behaviour.
+let _previewFsNativeActive = false;
+// Focus is restored only once every control the exit touches has reached its
+// final display state — clearPreview() hides the zoom/fullscreen controls right
+// after exiting, so focusing immediately stranded focus on a hidden button.
+let _previewFsPendingFocus = null;
+// Prior inert/aria-hidden values, so exiting restores what was there instead of
+// unconditionally deleting attributes another subsystem may have owned.
+let _previewFsSavedChromeState = [];
 function _updatePreviewFsHeight(){
   const panel = document.querySelector('.rightpanel.preview-fullscreen');
   if(panel){
@@ -971,8 +987,12 @@ const _PREVIEW_FS_ENTER_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" 
 function _setPreviewFullscreenButtonState(active){
   const btn = document.getElementById('btnPreviewFullscreen');
   if(!btn) return;
-  btn.title = active ? 'Exit fullscreen' : 'Fullscreen';
-  btn.setAttribute('aria-label', active ? 'Exit fullscreen' : 'Fullscreen');
+  const label = active
+    ? (typeof t==='function' ? t('preview_fullscreen_exit') : 'Exit fullscreen')
+    : (typeof t==='function' ? t('preview_fullscreen_enter') : 'Fullscreen');
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   btn.innerHTML = active ? _PREVIEW_FS_EXIT_ICON : _PREVIEW_FS_ENTER_ICON;
 }
 // ── Preview fullscreen focus/aria lifecycle ────────────────────────────────
@@ -989,17 +1009,26 @@ function _previewFullscreenEnter(panel){
   _previewFsPrevFocus = (document.activeElement && document.activeElement !== document.body)
     ? document.activeElement
     : null;
-  // aria-modal + role=region: announce the covering region and tell AT the
-  // rest of the page is not the active context.
-  panel.setAttribute('role', 'region');
+  // A labelled dialog is the correct semantics for a covering modal overlay;
+  // aria-modal on role="region" is invalid (the region role has no modal
+  // concept), so the panel is a dialog with a label instead.
+  panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-modal', 'true');
   const label = _previewFsRegionLabel();
   if(label) panel.setAttribute('aria-label', label);
   // inert is the correct primitive for "reachable by Tab but must not be":
   // it removes the subtree from the tab order and the accessibility tree.
+  // Remember each element's prior values so exiting restores them rather than
+  // blindly deleting attributes another subsystem may have set.
+  _previewFsSavedChromeState = [];
   for(const selector of _PREVIEW_FS_CHROME_SELECTORS){
     document.querySelectorAll(selector).forEach(el=>{
       if(el === panel || el.contains(panel)) return;
+      _previewFsSavedChromeState.push({
+        el,
+        hadInert: el.hasAttribute('inert'),
+        ariaHidden: el.getAttribute('aria-hidden'),
+      });
       el.setAttribute('inert', '');
       el.setAttribute('aria-hidden', 'true');
     });
@@ -1011,22 +1040,51 @@ function _previewFullscreenExit(panel){
   panel.removeAttribute('aria-modal');
   panel.removeAttribute('role');
   panel.removeAttribute('aria-label');
-  for(const selector of _PREVIEW_FS_CHROME_SELECTORS){
-    document.querySelectorAll(selector).forEach(el=>{
-      el.removeAttribute('inert');
-      el.removeAttribute('aria-hidden');
-    });
+  for(const entry of _previewFsSavedChromeState){
+    const el = entry.el;
+    if(!el) continue;
+    if(!entry.hadInert) el.removeAttribute('inert');
+    if(entry.ariaHidden === null) el.removeAttribute('aria-hidden');
+    else el.setAttribute('aria-hidden', entry.ariaHidden);
   }
-  // Return focus to where the user was, unless that element is now hidden or
-  // gone — then fall back to the fullscreen toggle so focus is never dropped
-  // onto <body>.
+  _previewFsSavedChromeState = [];
+  // Do NOT focus here. clearPreview() runs _showPreviewZoomControls(false,false)
+  // immediately after this returns, which hides the very button focus would land
+  // on, leaving focus stranded on a hidden control. Queue the target and let the
+  // caller flush it once the panel/controls have their final display state.
   const prev = _previewFsPrevFocus;
   _previewFsPrevFocus = null;
   if(prev && document.contains(prev) && _isFocusablePreviewTarget(prev)){
-    try{ prev.focus(); return; }catch(_){}
+    _previewFsPendingFocus = prev;
+    return;
   }
-  const btn = document.getElementById('btnPreviewFullscreen');
-  if(btn && _isFocusablePreviewTarget(btn)){ try{ btn.focus(); }catch(_){} }
+  _previewFsPendingFocus = () => {
+    const btn = document.getElementById('btnPreviewFullscreen');
+    return (btn && _isFocusablePreviewTarget(btn)) ? btn : null;
+  };
+}
+
+// Land the queued focus target once every control the exit changed has reached
+// its final state. Focus only ever goes to a control that is still visible;
+// otherwise it falls back to a control that outlives the preview, so it is never
+// dropped onto <body> and never parked on a hidden button.
+function _flushPreviewFullscreenFocus(){
+  const pending = _previewFsPendingFocus;
+  _previewFsPendingFocus = null;
+  if(!pending) return;
+  let target = null;
+  if(typeof pending === 'function'){
+    target = pending();
+  } else if(_isFocusablePreviewTarget(pending)){
+    target = pending;
+  }
+  if(!target){
+    for(const id of ['btnClearPreview', 'btnWorkspacePanelToggle', 'msg']){
+      const el = document.getElementById(id);
+      if(el && _isFocusablePreviewTarget(el)){ target = el; break; }
+    }
+  }
+  if(target){ try{ target.focus(); }catch(_){} }
 }
 
 function _isFocusablePreviewTarget(el){
@@ -1054,7 +1112,35 @@ function _focusPreviewFullscreenRegion(panel){
 function _previewFsRegionLabel(){
   const pathEl = document.getElementById('previewPathText');
   const path = pathEl && pathEl.textContent ? pathEl.textContent : '';
-  return path ? `Fullscreen preview: ${path}` : 'Fullscreen preview';
+  const name = typeof t==='function' ? t('preview_fullscreen_region') : 'Fullscreen preview';
+  return path ? `${name}: ${path}` : name;
+}
+
+/**
+ * Enter native fullscreen when the browser supports it, so the Escape key works
+ * even while focus is inside the preview iframe (key events do not cross that
+ * browsing-context boundary). Failures are non-fatal: the overlay class still
+ * applies and the document-level Escape handler remains as the fallback.
+ */
+function _requestNativePreviewFullscreen(panel){
+  try{
+    const el = document.documentElement;
+    const req = panel.requestFullscreen || el.requestFullscreen;
+    if(typeof req !== 'function') return;
+    const target = panel.requestFullscreen ? panel : el;
+    const result = req.call(target, { navigationUI: 'hide' });
+    if(result && typeof result.catch === 'function'){
+      result.catch(()=>{ _previewFsNativeActive = false; });
+    }
+  }catch(_){ _previewFsNativeActive = false; }
+}
+function _exitNativePreviewFullscreen(){
+  try{
+    if(document.fullscreenElement && typeof document.exitFullscreen === 'function'){
+      const result = document.exitFullscreen();
+      if(result && typeof result.catch === 'function') result.catch(()=>{});
+    }
+  }catch(_){}
 }
 
 /**
@@ -1089,6 +1175,7 @@ function setPreviewFullscreen(active){
       window.addEventListener('orientationchange', _previewFsResizeHandler);
     }
     _previewFullscreenEnter(panel);
+    _requestNativePreviewFullscreen(panel);
   } else {
     panel.style.height = '';
     panel.style.maxHeight = '';
@@ -1097,11 +1184,13 @@ function setPreviewFullscreen(active){
       window.removeEventListener('orientationchange', _previewFsResizeHandler);
       _previewFsResizeHandler = null;
     }
+    _exitNativePreviewFullscreen();
     _previewFullscreenExit(panel);
     // Exiting fullscreen can land on a different breakpoint than the one we
     // entered on (desktop fullscreen -> phone width). Re-derive the compact
     // class from the restored mode so the panel is not left off-screen.
     if(typeof _reconcileWorkspacePanelBreakpoint==='function') _reconcileWorkspacePanelBreakpoint();
+    _flushPreviewFullscreenFocus();
   }
 }
 function togglePreviewFullscreen(){
@@ -1109,6 +1198,22 @@ function togglePreviewFullscreen(){
   if(!panel) return;
   setPreviewFullscreen(!panel.classList.contains('preview-fullscreen'));
 }
+
+// The browser owns Escape while native fullscreen is active, so the mode change
+// arrives here rather than through the document keydown handler. Reconcile the
+// overlay class with reality: if native fullscreen ended (Escape, F11, or the
+// browser's own exit control) the panel must leave fullscreen presentation too,
+// and focus must land on a control that is still visible.
+document.addEventListener('fullscreenchange', ()=>{
+  const active = !!document.fullscreenElement;
+  _previewFsNativeActive = active;
+  if(active) return;
+  const panel = document.querySelector('.rightpanel.preview-fullscreen');
+  if(!panel) return;
+  // Detach our state without calling exitFullscreen again (the browser already
+  // left fullscreen); setPreviewFullscreen(false) is idempotent about that.
+  setPreviewFullscreen(false);
+});
 
 // ── Preview font-size zoom ──────────────────────────────────────────────────
 // Font sizes are clamped to the supported range; a malformed stored value must

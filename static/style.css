@@ -3517,8 +3517,13 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
    html.preview-fullscreen-active so only the file area is visible.
    Internal elements keep their natural display state (file-tree hidden
    when preview is showing, preview-area visible, etc.) — we only force
-   the container itself to fill the screen. */
-.rightpanel.preview-fullscreen{position:fixed;inset:0;z-index:200;width:100vw!important;min-width:100vw!important;max-width:100vw!important;height:100vh!important;height:100dvh!important;border-left:none;border-radius:0;container-type:normal;transform:none;opacity:1!important;pointer-events:auto!important;background:var(--sidebar);}
+   the container itself to fill the screen.
+   `display:flex!important` is load-bearing: the tablet media query at ≤900px
+   sets `.rightpanel{display:none}` and the mobile `display:flex!important` rule
+   only exists at ≤640px, so a desktop fullscreen preview resized to 641–900px
+   was invisible while `preview-fullscreen` (and its fullscreen state) stayed
+   active. The higher-specificity class plus !important wins at every width. */
+.rightpanel.preview-fullscreen{display:flex!important;flex-direction:column;position:fixed;inset:0;z-index:200;width:100vw!important;min-width:100vw!important;max-width:100vw!important;height:100vh!important;height:100dvh!important;border-left:none;border-radius:0;container-type:normal;transform:none;opacity:1!important;pointer-events:auto!important;background:var(--sidebar);}
 html.preview-fullscreen-active .sidebar,
 html.preview-fullscreen-active .rail,
 html.preview-fullscreen-active .main-wrapper,

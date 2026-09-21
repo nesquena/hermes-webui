@@ -2281,6 +2281,12 @@ function clearPreview(opts={}){
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
+  // Focus lands LAST. setPreviewFullscreen(false) only queues the target; the
+  // zoom/fullscreen controls are hidden by the call above and the panel mode is
+  // final by now, so this is the first point where a visible control exists to
+  // receive focus. Reaching this without the flush left focus on a display:none
+  // button (the gate's "clearPreview() can strand focus" blocker).
+  if(typeof _flushPreviewFullscreenFocus==='function') _flushPreviewFullscreenFocus();
 }
 $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead

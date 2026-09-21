@@ -341,13 +341,27 @@ def test_fullscreen_enter_inerts_covered_chrome():
 
 
 def test_fullscreen_exit_restores_focus():
+    """Exit must lift inert, and queue a focus target instead of focusing
+
+    immediately: clearPreview() hides the zoom/fullscreen controls right after
+    the exit, so focusing inside `_previewFullscreenExit()` stranded focus on a
+    display:none button (the gate's focus blocker). The flush lands it later."""
     body = _function("_previewFullscreenExit")
     assert "removeAttribute('inert')" in body or 'removeAttribute("inert")' in body, (
         "_previewFullscreenExit must lift inert from the restored chrome"
     )
-    assert ".focus()" in body, (
-        "_previewFullscreenExit must move focus somewhere visible so it is never "
-        "dropped onto <body>"
+    assert "_previewFsPendingFocus" in body, (
+        "_previewFullscreenExit must queue a focus target rather than focus "
+        "immediately, because the controls are hidden after it returns"
+    )
+    assert ".focus()" not in body, (
+        "_previewFullscreenExit must not call focus() directly — the target may be "
+        "hidden by the time clearPreview() finishes; _flushPreviewFullscreenFocus() "
+        "owns the focus call"
+    )
+    flush = _function("_flushPreviewFullscreenFocus")
+    assert ".focus()" in flush, (
+        "nothing focuses the queued target, so focus ends up on <body>"
     )
 
 
@@ -880,4 +894,286 @@ def test_the_app_font_change_path_calls_the_refresh():
     assert "_refreshPreviewFontSize" in body, (
         "changing the app font size must re-resolve the preview typography, or "
         "an open preview's editor keeps the previous size (Greptile review)"
+    )
+
+
+# ── Gate re-review (21 Sep): three blockers + three follow-throughs ───────────
+#
+# 1. Escape could not exit from HTML/PDF iframe focus — the only Escape handler
+#    is a document keydown listener and key events do not cross the iframe
+#    browsing-context boundary, while README promised "Escape to exit".
+# 2. clearPreview() stranded focus on a hidden control: the exit restored focus
+#    to the fullscreen button, then clearPreview() hid it.
+# 3. Fullscreen vanished at 641–900px: the ≤900px rule hides .rightpanel and the
+#    display:flex!important rule only exists at ≤640px.
+# Plus: invalid aria-modal on role=region; inert/aria-hidden clobbered; and
+# hard-coded English labels instead of locale keys.
+
+I18N_JS_PATH = REPO_ROOT / "static" / "i18n.js"
+INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
+
+# Keys the gate asked to route through locale parity.
+PREVIEW_FS_KEYS = (
+    "preview_fullscreen_enter",
+    "preview_fullscreen_exit",
+    "preview_fullscreen_region",
+    "preview_zoom_out",
+    "preview_zoom_in",
+)
+
+
+def _top_level_locales() -> list[str]:
+    src = _read(I18N_JS_PATH)
+    keys = []
+    for m in re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*):\s*\{", src, re.M):
+        keys.append(m.group(1).strip("'"))
+    return keys
+
+
+def _locale_block(locale: str) -> str:
+    """Return a top-level locale's body using brace matching (not a window)."""
+    src = _read(I18N_JS_PATH)
+    marker = f"'{locale}'" if "-" in locale else locale
+    m = re.search(r"^  " + re.escape(marker) + r":\s*\{", src, re.M)
+    assert m, f"locale block not found: {locale}"
+    # For quoted keys the marker itself contains a quote; find the body brace.
+    brace = src.index("{", m.start())
+    depth = 0
+    i = brace
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace : i + 1]
+        i += 1
+    raise AssertionError(f"locale block never closed: {locale}")
+
+
+# ── Blocker 1: native Fullscreen API ownership (Escape from iframe focus) ─────
+
+
+def test_fullscreen_uses_the_native_api_so_escape_works_from_iframe_focus():
+    """A document keydown listener cannot see Escape pressed inside the iframe,
+
+    so the mode must be owned by the browser's own fullscreen implementation."""
+    body = _function("setPreviewFullscreen")
+    assert "_requestNativePreviewFullscreen" in body, (
+        "entering fullscreen must request native fullscreen, or Escape pressed "
+        "while focus is inside #previewHtmlIframe/#previewPdfFrame never exits"
+    )
+    assert "_exitNativePreviewFullscreen" in body, (
+        "leaving fullscreen must leave native fullscreen too"
+    )
+
+
+def test_native_fullscreen_helpers_are_fail_safe():
+    """Browsers without the API (iOS Safari, non-video elements) must still get
+
+    the overlay: request failures are swallowed and never throw."""
+    req = _function("_requestNativePreviewFullscreen")
+    assert "requestFullscreen" in req
+    assert "catch" in req, "a rejected requestFullscreen must not break the toggle"
+    exit_body = _function("_exitNativePreviewFullscreen")
+    assert "exitFullscreen" in exit_body
+    assert "fullscreenElement" in exit_body, (
+        "exitFullscreen must only be called when the browser is actually in "
+        "fullscreen, otherwise it rejects during a plain overlay exit"
+    )
+
+
+def test_a_browser_driven_fullscreen_exit_reconciles_the_overlay():
+    """Escape handled by the browser ends native fullscreen directly, so the
+
+    overlay class must be reconciled from the fullscreenchange event."""
+    src = _read(WORKSPACE_JS_PATH)
+    assert "addEventListener('fullscreenchange'" in src, (
+        "without a fullscreenchange listener, browser-handled Escape leaves the "
+        "panel stuck in preview-fullscreen presentation"
+    )
+    idx = src.index("addEventListener('fullscreenchange'")
+    block = src[idx : idx + 700]
+    assert "setPreviewFullscreen(false)" in block, (
+        "the fullscreenchange handler must detach the overlay state"
+    )
+
+
+# ── Blocker 2: focus must land after the controls settle ─────────────────────
+
+
+def _clear_preview_body() -> str:
+    """`extract_function()` brace-matches from the first `{`, which for
+
+    `clearPreview(opts={})` is the default-value brace — it returns the signature
+    only. Slice to the next top-level declaration instead (the file declares
+    top-level functions at column 0), same approach as the #6710 tests.
+    """
+    src = _read(BOOT_JS_PATH)
+    declaration = "function clearPreview(opts={}){"
+    start = src.index(declaration)
+    offset = start + len(declaration)
+    for line in src[offset:].split("\n"):
+        if line.startswith(("function ", "async function ", "const ", "let ", "var ")):
+            return src[start:offset]
+        offset += len(line) + 1
+    return src[start:]
+
+
+def test_clear_preview_flushes_focus_last():
+    """clearPreview() hides the zoom/fullscreen controls, so the queued focus
+
+    target must be resolved only after the panel mode and controls are final."""
+    body = _clear_preview_body()
+    assert "_flushPreviewFullscreenFocus" in body, (
+        "clearPreview() must flush the queued focus target"
+    )
+    flush_at = body.index("_flushPreviewFullscreenFocus")
+    hide_at = body.index("_showPreviewZoomControls(false, false)")
+    assert flush_at > hide_at, (
+        "focus is flushed before the controls are hidden, so it lands on a "
+        "display:none button (the gate's stranded-focus blocker)"
+    )
+
+
+def test_focus_flush_never_targets_a_hidden_control():
+    flush = _function("_flushPreviewFullscreenFocus")
+    assert "_isFocusablePreviewTarget" in flush, (
+        "the flush must check visibility before focusing"
+    )
+    assert "btnClearPreview" in flush or "btnWorkspacePanelToggle" in flush, (
+        "the flush needs a fallback control that outlives the preview"
+    )
+
+
+# ── Blocker 3: fullscreen must survive the 641–900px band ────────────────────
+
+
+def test_fullscreen_rule_declares_display():
+    """The ≤900px media query sets .rightpanel{display:none}; the mobile
+
+    display:flex!important rule only exists at ≤640px, so the fullscreen rule
+    itself must re-establish display at every width."""
+    css = _read(STYLE_CSS_PATH)
+    match = re.search(r"\.rightpanel\.preview-fullscreen\{([^}]*)\}", css)
+    assert match, ".rightpanel.preview-fullscreen rule not found"
+    rule = match.group(1)
+    assert "display:flex" in rule.replace(" ", ""), (
+        "the fullscreen rule does not set display, so a desktop fullscreen "
+        "preview resized to 641–900px is invisible while fullscreen stays active"
+    )
+    assert "!important" in rule.split("display:flex", 1)[1][:40], (
+        "the display override must be !important to beat the ≤900px rule"
+    )
+
+
+def test_tablet_band_is_covered_by_the_fullscreen_selector():
+    """Assert the cascade shape the gate described, at the widths it named."""
+    css = _read(STYLE_CSS_PATH)
+    # The ≤900px rule that hides the panel must still exist …
+    assert ".rightpanel{display:none}" in css, (
+        "the ≤900px hide rule was removed; the blocker was the missing override"
+    )
+    # … and the fullscreen rule must win over it by specificity + !important.
+    assert ".rightpanel.preview-fullscreen{display:flex!important" in css.replace(" ", ""), (
+        "the fullscreen selector must override the tablet hide rule"
+    )
+
+
+# ── Follow-through: valid modal semantics ────────────────────────────────────
+
+
+def test_fullscreen_uses_dialog_role_not_region():
+    """aria-modal is only valid on a role that supports modality; role=region
+
+    has no modal concept, so the pair was invalid."""
+    enter = _function("_previewFullscreenEnter")
+    assert "'dialog'" in enter, (
+        "a covering modal overlay must use role=dialog (aria-modal is invalid "
+        "on role=region)"
+    )
+    assert "'region'" not in enter, (
+        "role=region is still set, so aria-modal remains invalid"
+    )
+    assert "'aria-modal'" in enter, "the modal declaration itself must remain"
+
+
+# ── Follow-through: prior inert/aria-hidden values are preserved ─────────────
+
+
+def test_inert_and_aria_hidden_are_restored_not_blindly_removed():
+    """Exit must restore what was there; unconditional removeAttribute() wiped
+
+    values another subsystem may have owned."""
+    enter = _function("_previewFullscreenEnter")
+    exit_body = _function("_previewFullscreenExit")
+    assert "hadInert" in enter and "ariaHidden" in enter, (
+        "_previewFullscreenEnter must snapshot each element's prior inert/"
+        "aria-hidden state"
+    )
+    assert "hadInert" in exit_body and "ariaHidden" in exit_body, (
+        "_previewFullscreenExit must restore the snapshot rather than deleting "
+        "the attributes unconditionally"
+    )
+
+
+# ── Follow-through: locale parity for the new labels ─────────────────────────
+
+
+def test_every_locale_defines_the_new_preview_labels():
+    locales = _top_level_locales()
+    assert "en" in locales, "the English locale block is missing"
+    missing = {}
+    for loc in locales:
+        body = _locale_block(loc)
+        absent = [k for k in PREVIEW_FS_KEYS if k not in body]
+        if absent:
+            missing[loc] = absent
+    assert not missing, (
+        f"locales missing the new preview/fullscreen keys: {missing}"
+    )
+
+
+def test_no_hardcoded_english_labels_remain_in_the_fullscreen_path():
+    """The gate asked for these three labels to go through locale keys."""
+    ws = _read(WORKSPACE_JS_PATH)
+    assert "btn.title = active ? 'Exit fullscreen' : 'Fullscreen'" not in ws, (
+        "the fullscreen button label is still hard-coded English"
+    )
+    assert "`Fullscreen preview: ${path}`" not in ws, (
+        "the fullscreen region label is still hard-coded English"
+    )
+    button = _read(INDEX_HTML_PATH)
+    zoom_out = re.search(r'id="btnPreviewZoomOut"[^>]*>', button)
+    assert zoom_out, "btnPreviewZoomOut not found"
+    tag = zoom_out.group(0)
+    assert 'data-i18n-title="preview_zoom_out"' in tag, (
+        "the zoom-out button is not wired to a locale key"
+    )
+    zoom_in = re.search(r'id="btnPreviewZoomIn"[^>]*>', button)
+    assert zoom_in, "btnPreviewZoomIn not found"
+    assert 'data-i18n-title="preview_zoom_in"' in zoom_in.group(0), (
+        "the zoom-in button is not wired to a locale key"
+    )
+
+
+def test_stateful_fullscreen_button_has_no_static_i18n_key():
+    """The label flips between "Fullscreen" and "Exit fullscreen", so a static
+
+    data-i18n key would latch the wrong one — same convention as the workspace
+    panel toggles. The sync function owns it and applyLocaleToDOM re-syncs."""
+    src = _read(INDEX_HTML_PATH)
+    tag = re.search(r'id="btnPreviewFullscreen"[^>]*>', src)
+    assert tag, "btnPreviewFullscreen not found"
+    assert "data-i18n-title=" not in tag.group(0), (
+        "the stateful fullscreen button carries a static i18n key"
+    )
+    assert "data-i18n-aria-label=" not in tag.group(0), (
+        "the stateful fullscreen button carries a static i18n aria key"
+    )
+    i18n = _read(I18N_JS_PATH)
+    apply_idx = i18n.index("function applyLocaleToDOM()")
+    tail = i18n[apply_idx : apply_idx + 2000]
+    assert "_setPreviewFullscreenButtonState" in tail, (
+        "a locale change must re-sync the fullscreen button's stateful label"
     )
