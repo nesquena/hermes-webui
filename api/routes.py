@@ -10357,7 +10357,7 @@ def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SE
     for session in sessions:
         if _is_cli_session_for_settings(session):
             cli_seen += 1
-            if cli_seen > cli_cap:
+            if cli_seen > cli_cap and not session.get("_agent_pinned"):
                 continue
         kept.append(session)
     return kept

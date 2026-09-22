@@ -71,7 +71,7 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
     # all); the rest are optional on older agent schemas and filtered below.
     _PROJECTION_SESSION_COLS = (
         'id', 'source', 'session_source', 'title', 'model', 'message_count',
-        'started_at', 'ended_at', 'end_reason', 'parent_session_id', 'archived',
+        'started_at', 'ended_at', 'end_reason', 'parent_session_id', 'archived', 'pinned',
         'user_id', 'chat_id', 'chat_type', 'thread_id', 'session_key',
         'origin_chat_id', 'origin_user_id', 'platform',
     )

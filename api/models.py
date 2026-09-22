@@ -7880,6 +7880,9 @@ def _load_cli_sessions_uncached(
             'created_at': row['started_at'],
             'updated_at': raw_ts,
             'pinned': False,
+            # Agent owns this source pin; retain it only for route-level
+            # discovery/capping and never write it through the WebUI sidecar.
+            '_agent_pinned': bool(row.get('pinned')),
             'archived': _archived,
             'project_id': _state_row_project_id(sid, _source),
             'profile': profile,
