@@ -153,6 +153,7 @@ def _reasoning_config_for_agent_destination(agent, value):
             getattr(agent, "model", None),
             provider_id=getattr(agent, "provider", None),
             base_url=getattr(agent, "base_url", None),
+            config_data=getattr(agent, "_webui_reasoning_config_snapshot", None),
         )
     except Exception:
         # Transition-time capability uncertainty must fail closed for the two
@@ -214,7 +215,28 @@ def _destination_aware_ai_agent_class(agent_class):
     ):
         return agent_class
 
-    class DestinationAwareAIAgent(agent_class):
+    class DestinationAwareMeta(type(agent_class)):
+        def __call__(cls, *args, **kwargs):
+            agent = super().__call__(*args, **kwargs)
+            # Internal Agent constructors (delegation, review, compression)
+            # import run_agent.AIAgent directly and do not pass WebUI's already-
+            # coerced config. Capture the active Agent profile snapshot, then
+            # replay the constructor value once model/provider/base_url exist.
+            try:
+                from hermes_cli.config import load_config_readonly
+
+                snapshot = load_config_readonly()
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, dict):
+                agent._webui_reasoning_config_snapshot = snapshot
+            if _agent_destination_fields_ready(agent):
+                current = getattr(agent, "reasoning_config", None)
+                if current is not None:
+                    agent.reasoning_config = current
+            return agent
+
+    class DestinationAwareAIAgent(agent_class, metaclass=DestinationAwareMeta):
         _webui_destination_reasoning_guard = True
 
         def __setattr__(self, name, value):
@@ -530,10 +552,15 @@ def ensure_agent_runtime_current() -> None:
 def require_ai_agent_class():
     """Import the guarded ``AIAgent`` after proving its revision is current."""
     ensure_agent_runtime_current()
-    from run_agent import AIAgent  # noqa: PLC0415
+    import run_agent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
-    return _destination_aware_ai_agent_class(AIAgent)
+    guarded = _destination_aware_ai_agent_class(run_agent.AIAgent)
+    # Delegation/review/compression paths import this canonical symbol locally
+    # after the parent agent is running. Publish the bounded-cached guard there
+    # so no in-process constructor can silently recover the undecorated class.
+    run_agent.AIAgent = guarded
+    return guarded
 
 
 def get_ai_agent_class():
