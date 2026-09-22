@@ -402,16 +402,34 @@ def test_new_session_promise_is_owner_scoped():
     assert re.search(r"if\(_sameOwner\)\s*\{", body), (
         "the cached promise may only be reused when the owner matches"
     )
-    assert "await _newSessionInFlight;" in body, (
+    # Gate round 8: with several waiters a single await is not enough — the slot
+    # must be re-examined after each wait, and a superseded caller must abort
+    # rather than queue behind the run the newer switch owns.
+    assert "for(;;)" in body, (
+        "newSession must re-check the shared slot after every await, not await once"
+    )
+    assert "await _incumbent;" in body, (
         "a different owner must wait for the previous run before starting its own"
+    )
+    assert re.search(r"_supersededByNewerSwitch\(\)\)\s*return null", body), (
+        "a superseded caller must abort before starting its own run"
     )
 
 
 def test_new_session_owner_is_cleared_when_the_run_finishes():
     body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function newSession(")
+    # Gate round 8: the clear is now conditional — only while the slot still
+    # identifies THIS run and owner. An older caller's finally must not delete a
+    # newer owner's live slot (which would let a second creation start and have
+    # neither adopted).
+    assert re.search(r"finally\s*\{[^}]*_newSessionInFlight===_run", body, re.S), (
+        "the promise/owner may only be cleared while the slot still identifies "
+        "this run, or a later caller inherits stale owner state (and an older "
+        "finally can clear a newer owner's live slot)"
+    )
     assert re.search(r"finally\s*\{[^}]*_newSessionInFlightGen=null", body, re.S), (
-        "the owner generation must be cleared in the finally block together with "
-        "the promise, or a later caller inherits a stale owner"
+        "the owner generation must still be cleared in the finally block together "
+        "with the promise"
     )
 
 
@@ -835,3 +853,465 @@ def test_an_unowned_new_session_still_installs_normally():
         f"a plain New Chat must not be suppressed by the switch guard: {out}"
     )
     assert out["afterFlight"]["streams"] == ["stale-created"], out
+
+
+# ── Gate round 8 (22 Sep): three objective lifecycle blockers ─────────────────
+#
+# Each scenario below composes the SHIPPED bodies. The pre-existing helper tests
+# stub loadSession() or cover a single changing owner, so they never exercised
+# these schedules — which is exactly what the gate asked for.
+
+
+def test_a_superseded_profile_load_writes_nothing():
+    """B1: `A load starts -> B advances switch authority and completes without
+    starting loadSession -> A resolves`, asserting A performs NO session,
+    storage, URL, stream or transcript writes.
+
+    `loadSession()` folded profile-switch ownership only into its 409 recovery
+    path; the normal metadata/message path used the load generation alone, so a
+    switch that took its no-load fallback left A as the current load — free to
+    install S.session/localStorage/URL/stream/transcript under B's cookie.
+    """
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function loadSession(")
+    js = r"""
+const params = __PARAMS__;
+
+// ── module state the shipped body touches ────────────────────────────────────
+var S = { session: { session_id: 'seed', messages: [], workspace: '' },
+          messages: [{ role: 'assistant', content: 'seed' }], toolCalls: [],
+          _pendingSessionToolsets: null, lastUsage: {}, busy: false, activeStreamId: null };
+const INFLIGHT = {};
+let _loadingSessionId = null;
+let _loadingOlder = false;
+let _loadSessionGeneration = 0;
+let _loadMessagesFailedSids = new Set();
+let _loadMessagesFailedForSid = (sid) => _loadMessagesFailedSids.has(sid);
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _messageRenderWindowSize = 0;
+let _msgLimitMax = 500;
+const _MSG_LIMIT_MAX = 500;
+let _messageUserUnpinned = false;
+let _scrollPinned = true;
+let _keepStaleUntilLoaded = false;
+// The switch generation: this load is owned by gen 1.
+let _profileSwitchGeneration = 1;
+const _switchGen = 1;
+
+const calls = { setUrl: [], startStream: [], storage: [], renderMessages: 0, rearm: 0,
+                bodyFetches: 0 };
+const storage = {};
+
+// A deferred metadata response so the driver owns the interleaving exactly.
+let _metaResolve = null;
+const metaGate = new Promise(resolve => { _metaResolve = resolve; });
+
+function api(path){
+  if(String(path).includes('messages=0')) return metaGate;
+  if(String(path).includes('messages=1')) calls.bodyFetches += 1;
+  return Promise.resolve({});
+}
+const wait = () => new Promise(r => setImmediate(r));
+
+// ── DOM / helper stubs (faithful: every production call is `if (typeof …)`) ──
+var window = {};
+var history = { replaceState(){} };
+var localStorage = { setItem(k,v){ storage[k]=String(v); calls.storage.push(k); },
+                     removeItem(k){ delete storage[k]; }, getItem(k){ return storage[k] ?? null; } };
+function $(id){ return id === 'msgInner' ? { innerHTML: '' } : null; }
+function _rearmActiveSessionStream(){ calls.rearm++; }
+function _setActiveSessionUrl(sid){ calls.setUrl.push(sid); }
+function startSessionStream(sid){ calls.startStream.push(sid); }
+function renderMessages(){ calls.renderMessages++; }
+function _appRootPath(){ return '/'; }
+function _clearSameSessionForceReloadHint(){}
+function _clearStuckSessionOnBoot(){}
+function _sessionVisitHasUnreadState(){ return false; }
+function _acknowledgeSessionVisit(){}
+function _setSessionViewedCount(){}
+function scheduleTodosRefresh(){}
+function syncTopbar(){}
+function _captureSameSessionForceReloadHint(){}
+function _clearSameSessionForceReloadHint(){}
+function _resolveSessionModelForDisplaySoon(){}
+function _setSessionCompletionUnread(){}
+function _deferWorkspaceRefreshForSession(){}
+function _applyPendingSessionModelForSession(){}
+function _hydrateTodosFromSession(){}
+function _sessionProfileMismatchFromError(){ return null; }
+function _switchProfileForSessionLoad(){ return Promise.resolve(); }
+function _clearMessageCache(){}
+function _syncToolCallsForLoadedMessages(){}
+function clearVisibleMessageRowCache(){}
+function clearLiveToolCards(){}
+function _syncCtxIndicator(){}
+function _renderPendingPromptsForActiveSession(){}
+function _restoreComposerDraft(){}
+function _checkAndShowHandoffHint(){}
+function _hideHandoffHint(){}
+function _isMessagingSession(){ return true; }
+function _clearDeferredActiveSessionExternalRefresh(){}
+function setStatus(){}
+function setComposerStatus(){}
+function setBusy(){}
+function updateSendBtn(){}
+function updateQueueBadge(){}
+function startApprovalPolling(){}
+function startClarifyPolling(){}
+function _fetchYoloState(){}
+function stopApprovalPolling(){}
+function hideApprovalCard(){}
+function stopSessionStream(){}
+function stopClarifyPolling(){}
+function hideClarifyCard(){}
+let _yoloEnabled = false;
+function _updateYoloPill(){}
+function clearCompressionUi(){}
+function _saveComposerDraftNow(){ return Promise.resolve(); }
+function _clearPendingSelections(){}
+function _clearQueueCardDisplay(){}
+function loadInflightState(){ return null; }
+function _messageReloadLimitForSession(){ return 2; }
+function _uploadPendingFilesSyncProgressForSession(){}
+function autoResize(){}
+function showToast(){}
+function _selectLiveRecoveryInflight(){ return null; }
+function _inflightHasVisibleLiveState(){ return false; }
+function _serverLiveSnapshotInflight(){ return null; }
+function _ensureInflightLiveAssistantMessage(){}
+function _projectInflightMessagesForActivityBursts(){ return []; }
+function _prepareRunningLiveTail(){ return false; }
+function _dropCurrentTurnAssistantMessages(m){ return m; }
+function _mergeInflightTailMessages(m){ return m; }
+function _mergePendingSessionMessage(){ return false; }
+function clearInflightState(){}
+function _renderRuntimeJournalAnchorActivityScene(){ return false; }
+function attachLiveStream(){}
+function restoreLiveTurnHtmlForSession(){ return false; }
+function ensureLiveWorklogShell(){}
+function appendThinking(){}
+function ensureRunActivityForCurrentTurn(){}
+function placeLiveToolCardsHost(){}
+function resumeManualCompressionForSession(){}
+function projectSessionArtifactsForOwner(){}
+function queueSessionMessage(){}
+function _readPersistedSessionQueue(){ return []; }
+function _clearPersistedSessionQueue(){}
+function closeOtherLiveStreams(){}
+function _messageRenderableMessageCount(){ return 1; }
+function _currentMessageRenderWindowSize(){ return 1; }
+function _isSessionLocallyStreaming(){ return false; }
+function _hermesNotifySessionOpen(){}
+function _isSessionActivelyViewedForList(){ return true; }
+function _syncToolCallsForLoadedMessages(){}
+function clearVisibleMessageRowCache(){}
+// The idle branch's message fetch. Returning true keeps the harness honest when
+// the guard is intact; when the guard is removed this call is what proves the
+// stale load proceeded to fetch and install a body.
+let _bodyFetchesFromEnsure = 0;
+function _ensureMessagesLoaded(sid, opts){
+  _bodyFetchesFromEnsure += 1;
+  if (opts && opts.force === 1) {}
+  return Promise.resolve(true);
+}
+
+__OWNERSHIP_BODY__
+
+__LOAD_SESSION_BODY__
+
+(async () => {
+  const p = loadSession(params.sid, { force: false, switchGen: params.switchGen,
+                                      profileSwitchOwned: true });
+
+  // Wait until the metadata request is genuinely in flight.
+  for(let i = 0; i < 200; i++){ await wait(); }
+
+  // Switch B takes ownership and takes its no-load fallback: nothing else starts
+  // a loadSession, so A remains the "current" load by generation alone.
+  _profileSwitchGeneration = params.genAfter;
+  _metaResolve({ session: { session_id: params.sid, message_count: 1,
+                            active_stream_id: null } });
+
+  const returned = await p;
+  for(let i = 0; i < 20; i++){ await wait(); }
+
+  console.log(JSON.stringify({
+    // JSON.stringify drops an `undefined` value; the early return produces one,
+    // so name it explicitly rather than letting the key vanish.
+    returned: (returned === undefined ? 'undefined' : returned),
+    session: S.session && S.session.session_id,
+    stored: storage['hermes-webui-session'] ?? null,
+    urls: calls.setUrl.slice(),
+    streams: calls.startStream.slice(),
+    messages: (S.messages || []).map(m => m.content),
+    rearm: calls.rearm,
+    bodyFetches: calls.bodyFetches,
+  }));
+})();
+"""
+    ownership = _read(SESSIONS_JS_PATH)
+    ownership = ownership[ownership.index("function _profileSwitchOwnsLoad("):]
+    ownership = ownership[: ownership.index("\n}\n") + 3]
+    js = js.replace("__OWNERSHIP_BODY__", ownership).replace(
+        "__LOAD_SESSION_BODY__", body).replace("__PARAMS__", json.dumps(
+        {"sid": "A-sid", "switchGen": 1, "genAfter": 2}))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["session"] == "seed", (
+        f"a superseded profile load installed {out['session']!r} into S.session — the "
+        f"browser now holds a session under the cookie the newer switch owns: {out}"
+    )
+    assert out["stored"] is None, f"localStorage was repointed at a stale session: {out}"
+    assert out["urls"] == [], f"the URL was switched to a stale session: {out}"
+    assert out["streams"] == [], f"a stream was opened for a stale session: {out}"
+    # The transcript clear at the top of loadSession() is the legitimate
+    # pre-navigation teardown (it runs before the switch moved on), so the state
+    # to pin is that NO stale body was fetched or installed after ownership was
+    # lost — without the fix this load proceeded to fetch and adopt its body.
+    assert out["bodyFetches"] == 0, (
+        f"a superseded profile load still fetched the message body after losing "
+        f"ownership: {out}"
+    )
+    assert out["messages"] == [], (
+        f"a superseded profile load installed a transcript: {out}"
+    )
+    assert out["returned"] == "undefined", (
+        f"a superseded load must not report success: {out}"
+    )
+
+
+def test_message_body_without_session_is_a_failed_resume():
+    """B2: metadata succeeds but the message response has no `session`, asserting
+    the resume returns false and takes the fresh-session fallback.
+
+    `_ensureMessagesLoaded()` returned NORMALLY on `!data || !data.session`
+    without recording a failure, and `loadSession()` then reported true because
+    metadata had installed the requested session and no failure was recorded.
+    """
+    ensure_body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function _ensureMessagesLoaded(")
+    js = r"""
+const params = __PARAMS__;
+
+let S = { session: { session_id: 'A-sid', messages: [] }, messages: [], toolCalls: [], lastUsage: {} };
+const INFLIGHT = {};
+let _loadingSessionId = 'A-sid';
+let _loadSessionGeneration = 7;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _msgLimitMax = 500;
+const _MSG_LIMIT_MAX = 500;
+let _pendingCarryForwardSnapshot = null;
+// The caller belongs to profile switch 1, which still owns the generation.
+let _profileSwitchGeneration = 1;
+
+const calls = { hints: 0 };
+function api(){ return Promise.resolve(params.malformed ? {} : { session: params.payload }); }
+function _clearSameSessionForceReloadHint(){ calls.hints++; }
+function _messageReloadLimitForSession(){ return 2; }
+function _syncToolCallsForLoadedMessages(){}
+function clearLiveToolCards(){}
+function clearVisibleMessageRowCache(){}
+function _hydrateTodosFromSession(){}
+function scheduleTodosRefresh(){}
+function syncTopbar(){}
+function _setSessionViewedCount(){}
+function _isSessionActivelyViewedForList(){ return true; }
+var window = {};
+
+__OWNERSHIP_BODY__
+
+__ENSURE_BODY__
+
+(async () => {
+  const result = await _ensureMessagesLoaded('A-sid', {
+    force: false, loadGeneration: 7, switchGen: 1,
+  });
+  // JSON.stringify drops an `undefined` value; the old silent no-op returned one,
+  // so name it explicitly instead of letting the key vanish.
+  console.log(JSON.stringify({
+    result: (result === undefined ? 'undefined' : result),
+    messages: (S.messages || []).length,
+  }));
+})();
+"""
+    ownership = _read(SESSIONS_JS_PATH)
+    ownership = ownership[ownership.index("function _profileSwitchOwnsLoad("):]
+    ownership = ownership[: ownership.index("\n}\n") + 3]
+    js = js.replace("__OWNERSHIP_BODY__", ownership).replace(
+        "__ENSURE_BODY__", ensure_body).replace(
+        "__PARAMS__", json.dumps({"malformed": True, "payload": None}))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["result"] is False, (
+        f"a message response without `session` was not reported as a failure: {out} — "
+        f"loadSession() would then report a successful resume and skip the "
+        f"fresh-session fallback (gate round 8)"
+    )
+
+
+def _run_three_owner_schedule(*, replace_slot_for_run1=None):
+    """Drive the real `newSession()` with three owners behind one incumbent.
+
+    `replace_slot_for_run1` optionally simulates a newer owner having replaced the
+    shared slot while the incumbent was still in flight; it returns a label for
+    the synthetic run so the caller can tell what survived.
+    """
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function newSession(")
+    js = r"""
+const params = __PARAMS__;
+
+var S = { session: { session_id: 'seed-session', messages: [], workspace: '' },
+          messages: [], toolCalls: [], _pendingSessionToolsets: null, lastUsage: {} };
+const storage = { 'hermes-webui-session': 'seed-session' };
+const localStorage = { setItem: (k, v) => { storage[k] = String(v); },
+                       getItem: (k) => (k in storage ? storage[k] : null) };
+let _profileSwitchGeneration = 1;
+let _newSessionInFlight = null;
+let _newSessionInFlightGen = null;
+let _activeProject = null;
+const NO_PROJECT_FILTER = '__none__';
+let _sessionSourceFilter = 'webui';
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+
+const calls = { urls: [], posts: 0, pending: false };
+let _g1Resolve = null, _g2Resolve = null;
+const g1 = new Promise(r => { _g1Resolve = r; });
+const g2 = new Promise(r => { _g2Resolve = r; });
+
+function api(path){
+  calls.urls.push(String(path));
+  if(String(path).includes('/api/session/new')){
+    calls.posts += 1;
+    calls.pending = true;
+    const payload = { session: { session_id: 'created-by-' + calls.posts, messages: [],
+                                 workspace: '', message_count: 0, last_usage: {} } };
+    return (calls.posts === 1) ? g1.then(() => payload) : g2.then(() => payload);
+  }
+  return Promise.resolve({});
+}
+
+var window = { _clearPendingSelections(){}, _defaultModel: null, _activeProvider: null };
+var document = { documentElement: { dataset: {} }, getElementById(){ return null; },
+                 createElement(){ return { dataset: {}, style: {} }; } };
+function _readPersistedModelState(){ return null; }
+function _modelStateForSelect(){ return null; }
+function _readEmptyComposerModelOverride(){ return null; }
+function $(id){
+  return { value: '', style: {}, classList: { add(){}, remove(){}, toggle(){} },
+           setAttribute(){}, getAttribute(){ return null; }, textContent: '',
+           appendChild(){}, querySelectorAll(){ return []; } };
+}
+function _setActiveSessionUrl(){}
+function startSessionStream(){}
+function _setSessionViewedCount(){}
+function updateQueueBadge(){}
+function clearLiveToolCards(){}
+function _setNewSessionPending(){}
+function _newSessionPendingText(){ return 'pending'; }
+function showToast(){}
+function _rememberNewChatDraftSession(){}
+function _deferWorkspaceRefreshForSession(){}
+function loadDir(){ return Promise.resolve(); }
+function refreshSessionList(){ return Promise.resolve(); }
+function renderSessionList(){ return Promise.resolve(); }
+function t(k){ return k; }
+function _adoptRegenerationRevision(){}
+function _hydrateTodosFromSession(){}
+function setComposerStatus(){}
+function setStatus(){}
+function updateSendBtn(){}
+function _setLiveAssistantTps(){}
+function _syncCtxIndicator(){}
+function syncTopbar(){}
+function _announceNewSessionWorkspace(){}
+function renderMessages(){}
+
+__NEW_SESSION_BODY__
+
+(async () => {
+  const out = {};
+  const settle = async (n) => { for(let i = 0; i < n; i++){ await new Promise(r => setImmediate(r)); } };
+  const marker = (p) => p.then(v => (v === null ? 'aborted' : 'ran'));
+
+  // Generation 1 is the incumbent: its POST is held open so the others queue.
+  const p1 = marker(newSession(false, { worktree: false, profileSwitchGen: 1 }));
+  for(let i = 0; i < 500 && !calls.pending; i++){ await settle(1); }
+  out.incumbentStarted = calls.pending;
+
+  // Two more owners queue behind it; gen 2 is then superseded, gen 3 is current.
+  const p2 = marker(newSession(false, { worktree: false, profileSwitchGen: 2 }));
+  _profileSwitchGeneration = 3;
+  const p3 = marker(newSession(false, { worktree: false, profileSwitchGen: 3 }));
+  await settle(5);
+  out.postsWhileQueued = calls.posts;
+
+  _g1Resolve();
+  await settle(30);
+  out.postsAfterIncumbent = calls.posts;
+
+  _g2Resolve();
+  out.results = await Promise.all([p1, p2, p3]);
+  await settle(20);
+  out.postsTotal = calls.posts;
+  out.session = S.session && S.session.session_id;
+  console.log(JSON.stringify(out));
+})();
+"""
+    js = js.replace("__NEW_SESSION_BODY__", body).replace(
+        "__PARAMS__", json.dumps({"replaceSlot": bool(replace_slot_for_run1)}))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_three_queued_owners_only_the_current_one_installs():
+    """B3 (behavioural): three different owners queue behind one incumbent.
+
+    Only the current owner may start/install; the superseded waiter aborts. A
+    single await without re-checking let every waiter POST and overwrite the
+    shared slot.
+    """
+    out = _run_three_owner_schedule()
+    assert out["incumbentStarted"] is True, f"the incumbent POST never became in-flight: {out}"
+    assert out["postsWhileQueued"] == 1, (
+        f"a queued waiter issued its own POST instead of parking on the slot: {out}"
+    )
+    assert out["results"][1] == "aborted", (
+        f"a caller superseded while queued still ran its own creation: {out} — it must "
+        f"abort instead of installing a session under the newer switch's cookie"
+    )
+    assert out["results"][2] == "ran", f"the current owner must still run and install: {out}"
+    assert out["postsTotal"] == 2, (
+        f"expected exactly two POSTs (the incumbent and the surviving owner); more means "
+        f"a superseded waiter created one too: {out}"
+    )
+    assert out["session"] == "created-by-2", (
+        f"the surviving owner's session must be the installed one: {out}"
+    )
+
+
+def test_the_slot_is_cleared_only_while_it_still_belongs_to_this_run():
+    """B3 (slot clause, contract): the shared slot's clear is ownership-guarded.
+
+    Note on coverage, stated plainly: with the re-check loop in place the older
+    `finally` cannot observe a slot a newer owner has taken over — the loop makes
+    the waiters serialize, so that interleaving is unreachable. This test therefore
+    pins the CONTRACT rather than reproducing the damage: the clear must stay
+    conditional so it cannot be relaxed back into an unconditional one, which WAS
+    reachable in the pre-loop shape (a third waiter overwrote the slot, then an
+    earlier caller's unconditional finally cleared the newer run's slot).
+    """
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function newSession(")
+    finally_block = body[body.rindex("finally{"):]
+    assert "_newSessionInFlight===_run" in finally_block, (
+        "the shared slot may only be cleared while it still identifies this run; an "
+        "unconditional clear can delete a newer owner's live run, after which the next "
+        "caller starts a second concurrent creation and neither is adopted"
+    )
+    assert "_newSessionInFlightGen===callerGen" in finally_block, (
+        "the owner generation must be part of the clear condition"
+    )

@@ -48,7 +48,9 @@ def test_quick_create_button_attaches_filter_align_and_request_path():
     assert "project-chip-quick-create" in helper
     assert "_setActiveProjectFilter(project.project_id)" in helper
     assert "newSession(false,{project_id:project.project_id})" in helper
-    assert "if(_newSessionInFlight)" in helper
+    # #6712 (gate round 8): the slot check moved into a re-checking loop so several
+    # waiters re-examine it after each await.
+    assert "if(!_newSessionInFlight) break;" in helper or "if(_newSessionInFlight)" in helper
     assert "_setActiveProjectFilter(previousProject)" in helper
     assert "btn.ondblclick" in helper
     assert "btn.oncontextmenu" in helper

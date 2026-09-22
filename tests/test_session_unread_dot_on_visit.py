@@ -317,6 +317,10 @@ def _hidden_completion_script(*, hidden: bool) -> str:
     delayed messages fetch, marks a completion mid-fetch, and reports whether the
     completion-unread marker survives."""
     ensure = _extract_async("_ensureMessagesLoaded")
+    # #6712 (gate round 8): _ensureMessagesLoaded() folds profile-switch ownership
+    # into its guard through this shared rule; the harness injects only extracted
+    # functions, so ship the helper or the guard throws ReferenceError.
+    ownership = _extract("_profileSwitchOwnsLoad")
     set_viewed = _extract("_setSessionViewedCount")
     clear_unread = _extract("_clearSessionCompletionUnread")
     get_unread = _extract("_getSessionCompletionUnread")
@@ -379,6 +383,7 @@ async function api(url) {{ _apiCalled = true; return _apiResult; }}
 {mark_unread}
 {set_viewed}
 {actively_viewed}
+{ownership}
 {ensure}
 
 function _hasMarker() {{

@@ -1420,6 +1420,22 @@ function _setNewSessionPending(pending){
   }
 }
 
+// A load that belongs to a profile switch must ALSO stop owning its outcome when
+// a newer switch takes the generation. `_loadSessionGeneration` cannot see that:
+// switch B can advance `_profileSwitchGeneration` and take its no-load /
+// list-failure fallback, leaving switch A's load as the current load — free to
+// install S.session, localStorage, the URL, the stream and the transcript under
+// the cookie switch B now owns. Every guard site consults this one rule instead
+// of re-deriving ownership from a caller-supplied mode.
+//
+// `switchGen === null` marks a load that is not switch-owned (plain sidebar
+// navigation, boot restore, New Chat): those are unaffected.
+function _profileSwitchOwnsLoad(switchGen){
+  if(switchGen === null || typeof switchGen === 'undefined') return true;
+  if(typeof _profileSwitchGeneration !== 'number') return true;
+  return switchGen === _profileSwitchGeneration;
+}
+
 async function newSession(flash, options={}){
   // A shared in-flight promise must not be handed to a caller working under a
   // different profile generation. During a profile switch the cookie and the
@@ -1432,20 +1448,40 @@ async function newSession(flash, options={}){
   const callerGen = (options && typeof options.profileSwitchGen === 'number')
     ? options.profileSwitchGen
     : null;
-  if(_newSessionInFlight){
+  // #6712 (gate round 8): with several waiters, a single await is not enough.
+  // The slot may already have been replaced by a run owned by yet another
+  // generation, and this caller may have become superseded while it waited, so
+  // re-examine the slot after every await. Each pass either adopts the slot
+  // (same owner), aborts (superseded switch), or waits again; only then does
+  // this caller start its own run and take the slot.
+  // A caller whose switch has been superseded must produce no session at all:
+  // reaching the start of its own run would create one under the newer profile's
+  // cookie and adopt it over that switch's state. Checked on entry and again
+  // after every wait, so a caller that lost ownership while queued stops here.
+  const _supersededByNewerSwitch = () => callerGen !== null
+    && typeof _profileSwitchGeneration === 'number'
+    && callerGen !== _profileSwitchGeneration;
+  for(;;){
+    if(_supersededByNewerSwitch()) return null;
+    if(!_newSessionInFlight) break;
     const _inFlightGen = (typeof _newSessionInFlightGen === 'number') ? _newSessionInFlightGen : null;
     const _sameOwner = (callerGen === null && _inFlightGen === null) || callerGen === _inFlightGen;
     if(_sameOwner){
       if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
       return _newSessionInFlight;
     }
-    // Different owner: await the previous run so it cannot interleave with the
-    // one we are about to start, then fall through and create ours.
-    try{ await _newSessionInFlight; }catch(_){}
+    // Different owner still current: await the incumbent, then loop to
+    // re-check — the slot may be empty (we then start our own run) or may have
+    // been taken over by yet another owner, and this caller may itself have
+    // been superseded while it waited. The incumbent is captured locally so
+    // this run can be told apart from a successor's when the shared slot is
+    // finally cleared.
+    const _incumbent = _newSessionInFlight;
+    try{ await _incumbent; }catch(_){}
   }
   _setNewSessionPending(true);
   _newSessionInFlightGen = callerGen;
-  _newSessionInFlight=(async()=>{
+  const _run=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1646,12 +1682,20 @@ async function newSession(flash, options={}){
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
   })();
+  _newSessionInFlight=_run;
   try{
-    return await _newSessionInFlight;
+    return await _run;
   }finally{
-    _newSessionInFlight=null;
-    _newSessionInFlightGen=null;
-    _setNewSessionPending(false);
+    // #6712 (gate round 8): clear the shared slot only while it still
+    // identifies THIS run and owner. A newer owner may have replaced the slot
+    // while we awaited; clearing unconditionally would delete the live run, so
+    // the next caller would start a second concurrent creation and adopt
+    // neither — and the pending indicator would be cleared under it.
+    if(_newSessionInFlight===_run && _newSessionInFlightGen===callerGen){
+      _newSessionInFlight=null;
+      _newSessionInFlightGen=null;
+      _setNewSessionPending(false);
+    }
   }
 }
 
@@ -1812,7 +1856,26 @@ async function loadSession(sid){
   // This load owns the outcome for `sid`: drop any failure recorded by a
   // previous attempt so a now-successful load is not reported as failed.
   if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.delete(sid);
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  // #6712 (gate round 8): ownership is the load generation AND — when this load
+  // belongs to a profile switch — the switch generation it started under. The
+  // two used to be combined only on the 409 profile-mismatch path, so a
+  // superseded switch's normal metadata/message path could still reach the
+  // installs below (S.session, localStorage, the URL, the stream, the
+  // transcript) before the caller's post-await check ran.
+  const _loadSwitchGen = (opts.profileSwitchOwned && typeof opts.switchGen === 'number')
+    ? opts.switchGen
+    : null;
+  const _isCurrentLoad = () => _loadingSessionId === sid
+    && _loadSessionGeneration === _loadGeneration
+    && _profileSwitchOwnsLoad(_loadSwitchGen);
+  // The same ownership token, forwarded to _ensureMessagesLoaded() so a stale
+  // message response cannot write the transcript either. Keeps the load's opts
+  // in one place instead of re-spelling them at each call site.
+  const _loadOwnerOpts = (force) => ({
+    force: !!force,
+    loadGeneration:_loadGeneration,
+    switchGen:_loadSwitchGen,
+  });
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -1938,10 +2001,11 @@ async function loadSession(sid){
       // this, switch A's stale response could pull the browser back to A after
       // switch B had already advanced the cookie.
       if(opts.profileSwitchOwned){
-        const owns = typeof opts.switchGen !== 'number'
-          || typeof _profileSwitchGeneration === 'undefined'
-          || opts.switchGen === _profileSwitchGeneration;
-        if(!owns || !_isCurrentLoad()){
+        // #6712 F3: ownership is now part of _isCurrentLoad() — it folds in
+        // opts.switchGen against the live _profileSwitchGeneration — so this
+        // recovery cannot drag the browser back to a profile a newer switch has
+        // already left.
+        if(!_isCurrentLoad()){
           _rearmActiveSessionStream();
           return false;
         }
@@ -2233,8 +2297,9 @@ async function loadSession(sid){
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
+    let _messagesLoaded=false;
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2247,6 +2312,11 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
+    // #6712 (gate round 8): when the body was never accepted (lost ownership,
+    // or a response without `session`) the inflight projection is all there is
+    // — record the failure so the resume path does not report a half-loaded
+    // conversation as a success.
+    if(!_messagesLoaded && typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
@@ -2346,8 +2416,9 @@ async function loadSession(sid){
     // arrive (visibility/focus recovery), force the fetch so the
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
+    let _messagesLoaded=false;
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2368,6 +2439,11 @@ async function loadSession(sid){
     }
     // Stale? A newer loadSession() call has already started (#1060).
     if (!_isCurrentLoad()) return;
+    // #6712 (gate round 8): the body was not accepted (lost ownership, or a
+    // response without `session`). Record it so loadSession() reports failure
+    // and the profile-switch resume runs its fresh-session fallback instead of
+    // treating an empty transcript as a successful resume.
+    if(!_messagesLoaded && typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -3265,12 +3341,25 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
-  if (!_ownsLoad()) return;
+  // #6712 (gate round 8): ownership here is the same rule as loadSession's — the
+  // load generation AND, when the caller belongs to a profile switch, the switch
+  // generation. Without the switch half, a body requested by a superseded switch
+  // could still be accepted and written into the transcript of the profile a
+  // newer switch now owns.
+  const _switchGen = (typeof opts.switchGen === 'number') ? opts.switchGen : null;
+  const _ownsLoad = () => _loadingSessionId === sid
+    && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration)
+    && _profileSwitchOwnsLoad(_switchGen);
+  // Returns an explicit success boolean. `true` means a valid body was accepted
+  // (or usable messages were already in place); every other exit — lost
+  // ownership, a response without `session`, an auth redirect — is `false`.
+  // loadSession() turns a non-true result into a recorded failure, so a
+  // half-loaded conversation is no longer reported as a successful resume.
+  if (!_ownsLoad()) return false;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
-    return;
+    return true;
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
@@ -3296,9 +3385,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
-  if (!_ownsLoad()) return;
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
+  if (!_ownsLoad()) return false;
+  // Guard: api() may have redirected (401) and returned undefined — and #6712
+  // (gate round 8): a malformed body (no `session`) is a FAILED load, not a
+  // silent no-op that the caller then reads as success.
+  if (!data || !data.session) return false;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3387,6 +3478,7 @@ async function _ensureMessagesLoaded(sid, opts) {
     }
     if(typeof syncTopbar==='function') syncTopbar();
   }
+  return true;
 }
 
 function _messageComparableText(m){

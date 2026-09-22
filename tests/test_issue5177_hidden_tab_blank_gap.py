@@ -158,7 +158,9 @@ def test_ensure_messages_loaded_called_with_keep_stale_flag():
     # cannot skip the swap when stale messages are still in place.
     block = _load_session_block(_compact(SESSIONS_JS))
     # Both INFLIGHT and idle paths.
-    assert block.count("await_ensureMessagesLoaded(sid,{force:_keepStaleUntilLoaded,loadGeneration:_loadGeneration})") == 2
+    # #6712 (gate round 8): both call sites now forward the load ownership token
+    # (generation + switch generation) through one helper instead of re-spelling opts.
+    assert block.count("await_ensureMessagesLoaded(sid,_loadOwnerOpts(_keepStaleUntilLoaded))") == 2
 
 
 def test_ensure_messages_loaded_supports_force_override():
