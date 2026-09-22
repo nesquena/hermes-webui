@@ -554,8 +554,14 @@ def require_ai_agent_class():
     ensure_agent_runtime_current()
     import run_agent  # noqa: PLC0415
 
+    try:
+        agent_class = run_agent.AIAgent
+    except AttributeError as exc:
+        # Preserve the historical lazy-import contract used by gateway-only
+        # startup, whose test/runtime stub intentionally has no AIAgent symbol.
+        raise ImportError("cannot import name 'AIAgent' from 'run_agent'") from exc
     _capture_loaded_agent_revision()
-    guarded = _destination_aware_ai_agent_class(run_agent.AIAgent)
+    guarded = _destination_aware_ai_agent_class(agent_class)
     # Delegation/review/compression paths import this canonical symbol locally
     # after the parent agent is running. Publish the bounded-cached guard there
     # so no in-process constructor can silently recover the undecorated class.
