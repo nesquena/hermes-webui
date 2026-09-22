@@ -30,6 +30,25 @@ This RFC defines a consistency contract for those layers. It complements the
 larger run adapter direction in #1925 by documenting what must remain coherent
 while WebUI still has multiple overlapping state stores.
 
+## Inactive compression continuation recovery
+
+The Agent profile's SQLite compression lineage owns the canonical continuation,
+including when Desktop/CLI compressed a session without updating WebUI's
+`pre_compression_snapshot` sidecar flag. `GET /api/session` may expose the
+existing `continuation_session_id` hint from that read-only lineage. Automatic
+`idle_timeout` closure does not hide the continuation; explicit/unknown terminal
+reasons, foreign-profile rows and delegated/tool children do not authorize it.
+This read does not reopen sessions or copy ancestor display history into context.
+
+A stale `POST /api/chat/start` returns HTTP 409 with `code=session_rotated`
+and the continuation hint before workspace, model, pending-turn or worker
+mutation. The browser loads the continuation through normal session access
+checks and restores the rejected text and attachments as a draft. The user
+sends again explicitly; there is no automatic POST replay or migration of the
+parent's workspace binding. Clients without this handling must reload the
+session before retrying. Server wakeups, regeneration semantics and Gateway
+routing are not silently retargeted by this recovery path.
+
 ## Goals
 
 - Define the state layers involved in active and recovered WebUI turns.

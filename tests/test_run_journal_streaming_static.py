@@ -5,12 +5,16 @@ from api.streaming import _compact_for_echo_compare
 
 def test_streaming_initializes_one_run_journal_writer_per_stream():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
+    worker_idx = src.index("def _run_agent_streaming(")
+    cancel_idx = src.index("cancel_event = threading.Event()", worker_idx)
     register_idx = src.index("register_active_run(")
     writer_idx = src.index("RunJournalWriter(session_id, stream_id)", register_idx)
-    cancel_idx = src.index("cancel_event = threading.Event()", writer_idx)
 
     assert "from api.run_journal import RunJournalWriter" in src
-    assert register_idx < writer_idx < cancel_idx
+    assert src.count("RunJournalWriter(session_id, stream_id)") == 1
+    # The cancellation signal must exist before the run becomes visible, not
+    # be recreated after journal setup (which may overlap an accepted Stop).
+    assert cancel_idx < register_idx < writer_idx
 
 
 def test_streaming_journals_sse_events_before_queue_delivery():

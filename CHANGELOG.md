@@ -5,6 +5,41 @@
 
 ### Fixed
 
+- **Steering a conversation works again after the context is compressed.** When compression
+  rotated `agent.session_id`, a steer could no longer find the active worker: it was either
+  silently dropped or accepted and never delivered. Steers now resolve the owning worker
+  directly rather than relying on a cache lookup that compression invalidates, and every
+  terminal exit — normal completion, returned error, raised exception and self-heal — passes
+  through one idempotent settle boundary, so guidance can no longer be stranded between the
+  final drain and teardown. Two related defects are fixed alongside it: **Stop now actually
+  stops** a run that had already passed preflight (previously the worker could consult a
+  removed registry entry, miss the cancellation, and continue to completion), and a live
+  `finalizing` run is no longer reported as `stream_dead`, which had caused the client to tear
+  down its state while the stream was still alive. Compressed sessions from the CLI, TUI,
+  Desktop and ACP now resume correctly, and installations running an older Agent keep their
+  existing sidecar recovery instead of being left unresumable. Thanks @ruizanthony. (#7546)
+
+- **Slash-command autocomplete stops offering commands the WebUI cannot run.** The composer's
+  `/` menu announced all 51 registered commands, but many are CLI-only — picking one produced
+  a command that went nowhere. The menu now announces only the WebUI-dispatchable subset (16),
+  so the difference shows up where it matters: typing a prefix like `/a` or `/re` no longer
+  fills the list with dead options. Filtering is confined to the suggestion list — manually
+  typing a CLI-only command behaves exactly as before, and plugin commands plus the native
+  `/moa`, `/sessions`, `/resume` and `/pet` remain available. Thanks @webtecnica.
+
+- **Concurrent background completions stop burning the async-delegation delivery budget.**
+  When several delegated runs finished at once and idle-woke the same session together, each
+  wakeup consumed a delivery attempt before discovering the others, so the budget could be
+  exhausted and later completions went undelivered. Admission is now an atomic per-origin
+  test-and-set: a second wakeup for an origin already in flight defers without claiming, so it
+  costs zero budget and stays eligible through durable restore. The reservation is released on
+  every exit — claim failure, formatting failure, dispatch failure, and turn completion — so a
+  failed wakeup cannot wedge an origin. Thanks @webtecnica.
+
+- **Images and files produced during Codex commentary are viewable again.** The Agent's OpenAI Codex Responses adapter persists user-visible assistant progress in `codex_message_items` with `phase: "commentary"` while the outer `content` field stays empty. WebUI's session MEDIA authorization and its snapshot capture both read only that outer field, so a `MEDIA:` token emitted during commentary was invisible to both — the artifact was never authorized for the session token and never snapshotted, leaving the user unable to open a file the assistant had just produced. Both consumers now inspect the commentary sidecars as well. The widening is confined to genuinely assistant-authored, correctly-phased items: role, type, phase and content checks all fail closed, so a user-authored message, a tool result or a malformed item cannot grant a path token. Every existing guard is unchanged — exact-path matching, MIME allow-listing, session ownership, profile visibility and the state/secret hard-deny all still run on anything discovered through the new route, and snapshot capture keeps its confinement without double-capturing an artifact already taken from outer content. Verified against the Agent's real producer shape plus an adversarial probe covering user/wrong-role/wrong-phase, denied-state, wrong-path, duplicate, malformed and 300k-item inputs. Thanks @happy5318. (#7654, #7565)
+
+- **Custom model names containing colons are no longer truncated in the picker.** A model id like `ollamacloud/qwen3.5:397b` was cut at its internal colon, so the picker showed a mangled label and two models that differed only after the colon could render identically. The colon is overloaded here — it separates a `@provider:model` routing lane, and it also appears inside perfectly ordinary model names — so the label builder now takes the catalog as the authority for `@custom` entries and leaves a plain-lane model id whole. Labels are display-only: the original option value survives selection and is dispatched unchanged, so no routing behaviour moves. Catalogued, cold, empty, stale, host:port, leading- and trailing-colon and multi-colon names were each checked to stay non-blank and exception-free. Thanks @webtecnica. (#7401, #7240)
+
 - **Context-compaction cards stay visible in long transcripts.** When a transcript grew past the virtualization window, the compaction markers explaining where context was compressed scrolled out of the rendered range and vanished, leaving no indication that compaction had occurred. Pre-window markers are now preserved and placed deterministically, and card placement is stable across repeated renders and window changes — verified to neither lose nor duplicate a card as the virtual window moves. Hardened during review: the settled current-summary card was created only when *no* compaction marker was loaded at all, so a transcript carrying older markers plus a newer summary that none of them referenced silently dropped the summary the session was actually operating under — marker presence is not proof that any marker matches. The fallback now keys on whether a loaded marker actually references the current summary, and participates in the single preserved-task-owner selection so the repair cannot duplicate the task card. Mid-compression, empty-summary, unmatched-anchor-key, first-compaction and matched-marker cases were each checked, and reverting the guard reproduces the original suppression. Thanks @ruizanthony. (#7124)
 
 - **Editing or duplicating a one-shot cron job no longer returns HTTP 500.** The editable schedule field was populated from `schedule_display`, the human-readable label (`once at 2026-08-28 16:00`), and saving submitted that label straight back. The Agent's schedule parser only accepts the canonical timestamp, so it raised — and the route's existing `ValueError` guard did not cover the `update_job()` call, so the failure escaped as a 500. The field now carries the canonical `run_at` for one-shot jobs, and genuinely unparseable input returns a 400 with the parser's message instead of a server error. Natural-language recurring schedules are preserved verbatim: hardening during review found that preferring the canonical cron expression rewrote a job scheduled as `every monday 9am` into `0 9 * * 1` on every edit or duplicate — and because the Agent rebuilds the display string from whatever is submitted, the rewrite stuck and the user silently lost their phrasing. Only the `once at …` label is unparseable, so every other display form is now kept as typed. Thanks @happy5318. (#7649, #7352)
