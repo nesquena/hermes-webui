@@ -451,6 +451,121 @@ def test_post_collapse_count_still_skips_the_load_when_it_exceeds_the_child(
     assert _contents(reference) == ["child-0", "child-1", "child-2"]
 
 
+def test_save_freezes_messages_and_derived_count_from_one_snapshot(
+    deep_lineage, monkeypatch
+):
+    """A concurrent append/pop cannot split the count from persisted messages."""
+    import json
+    import threading
+
+    import api.models as models
+
+    routes, Session, child = deep_lineage(hops=0, sentinel=True, child_rows=1)
+    original_rows = _turns(5, 1000, "parent")
+    persisted_prefix = [dict(row) for row in original_rows[:2]]
+    parent = Session(
+        session_id="anc_0",
+        title="concurrently mutated sentinel",
+        messages=[dict(row) for row in original_rows],
+    )
+    parent.pre_compression_snapshot = True
+    parent.truncation_watermark = 0.0
+    parent.truncation_boundary = 0.0
+
+    collapse_started = threading.Event()
+    mutation_finished = threading.Event()
+    real_collapse = models._collapse_adjacent_duplicate_partials
+
+    def paused_collapse(messages):
+        collapsed = real_collapse(messages)
+        collapse_started.set()
+        assert mutation_finished.wait(timeout=5), "mutation thread did not complete"
+        return collapsed
+
+    def mutate_messages():
+        assert collapse_started.wait(timeout=5), "save never reached normalization"
+        parent.messages[:] = [dict(row) for row in persisted_prefix]
+        mutation_finished.set()
+
+    monkeypatch.setattr(models, "_collapse_adjacent_duplicate_partials", paused_collapse)
+    mutator = threading.Thread(target=mutate_messages)
+    mutator.start()
+    parent.save()
+    mutator.join(timeout=5)
+    assert not mutator.is_alive()
+
+    parent_path = routes.SESSION_DIR / "anc_0.json"
+    raw = json.loads(parent_path.read_text(encoding="utf-8"))
+    normalized, _ = real_collapse(raw["messages"])
+    assert raw["message_count"] == len(raw["messages"])
+    assert raw["post_collapse_message_count"] == len(normalized)
+    assert raw["messages"] == original_rows
+    monkeypatch.setattr(models, "_collapse_adjacent_duplicate_partials", real_collapse)
+
+    own_row = dict(child.messages[0])
+    child.messages = [*persisted_prefix, own_row, dict(own_row)]
+    child.parent_session_id = "anc_0"
+    child.save()
+
+    fast = routes._webui_sidecar_lineage_messages_for_display(child)
+    routes._lineage_display_cache.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    slow = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert json.dumps(fast, sort_keys=True) == json.dumps(slow, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    "malformed_count",
+    [5.5, "5", True, -1, float("inf")],
+    ids=["fractional", "numeric-string", "boolean", "negative", "non-finite"],
+)
+def test_malformed_post_collapse_count_fails_closed_without_changing_output(
+    deep_lineage, monkeypatch, malformed_count
+):
+    """Only a non-boolean JSON integer may activate the prefix-proof shortcut."""
+    import json
+
+    routes, Session, child = deep_lineage(hops=0, sentinel=True, child_rows=1)
+    _sentinel_parent_with_duplicate_partials(Session, duplicates=4)
+    parent_path = routes.SESSION_DIR / "anc_0.json"
+    raw = json.loads(parent_path.read_text(encoding="utf-8"))
+    raw["post_collapse_message_count"] = malformed_count
+    serialized = json.dumps(raw, ensure_ascii=False, indent=2)
+    if malformed_count == float("inf"):
+        # A finite JSON token may still overflow Python's float parser.
+        serialized = serialized.replace(
+            '"post_collapse_message_count": Infinity',
+            '"post_collapse_message_count": 1e309',
+        )
+    parent_path.write_text(serialized, encoding="utf-8")
+
+    stub = Session.load_metadata_only("anc_0")
+    assert stub is not None
+    assert stub._metadata_post_collapse_message_count is None
+
+    own_row = dict(child.messages[0])
+    child.messages = [
+        {"role": "user", "content": "p-0", "timestamp": 1000.0},
+        _partial_row(1010.0),
+        own_row,
+        dict(own_row),
+    ]
+    child.parent_session_id = "anc_0"
+    child.save()
+
+    loaded = _counting_load(routes, Session, monkeypatch)
+    fast = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert loaded == ["anc_0"], loaded
+
+    routes._lineage_display_cache.clear()
+    loaded.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    slow = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert loaded == ["anc_0"], loaded
+    assert json.dumps(fast, sort_keys=True) == json.dumps(slow, sort_keys=True)
+    assert slow == child.messages
+
+
 def test_mixed_chain_with_contributing_segments_before_the_sentinel(
     deep_lineage, monkeypatch
 ):
