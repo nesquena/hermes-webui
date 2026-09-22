@@ -106,6 +106,61 @@ def test_required_agent_class_is_cached_and_destination_aware(monkeypatch):
     assert getattr(first, "_webui_destination_reasoning_guard", False) is True
 
 
+def test_required_agent_class_replaces_canonical_symbol_and_replays_constructor_clamp(
+    monkeypatch,
+):
+    """Delegation/review local imports must receive the guard after route construction."""
+    from api import agent_runtime
+
+    class RawAgent:
+        @property
+        def base_url(self):
+            return self._base_url
+
+        @base_url.setter
+        def base_url(self, value):
+            self._base_url = value
+
+        def __init__(self, *, model, provider, base_url, reasoning_config):
+            self.model = model
+            self.reasoning_config = reasoning_config
+            self.base_url = base_url
+            self.provider = provider
+
+    run_agent = SimpleNamespace(AIAgent=RawAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", run_agent)
+    agent_config = ModuleType("hermes_cli.config")
+    profile_snapshot = {
+        "model": {"default": "inkling", "provider": "custom:profile-gateway"},
+        "custom_providers": [{
+            "name": "profile-gateway",
+            "models": {"inkling": {"reasoning_efforts": ["high", "max"]}},
+        }],
+    }
+    agent_config.__dict__["load_config_readonly"] = lambda: profile_snapshot
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", agent_config)
+
+    guarded = agent_runtime.require_ai_agent_class()
+    assert run_agent.AIAgent is guarded
+
+    child = run_agent.AIAgent(
+        model="claude-sonnet-4-5",
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        reasoning_config={"enabled": True, "effort": "ultra"},
+    )
+    assert child.reasoning_config["effort"] == "xhigh"
+
+    profiled_child = run_agent.AIAgent(
+        model="inkling",
+        provider="custom:profile-gateway",
+        base_url="https://profile-gateway.invalid/v1",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert profiled_child._webui_reasoning_config_snapshot == profile_snapshot
+    assert profiled_child.reasoning_config["effort"] == "max"
+
+
 def test_api_chat_sync_clamps_transition_through_production_constructor(
     monkeypatch, tmp_path
 ):

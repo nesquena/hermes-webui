@@ -5272,6 +5272,9 @@ def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
     provider_id: str,
+    *,
+    config_data: dict | None = None,
+    capability_confirmed: bool = False,
 ) -> list[str]:
     """Apply provider/model quirks to otherwise valid reasoning effort levels."""
     normalized = [
@@ -5343,8 +5346,12 @@ def _filter_reasoning_efforts_for_provider(
     # unconditional ai-gateway strip above already mapped its ultra down, and
     # ``max`` behavior everywhere is untouched. (#6018 gate 2026-09-09)
     if "ultra" in normalized and not _is_gpt_5_6_family(bare):
-        operator_allow = set(_configured_model_reasoning_efforts(provider, model_id))
-        operator_allow.update(_provider_configured_reasoning_efforts(provider))
+        operator_allow = set(_configured_model_reasoning_efforts(
+            provider, model_id, config_data=config_data
+        ))
+        operator_allow.update(_provider_configured_reasoning_efforts(
+            provider, config_data=config_data
+        ))
         if "ultra" not in operator_allow:
             normalized = [eff for eff in normalized if eff != "ultra"]
     # DEFAULT-DENY for custom/unrecognized providers: their native effort
@@ -5353,10 +5360,14 @@ def _filter_reasoning_efforts_for_provider(
     # authorized them via a provider ``reasoning_efforts`` allowlist. An empty
     # provider id skips this gate: the caller simply didn't name a provider,
     # which is not the same as naming one we don't recognize. (#6018)
-    if provider and not _provider_known_reasoning_capable(provider):
+    if provider and not capability_confirmed and not _provider_known_reasoning_capable(provider):
         # The model-scoped allowlist is the most specific operator authority.
-        allow = set(_configured_model_reasoning_efforts(provider, model_id))
-        allow.update(_provider_configured_reasoning_efforts(provider))
+        allow = set(_configured_model_reasoning_efforts(
+            provider, model_id, config_data=config_data
+        ))
+        allow.update(_provider_configured_reasoning_efforts(
+            provider, config_data=config_data
+        ))
         normalized = [
             eff for eff in normalized
             if eff not in {"max", "ultra"} or eff in allow
@@ -5399,7 +5410,11 @@ def _provider_known_reasoning_capable(provider_id) -> bool:
     prov = _resolve_provider_alias(str(provider_id or "").strip().lower())
     return prov in _KNOWN_REASONING_PROVIDERS
 
-def _provider_configured_reasoning_efforts(provider_id: str) -> list[str]:
+def _provider_configured_reasoning_efforts(
+    provider_id: str,
+    *,
+    config_data: dict | None = None,
+) -> list[str]:
     """Return the explicitly configured reasoning_efforts allowlist for *provider_id*.
 
     Reads ``providers.<name>.reasoning_efforts`` or the matching named
@@ -5411,15 +5426,16 @@ def _provider_configured_reasoning_efforts(provider_id: str) -> list[str]:
     provider = str(provider_id or "").strip().lower()
     if not provider:
         return []
+    source = config_data if isinstance(config_data, dict) else cfg
     entries = None
     try:
         if provider.startswith("custom:"):
-            for entry in _custom_provider_entries():
+            for entry in _custom_provider_entries(source):
                 if _custom_provider_slug_from_name(entry.get("name")) == provider:
                     entries = entry.get("reasoning_efforts")
                     break
         else:
-            prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            prov_entry = (source.get("providers") or {}).get(provider, {})
             if isinstance(prov_entry, dict):
                 entries = prov_entry.get("reasoning_efforts")
     except Exception:
@@ -5523,7 +5539,11 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     return []
 
 
-def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
+def _models_dev_reasoning_efforts(
+    model_id: str,
+    provider_id: str,
+    config_data: dict | None = None,
+) -> list[str] | None:
     """Return reasoning efforts from Hermes Agent model metadata when known.
 
     ``None`` means the metadata source is unavailable or has no answer, so the
@@ -5550,7 +5570,11 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
     if supports_reasoning is True:
         return _filter_reasoning_efforts_for_provider(
-            list(VALID_REASONING_EFFORTS), model, provider
+            list(VALID_REASONING_EFFORTS),
+            model,
+            provider,
+            config_data=config_data,
+            capability_confirmed=True,
         )
     if supports_reasoning is False:
         return []
@@ -5741,11 +5765,34 @@ def _resolve_reasoning_context(
     model_id: str | None,
     provider_id: str | None,
     base_url: str | None,
+    *,
+    config_data: dict | None = None,
 ) -> tuple[str, str, str | None]:
     """Canonicalize the model routing tuple used by reasoning capability gates."""
     model = str(model_id or "").strip()
     provider = str(provider_id or "").strip().lower()
     resolved_base_url = str(base_url or "").strip() or None
+    source = config_data if isinstance(config_data, dict) else None
+    if model and not provider and source is not None:
+        parsed = _parse_provider_qualified_model_id(model)
+        if parsed:
+            model, provider = parsed
+        else:
+            model_cfg = source.get("model")
+            if isinstance(model_cfg, dict):
+                provider = str(model_cfg.get("provider") or "").strip().lower()
+        providers_cfg = source.get("providers")
+        provider_cfg = (
+            providers_cfg.get(provider)
+            if isinstance(providers_cfg, dict) and provider
+            else None
+        )
+        if resolved_base_url is None and isinstance(provider_cfg, dict):
+            resolved_base_url = str(provider_cfg.get("base_url") or "").strip() or None
+        if resolved_base_url is None:
+            model_cfg = source.get("model")
+            if isinstance(model_cfg, dict):
+                resolved_base_url = str(model_cfg.get("base_url") or "").strip() or None
     if model and not provider:
         try:
             resolved_model, resolved_provider, inferred_base_url = resolve_model_provider(model)
@@ -5754,7 +5801,8 @@ def _resolve_reasoning_context(
             if resolved_base_url is None:
                 resolved_base_url = str(inferred_base_url or "").strip() or None
         except Exception:
-            model_cfg = cfg.get("model")
+            source = config_data if isinstance(config_data, dict) else cfg
+            model_cfg = source.get("model")
             if isinstance(model_cfg, dict):
                 provider = str(model_cfg.get("provider") or "").strip().lower()
     return model, _resolve_provider_alias(provider), resolved_base_url
@@ -5770,6 +5818,8 @@ def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
@@ -5780,9 +5830,11 @@ def resolve_model_reasoning_efforts(
     dropdown and streaming coercion therefore agree on every offered level.
     """
     model, provider, resolved_base_url = _resolve_reasoning_context(
-        model_id, provider_id, base_url
+        model_id, provider_id, base_url, config_data=config_data
     )
-    raw = _resolve_model_reasoning_efforts_impl(model, provider, resolved_base_url)
+    raw = _resolve_model_reasoning_efforts_impl(
+        model, provider, resolved_base_url, config_data=config_data
+    )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -5795,7 +5847,11 @@ def resolve_model_reasoning_efforts(
     # the ceiling filter only knows the reasoning LEVELS.
     had_none = "none" in raw
     filtered = _filter_reasoning_efforts_for_provider(
-        [e for e in raw if e != "none"], model, provider
+        [e for e in raw if e != "none"],
+        model,
+        provider,
+        config_data=config_data,
+        capability_confirmed="max" in raw,
     )
     if had_none:
         # Keep 'none' in its original leading position if it was there.
@@ -5830,22 +5886,28 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
     return configured_lists
 
 
-def _configured_model_reasoning_efforts(provider_id: str, model_id: str) -> list[str]:
+def _configured_model_reasoning_efforts(
+    provider_id: str,
+    model_id: str,
+    *,
+    config_data: dict | None = None,
+) -> list[str]:
     """Return the explicit model-level effort allowlist for a provider route."""
     provider = str(provider_id or "").strip().lower()
     model = _strip_provider_hint_for_reasoning(model_id, provider)
+    source = config_data if isinstance(config_data, dict) else cfg
     provider_entry = None
     try:
         if provider.startswith("custom:"):
             provider_entry = next(
                 (
-                    entry for entry in _custom_provider_entries()
+                    entry for entry in _custom_provider_entries(source)
                     if _custom_provider_slug_from_name(entry.get("name")) == provider
                 ),
                 None,
             )
         else:
-            candidate = (cfg.get("providers") or {}).get(provider)
+            candidate = (source.get("providers") or {}).get(provider)
             provider_entry = candidate if isinstance(candidate, dict) else None
     except Exception:
         return []
@@ -5863,6 +5925,8 @@ def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
     model = str(model_id or "").strip()
@@ -5875,7 +5939,8 @@ def _resolve_model_reasoning_efforts_impl(
         try:
             _, provider, resolved_base_url = resolve_model_provider(model)
         except Exception:
-            model_cfg = cfg.get("model")
+            source = config_data if isinstance(config_data, dict) else cfg
+            model_cfg = source.get("model")
             if isinstance(model_cfg, dict):
                 provider = str(model_cfg.get("provider") or "").strip().lower()
 
@@ -5898,17 +5963,18 @@ def _resolve_model_reasoning_efforts_impl(
     # precedence over its provider-level reasoning_efforts list. Explicit valid
     # config is authoritative — no heuristics or models.dev lookup. Invalid or
     # empty model metadata falls through to the provider list, then heuristics.
+    source = config_data if isinstance(config_data, dict) else cfg
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(source):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (source.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5928,7 +5994,9 @@ def _resolve_model_reasoning_efforts_impl(
     # no models.dev lookup.
     # Only short-circuits when the filtered list is non-empty; an all-invalid
     # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
-    _re_list = _provider_configured_reasoning_efforts(provider)
+    _re_list = _provider_configured_reasoning_efforts(
+        provider, config_data=config_data
+    )
     if _re_list:
         _filtered = list(dict.fromkeys(_re_list))
         if _filtered:
@@ -5991,7 +6059,9 @@ def _resolve_model_reasoning_efforts_impl(
                 list(VALID_REASONING_EFFORTS), hinted_model, provider
             )
 
-    metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
+    metadata_efforts = _models_dev_reasoning_efforts(
+        hinted_model, provider, config_data
+    )
     if metadata_efforts is not None:
         return metadata_efforts
 
@@ -6003,13 +6073,15 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> str:
     """Return the closest supported effort for the target model/provider."""
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
     model, provider, resolved_base_url = _resolve_reasoning_context(
-        model_id, provider_id, base_url
+        model_id, provider_id, base_url, config_data=config_data
     )
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled at all — a stored 'none' must coerce to '' (provider default =
@@ -6026,6 +6098,7 @@ def coerce_reasoning_effort_for_model(
         model,
         provider_id=provider,
         base_url=resolved_base_url,
+        config_data=config_data,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -6036,7 +6109,11 @@ def coerce_reasoning_effort_for_model(
     # excludes the requested level, degrade down the ladder even when the sourced
     # list is empty or overly broad.
     ceiling = _filter_reasoning_efforts_for_provider(
-        list(VALID_REASONING_EFFORTS), model, provider
+        list(VALID_REASONING_EFFORTS),
+        model,
+        provider,
+        config_data=config_data,
+        capability_confirmed="max" in supported,
     )
     # For a NAMED unknown/custom provider whose top-tier request was denied by
     # the default-deny gate (no explicit provider/model allowlist — otherwise
@@ -6159,12 +6236,16 @@ def get_reasoning_status(
                 resolve_base_url = str(model_cfg["base_url"]).strip()
 
     resolve_model, resolve_provider, resolve_base_url = _resolve_reasoning_context(
-        resolve_model, resolve_provider, resolve_base_url
+        resolve_model,
+        resolve_provider,
+        resolve_base_url,
+        config_data=config_data,
     )
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,
         provider_id=resolve_provider,
         base_url=resolve_base_url,
+        config_data=config_data,
     )
     # supports_thinking_toggle: can the user turn thinking on/off at all? An
     # effort-capable model obviously can. The ZAI gate separately exposes the
@@ -6187,6 +6268,7 @@ def get_reasoning_status(
             resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
+            config_data=config_data,
         ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),

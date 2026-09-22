@@ -313,6 +313,62 @@ def test_actual_metadata_ladder_retains_max(monkeypatch):
     ) == "max"
 
 
+def test_metadata_confirmed_deepinfra_ladder_retains_max(monkeypatch):
+    """Installed canonical providers may prove max support via model metadata."""
+    monkeypatch.setattr(
+        cfg,
+        "_models_dev_reasoning_efforts",
+        lambda *args, **kwargs: ["minimal", "low", "medium", "high", "xhigh", "max"],
+    )
+
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "DeepSeek-V4-Flash", provider_id="deepinfra"
+    )
+
+    assert "max" in efforts
+    assert "ultra" not in efforts
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "DeepSeek-V4-Flash", provider_id="deepinfra"
+    ) == "max"
+
+
+def test_named_profile_snapshot_owns_reasoning_allowlists(monkeypatch, tmp_path):
+    """A named profile must not borrow module-global provider capability config."""
+    named = {
+        "agent": {"reasoning_effort": "max"},
+        "model": {"default": "inkling", "provider": "custom:profile-gateway"},
+        "custom_providers": [{
+            "name": "profile-gateway",
+            "models": {"inkling": {"reasoning_efforts": ["high", "max"]}},
+        }],
+    }
+    monkeypatch.setattr(cfg, "cfg", {
+        "model": {"default": "other", "provider": "custom:other-gateway"},
+        "custom_providers": [{
+            "name": "other-gateway",
+            "models": {"other": {"reasoning_efforts": ["high"]}},
+        }],
+    })
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(__import__("yaml").safe_dump(named), encoding="utf-8")
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+
+    assert cfg.resolve_model_reasoning_efforts(
+        "inkling",
+        provider_id="custom:profile-gateway",
+        config_data=named,
+    ) == ["high", "max"]
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max",
+        "inkling",
+        provider_id="custom:profile-gateway",
+        config_data=named,
+    ) == "max"
+    status = cfg.get_reasoning_status()
+    assert status["supported_efforts"] == ["high", "max"]
+    assert status["reasoning_effort"] == "max"
+
+
 def test_copilot_standalone_fallback_caps_gpt56(monkeypatch):
     import builtins
 
