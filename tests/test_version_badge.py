@@ -140,13 +140,13 @@ class TestDetectWebUIVersion:
             calls.append((args, timeout))
             if args[:3] == ['describe', '--tags', '--always']:
                 return ('v0.50.123', True)
-            if args[:2] == ['diff-index', '--quiet']:
+            if args[:2] == ['diff', '--quiet']:
                 return ('git exited with status 1', False)
             return ('unexpected', False)
 
         result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
         assert result == 'v0.50.123-dirty'
-        assert calls[1][0][:2] == ['diff-index', '--quiet']
+        assert calls[1][0][:2] == ['diff', '--quiet']
 
     def test_dirty_check_hashes_tracked_diff_when_available(self, tmp_path):
         """Dirty dev-build asset URLs should change on each tracked diff edit."""
@@ -160,7 +160,7 @@ class TestDetectWebUIVersion:
             calls.append((args, timeout))
             if args[:3] == ['describe', '--tags', '--always']:
                 return ('v0.50.123', True)
-            if args[:2] == ['diff-index', '--quiet']:
+            if args[:2] == ['diff', '--quiet']:
                 return ('git exited with status 1', False)
             if args[:3] == ['diff', '--binary', 'HEAD']:
                 return (diff, True)
@@ -175,7 +175,7 @@ class TestDetectWebUIVersion:
         def fake_run_git(args, cwd, timeout=10):
             if args[:3] == ['describe', '--tags', '--always']:
                 return ('v0.50.123', True)
-            if args[:2] == ['diff-index', '--quiet']:
+            if args[:2] == ['diff', '--quiet']:
                 return ('git exited with status 1', False)
             if args[:3] == ['diff', '--binary', 'HEAD']:
                 return ('git diff timed out after 1s', False)
@@ -213,8 +213,8 @@ class TestDetectWebUIVersion:
         def fake_run_git(args, cwd, timeout=10):
             if args[:3] == ['describe', '--tags', '--always']:
                 return ('v0.50.123', True)
-            if args[:2] == ['diff-index', '--quiet']:
-                return ('git diff-index --quiet HEAD -- timed out after 1s', False)
+            if args[:2] == ['diff', '--quiet']:
+                return ('git diff --quiet HEAD -- timed out after 1s', False)
             return ('unexpected', False)
 
         result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)

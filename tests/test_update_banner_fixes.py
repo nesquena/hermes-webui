@@ -2363,6 +2363,7 @@ if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) t
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
         dirty_fn = extract_js_function(src, '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(src, '_isForceCleanTarget')
         show_fn = extract_js_function(src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -2382,6 +2383,7 @@ global.t = (key, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{predicate_fn}
 {dirty_fn}
 {show_fn}
 _showUpdateBanner({{
@@ -3373,10 +3375,12 @@ class TestCheckForUpdatesButton:
     def test_formatUpdateDirtyStatus_returns_null_for_clean_install(self):
         """#4085: clean install at latest → no dirty status part."""
         format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(read('static/ui.js'), '_isForceCleanTarget')
         instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
         script = f"""
 global.window = {{}};
 const $ = (id) => null;
+{predicate_fn}
 {instruction_fn}
 {format_fn}
 const out = _formatUpdateDirtyStatus('WebUI', {{
@@ -3392,6 +3396,7 @@ if (out !== null) throw new Error('clean install must return null, got: ' + out)
     def test_formatUpdateDirtyStatus_returns_label_for_dirty_at_latest(self):
         """#4085: dirty install at latest → "Local changes detected" label."""
         format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(read('static/ui.js'), '_isForceCleanTarget')
         instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
         script = f"""
 global.window = {{}};
@@ -3404,6 +3409,7 @@ global.t = (key, fallback, ...args) => {{
   return ((values[key] || fallback || key) + '').replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }};
 {instruction_fn}
+{predicate_fn}
 {format_fn}
 const out = _formatUpdateDirtyStatus('WebUI', {{
   dirty: true,
@@ -3420,11 +3426,13 @@ if (out.indexOf('WebUI') === -1) throw new Error('dirty+current label must inclu
     def test_formatUpdateDirtyStatus_skips_when_behind_present(self):
         """#4085: dirty+behind is covered by the upstream banner, not the dirty one."""
         format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(read('static/ui.js'), '_isForceCleanTarget')
         instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
         script = f"""
 global.window = {{}};
 const $ = (id) => null;
 {instruction_fn}
+{predicate_fn}
 {format_fn}
 const out = _formatUpdateDirtyStatus('WebUI', {{
   dirty: true,
@@ -3441,11 +3449,13 @@ if (out !== null) throw new Error('dirty+behind must defer to the upstream banne
         /api/updates/force endpoint refuses those targets anyway, so the
         helper must not surface a force action for them."""
         format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(read('static/ui.js'), '_isForceCleanTarget')
         instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
         script = f"""
 global.window = {{}};
 const $ = (id) => null;
 {instruction_fn}
+{predicate_fn}
 {format_fn}
 const out1 = _formatUpdateDirtyStatus('WebUI', {{ dirty: true, behind: 0, no_git: true }});
 if (out1 !== null) throw new Error('dirty+no_git must return null, got: ' + out1);
@@ -3458,11 +3468,13 @@ if (out2 !== null) throw new Error('dirty+manual_update must return null, got: '
         """#4085: stale-check errors get their own surface; do not pile a dirty
         banner on top."""
         format_fn = extract_js_function(read('static/ui.js'), '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(read('static/ui.js'), '_isForceCleanTarget')
         instruction_fn = extract_js_function(read('static/ui.js'), '_formatManualUpdateInstruction')
         script = f"""
 global.window = {{}};
 const $ = (id) => null;
 {instruction_fn}
+{predicate_fn}
 {format_fn}
 const out = _formatUpdateDirtyStatus('WebUI', {{
   dirty: true,
@@ -3482,6 +3494,7 @@ if (out !== null) throw new Error('dirty+error must defer to the error surface, 
         format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
         dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(ui_src, '_isForceCleanTarget')
         show_fn = extract_js_function(ui_src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -3505,6 +3518,7 @@ global.t = (key, fallback, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{predicate_fn}
 {dirty_fn}
 {show_fn}
 _showUpdateBanner({{
@@ -3536,6 +3550,7 @@ if (state.updateMsg.textContent.indexOf('Local changes detected') === -1) throw 
         format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
         dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(ui_src, '_isForceCleanTarget')
         show_fn = extract_js_function(ui_src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -3559,6 +3574,7 @@ global.t = (key, fallback, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{predicate_fn}
 {dirty_fn}
 {show_fn}
 _showUpdateBanner({{
@@ -3585,6 +3601,7 @@ if (state.btnForceUpdate.dataset.target === 'webui') throw new Error('clean+curr
         format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
         dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(ui_src, '_isForceCleanTarget')
         show_fn = extract_js_function(ui_src, '_showUpdateBanner')
         script = f"""
 const state = {{
@@ -3608,6 +3625,7 @@ global.t = (key, fallback, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{predicate_fn}
 {dirty_fn}
 {show_fn}
 _showUpdateBanner({{
@@ -3646,9 +3664,18 @@ if (state.updateMsg.textContent.indexOf('WebUI') === -1) throw new Error('dirty+
         # btnForceUpdate (which forceUpdate reads) and not a separate
         # code path.
         assert "btnForceUpdate" in show_block, "show banner must reference btnForceUpdate"
-        assert "dataset.target='webui'" in show_block, (
-            "dirty path must set dataset.target='webui' so the channel-aware "
-            "forceUpdate() body at line ~10838 reads window._updateData correctly"
+        # #7679 SILENT #4: the target is now DERIVED from the shared predicate
+        # (a webui-dirty payload targets webui; an agent-only dirty payload
+        # targets agent), so the literal assignment moved into forceTarget.
+        # What must not regress is that the button is driven off a target
+        # variable rather than being wired to a hardcoded one.
+        assert "dataset.target=forceTarget" in show_block, (
+            "dirty path must set the force button's target from the shared "
+            "predicate-derived forceTarget so forceUpdate()'s channel-aware "
+            "body reads window._updateData[target] for the right checkout"
+        )
+        assert "'webui'" in show_block and "'agent'" in show_block, (
+            "both force targets must be selectable (SILENT #4)"
         )
 
     def test_forceUpdate_body_includes_channel_for_dirty_path(self):
@@ -3681,4 +3708,253 @@ if (state.updateMsg.textContent.indexOf('WebUI') === -1) throw new Error('dirty+
             "is forceUpdate()'s job and gates on a user-initiated click + "
             "danger confirm"
         )
+
+    # ── #7679 reviewer CORE #2: force button must reset on every render ──
+
+    _RESET_HARNESS = r"""
+const state = {{
+  updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
+  updateMsg: {{ textContent: '' }},
+  updateError: {{ textContent: '', style: {{ display: 'none' }} }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'none' }}, dataset: {{ target: '' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'none' }}, dataset: {{ target: '' }} }},
+  updateWhatsNewLinks: {{ style: {{ display: 'none' }}, replaceChildren() {{ this.cleared = true; }} }},
+}};
+global.window = {{}};
+global.$ = (id) => state[id] || null;
+global._renderUpdateWhatsNewLinks = () => {{}};
+global.t = (key, fallback, ...args) => {{
+  const values = {{
+    update_dirty_local_changes: 'Local changes detected',
+    update_force: 'Force update',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+  }};
+  return ((values[key] || fallback || key) + '').replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}};
+{format_fn}
+{instruction_fn}
+{predicate_fn}
+{dirty_fn}
+{show_fn}
+const hidden = () => state.btnForceUpdate.style.display === 'none';
+const untargeted = () => state.btnForceUpdate.dataset.target === '';
+const disabledFlag = () => state.btnForceUpdate.disabled === true;
+"""
+
+    def _run_reset_harness(self, state_updates):
+        """Run _showUpdateBanner over an ordered list of payload updates."""
+        ui_src = read('static/ui.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        dirty_fn = extract_js_function(ui_src, '_formatUpdateDirtyStatus')
+        predicate_fn = extract_js_function(ui_src, '_isForceCleanTarget')
+        show_fn = extract_js_function(ui_src, '_showUpdateBanner')
+        script = self._RESET_HARNESS.format(
+            format_fn=format_fn,
+            instruction_fn=instruction_fn,
+            dirty_fn=dirty_fn,
+            predicate_fn=predicate_fn,
+            show_fn=show_fn,
+        ) + state_updates
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_webui_error_plus_agent_update_hides_webui_force_button(self):
+        """#7679 reviewer CORE #2: a WebUI fetch error + Agent update must NOT
+        leave the destructive force button exposed on the WebUI target.
+
+        ``webuiDirty`` never read ``error``, so a stale-check payload still
+        satisfied it and the button stayed visible — but /api/updates/force
+        does not offer a webui reset on that payload, so the operator would
+        have been handed a destructive action that discards local changes
+        for a state the check could not even establish.
+        """
+        self._run_reset_harness("""
+_showUpdateBanner({
+  webui: { dirty: true, behind: 0, error: 'fetch failed: connection refused' },
+  agent: { behind: 3 },
+});
+// The banner must render the Agent update, not a webui destructive action.
+if (state.updateMsg.textContent.indexOf('Agent') === -1) throw new Error('agent update must still banner: ' + state.updateMsg.textContent);
+if (state.updateMsg.textContent.indexOf('Local changes detected') !== -1) throw new Error('webui error must not also banner a dirty state');
+// Force button hidden and detargeted.
+if (!hidden()) throw new Error('webui error + agent update must hide the force button, got display=' + state.btnForceUpdate.style.display);
+if (!untargeted()) throw new Error('webui error must clear the force target, got: ' + state.btnForceUpdate.dataset.target);
+// Apply is still available for the Agent target.
+if (state.btnApplyUpdate.style.display !== '') throw new Error('agent update must keep apply available');
+""")
+
+    def test_dirty_then_clean_then_ordinary_update_resets_force_button(self):
+        """#7679 reviewer CORE #2: dirty -> clean -> agent update must not
+        leave the destructive button visible for the now-clean WebUI repo.
+
+        The old code only ever SHOWED the button, so a stale button from a
+        previous dirty check survived into an unrelated state.
+        """
+        self._run_reset_harness("""
+// 1) dirty at latest — destructive recovery path is legitimately exposed.
+_showUpdateBanner({ webui: { dirty: true, behind: 0 }, agent: null });
+if (hidden()) throw new Error('step 1: dirty-at-latest must expose the force button');
+if (state.btnForceUpdate.dataset.target !== 'webui') throw new Error('step 1: force button must target webui');
+// 2) a later clean check must hide it again.
+_showUpdateBanner({ webui: { dirty: false, behind: 0 }, agent: null });
+if (!hidden()) throw new Error('step 2: clean+current must hide the force button, got display=' + state.btnForceUpdate.style.display);
+if (!untargeted()) throw new Error('step 2: clean+current must clear the force target, got: ' + state.btnForceUpdate.dataset.target);
+if (state.btnForceUpdate.disabled !== true) throw new Error('step 2: force button must stay disabled while hidden');
+// 3) and an unrelated (Agent-only) update must not resurrect it.
+_showUpdateBanner({ webui: { dirty: false, behind: 0 }, agent: { behind: 2 } });
+if (!hidden()) throw new Error('step 3: agent-only update must leave the webui force button hidden');
+if (!untargeted()) throw new Error('step 3: agent-only update must not retarget the force button, got: ' + state.btnForceUpdate.dataset.target);
+if (state.updateMsg.textContent.indexOf('Agent') === -1) throw new Error('step 3: agent update must still banner');
+// Clear-lock must not be resurrected either — it is not a dirty-state control.
+if (state.btnClearUpdateLock.style.display !== 'none') throw new Error('step 3: clear-lock must stay hidden, got display=' + state.btnClearUpdateLock.style.display);
+""")
+
+
+    # ── #7679 reviewer SILENT #4: Agent-only dirty state ──
+
+    def test_agent_only_dirty_install_exposes_force_button_for_agent(self):
+        """#7679 reviewer SILENT #4: an Agent-only dirty install used to render
+        "Agent: Local changes detected" in the banner text while the force
+        button remained WebUI-only — i.e. banner copy promising a recovery
+        action the button could not perform.
+
+        /api/updates/force accepts ``agent``, so the button must target the
+        agent checkout instead of pointing at a WebUI the payload never
+        reported dirty.
+        """
+        self._run_reset_harness("""
+_showUpdateBanner({ webui: null, agent: { dirty: true, behind: 0 } });
+// The banner must name the Agent dirty state.
+if (state.updateMsg.textContent.indexOf('Agent') === -1) throw new Error('agent dirty must banner, got: ' + state.updateMsg.textContent);
+if (state.updateMsg.textContent.indexOf('Local changes detected') === -1) throw new Error('agent dirty must carry the dirty label, got: ' + state.updateMsg.textContent);
+// ...and the destructive button must actually target the AGENT.
+if (hidden()) throw new Error('agent-only dirty must expose the force button');
+if (state.btnForceUpdate.dataset.target !== 'agent') throw new Error('agent-only dirty must target agent, got: ' + state.btnForceUpdate.dataset.target);
+if (disabledFlag()) throw new Error('agent-only dirty must leave the force button enabled, disabled=' + state.btnForceUpdate.disabled);
+""")
+
+    def test_both_dirty_prefers_webui_target_but_lists_both_banner_parts(self):
+        """#7679 reviewer SILENT #4: define an explicit policy for the
+        both-dirty case rather than leaving it to chance.
+
+        Policy: WebUI wins the single destructive button's target (it is
+        the checkout the Settings panel the user is looking at belongs to),
+        while the banner TEXT still lists both dirty states so neither
+        silent-loss.
+        """
+        self._run_reset_harness("""
+_showUpdateBanner({
+  webui: { dirty: true, behind: 0 },
+  agent: { dirty: true, behind: 0 },
+});
+// Button target is decided, not ambiguous.
+if (hidden()) throw new Error('both-dirty must expose the force button');
+if (state.btnForceUpdate.dataset.target !== 'webui') throw new Error('both-dirty must prefer the webui target, got: ' + state.btnForceUpdate.dataset.target);
+// Both banner parts survive — the operator sees BOTH dirty checkouts.
+const msg = state.updateMsg.textContent;
+if (msg.indexOf('WebUI') === -1) throw new Error('both-dirty banner must list the WebUI state, got: ' + msg);
+if (msg.indexOf('Agent') === -1) throw new Error('both-dirty banner must list the Agent state, got: ' + msg);
+""")
+
+    def test_agent_clean_webui_dirty_targets_webui(self):
+        """#7679 reviewer SILENT #4 counterpart: a clean Agent must never steal
+        the target when only the WebUI is dirty."""
+        self._run_reset_harness("""
+_showUpdateBanner({ webui: { dirty: true, behind: 0 }, agent: { dirty: false, behind: 0 } });
+if (hidden()) throw new Error('webui-only dirty must expose the force button');
+if (state.btnForceUpdate.dataset.target !== 'webui') throw new Error('webui-only dirty must target webui, got: ' + state.btnForceUpdate.dataset.target);
+""")
+
+    def test_neither_dirty_leaves_force_button_hidden(self):
+        """#7679 reviewer SILENT #4 boundary: two clean checkouts get no
+        destructive action at all (no true-ANY-where propagation)."""
+        self._run_reset_harness("""
+_showUpdateBanner({ webui: { dirty: false, behind: 0 }, agent: { dirty: false, behind: 0 } });
+if (!hidden()) throw new Error('all-clean must hide the force button, got display=' + state.btnForceUpdate.style.display);
+if (!untargeted()) throw new Error('all-clean must clear the force target, got: ' + state.btnForceUpdate.dataset.target);
+""")
+
+    # ── #7679 reviewer SILENT #3: boot-time check must surface dirty ──
+
+    def test_payload_predicate_covers_dirty_at_latest(self):
+        """#7679 reviewer SILENT #3: ``_updatePayloadHasActionableState`` gates
+        the unattended boot-time check. It must return true for a
+        dirty-at-latest payload, which the old ``behind > 0`` test dropped."""
+        ui_src = read('static/ui.js')
+        predicate_fn = extract_js_function(ui_src, '_isForceCleanTarget')
+        has_fn = extract_js_function(ui_src, '_updatePayloadHasActionableState')
+        script = f"""
+{predicate_fn}
+{has_fn}
+// dirty-at-latest on the WebUI checkout.
+if (_updatePayloadHasActionableState({{ webui: {{ dirty: true, behind: 0 }}, agent: null }}) !== true)
+  throw new Error('dirty-at-latest webui payload must be actionable');
+// dirty-at-latest on the Agent checkout.
+if (_updatePayloadHasActionableState({{ webui: null, agent: {{ dirty: true, behind: 0 }} }}) !== true)
+  throw new Error('dirty-at-latest agent payload must be actionable');
+// real updates still count.
+if (_updatePayloadHasActionableState({{ webui: {{ behind: 2 }}, agent: null }}) !== true)
+  throw new Error('behind>0 payload must stay actionable');
+if (_updatePayloadHasActionableState({{ webui: null, agent: {{ behind: 1 }} }}) !== true)
+  throw new Error('agent behind>0 payload must stay actionable');
+// and the negatives: an all-clean payload is NOT actionable, so the
+// boot check does not raise a banner for "up to date".
+if (_updatePayloadHasActionableState({{ webui: {{ dirty: false, behind: 0 }}, agent: {{ dirty: false, behind: 0 }} }}) !== false)
+  throw new Error('all-clean payload must not be actionable');
+// error-only and no-git-only payloads have their own surfaces.
+if (_updatePayloadHasActionableState({{ webui: {{ error: 'fetch failed' }}, agent: null }}) !== false)
+  throw new Error('error-only payload must not be actionable');
+if (_updatePayloadHasActionableState({{ webui: {{ no_git: true }}, agent: null }}) !== false)
+  throw new Error('no_git-only payload must not be actionable');
+// dirty + behind is covered by the behind branch already.
+if (_updatePayloadHasActionableState({{ webui: {{ dirty: true, behind: 3 }}, agent: null }}) !== true)
+  throw new Error('dirty+behind payload must stay actionable');
+// null/empty payload must not throw.
+if (_updatePayloadHasActionableState(null) !== false) throw new Error('null payload must not be actionable');
+if (_updatePayloadHasActionableState({{}}) !== false) throw new Error('empty payload must not be actionable');
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_boot_auto_check_uses_payload_predicate(self):
+        """#7679 reviewer SILENT #3: the boot-time check must route its banner
+        decision through ``_updatePayloadHasActionableState`` instead of the
+        inline ``behind > 0`` test, so a dirty-at-latest payload reaches the
+        banner without a manual Settings visit.
+        """
+        boot = read('static/boot.js')
+        idx = boot.index("api(_checkUrl,{method:_testUpdates?'GET':'POST'")
+        # The decision must reference the shared predicate, not the old test.
+        assert '_updatePayloadHasActionableState' in boot[idx:idx + 600], (
+            'boot auto-check must gate the banner on _updatePayloadHasActionableState'
+        )
+        # And the old inline-only condition must not gate it any more.
+        decision = boot[idx:idx + 600]
+        assert "(d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0)))_showUpdateBanner" not in decision, (
+            'boot auto-check must not gate the banner on behind>0 alone'
+        )
+        # The predicate must live in ui.js, which boot.js never loads
+        # before (index.html defers ui.js ahead of boot.js).
+        ui = read('static/ui.js')
+        assert 'function _updatePayloadHasActionableState(' in ui
+        html = read('static/index.html')
+        ui_at = html.index('static/ui.js?v=')
+        boot_at = html.index('static/boot.js?v=')
+        assert ui_at < boot_at, 'ui.js must load before boot.js'
+
+    def test_force_button_hides_when_payload_stops_being_forceable(self):
+        """#7679 reviewer CORE #2: manual_update / no_git installs have no
+        checkout to reset, so the destructive button must be hidden and
+        detargeted even when `dirty: true` is still in the payload."""
+        self._run_reset_harness("""
+// manual_update install
+_showUpdateBanner({ webui: { dirty: true, behind: 0, manual_update: true }, agent: null });
+if (!hidden()) throw new Error('manual_update must hide the force button, got display=' + state.btnForceUpdate.style.display);
+if (!untargeted()) throw new Error('manual_update must clear the force target');
+// no_git install
+_showUpdateBanner({ webui: { dirty: true, behind: 0, no_git: true }, agent: null });
+if (!hidden()) throw new Error('no_git must hide the force button, got display=' + state.btnForceUpdate.style.display);
+if (!untargeted()) throw new Error('no_git must clear the force target');
+""")
+
 
