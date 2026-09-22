@@ -13954,12 +13954,73 @@ def _handle_session_get(handler, parsed) -> bool:
         return j(handler, {"session": public_session_projection(sess)})
 
 
+def _installation_config_path():
+    """#7611: resolve the INSTALLATION-scoped ``config.yaml`` path.
+
+    The instance label is installation-scoped, so it must never be read
+    from the *request* profile's ``config.yaml`` (which is what the
+    ambient ``get_config()`` resolves). Resolution order:
+
+      1. ``HERMES_CONFIG_PATH`` when set — the same explicit,
+         deployment-level override the rest of the config layer honours.
+      2. ``<base Hermes home>/config.yaml`` — the root that *contains*
+         ``profiles/``, never the active profile's home.
+    """
+    override = (os.getenv("HERMES_CONFIG_PATH") or "").strip()
+    if override:
+        try:
+            return Path(override).expanduser()
+        except Exception:
+            return None
+    try:
+        # _DEFAULT_HERMES_HOME is the base root (it unwraps a
+        # */profiles/<name> HERMES_HOME), so this is profile-independent.
+        from api.profiles import _DEFAULT_HERMES_HOME as _BASE_HERMES_HOME
+
+        return Path(_BASE_HERMES_HOME).expanduser() / "config.yaml"
+    except Exception:
+        return None
+
+
+def _read_installation_config() -> dict:
+    """#7611: read the installation-scoped ``config.yaml`` straight off disk.
+
+    Deliberately bypasses the ambient ``get_config()`` — that resolves the
+    *request* profile's file, so on one installation the default profile
+    and a named profile could disagree on the label, which is exactly the
+    profile-scoping this feature exists to avoid (re-gate finding 1).
+
+    Reading the file directly also keeps this race-safe: no process-global
+    ``_cfg_cache`` is consulted or mutated, so concurrent requests on
+    different profiles cannot observe a half-swapped cache. The bytes are
+    read once and parsed from memory, so a concurrent atomic write
+    (write-temp + rename) can never yield a torn document — the worst case
+    is a parse failure that degrades to ``{}``, never a 500 on
+    ``/api/settings``.
+    """
+    path = _installation_config_path()
+    if path is None:
+        return {}
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        # Missing / unreadable — indistinguishable from "no label set".
+        return {}
+    try:
+        import yaml as _yaml
+
+        loaded = _yaml.safe_load(raw.decode("utf-8", "replace"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _read_instance_label() -> str:
     """#7611: installation-scoped instance label used to distinguish
     multi-instance browser tabs and desktop windows. Order of
-    precedence: env var ``HERMES_WEBUI_INSTANCE_NAME``, then
-    ``config.yaml``'s top-level ``instance_name`` or nested
-    ``webui.instance_name``. The label is installation-scoped —
+    precedence: env var ``HERMES_WEBUI_INSTANCE_NAME``, then the
+    installation-scoped ``config.yaml``'s top-level ``instance_name`` or
+    nested ``webui.instance_name``. The label is installation-scoped —
     never editable from the WebUI settings UI (a per-profile
     value would defeat the multi-instance use case because the
     profile name is already shown in the profile chip and
@@ -13968,18 +14029,14 @@ def _read_instance_label() -> str:
     label = (os.getenv("HERMES_WEBUI_INSTANCE_NAME") or "").strip()
     if label:
         return label
-    try:
-        from api.config import get_config
-        cfg = get_config() or {}
-        candidates = (
-            cfg.get("instance_name"),
-            (cfg.get("webui") or {}).get("instance_name") if isinstance(cfg.get("webui"), dict) else None,
-        )
-        for cand in candidates:
-            if isinstance(cand, str) and cand.strip():
-                return cand.strip()
-    except Exception:
-        pass
+    cfg = _read_installation_config()
+    candidates = (
+        cfg.get("instance_name"),
+        (cfg.get("webui") or {}).get("instance_name") if isinstance(cfg.get("webui"), dict) else None,
+    )
+    for cand in candidates:
+        if isinstance(cand, str) and cand.strip():
+            return cand.strip()
     return ""
 
 

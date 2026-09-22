@@ -3075,9 +3075,22 @@ function applyBotName(){
   // window title. The label is read-only and never edits
   // bot_name or the profile identity; an empty label leaves the
   // default title untouched.
+  //
+  // The prefix is applied ONLY inside the !S.session branch: that
+  // branch is the one that just wrote the bare `name` into
+  // document.title, so prefixing there cannot stack on a title
+  // some other owner already composed. #4086 deliberately left
+  // document.title alone while a chat session is active so
+  // syncTopbar() stays the sole owner of the per-session
+  // "<session> — <assistant>" title — applyBotName() fires on
+  // every profile switch and boot refresh, so an unconditional
+  // prefix would accumulate ("A • A • A • …") and would also
+  // clobber the session title.
   const _instanceLabel=(window._instanceLabel||'').trim();
-  if(!S.session) document.title=name;
-  if(_instanceLabel) document.title=_instanceLabel+' \u2022 '+document.title;
+  if(!S.session){
+    document.title=name;
+    if(_instanceLabel) document.title=_instanceLabel+' \u2022 '+document.title;
+  }
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
   const logo=document.querySelector('.sidebar-header .logo');
