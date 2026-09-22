@@ -372,6 +372,9 @@ LEGITIMATE_PERSISTED_TITLES = (
     "Understanding 3-8 Words in Regex",
     "The Good Title Debate",
     "A Good Title for Your Novel",
+    "Something Like Summer Discussion",
+    '"Merge" or "Rebase" in Git',
+    "Parsing <analysis> Tags",
 )
 
 SCREENSHOT_PERSISTED_TRACES = (
@@ -400,6 +403,65 @@ def test_persisted_title_check_accepts_ordinary_subject_matter(candidate):
         ],
     )
     assert streaming._background_title_generation_inputs(session) is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        "Something Like Summer Discussion",
+        '"Merge" or "Rebase" in Git',
+        "Parsing <analysis> Tags",
+    ),
+)
+def test_persisted_subject_matter_survives_normal_send(candidate, monkeypatch):
+    session = types.SimpleNamespace(
+        session_id="title-false-positive-persist",
+        title=candidate,
+        llm_title_generated=True,
+        manual_title=False,
+        messages=[
+            {"role": "user", "content": "Explain the topic."},
+            {"role": "assistant", "content": "Here is the explanation."},
+        ],
+        save=MagicMock(),
+    )
+    events = []
+    monkeypatch.setattr(streaming, "get_session", lambda _session_id: session)
+    monkeypatch.setattr(streaming, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(streaming, "LOCK", threading.Lock())
+    monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: True)
+    monkeypatch.setattr(
+        streaming,
+        "_generate_llm_session_title_via_aux",
+        lambda *_args, **_kwargs: ("Silent Rename Victim", "llm_aux", "Silent Rename Victim"),
+    )
+    monkeypatch.setattr(
+        "api.profiles.profile_env_for_background_worker",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+
+    streaming._run_background_title_update(
+        session_id=session.session_id,
+        user_text="Explain the topic.",
+        assistant_text="Here is the explanation.",
+        placeholder_title="Untitled",
+        put_event=lambda name, data: events.append((name, data)),
+        agent=None,
+    )
+
+    assert session.title == candidate
+    session.save.assert_not_called()
+    status = [data for name, data in events if name == "title_status"]
+    assert status[-1]["status"] == "skipped"
+    assert status[-1]["reason"] == "already_generated"
+
+
+def test_new_candidates_still_reject_embedded_traces_and_quoted_alternatives():
+    assert streaming._sanitize_generated_title("Parsing <analysis> Tags") == ""
+    assert streaming._sanitize_generated_title('"Merge" or "Rebase" in Git') == ""
+    assert streaming._looks_invalid_generated_title("Parsing <analysis> Tags") is False
+    assert streaming._looks_invalid_generated_title('"Merge" or "Rebase" in Git') is False
 
 
 @pytest.mark.parametrize("candidate", SCREENSHOT_PERSISTED_TRACES)

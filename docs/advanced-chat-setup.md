@@ -85,9 +85,10 @@ Generated candidates are rejected rather than truncated when they resemble
 reasoning/meta commentary or exceed twelve words; rejected candidates fall
 through to the existing title retry or local-summary behavior. Fresh candidates
 also reject prompt-echo phrases such as `maybe`, `topic label`, and `3-8 words`.
-Already-persisted titles use a narrower structural check (thinking/analysis
-wrappers and leading meta-commentary) so ordinary subject matter is not
-silently regenerated on later turns.
+Already-persisted titles use a narrower structural check (leading thinking/analysis
+wrappers, a full "The title should…" sentence, or candidate-list syntax) so ordinary
+subject matter is not silently regenerated on later turns. Embedded wrappers,
+quoted alternatives, and bullet lists still reject fresh candidates.
 
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):

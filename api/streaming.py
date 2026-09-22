@@ -3918,7 +3918,7 @@ def _sanitize_generated_title(text: str) -> str:
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
     # Check the untrimmed candidate first so wrapping quotes remain available
     # to the quoted-alternatives guard below.
-    if _looks_invalid_generated_title(s):
+    if _is_bad_new_title(s):
         return ''
     s = s.strip().strip("\"'`*_~").strip()
     s = re.sub(r'\s+', ' ', s).strip()
@@ -3931,10 +3931,11 @@ def _sanitize_generated_title(text: str) -> str:
 def _looks_invalid_generated_title(text: str) -> bool:
     """True when an existing/persisted title is structurally invalid (CoT leak).
 
-    This is the persisted-title self-heal predicate. Keep it structural:
-    thinking/analysis/reasoning wrappers, quoted-alternative lists, and
-    leading meta-commentary. Do not reject ordinary subject matter such as
-    "Maybe Monad Error Handling" or "Topic Label Accessibility". Use
+    This is the persisted-title self-heal predicate. Keep it unambiguous:
+    leading thinking/analysis/reasoning wrappers, a full "The title should…"
+    sentence, candidate-list syntax, and leading meta-commentary. Do not
+    reject ordinary subject matter such as "Maybe Monad Error Handling",
+    "Something Like Summer Discussion", or "Parsing <analysis> Tags". Use
     ``_is_bad_new_title`` for freshly generated candidates.
     """
     s = str(text or '')
@@ -3942,27 +3943,35 @@ def _looks_invalid_generated_title(text: str) -> bool:
         return True
     return bool(
         re.search(
-            r'<\s*(?:think|analysis|reasoning|thought)(?:\s[^>]*)?>',
+            r'^\s*(?:[*_`~]+\s*)?<\s*(?:think|analysis|reasoning|thought)(?:\s[^>]*)?>',
             s,
             flags=re.IGNORECASE,
         )
         or re.search(
-            r'<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
-            s,
-            flags=re.IGNORECASE,
-        )
-        or re.search(r'<\|turn\|?>\s*thinking', s, flags=re.IGNORECASE)
-        or re.search(
-            r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should|^\s*(?:[*_`~]+\s*)?(?:something like|(?:a\s+)?good title\s*:|options\s*:)',
+            r'^\s*(?:[*_`~]+\s*)?<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
             s,
             flags=re.IGNORECASE,
         )
         or re.search(
-            r'["“][^"”\n]+["”]\s+or\s+["“][^"”\n]+["”]',
+            r'^\s*(?:[*_`~]+\s*)?<\|turn\|?>\s*thinking',
             s,
             flags=re.IGNORECASE,
         )
-        or re.search(r'^\s*[-*•]\s*["“][^"”\n]+["”]', s)
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?something like\s+["“]',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?(?:(?:a\s+)?good title\s*:|options\s*:)',
+            s,
+            flags=re.IGNORECASE,
+        )
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
@@ -3982,10 +3991,36 @@ def _is_bad_new_title(text: str) -> bool:
 
     Includes structural CoT rejection plus trivial single-token echo replies
     (pong, yes, done, cool, …) that are useless as first-generation titles.
+    Anywhere-in-string wrappers, quoted alternatives, and bullet lists are
+    candidate-only so ordinary persisted titles are not silently renamed.
     """
     if _looks_invalid_generated_title(text):
         return True
     s = str(text or '').strip()
+    if re.search(
+        r'<\s*(?:think|analysis|reasoning|thought)(?:\s[^>]*)?>',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r'<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r'<\|turn\|?>\s*thinking', s, flags=re.IGNORECASE):
+        return True
+    if re.search(
+        r'["“][^"”\n]+["”]\s+or\s+["“][^"”\n]+["”]',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r'^\s*[-*•]\s*["“][^"”\n]+["”]', s):
+        return True
+    if re.search(r'^\s*(?:[*_`~]+\s*)?something like\b', s, flags=re.IGNORECASE):
+        return True
     _token = re.sub(r'[\s.!?]+$', '', s, flags=re.IGNORECASE)
     if re.fullmatch(
         r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
