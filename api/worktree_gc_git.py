@@ -184,6 +184,10 @@ class _GitInvocationError(RuntimeError):
         self.code = code
 
 
+class _SplitIndexPresent(ValueError):
+    pass
+
+
 def _clean_git_env() -> dict[str, str]:
     """Build a Git subprocess env with every inherited ``GIT_*`` variable removed.
 
@@ -658,16 +662,16 @@ def list_linked_worktrees(
 def _worktree_record(
     repo_root: Path,
     worktree_path: Path,
-) -> tuple[bool | None, str | None, str | None]:
+) -> tuple[_WorktreeRecord | None, str | None]:
     records, error = _list_worktree_records(repo_root)
     if error or records is None:
-        return None, None, error or "worktree_list_failed"
-    matches = [record.branch_ref for record in records if record.path == worktree_path]
+        return None, error or "worktree_list_failed"
+    matches = [record for record in records if record.path == worktree_path]
     if len(matches) > 1:
-        return None, None, "worktree_list_ambiguous"
+        return None, "worktree_list_ambiguous"
     if not matches:
-        return False, None, None
-    return True, matches[0], None
+        return None, None
+    return matches[0], None
 
 
 def _read_index_bytes(index_path: Path) -> tuple[bytes, int] | str:
@@ -812,6 +816,11 @@ def _parse_index_entries(data: bytes, hash_length: int) -> list[_IndexEntry]:
         ):
             raise ValueError("invalid index extension signature")
         (extension_size,) = struct.unpack_from(">I", data, position + 4)
+        if signature == b"link":
+            # The entries in a split index are only a delta over the referenced
+            # shared index.  Auditing this file alone can omit tracked paths, so
+            # reject the layout rather than publish incomplete clean evidence.
+            raise _SplitIndexPresent("split index")
         position += 8 + extension_size
         if position > len(data) - hash_length:
             raise ValueError("index extension overruns checksum")
@@ -825,6 +834,8 @@ def _parse_index(data: bytes) -> list[_IndexEntry]:
     for hash_length in (20, 32):
         try:
             return _parse_index_entries(data, hash_length)
+        except _SplitIndexPresent:
+            raise
         except (ValueError, IndexError, struct.error):
             continue
     raise ValueError("index_unparseable")
@@ -853,6 +864,8 @@ def _index_snapshot(worktree_path: Path) -> tuple[_IndexSnapshot | None, str | N
     data, index_mtime_sec = read_result
     try:
         entries = _parse_index(data)
+    except _SplitIndexPresent:
+        return None, "split_index_present"
     except ValueError:
         return None, "index_unparseable"
     masked = sum(
@@ -1183,6 +1196,15 @@ def _pins_still_valid(
     current_worktree_head = _worktree_head_oid(worktree_path)
     if current_worktree_head != worktree_head_oid:
         return False
+    current_record, record_error = _worktree_record(repo_root, worktree_path)
+    if (
+        record_error
+        or current_record is None
+        or current_record.branch_ref != branch_ref
+        or current_record.head_oid != worktree_head_oid
+        or current_record.locked
+    ):
+        return False
     scan, scan_error = _scan_worktree_state(worktree_path, worktree_head_oid)
     if scan_error or scan is None:
         return False
@@ -1297,7 +1319,8 @@ def classify_git_worktree(
     if repo_error:
         return result(KEEP_UNCERTAIN, repo_error)
 
-    listed, listed_branch, list_error = _worktree_record(repo_path, worktree_path)
+    worktree_record, list_error = _worktree_record(repo_path, worktree_path)
+    listed = worktree_record is not None
     audit["listed"] = listed
     if list_error:
         return result(KEEP_UNCERTAIN, list_error)
@@ -1318,7 +1341,7 @@ def classify_git_worktree(
     pinned_branch_ref = branch_ref
     pinned_branch_oid = branch_oid
 
-    if listed and listed_branch != branch_ref:
+    if listed and worktree_record.branch_ref != branch_ref:
         return result(KEEP_UNCERTAIN, "worktree_branch_mismatch")
     if audit["exists"] is False:
         if listed:
@@ -1328,6 +1351,8 @@ def classify_git_worktree(
         return result(KEEP_UNCERTAIN, "worktree_path_not_directory")
     if not listed:
         return result(KEEP_UNCERTAIN, "worktree_not_listed")
+    if worktree_record.locked:
+        return result(KEEP_UNCERTAIN, "worktree_locked")
 
     worktree_head_oid = _worktree_head_oid(worktree_path)
     if worktree_head_oid is None:
