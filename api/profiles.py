@@ -612,7 +612,7 @@ def _home_for_scheduled_cron_job(job: dict) -> Path:
         return get_active_hermes_home()
     if not raw:
         stack = _cron_context_stack.get()
-        if _cron_profile_context_depth() > 0 and stack:
+        if stack:
             return stack[-1]._home
         return get_active_hermes_home()
     if _is_root_profile(raw):

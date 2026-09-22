@@ -730,44 +730,109 @@ def test_scheduler_live_gateway_handles_preserve_agent_delivery_and_settlement(
     ]
 
 
-def test_scheduler_live_gateway_handles_do_not_trust_copied_stack_without_depth(
+def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_profile(
     monkeypatch, tmp_path
 ):
     import contextvars
-    import types
 
     from api import profiles as p
 
-    home = tmp_path / "home"
-    stale_home = tmp_path / "stale"
-    scheduler = types.ModuleType("cron.scheduler")
-    observed = []
-    scheduler.run_one_job = lambda job, **kwargs: observed.append(
-        (os.environ.get("HERMES_HOME"), p._cron_profile_context_depth(), p._cron_env_lock.locked())
-    ) or True
-    cron_pkg = types.ModuleType("cron")
-    cron_pkg.__path__ = []
-    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
-    monkeypatch.setitem(sys.modules, "cron.scheduler", scheduler)
-    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", home)
+    scheduler = pytest.importorskip("cron.scheduler")
+    executions = pytest.importorskip("cron.executions")
+    default_home = tmp_path / "default"
+    profile_home = default_home / "profiles" / "ops"
+    job_id = "copied-live"
+    default_jobs = [{"id": "default-only", "name": "default-only"}]
+    profile_job = {
+        "id": job_id,
+        "name": "profile job",
+        "prompt": "profile job",
+        "enabled": True,
+        "schedule": {
+            "kind": "once",
+            "run_at": "2099-01-01T00:00:00+00:00",
+        },
+        "repeat": {"times": 2, "completed": 0},
+        "run_claim": {"by": "profile-worker", "at": "2099-01-01T00:00:00+00:00"},
+        "fire_claim": {"by": "profile-worker"},
+    }
+    _write_jobs(default_home, default_jobs)
+    _write_jobs(profile_home, [profile_job])
+
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", default_home)
     monkeypatch.setattr(p, "publish_session_list_changed", lambda *a, **k: None)
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "executions.db")
+
+    body_calls = []
+    deliveries = []
+
+    def run_job(
+        job,
+        *,
+        defer_agent_teardown=None,
+        extra_prompt=None,
+        execution_id=None,
+        cancel_event=None,
+    ):
+        body_calls.append(
+            (
+                job["id"],
+                pathlib.Path(os.environ["HERMES_HOME"]),
+                p._cron_profile_context_depth(),
+                p._cron_env_lock.locked(),
+            )
+        )
+        return True, "agent output", "agent response", None
+
+    def deliver_result(job, content, adapters=None, loop=None):
+        deliveries.append((job["id"], content, adapters, loop))
+
+    monkeypatch.setattr(scheduler, "run_one_job", scheduler.run_one_job)
+    monkeypatch.setattr(scheduler, "run_job", run_job)
+    monkeypatch.setattr(scheduler, "_deliver_result", deliver_result)
     p.install_cron_scheduler_profile_isolation()
 
-    with p.cron_profile_context_for_home(stale_home):
+    with p.cron_profile_context_for_home(profile_home):
         copied_context = contextvars.copy_context()
 
     assert p._cron_profile_context_depth() == 0
-    copied_context.run(
-        scheduler.run_one_job,
-        {"id": "copied-live", "profile": "default"},
-        loop=object(),
-    )
-    copied_context.run(
-        scheduler.run_one_job,
-        {"id": "copied-live-without-profile"},
-        loop=object(),
-    )
-    assert observed == [(str(home), 1, True), (str(home), 1, True)]
+    outcomes = []
+    worker_depths = []
+    live_loop = object()
+
+    def fire_from_worker():
+        worker_depths.append(p._cron_profile_context_depth())
+        outcomes.append(
+            copied_context.run(
+                scheduler.run_one_job,
+                profile_job,
+                loop=live_loop,
+            )
+        )
+
+    worker = threading.Thread(target=fire_from_worker)
+    worker.start()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert worker_depths == [0]
+    assert outcomes == [True]
+    assert body_calls == [(job_id, profile_home, 1, True)]
+    assert deliveries == [(job_id, "agent response", None, live_loop)]
+
+    profile_state = json.loads(
+        (profile_home / "cron" / "jobs.json").read_text(encoding="utf-8")
+    )["jobs"][0]
+    assert profile_state["last_status"] == "ok"
+    assert profile_state["run_claim"] is None
+    assert profile_state["fire_claim"] is None
+    assert profile_state["repeat"]["completed"] == 1
+    assert (profile_home / "cron" / "output" / job_id).is_dir()
+
+    assert json.loads(
+        (default_home / "cron" / "jobs.json").read_text(encoding="utf-8")
+    )["jobs"] == default_jobs
+    assert not (default_home / "cron" / "output" / job_id).exists()
     assert not p._cron_env_lock.locked()
 
 
