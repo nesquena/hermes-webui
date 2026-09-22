@@ -352,6 +352,38 @@ const LOCALES = {
     composer_placeholder_busy_interrupt: 'Enter = interrupt | /queue | /background | /steer',
     composer_placeholder_busy_steer: 'Enter = steer | /queue | /background | /interrupt',
 
+    // #7697 context tooltip
+    ctx_label_context_window: 'Context window',
+    ctx_label_estimated: 'Estimated next model context',
+    ctx_usage_pct: '{0}: {1}% used ({2}% left)',
+    ctx_usage_exceeded: '{0}: {1}% used (context exceeded)',
+    ctx_tokens_used: '{0}: {1} / {2} tokens used',
+    ctx_in_out: 'In: {0} · Out: {1}',
+    ctx_auto_compress: 'Auto-compress at {0} ({1}%)',
+    ctx_estimated_cost: 'Estimated cost: ${0}',
+    ctx_tokens_no_prompt: '{0} tokens used',
+    ctx_aria_usage: '{0} — {1}',
+
+    // #7697 sidebar toggles
+    session_show_archived: 'Show {0} archived',
+    session_hide_archived: 'Hide archived',
+    session_pf_show_others: 'Show {0} from other profiles',
+    session_pf_active_only: 'Show active profile only',
+
+    // #7697 composer placeholder
+    composer_placeholder_idle: 'Message {0}…',
+
+    // #7697 reasoning effort chip
+    reasoning_effort_default: 'Default',
+    reasoning_effort_none: 'None',
+    reasoning_effort_minimal: 'Minimal',
+    reasoning_effort_low: 'Low',
+    reasoning_effort_medium: 'Medium',
+    reasoning_effort_high: 'High',
+    reasoning_effort_xhigh: 'Extra High',
+    reasoning_effort_max: 'Max',
+    reasoning_effort_aria_label: 'Reasoning effort: {0}',
+
   slash_skill_badge:'Skill',
   slash_skill_desc:'Invoke this skill',
   cmd_stop:'Stop the current response',
