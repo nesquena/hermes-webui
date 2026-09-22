@@ -85,17 +85,32 @@ let modelSwitchedTranslation = '';
 function t(key) {{ return key === 'model_switched' ? modelSwitchedTranslation : ''; }}
 eval(extractFunc('_bareModelId'));
 eval(extractFunc('_bareModelIdCandidates'));
+eval(extractFunc('_normalizedProviderId'));
 eval(extractFunc('_localModelSwitchText'));
 eval(extractFunc('_gatewayModelWarningText'));
 const cases = {{
-  // Genuine local fallback: configured model failed, another one served.
+  // Genuine local fallback: configured provider failed, another one served.
+  // Production shape: the backend stamped _requestedModel/_requestedProvider
+  // (its verdict) next to the served identity.
   realSwitch: _localModelSwitchText(
-    {{ _usedModel: 'deepseek-v4-flash-0731', _usedProvider: 'ollama', _requestedProvider: 'alibaba' }}, '@alibaba:qwen3.8-max'),
+    {{ _requestedModel: 'qwen3.8-max', _requestedProvider: 'alibaba',
+       _usedModel: 'deepseek-v4-flash-0731', _usedProvider: 'ollama' }}),
+  // Gate blocker #1 production shape: a NORMAL turn served by the
+  // Agent-normalized spelling (claude-sonnet-4.6 → claude-sonnet-4-6) carries
+  // NO _requestedModel — the backend stamped nothing — so nothing renders.
+  normalAliasNoRequestedStamp: _localModelSwitchText(
+    {{ _usedModel: 'claude-sonnet-4-6', _usedProvider: 'anthropic' }}),
+  // Gate blocker #2 production shape: same bare model, DIFFERENT provider,
+  // backend-stamped switch — labels collapse, qualified ids must surface.
+  sameBareModelCrossProvider: _localModelSwitchText(
+    {{ _requestedModel: 'claude-sonnet-4-6', _requestedProvider: 'openrouter',
+       _usedModel: 'claude-sonnet-4-6', _usedProvider: 'anthropic' }}),
   // Same model, different notation -> must stay silent (869 real occurrences).
+  // Normal turns are never stamped, so only the served identity is present.
   notationOnly: _localModelSwitchText(
-    {{ _usedModel: 'gpt-5.6-sol', _usedProvider: 'openai-codex', _requestedProvider: 'openai-codex' }}, '@openai-codex:gpt-5.6-sol'),
+    {{ _usedModel: 'gpt-5.6-sol', _usedProvider: 'openai-codex' }}),
   notationOnlyCustom: _localModelSwitchText(
-    {{ _usedModel: 'k3-256k', _usedProvider: 'custom:kimi-coding', _requestedProvider: 'custom:kimi-coding' }}, '@custom:kimi-coding:k3-256k'),
+    {{ _usedModel: 'k3-256k', _usedProvider: 'custom:kimi-coding' }}),
   customPrefixNoProvenanceSame: _localModelSwitchText(
     {{ _usedModel: 'k3-256k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
   customPrefixNoProvenanceTaggedSame: _localModelSwitchText(
@@ -140,41 +155,40 @@ const cases = {{
   customPrefixContradictoryEmbeddedProvenance: _localModelSwitchText(
     {{ _usedModel: '@custom:other:k3-256k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
   colonTaggedSwitch: _localModelSwitchText(
-    {{ _usedModel: '@ollama:qwen2.5:8b', _usedProvider: 'ollama', _requestedProvider: 'ollama' }},
-    '@ollama:llama3:8b'),
+    {{ _requestedModel: 'llama3:8b', _requestedProvider: 'ollama',
+       _usedModel: '@ollama:qwen2.5:8b', _usedProvider: 'ollama' }}),
   colonTaggedSame: _localModelSwitchText(
-    {{ _usedModel: 'llama3:8b', _usedProvider: 'ollama', _requestedProvider: 'ollama' }},
-    '@ollama:llama3:8b'),
+    {{ _usedModel: 'llama3:8b', _usedProvider: 'ollama' }}),
   customColonTaggedSwitch: _localModelSwitchText(
-    {{ _usedModel: '@custom:local:qwen2.5:8b', _usedProvider: 'custom:local', _requestedProvider: 'custom:local' }},
-    '@custom:local:llama3:8b'),
+    {{ _requestedModel: 'llama3:8b', _requestedProvider: 'custom:local',
+       _usedModel: '@custom:local:qwen2.5:8b', _usedProvider: 'custom:local' }}),
   slashQualifiedSwitch: _localModelSwitchText(
-    {{ _usedModel: 'my-local/gpt-4' }}, 'openai/gpt-4'),
+    {{ _requestedModel: 'openai/gpt-4', _usedModel: 'my-local/gpt-4' }}),
   bareRequestedSlashUsed: _localModelSwitchText(
-    {{ _usedModel: 'my-local/gpt-4' }}, 'gpt-4'),
+    {{ _requestedModel: 'gpt-4', _usedModel: 'my-local/gpt-4' }}),
   slashRequestedBareUsed: _localModelSwitchText(
-    {{ _usedModel: 'gpt-4' }}, 'my-local/gpt-4'),
+    {{ _requestedModel: 'my-local/gpt-4', _usedModel: 'gpt-4' }}),
   slashHintedSwitch: _localModelSwitchText(
-    {{ _usedModel: '@ollama:my-local/gpt-4' }}, '@ollama:openai/gpt-4'),
+    {{ _requestedModel: '@ollama:openai/gpt-4', _usedModel: '@ollama:my-local/gpt-4' }}),
   slashHintedSame: _localModelSwitchText(
-    {{ _usedModel: 'openai/gpt-4' }}, '@ollama:openai/gpt-4'),
+    {{ _requestedModel: '@ollama:openai/gpt-4', _usedModel: 'openai/gpt-4' }}),
   slashHintedSameReverse: _localModelSwitchText(
-    {{ _usedModel: '@ollama:openai/gpt-4' }}, 'openai/gpt-4'),
+    {{ _requestedModel: 'openai/gpt-4', _usedModel: '@ollama:openai/gpt-4' }}),
   providerQualifiedRequestedSwitch: _localModelSwitchText(
-    {{ _usedModel: 'claude-opus-5' }}, 'anthropic/claude-opus-5'),
+    {{ _requestedModel: 'anthropic/claude-opus-5', _usedModel: 'claude-opus-5' }}),
   providerQualifiedUsedSwitch: _localModelSwitchText(
-    {{ _usedModel: 'anthropic/claude-opus-5' }}, 'claude-opus-5'),
-  identical: _localModelSwitchText({{ _usedModel: 'gpt-5.6-sol' }}, 'gpt-5.6-sol'),
+    {{ _requestedModel: 'claude-opus-5', _usedModel: 'anthropic/claude-opus-5' }}),
+  identical: _localModelSwitchText({{ _usedModel: 'gpt-5.6-sol' }}),
   caseInsensitive: _localModelSwitchText(
-    {{ _usedModel: 'GPT-5.6-Sol' }}, '@openai-codex:gpt-5.6-sol'),
+    {{ _requestedModel: '@openai-codex:gpt-5.6-sol', _usedModel: 'GPT-5.6-Sol' }}),
   // Gateway turns already own their warning -> no duplicate.
   gatewayOwned: _localModelSwitchText(
-    {{ _usedModel: 'deepseek-v4-flash-0731', _gatewayRouting: {{ model_changed: true }} }},
-    '@alibaba:qwen3.8-max'),
+    {{ _requestedModel: '@alibaba:qwen3.8-max', _usedModel: 'deepseek-v4-flash-0731',
+       _gatewayRouting: {{ model_changed: true }} }}),
   // Unknown / missing data must never guess.
-  noUsedModel: _localModelSwitchText({{}}, '@alibaba:qwen3.8-max'),
-  noRequested: _localModelSwitchText({{ _usedModel: 'kimi-k3' }}, ''),
-  nullMsg: _localModelSwitchText(null, 'gpt-5.6-sol'),
+  noUsedModel: _localModelSwitchText({{ _requestedModel: '@alibaba:qwen3.8-max' }}),
+  noRequested: _localModelSwitchText({{ _usedModel: 'kimi-k3' }}),
+  nullMsg: _localModelSwitchText(null),
 }};
 modelSwitchedTranslation = 'Modèle changé';
 cases.gatewayLocalized = _gatewayModelWarningText({{
@@ -220,6 +234,7 @@ function getModelLabel(modelId) {{
 function t(key) {{ return ''; }}
 eval(extractFunc('_bareModelId'));
 eval(extractFunc('_bareModelIdCandidates'));
+eval(extractFunc('_normalizedProviderId'));
 eval(extractFunc('_localModelSwitchText'));
 eval(extractFunc('_localModelSwitchTitle'));
 const cases = {{
@@ -516,6 +531,14 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["realSwitch"], "a genuine local fallback switch must be surfaced"
     assert "qwen3.8-max" in cases["realSwitch"]
     assert "deepseek-v4-flash-0731" in cases["realSwitch"]
+    # Gate blocker #1: a normal turn served by the Agent-normalized spelling
+    # carries no _requestedModel and must render nothing.
+    assert cases["normalAliasNoRequestedStamp"] == ""
+    # Gate blocker #2: same bare model, different provider — the switch is real
+    # and the labels collapse, so the qualified ids must carry the distinction.
+    assert cases["sameBareModelCrossProvider"] == (
+        "Model switched: @openrouter:claude-sonnet-4-6 → @anthropic:claude-sonnet-4-6"
+    )
     assert "llama3:8b" in cases["colonTaggedSwitch"]
     assert "qwen2.5:8b" in cases["colonTaggedSwitch"]
     assert cases["colonTaggedSame"] == ""
