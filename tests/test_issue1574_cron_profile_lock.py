@@ -214,17 +214,69 @@ def _selected_profile_home_runner(profile_home, result_queue):
         result_queue.put(("error", repr(exc), traceback.format_exc()))
 
 
-def test_manual_cron_subprocess_uses_spawn_context():
+def test_manual_cron_subprocess_uses_spawn_context(monkeypatch):
     """Manual cron subprocesses must avoid fork-from-threaded-WebUI hazards."""
-    routes_src = (Path(__file__).resolve().parent.parent / "api" / "cron_runtime.py").read_text(
-        encoding="utf-8"
-    )
-    start = routes_src.find("def run_cron_in_profile_subprocess")
-    assert start != -1, "run_cron_in_profile_subprocess not found"
-    body = routes_src[start : start + 1200]
+    from api import cron_runtime
 
-    assert 'multiprocessing.get_context("spawn")' in body
-    assert 'multiprocessing.get_context("fork")' not in body
+    selected_contexts = []
+
+    class FakeQueue:
+        def __init__(self):
+            self.closed = False
+            self.joined = False
+
+        def get(self, timeout):
+            return ("ok", pickle.dumps("completed"))
+
+        def close(self):
+            self.closed = True
+
+        def join_thread(self):
+            self.joined = True
+
+    class FakeProcess:
+        exitcode = 0
+
+        def __init__(self, **kwargs):
+            self.target = kwargs["target"]
+            self.args = kwargs["args"]
+
+        def start(self):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            return None
+
+        def terminate(self):
+            raise AssertionError("a completed child should not be terminated")
+
+    class FakeContext:
+        def __init__(self):
+            self.result_queue = FakeQueue()
+            self.process = None
+
+        def Queue(self, maxsize=1):
+            return self.result_queue
+
+        def Process(self, **kwargs):
+            self.process = FakeProcess(**kwargs)
+            return self.process
+
+    context = FakeContext()
+    monkeypatch.setattr(
+        cron_runtime.multiprocessing,
+        "get_context",
+        lambda name: selected_contexts.append(name) or context,
+    )
+
+    assert cron_runtime.run_cron_in_profile_subprocess({}, None, "run_job") == "completed"
+    assert selected_contexts == ["spawn"]
+    assert context.process.target is cron_runtime._cron_job_subprocess_main
+    assert context.result_queue.closed
+    assert context.result_queue.joined
 
 
 def test_cron_subprocess_no_payload_and_crash_cleanup_are_bounded(monkeypatch):

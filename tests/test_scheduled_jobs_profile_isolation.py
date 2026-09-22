@@ -1045,7 +1045,7 @@ def test_install_scheduler_fails_when_both_operations_are_missing(monkeypatch):
         p.install_cron_scheduler_profile_isolation()
 
 
-def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
+def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure(monkeypatch):
     """The subprocess target must not fall back to an unpinned cron run.
 
     A silent fallback would leave the job running against process-global
@@ -1053,20 +1053,53 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
     as #1573. The child process may report the exception to the parent, but it
     must not continue into run_job outside the requested profile context.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "api" / "cron_runtime.py").read_text(encoding="utf-8")
+    from api import cron_runtime
+    from api import profiles as p
 
-    idx = src.find("def _cron_job_subprocess_main(")
-    assert idx != -1, "_cron_job_subprocess_main not found"
-    body = src[idx : idx + 2000]
+    scheduler_calls = []
 
-    assert "with _run_in_profile:" in body
-    assert "result = _invoke_cron_operation" in body
-    assert "_run_in_profile = None" in body
-    assert "except Exception" not in body[:body.find("with _run_in_profile")], (
-        "cron subprocess target appears to catch profile-context setup before "
-        "entering the context; do not fall back to an unpinned run_job call."
+    class FailingProfileContext:
+        def __enter__(self):
+            raise RuntimeError("profile context failed")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        p,
+        "cron_profile_context_for_home",
+        lambda home, **kwargs: FailingProfileContext(),
     )
+    monkeypatch.setattr(
+        cron_runtime,
+        "_invoke_cron_operation",
+        lambda *args, **kwargs: scheduler_calls.append((args, kwargs)),
+    )
+
+    class ResultQueue:
+        def __init__(self):
+            self.items = []
+
+        def put(self, item):
+            self.items.append(item)
+
+    result_queue = ResultQueue()
+    cron_runtime._cron_job_subprocess_main(
+        json.dumps({"id": "job1574"}),
+        "/tmp/profile-home",
+        None,
+        "run_job",
+        "[]",
+        "{}",
+        result_queue,
+    )
+
+    assert scheduler_calls == []
+    assert result_queue.items
+    status, message, traceback_text = result_queue.items[0]
+    assert status == "error"
+    assert "profile context failed" in message
+    assert traceback_text
 
 
 def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_path, monkeypatch):
