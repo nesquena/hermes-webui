@@ -16,6 +16,8 @@ def _proc_cwd(proc_root: Path, pid: int, cwd: Path) -> None:
     pid_dir = proc_root / str(pid)
     pid_dir.mkdir(parents=True)
     os.symlink(cwd, pid_dir / "cwd")
+    # A live process always has an fd table; an empty readable one here.
+    (pid_dir / "fd").mkdir()
 
 
 def _proc_fd(proc_root: Path, pid: int, target: Path) -> None:
@@ -133,3 +135,30 @@ def test_unreadable_pid_cwd_makes_scan_incomplete(tmp_path, monkeypatch):
     assert scan.available is True
     assert scan.complete is False
     assert scan.unreadable_count == 1
+
+
+def test_unreadable_fd_table_makes_scan_incomplete_but_keeps_cwd_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    """Fail closed: an unreadable fd table is not proof of no open files."""
+    proc_root = tmp_path / "proc"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _proc_cwd(proc_root, 601, worktree)
+    real_scandir = os.scandir
+
+    def denied_scandir(path):
+        if Path(path).name == "fd":
+            raise PermissionError(errno.EACCES, "denied", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied_scandir)
+
+    scan = scan_process_cwds(proc_root)
+
+    assert scan.available is True
+    assert scan.complete is False
+    assert scan.unreadable_count == 1
+    # cwd evidence is retained: the process still blocks the worktree.
+    assert scan.blocking_process_count(worktree) == 1

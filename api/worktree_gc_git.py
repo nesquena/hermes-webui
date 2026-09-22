@@ -3,11 +3,31 @@
 This module deliberately has no dependency on WebUI sessions or models.  Its
 inputs are the Git identities needed to prove whether a linked worktree can be
 considered inactive without inspecting file contents.
+
+Safety boundary: no audit command may execute repository-controlled programs.
+Porcelain commands such as ``git status`` (and plumbing that rehashes worktree
+content, such as ``git diff-files``) can invoke clean/smudge filters configured
+by the repository itself.  The audit therefore combines:
+
+- plumbing commands restricted to the object database and refs
+  (``rev-parse``, ``show-ref``, ``merge-base``, ``rev-list``, ``cherry``,
+  ``worktree list``, ``diff-index --cached``), which never read worktree file
+  contents, never consult conversion attributes, and never run hooks, diff
+  drivers, or filters;
+- ``ls-files --others`` directory scans (no content reads, no filters);
+- a bounded, read-only parse of the index file plus ``lstat`` comparisons
+  implemented here, replacing the worktree half of ``git status`` outright.
+
+Racy index entries (mtime not older than the index timestamp) are treated as
+dirty: verifying them would require hashing worktree content through the
+conversion machinery, which is exactly the execution path this audit refuses.
 """
 
 from __future__ import annotations
 
 import os
+import stat
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -25,7 +45,10 @@ REMOVE_PATCH_EQUIVALENT_KEEP_BRANCH = "REMOVE_PATCH_EQUIVALENT_KEEP_BRANCH"
 GIT_TIMEOUT = 10
 IGNORED_OUTPUT_LIMIT = 1024 * 1024
 IGNORED_ENTRY_LIMIT = 10_000
+_UNTRACKED_OUTPUT_LIMIT = 1024 * 1024
+_UNTRACKED_ENTRY_LIMIT = 100_000
 _GIT_OUTPUT_LIMIT = 1024 * 1024
+_INDEX_SIZE_LIMIT = 64 * 1024 * 1024
 _ENV_GIT_PREFIX = "GIT_"
 _IGNORED_FILES_ARGS = (
     "ls-files",
@@ -33,6 +56,19 @@ _IGNORED_FILES_ARGS = (
     "--ignored",
     "--exclude-standard",
     "-z",
+)
+_UNTRACKED_FILES_ARGS = (
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "-z",
+)
+_DIFF_INDEX_PREFIX = (
+    "diff-index",
+    "--cached",
+    "-z",
+    "--name-only",
+    "--no-renames",
 )
 
 _GIT_ENV_KEYS = (
@@ -57,6 +93,7 @@ _GIT_ENV_KEYS = (
 _GIT_ENV_KEYS_LOWER = {key.lower() for key in _GIT_ENV_KEYS}
 _GIT_CONFIG = (
     ("core.fsmonitor", "false"),
+    ("core.untrackedCache", "false"),
     ("core.sshCommand", "ssh"),
     ("core.askPass", ""),
     ("credential.helper", ""),
@@ -64,7 +101,15 @@ _GIT_CONFIG = (
     ("core.gitProxy", ""),
     ("submodule.recurse", "false"),
     ("fetch.recurseSubmodules", "false"),
+    ("diff.renames", "false"),
 )
+
+_HEX_DIGEST_LENGTHS = (40, 64)
+_INDEX_MAGIC = b"DIRC"
+_INDEX_VERSIONS = (2, 3, 4)
+_GITLINK_MODE = 0o160000
+_SYMLINK_MODE = 0o120000
+_REGULAR_MODES = (0o100644, 0o100755)
 
 
 @dataclass(frozen=True)
@@ -86,6 +131,51 @@ class GitWorktreeDecision:
     cherry_unique_count: int | None
     branch_exclusive_merge_count: int | None
     reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LinkedWorktree:
+    """One record from ``git worktree list --porcelain -z``."""
+
+    path: str
+    branch: str | None
+    head_oid: str | None
+    locked: bool
+
+
+@dataclass(frozen=True)
+class _IndexEntry:
+    path: bytes
+    mode: int
+    stage: int
+    assume_valid: bool
+    skip_worktree: bool
+    intent_to_add: bool
+    ctime_ns: int
+    mtime_ns: int
+    dev: int
+    ino: int
+    uid: int
+    gid: int
+    size: int
+
+
+@dataclass(frozen=True)
+class _IndexSnapshot:
+    entries: tuple[_IndexEntry, ...]
+    index_mtime_sec: int
+    uses_nsec: bool
+    masked_count: int
+    gitlink_count: int
+    unmerged_count: int
+
+
+@dataclass(frozen=True)
+class _WorktreeScan:
+    dirty: bool
+    untracked_count: int
+    masked_count: int
+    gitlink_count: int
 
 
 class _GitInvocationError(RuntimeError):
@@ -125,16 +215,17 @@ def _git_argv(args: list[str], hooks_path: str) -> list[str]:
     return argv
 
 
-def _format_is_40_hex(value: bytes) -> bool:
+def _format_is_hex_oid(value: bytes) -> bool:
+    """Accept full SHA-1 (40) or SHA-256 (64) hexadecimal object IDs."""
     return (
-        len(value) == 40
+        len(value) in _HEX_DIGEST_LENGTHS
         and all(char in b"0123456789abcdefABCDEF" for char in value)
     )
 
 
 def _parse_oid(output: bytes) -> str | None:
     line = output.strip().splitlines()[0] if output.strip() else b""
-    return os.fsdecode(line) if _format_is_40_hex(line) else None
+    return os.fsdecode(line) if _format_is_hex_oid(line) else None
 
 
 _REV_LIST_COUNT_MERGES_ARGS = (
@@ -143,23 +234,22 @@ _REV_LIST_COUNT_MERGES_ARGS = (
     "--merges",
     "--end-of-options",
 )
-_LS_FILES_V_ARGS = ("ls-files", "-v", "-z")
-_LS_FILES_STAGE_ARGS = ("ls-files", "--stage", "-z")
-_BOUNDED_OUTPUT_ARGS = (
-    _IGNORED_FILES_ARGS,
-    _LS_FILES_V_ARGS,
-    _LS_FILES_STAGE_ARGS,
-)
-_GITLINK_MODE = b"160000"
 
 
 def _read_only_git_args(args: list[str]) -> bool:
+    """Allowlist of plumbing that cannot execute repository programs.
+
+    Every entry is object-store/ref/directory-scan only: no worktree content
+    hashing (no clean filters), no patch emission (no diff drivers or
+    textconv), no hooks, no pager.
+    """
     command = tuple(args)
     if command in {
         ("rev-parse", "--show-toplevel"),
-        ("worktree", "list", "--porcelain"),
-        ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+        ("rev-parse", "--absolute-git-dir"),
+        ("worktree", "list", "--porcelain", "-z"),
         _IGNORED_FILES_ARGS,
+        _UNTRACKED_FILES_ARGS,
     }:
         return True
     if (
@@ -175,34 +265,41 @@ def _read_only_git_args(args: list[str]) -> bool:
         return True
     if len(command) == 3 and command[:2] == ("check-ref-format", "--branch"):
         return True
-    if len(command) == 4 and command[:2] == ("merge-base", "--is-ancestor"):
+    if (
+        len(command) == 4
+        and command[:2] == ("merge-base", "--is-ancestor")
+        and _format_is_hex_oid(os.fsencode(command[2]))
+        and _format_is_hex_oid(os.fsencode(command[3]))
+    ):
         return True
     if len(command) == 6 and command[:4] == _REV_LIST_COUNT_MERGES_ARGS:
         return _valid_merge_range_args(command[4], command[5])
     if (
         len(command) == 4
         and command[:3] == ("show-ref", "--verify", "--quiet")
+        and command[3].startswith("refs/")
     ):
         return True
-    if len(command) == 3 and command[0] == "cherry":
+    if (
+        len(command) == 3
+        and command[0] == "cherry"
+        and _format_is_hex_oid(os.fsencode(command[1]))
+        and _format_is_hex_oid(os.fsencode(command[2]))
+    ):
         return True
-    return len(command) == 3 and command[:1] == ("ls-files",) and (
-        tuple(command[1:]) == _LS_FILES_V_ARGS[1:]
-        or tuple(command[1:]) == _LS_FILES_STAGE_ARGS[1:]
+    return (
+        len(command) == 7
+        and command[:5] == _DIFF_INDEX_PREFIX
+        and _format_is_hex_oid(os.fsencode(command[5]))
+        and command[6] == "--"
     )
-
-
-def _bounded_output_error(output: bytes) -> str | None:
-    if len(output) > _GIT_OUTPUT_LIMIT:
-        return "git_output_oversized"
-    return None
 
 
 def _valid_merge_range_args(first: str, second: str) -> bool:
     """Accept exactly ``<oid> ^<oid>`` (or swapped) for the merge count."""
 
     def is_plain_oid(value: str) -> bool:
-        return _format_is_40_hex(os.fsencode(value))
+        return _format_is_hex_oid(os.fsencode(value))
 
     def is_negated_oid(value: str) -> bool:
         return value.startswith("^") and is_plain_oid(value[1:])
@@ -221,41 +318,40 @@ def _run_git(
     *,
     timeout: float = GIT_TIMEOUT,
 ) -> subprocess.CompletedProcess[bytes]:
+    """Run an allowlisted read-only Git command with hard-bounded output.
+
+    Both streams are spooled to a temporary file so a hostile or corrupt
+    repository cannot exhaust memory; output beyond ``_GIT_OUTPUT_LIMIT``
+    fails closed instead of being parsed.
+    """
     if not _read_only_git_args(args):
         raise _GitInvocationError("git_command_not_allowed")
     hooks_path: str | None = None
     try:
         hooks_path = tempfile.mkdtemp(prefix="hermes-webui-worktree-git-hooks-")
         argv = _git_argv(args, hooks_path)
-        if tuple(args) in _BOUNDED_OUTPUT_ARGS:
-            with tempfile.TemporaryFile() as stdout:
-                result = subprocess.run(
-                    argv,
-                    cwd=str(cwd),
-                    shell=False,
-                    stdout=stdout,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=timeout,
-                    env=_clean_git_env(),
-                )
-                stdout.seek(0)
-                bounded_stdout = stdout.read(IGNORED_OUTPUT_LIMIT + 1)
-            return subprocess.CompletedProcess(
-                result.args,
-                result.returncode,
-                bounded_stdout,
-                b"",
+        with tempfile.TemporaryFile(
+            prefix="hermes-webui-worktree-git-out-",
+        ) as spool:
+            result = subprocess.run(
+                argv,
+                cwd=str(cwd),
+                shell=False,
+                stdout=spool,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=timeout,
+                env=_clean_git_env(),
             )
-        return subprocess.run(
-            argv,
-            cwd=str(cwd),
-            shell=False,
-            capture_output=True,
-            text=False,
-            check=False,
-            timeout=timeout,
-            env=_clean_git_env(),
+            spool.seek(0)
+            bounded_stdout = spool.read(_GIT_OUTPUT_LIMIT + 1)
+        if len(bounded_stdout) > _GIT_OUTPUT_LIMIT:
+            raise _GitInvocationError("git_output_oversized")
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            bounded_stdout,
+            b"",
         )
     except subprocess.TimeoutExpired as exc:
         raise _GitInvocationError("git_timeout") from exc
@@ -424,85 +520,149 @@ def _verify_branch_oid(
     return branch_ref, oid, None
 
 
-def _parse_worktree_list(output: bytes) -> list[tuple[Path, str | None]]:
-    records: list[tuple[Path, str | None]] = []
+@dataclass(frozen=True)
+class _WorktreeRecord:
+    path: Path
+    branch_ref: str | None
+    head_oid: str | None
+    locked: bool
+
+
+def _parse_worktree_list(output: bytes) -> list[_WorktreeRecord]:
+    """Parse ``git worktree list --porcelain -z`` output.
+
+    NUL termination keeps paths containing newlines (or any other byte)
+    unambiguous; records are separated by an empty field.
+    """
+    if not output or not output.endswith(b"\0"):
+        raise ValueError("malformed worktree list")
+    records: list[_WorktreeRecord] = []
     path: Path | None = None
     branch_ref: str | None = None
+    head_oid: str | None = None
+    locked = False
     branch_kind_seen = False
 
     def finish_record() -> None:
-        nonlocal path, branch_ref, branch_kind_seen
-        if path is None or not branch_kind_seen:
+        nonlocal path, branch_ref, head_oid, locked, branch_kind_seen
+        if path is None or head_oid is None or not branch_kind_seen:
             raise ValueError("incomplete worktree record")
-        records.append((path, branch_ref))
+        records.append(
+            _WorktreeRecord(
+                path=path,
+                branch_ref=branch_ref,
+                head_oid=head_oid,
+                locked=locked,
+            )
+        )
         path = None
         branch_ref = None
+        head_oid = None
+        locked = False
         branch_kind_seen = False
 
-    if not output:
-        raise ValueError("empty worktree list")
-    for raw_line in output.splitlines():
-        if not raw_line:
-            if path is not None:
-                finish_record()
+    for raw_field in output[:-1].split(b"\0"):
+        if not raw_field:
+            if path is None:
+                raise ValueError("worktree field outside record")
+            finish_record()
             continue
-        if raw_line.startswith(b"worktree "):
+        if raw_field.startswith(b"worktree "):
             if path is not None:
                 raise ValueError("unterminated worktree record")
-            raw_path = raw_line[len(b"worktree ") :]
+            raw_path = raw_field[len(b"worktree ") :]
             if not raw_path:
                 raise ValueError("empty worktree path")
             path = _decode_path(raw_path)
             continue
         if path is None:
             raise ValueError("field outside worktree record")
-        if raw_line.startswith(b"HEAD "):
-            head = raw_line[len(b"HEAD ") :]
-            if not head or any(char not in b"0123456789abcdefABCDEF" for char in head):
+        if raw_field.startswith(b"HEAD "):
+            raw_head = raw_field[len(b"HEAD ") :]
+            if not _format_is_hex_oid(raw_head):
                 raise ValueError("invalid worktree head")
-        elif raw_line.startswith(b"branch "):
+            head_oid = os.fsdecode(raw_head)
+        elif raw_field.startswith(b"branch "):
             if branch_kind_seen:
                 raise ValueError("duplicate worktree branch kind")
-            raw_branch = raw_line[len(b"branch ") :]
+            raw_branch = raw_field[len(b"branch ") :]
             if not raw_branch:
                 raise ValueError("empty worktree branch")
             branch_ref = os.fsdecode(raw_branch)
             branch_kind_seen = True
-        elif raw_line in {b"detached", b"bare"}:
+        elif raw_field in {b"detached", b"bare"}:
             if branch_kind_seen:
                 raise ValueError("duplicate worktree branch kind")
             branch_kind_seen = True
-        elif raw_line == b"locked" or raw_line.startswith(b"locked "):
-            continue
-        elif raw_line == b"prunable" or raw_line.startswith(b"prunable "):
+        elif raw_field == b"locked" or raw_field.startswith(b"locked "):
+            locked = True
+        elif raw_field == b"prunable" or raw_field.startswith(b"prunable "):
             continue
         else:
             raise ValueError("unknown worktree field")
     if path is not None:
-        finish_record()
+        raise ValueError("unterminated worktree record")
     if not records:
         raise ValueError("no worktree records")
     return records
+
+
+def _list_worktree_records(
+    repo_root: Path,
+) -> tuple[list[_WorktreeRecord] | None, str | None]:
+    try:
+        result = _run_git(["worktree", "list", "--porcelain", "-z"], repo_root)
+    except _GitInvocationError as exc:
+        return None, exc.code
+    if result.returncode != 0:
+        return None, "worktree_list_failed"
+    try:
+        return _parse_worktree_list(result.stdout), None
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return None, "worktree_list_unparseable"
+
+
+def list_linked_worktrees(
+    repo_root: str | os.PathLike[str],
+) -> tuple[tuple[LinkedWorktree, ...] | None, str | None]:
+    """Enumerate every worktree registered for ``repo_root``, read-only.
+
+    Used to surface worktrees that no session sidecar references, so they
+    cannot silently disappear from the audit inventory.
+    """
+    repo_path = _resolved_path(repo_root)
+    repo_error = _verify_repo_root(repo_path)
+    if repo_error:
+        return None, repo_error
+    records, error = _list_worktree_records(repo_path)
+    if error or records is None:
+        return None, error or "worktree_list_failed"
+    return (
+        tuple(
+            LinkedWorktree(
+                path=str(record.path),
+                branch=(
+                    record.branch_ref.removeprefix("refs/heads/")
+                    if record.branch_ref
+                    else None
+                ),
+                head_oid=record.head_oid,
+                locked=record.locked,
+            )
+            for record in records
+        ),
+        None,
+    )
 
 
 def _worktree_record(
     repo_root: Path,
     worktree_path: Path,
 ) -> tuple[bool | None, str | None, str | None]:
-    try:
-        result = _run_git(["worktree", "list", "--porcelain"], repo_root)
-    except _GitInvocationError as exc:
-        return None, None, exc.code
-    if result.returncode != 0:
-        return None, None, "worktree_list_failed"
-    try:
-        matches = [
-            branch_ref
-            for listed_path, branch_ref in _parse_worktree_list(result.stdout)
-            if listed_path == worktree_path
-        ]
-    except (OSError, RuntimeError, UnicodeError, ValueError):
-        return None, None, "worktree_list_unparseable"
+    records, error = _list_worktree_records(repo_root)
+    if error or records is None:
+        return None, None, error or "worktree_list_failed"
+    matches = [record.branch_ref for record in records if record.path == worktree_path]
     if len(matches) > 1:
         return None, None, "worktree_list_ambiguous"
     if not matches:
@@ -510,150 +670,354 @@ def _worktree_record(
     return True, matches[0], None
 
 
-def _parse_status_porcelain(output: bytes) -> tuple[bool, int]:
-    if not output:
-        return False, 0
-    if not output.endswith(b"\0"):
-        raise ValueError("status output is not NUL terminated")
-    fields = output.split(b"\0")[:-1]
-    untracked_count = 0
-    index = 0
-    allowed = b" MADRCUT?!"
-    while index < len(fields):
-        entry = fields[index]
-        if len(entry) < 4 or entry[2:3] != b" " or not entry[3:]:
-            raise ValueError("invalid status entry")
-        status = entry[:2]
-        if status[0] not in allowed or status[1] not in allowed:
-            raise ValueError("invalid status code")
-        if status in {b"??", b"!!"}:
-            if status == b"??":
-                untracked_count += 1
-        elif status == b"  " or b"?" in status or b"!" in status:
-            raise ValueError("invalid ordinary status code")
-        if status[0:1] in {b"R", b"C"} or status[1:2] in {b"R", b"C"}:
-            index += 1
-            if index >= len(fields) or not fields[index]:
-                raise ValueError("rename/copy source missing")
-        index += 1
-    return True, untracked_count
+def _read_index_bytes(index_path: Path) -> tuple[bytes, int] | str:
+    """Read the index file without following symlinks, with a hard size cap.
+
+    Returns ``(data, index_mtime_sec)`` or an error code.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_descriptor = os.open(index_path, flags)
+    except FileNotFoundError:
+        return "index_missing"
+    except OSError:
+        return "index_unreadable"
+    try:
+        info = os.fstat(file_descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return "index_not_regular_file"
+        if info.st_size > _INDEX_SIZE_LIMIT:
+            return "index_oversized"
+        with os.fdopen(file_descriptor, "rb") as handle:
+            file_descriptor = -1
+            data = handle.read(_INDEX_SIZE_LIMIT + 1)
+        if len(data) > _INDEX_SIZE_LIMIT:
+            return "index_oversized"
+        return data, info.st_mtime_ns // 1_000_000_000
+    except OSError:
+        return "index_unreadable"
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
 
 
-def _status(repo_path: Path) -> tuple[bool | None, int | None, str | None]:
+def _read_index_varint(data: bytes, position: int) -> tuple[int, int]:
+    """Decode the offset-style varint used by index v4 name compression."""
+    byte = data[position]
+    position += 1
+    value = byte & 0x7F
+    while byte & 0x80:
+        byte = data[position]
+        position += 1
+        value = ((value + 1) << 7) | (byte & 0x7F)
+    return value, position
+
+
+def _parse_index_entries(data: bytes, hash_length: int) -> list[_IndexEntry]:
+    if len(data) < 12 + hash_length or data[:4] != _INDEX_MAGIC:
+        raise ValueError("bad index header")
+    version, entry_count = struct.unpack_from(">II", data, 4)
+    if version not in _INDEX_VERSIONS:
+        raise ValueError("unsupported index version")
+    position = 12
+    fixed_length = 40 + hash_length + 2
+    entries: list[_IndexEntry] = []
+    previous_name = b""
+    for _ in range(entry_count):
+        if position + fixed_length > len(data):
+            raise ValueError("truncated index entry")
+        (
+            ctime_sec,
+            ctime_nsec,
+            mtime_sec,
+            mtime_nsec,
+            dev,
+            ino,
+            mode,
+            uid,
+            gid,
+            size,
+        ) = struct.unpack_from(">10I", data, position)
+        flags = struct.unpack_from(">H", data, position + 40 + hash_length)[0]
+        cursor = position + fixed_length
+        assume_valid = bool(flags & 0x8000)
+        extended = bool(flags & 0x4000)
+        stage = (flags >> 12) & 0x3
+        name_length = flags & 0x0FFF
+        skip_worktree = False
+        intent_to_add = False
+        if extended:
+            if version < 3:
+                raise ValueError("extended flags in v2 index")
+            if cursor + 2 > len(data):
+                raise ValueError("truncated extended flags")
+            extended_flags = struct.unpack_from(">H", data, cursor)[0]
+            cursor += 2
+            skip_worktree = bool(extended_flags & 0x4000)
+            intent_to_add = bool(extended_flags & 0x2000)
+        if version == 4:
+            strip, cursor = _read_index_varint(data, cursor)
+            if strip > len(previous_name):
+                raise ValueError("invalid name compression")
+            end = data.index(b"\0", cursor)
+            name = previous_name[: len(previous_name) - strip] + data[cursor:end]
+            cursor = end + 1
+        else:
+            if name_length == 0x0FFF:
+                end = data.index(b"\0", cursor)
+                name = data[cursor:end]
+            else:
+                if cursor + name_length > len(data):
+                    raise ValueError("truncated entry name")
+                name = data[cursor : cursor + name_length]
+            entry_length = (cursor - position) + len(name)
+            padding = 8 - (entry_length % 8)
+            if padding == 0:
+                padding = 8
+            end = position + entry_length + padding
+            if end > len(data) or any(data[position + entry_length : end]):
+                raise ValueError("invalid entry padding")
+            cursor = end
+        if not name or b"\0" in name:
+            raise ValueError("invalid entry name")
+        entries.append(
+            _IndexEntry(
+                path=name,
+                mode=mode,
+                stage=stage,
+                assume_valid=assume_valid,
+                skip_worktree=skip_worktree,
+                intent_to_add=intent_to_add,
+                ctime_ns=ctime_sec * 1_000_000_000 + ctime_nsec,
+                mtime_ns=mtime_sec * 1_000_000_000 + mtime_nsec,
+                dev=dev,
+                ino=ino,
+                uid=uid,
+                gid=gid,
+                size=size,
+            )
+        )
+        previous_name = name
+        position = cursor
+    # Extensions: signature (4 bytes) + length (4 bytes) + payload, then the
+    # trailing index checksum.  Walk them to confirm the structure is exact.
+    while position < len(data) - hash_length:
+        if position + 8 > len(data) - hash_length:
+            raise ValueError("truncated index extension")
+        signature = data[position : position + 4]
+        if not all(
+            char in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            for char in signature
+        ):
+            raise ValueError("invalid index extension signature")
+        (extension_size,) = struct.unpack_from(">I", data, position + 4)
+        position += 8 + extension_size
+        if position > len(data) - hash_length:
+            raise ValueError("index extension overruns checksum")
+    if position != len(data) - hash_length:
+        raise ValueError("index length mismatch")
+    return entries
+
+
+def _parse_index(data: bytes) -> list[_IndexEntry]:
+    """Parse an index for either object format; reject ambiguous layouts."""
+    for hash_length in (20, 32):
+        try:
+            return _parse_index_entries(data, hash_length)
+        except (ValueError, IndexError, struct.error):
+            continue
+    raise ValueError("index_unparseable")
+
+
+def _index_snapshot(worktree_path: Path) -> tuple[_IndexSnapshot | None, str | None]:
+    """Read the worktree index directly; never through content-hashing Git."""
+    try:
+        result = _run_git(["rev-parse", "--absolute-git-dir"], worktree_path)
+    except _GitInvocationError as exc:
+        return None, exc.code
+    if result.returncode != 0 or not result.stdout.endswith(b"\n"):
+        return None, "git_dir_unresolvable"
+    raw_git_dir = result.stdout[:-1]
+    if not raw_git_dir or b"\0" in raw_git_dir:
+        return None, "git_dir_unparseable"
+    try:
+        git_dir = _decode_path(raw_git_dir)
+    except (OSError, RuntimeError, ValueError):
+        return None, "git_dir_unparseable"
+    if not git_dir.is_absolute():
+        return None, "git_dir_unparseable"
+    read_result = _read_index_bytes(git_dir / "index")
+    if isinstance(read_result, str):
+        return None, read_result
+    data, index_mtime_sec = read_result
+    try:
+        entries = _parse_index(data)
+    except ValueError:
+        return None, "index_unparseable"
+    masked = sum(
+        1 for entry in entries if entry.assume_valid or entry.skip_worktree
+    )
+    gitlinks = sum(1 for entry in entries if entry.mode == _GITLINK_MODE)
+    unmerged = sum(1 for entry in entries if entry.stage != 0)
+    uses_nsec = any(
+        entry.ctime_ns % 1_000_000_000 or entry.mtime_ns % 1_000_000_000
+        for entry in entries
+    )
+    return (
+        _IndexSnapshot(
+            entries=tuple(entries),
+            index_mtime_sec=index_mtime_sec,
+            uses_nsec=uses_nsec,
+            masked_count=masked,
+            gitlink_count=gitlinks,
+            unmerged_count=unmerged,
+        ),
+        None,
+    )
+
+
+def _entry_path_is_safe(name: bytes) -> bool:
+    return (
+        bool(name)
+        and not name.startswith(b"/")
+        and b"\0" not in name
+        and all(part not in {b"", b".."} for part in name.split(b"/"))
+    )
+
+
+def _stat_scan_dirty(
+    worktree_path: Path,
+    snapshot: _IndexSnapshot,
+) -> tuple[bool | None, str | None]:
+    """Compare index stat data with the worktree; racy entries fail dirty.
+
+    This reproduces the worktree half of ``git status`` without ever hashing
+    file contents, so clean filters and other repository programs cannot run.
+    A file whose stat data matches but which is racy (mtime not older than
+    the index timestamp) is reported dirty rather than verified by hashing.
+    """
+    for entry in snapshot.entries:
+        if entry.mode == _GITLINK_MODE:
+            continue
+        if not _entry_path_is_safe(entry.path):
+            return None, "index_path_suspicious"
+        try:
+            info = os.lstat(worktree_path / os.fsdecode(entry.path))
+        except FileNotFoundError:
+            return True, None
+        except OSError:
+            return None, "worktree_stat_failed"
+        if entry.mode == _SYMLINK_MODE:
+            if not stat.S_ISLNK(info.st_mode):
+                return True, None
+        elif entry.mode in _REGULAR_MODES:
+            if not stat.S_ISREG(info.st_mode):
+                return True, None
+            if info.st_size & 0xFFFFFFFF != entry.size:
+                return True, None
+            if bool(info.st_mode & 0o111) != (entry.mode == 0o100755):
+                return True, None
+        else:
+            return None, "index_mode_unexpected"
+        if (
+            info.st_dev & 0xFFFFFFFF != entry.dev
+            or info.st_ino & 0xFFFFFFFF != entry.ino
+            or info.st_uid & 0xFFFFFFFF != entry.uid
+            or info.st_gid & 0xFFFFFFFF != entry.gid
+        ):
+            return True, None
+        ctime_differs = (
+            info.st_ctime_ns // 1_000_000_000 != entry.ctime_ns // 1_000_000_000
+        )
+        mtime_differs = (
+            info.st_mtime_ns // 1_000_000_000 != entry.mtime_ns // 1_000_000_000
+        )
+        if snapshot.uses_nsec:
+            ctime_differs = ctime_differs or info.st_ctime_ns != entry.ctime_ns
+            mtime_differs = mtime_differs or info.st_mtime_ns != entry.mtime_ns
+        if ctime_differs or mtime_differs:
+            return True, None
+        if entry.mtime_ns // 1_000_000_000 >= snapshot.index_mtime_sec:
+            # Racy entry: only a content hash could prove it clean, and
+            # hashing would invoke repository-controlled conversion programs.
+            return True, None
+    return False, None
+
+
+def _index_differs_from_head(
+    worktree_path: Path,
+    head_oid: str,
+) -> tuple[bool | None, str | None]:
+    """Compare the index against the pinned HEAD tree (object store only)."""
     try:
         result = _run_git(
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            repo_path,
+            [
+                "diff-index",
+                "--cached",
+                "-z",
+                "--name-only",
+                "--no-renames",
+                head_oid,
+                "--",
+            ],
+            worktree_path,
         )
     except _GitInvocationError as exc:
-        return None, None, exc.code
+        return None, exc.code
     if result.returncode != 0:
-        return None, None, "status_failed"
-    try:
-        dirty, untracked_count = _parse_status_porcelain(result.stdout)
-    except ValueError:
-        return None, None, "status_unparseable"
-    return dirty, untracked_count, None
+        return None, "status_failed"
+    if result.stdout and not result.stdout.endswith(b"\0"):
+        return None, "status_unparseable"
+    return bool(result.stdout), None
 
 
-def _parse_ignored_paths(output: bytes) -> int:
+def _parse_nul_path_count(
+    output: bytes,
+    *,
+    output_limit: int,
+    entry_limit: int,
+) -> int:
     if not output:
         return 0
-    if len(output) > IGNORED_OUTPUT_LIMIT or not output.endswith(b"\0"):
-        raise ValueError("ignored-file output is invalid")
+    if len(output) > output_limit or not output.endswith(b"\0"):
+        raise ValueError("path-list output is invalid")
     fields = output[:-1].split(b"\0")
     if (
         not fields
         or any(not field for field in fields)
-        or len(fields) > IGNORED_ENTRY_LIMIT
+        or len(fields) > entry_limit
     ):
-        raise ValueError("ignored-file output is invalid")
+        raise ValueError("path-list output is invalid")
     return len(fields)
 
 
-def _parse_ls_files_v(output: bytes) -> int | str:
-    """Count ``assume-unchanged``/``skip-worktree`` entries NUL-safely.
-
-    Returns the masked-entry count or an error code.  ``ls-files -v``
-    prefixes each path with a tag; lowercase tags (``h``, ``S``) mark
-    masked entries that hide real modifications from ``git status``.
-    """
-    if not output:
-        return 0
-    if not output.endswith(b"\0"):
-        return "index_flags_unparseable"
-    fields = output[:-1].split(b"\0")
-    if not fields or any(not field for field in fields):
-        return "index_flags_unparseable"
-    masked = 0
-    for field in fields:
-        if len(field) < 2 or field[1:2] != b" ":
-            return "index_flags_unparseable"
-        tag = field[0:1]
-        if tag in {b"h", b"S"}:
-            masked += 1
-    return masked
+def _parse_ignored_paths(output: bytes) -> int:
+    return _parse_nul_path_count(
+        output,
+        output_limit=IGNORED_OUTPUT_LIMIT,
+        entry_limit=IGNORED_ENTRY_LIMIT,
+    )
 
 
-def _parse_ls_files_stage(output: bytes) -> int | str:
-    """Count gitlink entries from ``ls-files --stage`` output.
-
-    Returns the gitlink count or an error code.  An entry with mode
-    ``160000`` is a submodule gitlink whose contents the top-level probes
-    cannot see.
-    """
-    if not output:
-        return 0
-    if not output.endswith(b"\0"):
-        return "index_flags_unparseable"
-    fields = output[:-1].split(b"\0")
-    if not fields or any(not field for field in fields):
-        return "index_flags_unparseable"
-    gitlinks = 0
-    for field in fields:
-        parts = field.split(b"\t", 1)
-        if len(parts) != 2 or not parts[1]:
-            return "index_flags_unparseable"
-        meta = parts[0].split(b" ")
-        if len(meta) != 3:
-            return "index_flags_unparseable"
-        mode, oid_text, _stage = meta
-        if not _format_is_40_hex(oid_text) or not _stage.isdigit():
-            return "index_flags_unparseable"
-        if mode == _GITLINK_MODE:
-            gitlinks += 1
-    return gitlinks
-
-
-def _index_flags(repo_path: Path) -> tuple[int | None, int | None, str | None]:
-    """Return ``(masked_count, gitlink_count)``; fail closed on any doubt."""
+def _untracked_files(repo_path: Path) -> tuple[int | None, str | None]:
     try:
-        flags_result = _run_git(list(_LS_FILES_V_ARGS), repo_path)
+        result = _run_git(list(_UNTRACKED_FILES_ARGS), repo_path)
     except _GitInvocationError as exc:
-        return None, None, exc.code
-    if flags_result.returncode != 0:
-        return None, None, "index_flags_failed"
-    oversized = _bounded_output_error(flags_result.stdout)
-    if oversized:
-        return None, None, oversized
-    parsed_flags = _parse_ls_files_v(flags_result.stdout)
-    if isinstance(parsed_flags, str):
-        return None, None, parsed_flags
-    masked_count = parsed_flags
+        return None, exc.code
+    if result.returncode != 0:
+        return None, "untracked_files_failed"
     try:
-        stage_result = _run_git(list(_LS_FILES_STAGE_ARGS), repo_path)
-    except _GitInvocationError as exc:
-        return None, None, exc.code
-    if stage_result.returncode != 0:
-        return None, None, "index_flags_failed"
-    oversized = _bounded_output_error(stage_result.stdout)
-    if oversized:
-        return None, None, oversized
-    parsed_stage = _parse_ls_files_stage(stage_result.stdout)
-    if isinstance(parsed_stage, str):
-        return None, None, parsed_stage
-    gitlink_count = parsed_stage
-    return masked_count, gitlink_count, None
+        return (
+            _parse_nul_path_count(
+                result.stdout,
+                output_limit=_UNTRACKED_OUTPUT_LIMIT,
+                entry_limit=_UNTRACKED_ENTRY_LIMIT,
+            ),
+            None,
+        )
+    except ValueError:
+        return None, "untracked_files_unparseable"
 
 
 def _ignored_files(repo_path: Path) -> tuple[int | None, str | None]:
@@ -667,6 +1031,41 @@ def _ignored_files(repo_path: Path) -> tuple[int | None, str | None]:
         return _parse_ignored_paths(result.stdout), None
     except ValueError:
         return None, "ignored_files_unparseable"
+
+
+def _scan_worktree_state(
+    worktree_path: Path,
+    head_oid: str,
+) -> tuple[_WorktreeScan | None, str | None]:
+    """Dirtiness, masked-index, submodule, and untracked evidence in one pass.
+
+    No step reads worktree file contents or invokes repository-configured
+    programs.
+    """
+    snapshot, snapshot_error = _index_snapshot(worktree_path)
+    if snapshot_error or snapshot is None:
+        return None, snapshot_error or "index_unreadable"
+    stat_dirty, stat_error = _stat_scan_dirty(worktree_path, snapshot)
+    if stat_error:
+        return None, stat_error
+    dirty = bool(stat_dirty) or snapshot.unmerged_count > 0
+    if not dirty:
+        differs, diff_error = _index_differs_from_head(worktree_path, head_oid)
+        if diff_error or differs is None:
+            return None, diff_error or "status_failed"
+        dirty = differs
+    untracked_count, untracked_error = _untracked_files(worktree_path)
+    if untracked_error or untracked_count is None:
+        return None, untracked_error or "untracked_files_failed"
+    return (
+        _WorktreeScan(
+            dirty=dirty or untracked_count > 0,
+            untracked_count=untracked_count,
+            masked_count=snapshot.masked_count,
+            gitlink_count=snapshot.gitlink_count,
+        ),
+        None,
+    )
 
 
 def _decision(
@@ -772,7 +1171,8 @@ def _pins_still_valid(
 
     A concurrent ref or HEAD move between the clean-status read and the
     published decision must downgrade eligibility to uncertainty, never
-    certify a moved target.
+    certify a moved target.  The worktree is also scanned again: a mutation
+    landing after the first scan invalidates the clean evidence as well.
     """
     current_branch_oid, branch_error = _resolve_commit_oid(repo_root, branch_ref)
     if branch_error or current_branch_oid != branch_oid:
@@ -782,6 +1182,19 @@ def _pins_still_valid(
         return False
     current_worktree_head = _worktree_head_oid(worktree_path)
     if current_worktree_head != worktree_head_oid:
+        return False
+    scan, scan_error = _scan_worktree_state(worktree_path, worktree_head_oid)
+    if scan_error or scan is None:
+        return False
+    if (
+        scan.dirty
+        or scan.untracked_count
+        or scan.masked_count
+        or scan.gitlink_count
+    ):
+        return False
+    ignored_count, ignored_error = _ignored_files(worktree_path)
+    if ignored_error or ignored_count:
         return False
     return True
 
@@ -921,23 +1334,19 @@ def classify_git_worktree(
         return result(KEEP_UNCERTAIN, "worktree_head_unpinnable")
     pinned_worktree_head = worktree_head_oid
 
-    dirty, untracked_count, status_error = _status(worktree_path)
-    audit["dirty"] = dirty
-    audit["untracked_count"] = untracked_count
-    if status_error:
-        return result(KEEP_UNCERTAIN, status_error)
-
-    masked_count, gitlink_count, index_error = _index_flags(worktree_path)
-    audit["index_masked_count"] = masked_count
-    audit["submodule_count"] = gitlink_count
-    if index_error:
-        return result(KEEP_UNCERTAIN, index_error)
-    if masked_count:
+    scan, scan_error = _scan_worktree_state(worktree_path, worktree_head_oid)
+    if scan_error or scan is None:
+        return result(KEEP_UNCERTAIN, scan_error or "index_unreadable")
+    audit["dirty"] = scan.dirty
+    audit["untracked_count"] = scan.untracked_count
+    audit["index_masked_count"] = scan.masked_count
+    audit["submodule_count"] = scan.gitlink_count
+    if scan.masked_count:
         return result(
             KEEP_UNCERTAIN,
             "index_masked_entries_present",
         )
-    if gitlink_count:
+    if scan.gitlink_count:
         return result(
             KEEP_UNCERTAIN,
             "submodules_present",
@@ -947,9 +1356,9 @@ def classify_git_worktree(
     audit["ignored_count"] = ignored_count
     if ignored_error:
         return result(KEEP_UNCERTAIN, ignored_error)
-    if dirty:
+    if scan.dirty:
         reasons = ["dirty_worktree"]
-        if untracked_count:
+        if scan.untracked_count:
             reasons.append("untracked_files_present")
         if ignored_count:
             reasons.append("ignored_files_present")
@@ -993,8 +1402,7 @@ def classify_git_worktree(
         if (
             len(parts) != 2
             or parts[0] not in {b"+", b"-"}
-            or not parts[1]
-            or any(char not in b"0123456789abcdefABCDEF" for char in parts[1])
+            or not _format_is_hex_oid(parts[1])
         ):
             return result(KEEP_UNCERTAIN, "cherry_unparseable")
         signs.append(parts[0])

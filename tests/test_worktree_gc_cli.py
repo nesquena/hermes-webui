@@ -225,11 +225,15 @@ def test_atomic_report_replaces_only_after_complete_fsync(tmp_path, monkeypatch)
         events.append(("fsync", fd))
         return real_fsync(fd)
 
-    def observing_replace(source, destination):
+    def observing_replace(source, destination, **kwargs):
         events.append(("replace", Path(source), Path(destination)))
-        assert json.loads(Path(source).read_text(encoding="utf-8")) == {"new": True}
+        source_path = Path(source)
+        if not source_path.is_absolute():
+            # dirfd-relative rename: the source names the pinned parent dir.
+            source_path = report_path.parent / source_path
+        assert json.loads(source_path.read_text(encoding="utf-8")) == {"new": True}
         assert json.loads(report_path.read_text(encoding="utf-8")) == {"old": True}
-        return real_replace(source, destination)
+        return real_replace(source, destination, **kwargs)
 
     monkeypatch.setattr(os, "fsync", observing_fsync)
     monkeypatch.setattr(os, "replace", observing_replace)
@@ -243,3 +247,89 @@ def test_atomic_report_replaces_only_after_complete_fsync(tmp_path, monkeypatch)
     assert any(event[0] == "fsync" for event in events[replace_index + 1 :])
     assert json.loads(report_path.read_text(encoding="utf-8")) == {"new": True}
     assert list(report_path.parent.glob(f".{report_path.name}.*")) == []
+
+
+def test_report_path_inside_audited_repo_is_rejected(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with pytest.raises(SystemExit) as exc:
+        worktree_gc.main(
+            ["--repo", str(repo), "--report-path", str(repo / "audit.json")],
+            git_backend=object(),
+            audit_fn=lambda **_kwargs: pytest.fail("audit must not run"),
+            stdout=io.StringIO(),
+        )
+
+    assert exc.value.code == 2
+    assert not (repo / "audit.json").exists()
+
+
+def test_report_path_git_head_is_never_overwritten(tmp_path):
+    repo = tmp_path / "repo"
+    git_dir = repo / ".git"
+    git_dir.mkdir(parents=True)
+    head = git_dir / "HEAD"
+    original = "ref: refs/heads/master\n"
+    head.write_text(original, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        worktree_gc.main(
+            ["--repo", str(repo), "--report-path", str(head)],
+            git_backend=object(),
+            audit_fn=lambda **_kwargs: pytest.fail("audit must not run"),
+            stdout=io.StringIO(),
+        )
+
+    assert exc.value.code == 2
+    assert head.read_text(encoding="utf-8") == original
+
+
+def test_report_path_inside_state_dir_is_rejected(tmp_path):
+    repo = tmp_path / "repo"
+    sessions = tmp_path / "state" / "sessions"
+    repo.mkdir()
+    sessions.mkdir(parents=True)
+    sidecar = sessions / "existing.json"
+    original = "{}\n"
+    sidecar.write_text(original, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        worktree_gc.main(
+            [
+                "--repo",
+                str(repo),
+                "--state-dir",
+                str(sessions.parent),
+                "--report-path",
+                str(sidecar),
+            ],
+            git_backend=object(),
+            audit_fn=lambda **_kwargs: pytest.fail("audit must not run"),
+            stdout=io.StringIO(),
+        )
+
+    assert exc.value.code == 2
+    assert sidecar.read_text(encoding="utf-8") == original
+
+
+def test_report_destination_symlink_is_rejected_without_being_followed(tmp_path):
+    target = tmp_path / "target.json"
+    original = '{"original": true}\n'
+    target.write_text(original, encoding="utf-8")
+    link = tmp_path / "link.json"
+    os.symlink(target, link)
+
+    with pytest.raises(ValueError):
+        write_report_atomic({"new": True}, link)
+
+    assert target.read_text(encoding="utf-8") == original
+    assert link.is_symlink()
+
+
+def test_report_destination_fifo_is_rejected_without_blocking(tmp_path):
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+
+    with pytest.raises(ValueError):
+        write_report_atomic({"new": True}, fifo)

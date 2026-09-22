@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from api.worktree_gc_git import (
@@ -14,6 +16,7 @@ from tests.test_worktree_gc_git_classification import (
     _commit,
     add_worktree,
     make_remote_repo,
+    settle_index_clock,
 )
 
 
@@ -100,6 +103,7 @@ def test_branch_exclusive_merge_resolution_is_not_patch_equivalent(tmp_path):
     )
     _git(worktree, "add", "unique-resolution.txt")
     _git(worktree, "commit", "-q", "--amend", "--no-edit")
+    settle_index_clock(worktree)
 
     decision = classify_git_worktree(
         worktree,
@@ -130,6 +134,7 @@ def test_branch_exclusive_merge_with_proven_equal_tree_stays_eligible(tmp_path):
     # Both sides carry the same patch: the merge resolution is identical to
     # the target tree even though the merge commit itself is branch-exclusive.
     _git(worktree, "merge", "--no-ff", "-q", "side-work", "-m", "merge same tree")
+    settle_index_clock(worktree)
 
     decision = classify_git_worktree(
         worktree,
@@ -157,8 +162,8 @@ def test_assume_unchanged_masked_entry_fails_closed(tmp_path):
 
     assert decision.verdict == KEEP_UNCERTAIN
     assert decision.eligible is False
-    assert decision.dirty is False  # status is genuinely clean...
-    assert decision.index_masked_count == 1  # ...but the index lies.
+    assert decision.dirty is True  # stat evidence disagrees with the index...
+    assert decision.index_masked_count == 1  # ...and the index lies about it.
     assert decision.reasons == ("index_masked_entries_present",)
 
 
@@ -293,3 +298,220 @@ def test_worktree_head_move_between_status_and_decision_blocks(tmp_path, monkeyp
     assert decision.verdict == KEEP_UNCERTAIN
     assert decision.eligible is False
     assert "pin_revalidation_failed" in decision.reasons
+
+
+# ---------------------------------------------------------------------------
+# Round-2 gate blockers (2026-09-19): no repository program may execute, and
+# no state outside the report may be overwritten.
+# ---------------------------------------------------------------------------
+
+
+def test_classification_never_executes_repository_programs(tmp_path):
+    """Round-2 blocker 1: clean filters and diff drivers must never run.
+
+    The control half proves the repository configuration is live: ordinary
+    porcelain Git executes it.  The audit must classify the same worktree
+    without executing anything the repository configured.
+    """
+    case = make_remote_repo(tmp_path)
+    repo = case["repo"]
+    assert isinstance(repo, Path)
+    marker = tmp_path / "filter-executed.marker"
+    driver_marker = tmp_path / "diff-driver-executed.marker"
+    (repo / ".gitattributes").write_text(
+        "*.txt filter=gatemark diff=gatemark\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".gitattributes")
+    _git(repo, "commit", "-m", "repository-controlled attributes")
+    _git(repo, "push", "origin", "master")
+    _git(
+        repo,
+        "config",
+        "filter.gatemark.clean",
+        f"touch {marker}; cat",
+    )
+    _git(
+        repo,
+        "config",
+        "diff.gatemark.command",
+        f"touch {driver_marker}; true",
+    )
+    worktree = add_worktree(
+        case,
+        tmp_path,
+        "gc/hostile-config",
+        start="origin/master",
+    )
+
+    decision = classify_git_worktree(worktree, "gc/hostile-config", repo)
+
+    assert decision.verdict == REMOVE_ANCESTOR
+    assert decision.eligible is True
+    assert not marker.exists(), "classification executed a clean filter"
+    assert not driver_marker.exists(), "classification executed a diff driver"
+
+    # Control: the same repository executes its configured programs under
+    # ordinary porcelain Git, proving the harness would catch execution.
+    (worktree / "base.txt").write_text("modified\n", encoding="utf-8")
+    _git(worktree, "status", "--porcelain")
+    _git(worktree, "diff", "--", "base.txt")
+    assert marker.exists(), "control probe: clean filter did not run"
+    assert driver_marker.exists(), "control probe: diff driver did not run"
+
+
+def test_masked_index_lowercase_and_combined_tags_fail_closed(tmp_path):
+    """Round-2: masked tags beyond ``h``/``S`` must be caught at the bit level."""
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/masked-combined")
+    # skip-worktree + assume-unchanged combined shows as lowercase ``s`` in
+    # ls-files -v, which a tag-letter parser can miss entirely.
+    _git(
+        worktree,
+        "update-index",
+        "--skip-worktree",
+        "--assume-unchanged",
+        "base.txt",
+    )
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/masked-combined",
+        case["repo"],
+    )
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert decision.index_masked_count == 1
+    assert decision.reasons == ("index_masked_entries_present",)
+
+
+def test_tracked_mutation_after_first_scan_blocks_eligibility(
+    tmp_path,
+    monkeypatch,
+):
+    """Round-2: eligibility must not survive a mutation after the clean read."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/toctou-content")
+    repo = case["repo"]
+    assert isinstance(repo, Path)
+
+    real_run_git = gc_git._run_git
+    mutated = {"done": False}
+
+    def mutating_run_git(args, cwd, *, timeout=gc_git.GIT_TIMEOUT):
+        if (
+            not mutated["done"]
+            and args[:2] == ["merge-base", "--is-ancestor"]
+        ):
+            mutated["done"] = True
+            # The clean scan already ran; mutate a tracked file now.
+            (worktree / "base.txt").write_text(
+                "mutated after the scan\n",
+                encoding="utf-8",
+            )
+        return real_run_git(args, cwd, timeout=timeout)
+
+    monkeypatch.setattr(gc_git, "_run_git", mutating_run_git)
+
+    decision = classify_git_worktree(worktree, "gc/toctou-content", repo)
+
+    assert mutated["done"] is True
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert "pin_revalidation_failed" in decision.reasons
+
+
+def test_racy_index_entry_is_dirty_without_content_hashing(tmp_path):
+    """Racy entries fail closed: hashing them would invoke clean filters."""
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/racy")
+    # Deterministic raciness: index timestamp at or below the entry mtime.
+    import tests.test_worktree_gc_git_classification as helpers
+
+    index = helpers._index_path(worktree)
+    past = time.time() - 3600
+    os.utime(index, (past, past))
+
+    decision = classify_git_worktree(worktree, "gc/racy", case["repo"])
+
+    assert decision.verdict == "KEEP_DIRTY"
+    assert decision.eligible is False
+    assert decision.dirty is True
+
+
+def test_sha256_repository_classifies_end_to_end(tmp_path):
+    """Round-2: SHA-256 object format must not be rejected by 40-hex checks."""
+    remote = tmp_path / "origin256.git"
+    repo = tmp_path / "repo256"
+    remote.mkdir()
+    repo.mkdir()
+    _git(remote, "init", "--bare", "--initial-branch=master", "--object-format=sha256")
+    _git(repo, "init", "--initial-branch=master", "--object-format=sha256")
+    _git(repo, "config", "user.email", "gc-tests@example.invalid")
+    _git(repo, "config", "user.name", "Worktree GC Tests")
+    _commit(repo, "base.txt", "base\n", "base")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "master")
+    worktree = tmp_path / "wt256"
+    _git(repo, "worktree", "add", "-b", "gc/sha256", str(worktree), "master")
+    settle_index_clock(worktree)
+
+    head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    assert len(head) == 64
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/sha256",
+        repo,
+        target_ref="master",
+    )
+
+    assert decision.verdict == REMOVE_ANCESTOR
+    assert decision.eligible is True
+    assert decision.ancestor_of_target is True
+
+
+def test_newline_worktree_path_is_classified_not_rejected(tmp_path):
+    """Round-2: NUL-delimited worktree listing must survive newline paths."""
+    case = make_remote_repo(tmp_path)
+    repo = case["repo"]
+    assert isinstance(repo, Path)
+    worktree = tmp_path / "weird" / "wt\nnewline"
+    worktree.parent.mkdir()
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "-b",
+        "gc/newline-path",
+        str(worktree),
+        str(case["base_sha"]),
+    )
+    settle_index_clock(worktree)
+
+    decision = classify_git_worktree(worktree, "gc/newline-path", repo)
+
+    assert decision.listed is True
+    assert decision.verdict == REMOVE_ANCESTOR
+    assert decision.eligible is True
+
+
+def test_oversized_git_output_fails_closed_instead_of_consuming_memory(
+    tmp_path,
+    monkeypatch,
+):
+    """Round-2: every Git output is hard-bounded, not just a few probes."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/oversized")
+    monkeypatch.setattr(gc_git, "_GIT_OUTPUT_LIMIT", 8)
+
+    decision = classify_git_worktree(worktree, "gc/oversized", case["repo"])
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert "git_output_oversized" in decision.reasons
