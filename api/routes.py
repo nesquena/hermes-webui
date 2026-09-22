@@ -44,6 +44,7 @@ from api.agent_runtime import (
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
+    open_state_db_readonly,
     is_cli_session_row,
     is_cli_session_row_visible,
     read_session_lineage_report,
@@ -320,7 +321,7 @@ def _latest_cron_session_info_for_jobs(
     if not db_path or not Path(db_path).exists():
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path, log=logger)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -378,7 +379,7 @@ def _latest_cron_session_info_for_jobs(
                 if all(info["session_id"] for info in results.values()):
                     break
             return results
-    except sqlite3.Error:
+    except (OSError, sqlite3.Error):
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
 
 
@@ -8312,8 +8313,7 @@ def _state_db_session_source(sid: str) -> str:
         db_path = _active_state_db_path()
         if not db_path or not Path(db_path).exists():
             return ""
-        import sqlite3 as _sqlite
-        with closing(_sqlite.connect(str(db_path))) as _conn:
+        with closing(open_state_db_readonly(db_path, log=logger)) as _conn:
             row = _conn.execute(
                 "SELECT source FROM sessions WHERE id = ?", (sid,)
             ).fetchone()
@@ -8572,7 +8572,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         db_path = _active_state_db_path()
         if db_path and Path(db_path).exists():
             import sqlite3 as _sqlite
-            with closing(_sqlite.connect(str(db_path))) as _conn:
+            with closing(open_state_db_readonly(db_path, log=logger)) as _conn:
                 _conn.row_factory = _sqlite.Row
                 _row = _conn.execute(
                     "SELECT source, title, model, cwd, started_at, ended_at "
@@ -11970,7 +11970,7 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path, log=logger)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
@@ -12605,7 +12605,7 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
                 "ms": round((time.time() - t0) * 1000, 1),
             }
         else:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path, log=logger)) as conn:
                 conn.execute("PRAGMA schema_version").fetchone()
             checks["state_db"] = {
                 "status": "ok",

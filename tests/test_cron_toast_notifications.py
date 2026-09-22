@@ -35,6 +35,25 @@ def _payload(handler):
     return json.loads(handler.wfile.getvalue().decode("utf-8"))
 
 
+def test_cron_session_lookup_degrades_if_db_disappears_during_open(tmp_path, monkeypatch):
+    """A disappearance after exists() still returns placeholders for every job."""
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    db_path.touch()
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db_path)
+
+    def fail_open(_path, *args, **kwargs):
+        raise FileNotFoundError(str(db_path))
+
+    monkeypatch.setattr(routes, "open_state_db_readonly", fail_open)
+
+    assert routes._latest_cron_session_info_for_jobs(["job-a", "job-b"]) == {
+        "job-a": {"session_id": "", "message_count": None},
+        "job-b": {"session_id": "", "message_count": None},
+    }
+
+
 def _function_body(name: str) -> str:
     marker = f"function {name}("
     start = PANELS_JS.find(marker)

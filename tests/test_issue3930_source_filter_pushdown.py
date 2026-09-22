@@ -255,6 +255,7 @@ def test_load_cli_sessions_uncached_pushes_specific_source_into_state_db_scan(mo
             "log": models.logger,
             "exclude_sources": None,
             "include_sources": ("tui",),
+            "raise_on_unavailable": True,
         }
     ]
     assert [row["source_tag"] for row in result] == ["tui"]
@@ -296,6 +297,7 @@ def test_cron_source_filter_uses_cron_rescue_limit(monkeypatch, tmp_path):
             "log": models.logger,
             "exclude_sources": None,
             "include_sources": ("cron",),
+            "raise_on_unavailable": True,
         }
     ]
     assert [row["source_tag"] for row in result] == ["cron"]

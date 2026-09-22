@@ -279,8 +279,9 @@ def test_sessions_route_supports_historical_get_cli_sessions_signature(monkeypat
 
 
 def test_all_profiles_scans_claude_code_only_once(monkeypatch):
-    """All-profiles mode should keep the old single global Claude Code scan."""
-    calls = []
+    """All-profiles mode performs one independent global Claude scan; profile
+    loaders never embed Claude rows themselves."""
+    claude_calls = []
 
     def fake_contexts():
         return [
@@ -289,24 +290,27 @@ def test_all_profiles_scans_claude_code_only_once(monkeypatch):
         ], ("profile-a", "profile-b")
 
     def fake_load(_home, _db_path, profile, **kwargs):
-        include = kwargs["include_claude_code"]
-        calls.append((profile, include))
-        rows = [{"session_id": f"{profile}-cli"}]
-        if include:
-            rows.append({"session_id": "claude-global"})
-        return rows
+        calls.append((profile, kwargs.get("include_claude_code")))
+        return [{"session_id": f"{profile}-cli"}]
 
+    def fake_claude():
+        claude_calls.append(True)
+        return [{"session_id": "claude-global"}]
+
+    calls = []
     monkeypatch.setattr(models, "_all_profiles_cli_contexts", fake_contexts)
     monkeypatch.setattr(models, "_load_cli_sessions_uncached", fake_load)
+    monkeypatch.setattr(models, "get_claude_code_sessions", fake_claude)
     monkeypatch.setattr(models, "_cli_sessions_cache_ttl_seconds", lambda: 0.0)
 
     rows = models.get_cli_sessions(all_profiles=True, include_claude_code=True)
 
-    assert calls == [("profile-a", True), ("profile-b", False)]
+    assert calls == [("profile-a", False), ("profile-b", False)]
+    assert claude_calls == [True]
     assert [row["session_id"] for row in rows] == [
         "profile-a-cli",
-        "claude-global",
         "profile-b-cli",
+        "claude-global",
     ]
 
 
