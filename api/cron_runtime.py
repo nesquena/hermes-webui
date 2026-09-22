@@ -40,7 +40,15 @@ def _child_kwargs_for_operation(operation, kwargs):
     return child_kwargs
 
 
-def _cron_job_subprocess_main(job_json, profile_home, operation, args_json, kwargs_json, result_queue):
+def _cron_job_subprocess_main(
+    job_json,
+    profile_home,
+    cron_home,
+    operation,
+    args_json,
+    kwargs_json,
+    result_queue,
+):
     try:
         job = json.loads(job_json)
         args = tuple(json.loads(args_json))
@@ -53,7 +61,9 @@ def _cron_job_subprocess_main(job_json, profile_home, operation, args_json, kwar
         else:
             from api.profiles import cron_profile_context_for_home
 
-            _run_in_profile = cron_profile_context_for_home(profile_home)
+            _run_in_profile = cron_profile_context_for_home(
+                profile_home, cron_store_home=cron_home
+            )
 
         try:
             if _run_in_profile is None:
@@ -103,9 +113,19 @@ def _cron_subprocess_result_timeout_seconds(job):
 
 
 def run_cron_in_profile_subprocess(
-    job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None
+    job,
+    profile_home,
+    operation,
+    *,
+    args=(),
+    kwargs=None,
+    cancel_event=None,
+    cron_home=None,
 ):
     """Run one supported cron operation in a profile-pinned spawned child.
+
+    ``profile_home`` selects the execution profile. ``cron_home`` optionally
+    selects the owning store for lifecycle state when those homes differ.
 
     ``cancel_event`` stays in the parent because it is a live control object.
     A set event terminates the child; Agent then recovers the abandoned claim
@@ -117,12 +137,21 @@ def run_cron_in_profile_subprocess(
     kwargs = _child_kwargs_for_operation(operation, kwargs or {})
     job_json, args_json, kwargs_json = _serialize_child_request(job, args, kwargs)
     profile_home = None if profile_home is None else str(Path(profile_home))
+    cron_home = None if cron_home is None else str(Path(cron_home))
 
     ctx = multiprocessing.get_context("spawn")
     result_queue = ctx.Queue(maxsize=1)
     process = ctx.Process(
         target=_cron_job_subprocess_main,
-        args=(job_json, profile_home, operation, args_json, kwargs_json, result_queue),
+        args=(
+            job_json,
+            profile_home,
+            cron_home,
+            operation,
+            args_json,
+            kwargs_json,
+            result_queue,
+        ),
     )
     result_timeout = _cron_subprocess_result_timeout_seconds(job)
     status = "error"

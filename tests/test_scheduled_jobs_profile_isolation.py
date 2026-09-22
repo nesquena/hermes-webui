@@ -119,6 +119,26 @@ def test_cron_profile_context_for_home_pins_explicit_home(tmp_path):
             os.environ["HERMES_HOME"] = prev
 
 
+def test_cron_profile_context_for_home_separates_execution_and_store(tmp_path):
+    pytest.importorskip("cron.jobs")
+
+    owner_home = tmp_path / "owner"
+    execution_home = tmp_path / "execution"
+    _write_jobs(owner_home, [{"id": "owner-job", "name": "Owner"}])
+    _write_jobs(execution_home, [{"id": "execution-job", "name": "Execution"}])
+
+    from api.profiles import cron_profile_context_for_home
+    from cron.jobs import list_jobs
+
+    with cron_profile_context_for_home(
+        execution_home, cron_store_home=owner_home
+    ):
+        assert pathlib.Path(os.environ["HERMES_HOME"]) == execution_home
+        assert [job["id"] for job in list_jobs(include_disabled=True)] == [
+            "owner-job"
+        ]
+
+
 def test_cron_profile_context_serializes_concurrent_access(tmp_path):
     """The lock must prevent concurrent contexts from interleaving."""
     from api.profiles import cron_profile_context_for_home
@@ -245,7 +265,7 @@ def test_webui_routes_scheduler_lifecycle_to_pinned_child(tmp_path, monkeypatch)
     monkeypatch.setattr(p, "publish_session_list_changed", lambda reason: events.append(("publish", reason)))
     monkeypatch.setattr(
         "api.cron_runtime.run_cron_in_profile_subprocess",
-        lambda job, home, operation, *, args=(), kwargs=None, cancel_event=None: (
+        lambda job, home, operation, *, args=(), kwargs=None, cancel_event=None, cron_home=None: (
             events.append(("spawn", str(home), operation))
             or original_run_one_job(job)
         ),
@@ -327,7 +347,7 @@ def test_scheduled_fire_reader_enters_while_child_remains_blocked(tmp_path, monk
     monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", home)
 
     def child_boundary(
-        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None
+        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None, cron_home=None
     ):
         started.set()
         assert release.wait(2)
@@ -371,7 +391,7 @@ def test_in_chat_run_suspends_parent_tool_context_before_child(monkeypatch, tmp_
     observed = []
 
     def child_boundary(
-        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None
+        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None, cron_home=None
     ):
         observed.append((operation, p._cron_env_lock.locked(), p._cron_profile_context_depth()))
         return True
@@ -403,7 +423,7 @@ def test_in_chat_run_reacquires_profile_for_post_child_settlement(monkeypatch, t
     observed = []
 
     def child_boundary(
-        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None
+        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None, cron_home=None
     ):
         assert not p._cron_env_lock.locked()
         return True
@@ -438,7 +458,7 @@ def test_in_chat_run_without_profile_inherits_selected_home_before_suspend(
     observed = []
 
     def child_boundary(
-        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None
+        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None, cron_home=None
     ):
         observed.append((profile_home, operation, p._cron_profile_context_depth()))
         return True
@@ -516,7 +536,7 @@ def test_two_overlapping_scheduled_children_leave_profile_readers_responsive(
     release = {profile: threading.Event() for profile in homes}
 
     def child_boundary(
-        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None
+        job, profile_home, operation, *, args=(), kwargs=None, cancel_event=None, cron_home=None
     ):
         profile = job["profile"]
         assert pathlib.Path(profile_home) == homes[profile]
@@ -730,7 +750,7 @@ def test_scheduler_live_gateway_handles_preserve_agent_delivery_and_settlement(
     ]
 
 
-def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_profile(
+def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_owning_store(
     monkeypatch, tmp_path
 ):
     import contextvars
@@ -742,10 +762,11 @@ def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_profile(
     default_home = tmp_path / "default"
     profile_home = default_home / "profiles" / "ops"
     job_id = "copied-live"
-    default_jobs = [{"id": "default-only", "name": "default-only"}]
+    default_jobs = []
     profile_job = {
         "id": job_id,
         "name": "profile job",
+        "profile": "ops",
         "prompt": "profile job",
         "enabled": True,
         "schedule": {
@@ -756,8 +777,9 @@ def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_profile(
         "run_claim": {"by": "profile-worker", "at": "2099-01-01T00:00:00+00:00"},
         "fire_claim": {"by": "profile-worker"},
     }
+    default_jobs.append(profile_job)
     _write_jobs(default_home, default_jobs)
-    _write_jobs(profile_home, [profile_job])
+    _write_jobs(profile_home, [])
 
     monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", default_home)
     monkeypatch.setattr(p, "publish_session_list_changed", lambda *a, **k: None)
@@ -792,7 +814,7 @@ def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_profile(
     monkeypatch.setattr(scheduler, "_deliver_result", deliver_result)
     p.install_cron_scheduler_profile_isolation()
 
-    with p.cron_profile_context_for_home(profile_home):
+    with p.cron_profile_context_for_home(default_home):
         copied_context = contextvars.copy_context()
 
     assert p._cron_profile_context_depth() == 0
@@ -820,19 +842,19 @@ def test_scheduler_live_gateway_handles_copied_profile_job_settles_in_profile(
     assert body_calls == [(job_id, profile_home, 1, True)]
     assert deliveries == [(job_id, "agent response", None, live_loop)]
 
-    profile_state = json.loads(
-        (profile_home / "cron" / "jobs.json").read_text(encoding="utf-8")
+    owner_state = json.loads(
+        (default_home / "cron" / "jobs.json").read_text(encoding="utf-8")
     )["jobs"][0]
-    assert profile_state["last_status"] == "ok"
-    assert profile_state["run_claim"] is None
-    assert profile_state["fire_claim"] is None
-    assert profile_state["repeat"]["completed"] == 1
-    assert (profile_home / "cron" / "output" / job_id).is_dir()
+    assert owner_state["last_status"] == "ok"
+    assert owner_state["run_claim"] is None
+    assert owner_state["fire_claim"] is None
+    assert owner_state["repeat"]["completed"] == 1
+    assert (default_home / "cron" / "output" / job_id).is_dir()
 
     assert json.loads(
-        (default_home / "cron" / "jobs.json").read_text(encoding="utf-8")
-    )["jobs"] == default_jobs
-    assert not (default_home / "cron" / "output" / job_id).exists()
+        (profile_home / "cron" / "jobs.json").read_text(encoding="utf-8")
+    )["jobs"] == []
+    assert not (profile_home / "cron" / "output" / job_id).exists()
     assert not p._cron_env_lock.locked()
 
 
@@ -998,7 +1020,7 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "api" / "cron_runtime.py").read_text(encoding="utf-8")
 
-    idx = src.find("def _cron_job_subprocess_main(job")
+    idx = src.find("def _cron_job_subprocess_main(")
     assert idx != -1, "_cron_job_subprocess_main not found"
     body = src[idx : idx + 2000]
 

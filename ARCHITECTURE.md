@@ -395,7 +395,24 @@ read_file_content(workspace, rel):
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
 
-### 4.8 Persistent Goal Profile Boundary
+### 4.8 Scheduled Cron Profile Isolation
+
+Scheduled cron jobs keep two profile paths distinct. The owning cron home holds
+the job row, claims, output, and terminal settlement. The execution home holds
+the selected profile's configuration, secrets, skills, and agent runtime.
+
+Handle-free scheduled and in-chat runs call Agent's complete `run_one_job`
+lifecycle in a spawned child. The child receives both homes and routes cron
+store operations through the owning home. A copied worker context can therefore
+run a job selected for `profiles/research` while settling the row in the
+default store that supplied it.
+
+Runs with live adapters or an event loop stay in the parent so those
+process-local handles remain valid. They keep the current profile lock for the
+duration of the lifecycle. Parent cancellation terminates a child when possible;
+Agent's claim expiry and recovery handle the abandoned run.
+
+### 4.9 Persistent Goal Profile Boundary
 
 `api/goals.py` exposes the WebUI `/goal` command payloads and post-turn evaluation hook.
 Hermes Agent's native `GoalManager` is the authoritative owner of goal evaluation,

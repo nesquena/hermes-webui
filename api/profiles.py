@@ -633,6 +633,25 @@ def _home_for_scheduled_cron_job(job: dict) -> Path:
     return home
 
 
+def _cron_store_home_for_scheduled_job() -> Path:
+    """Resolve the cron store that supplied the scheduler job row."""
+    stack = _cron_context_stack.get()
+    if stack:
+        return Path(stack[-1]._home)
+    try:
+        import cron.jobs as _cj
+
+        current_store = getattr(_cj, '_current_cron_store', None)
+        if callable(current_store):
+            return Path(current_store().cron_dir).parent
+        jobs_file = getattr(_cj, 'JOBS_FILE', None)
+        if jobs_file is not None:
+            return Path(jobs_file).parent.parent
+    except (ImportError, AttributeError, TypeError, ValueError):
+        logger.debug("Could not resolve the current cron store", exc_info=True)
+    return get_active_hermes_home()
+
+
 def install_cron_scheduler_profile_isolation() -> None:
     """Patch cron.scheduler.run_one_job for profile-pinned scheduler safety.
 
@@ -695,6 +714,7 @@ def install_cron_scheduler_profile_isolation() -> None:
         )
         try:
             execution_home = _home_for_scheduled_cron_job(job)
+            cron_store_home = _cron_store_home_for_scheduled_job()
             if live_gateway_handles:
                 if _cron_profile_context_depth() > 0:
                     active_context = _cron_context_stack.get()
@@ -710,7 +730,9 @@ def install_cron_scheduler_profile_isolation() -> None:
                             "profile context"
                         )
                     return original(job, *args, **kwargs)
-                with cron_profile_context_for_home(execution_home):
+                with cron_profile_context_for_home(
+                    execution_home, cron_store_home=cron_store_home
+                ):
                     return original(job, *args, **kwargs)
 
             from api.cron_runtime import run_cron_in_profile_subprocess
@@ -728,6 +750,7 @@ def install_cron_scheduler_profile_isolation() -> None:
                 args=args,
                 kwargs=child_kwargs,
                 cancel_event=cancel_event,
+                cron_home=cron_store_home,
             )
         finally:
             if _cron_profile_context_depth() == 0:
@@ -748,15 +771,18 @@ def install_cron_scheduler_profile_isolation() -> None:
 
 
 class cron_profile_context_for_home:
-    """Context manager that pins HERMES_HOME to an explicit profile home path.
+    """Pin execution config and, optionally, a separate cron store home.
 
     Use this variant from worker threads that don't have TLS context (e.g. the
     background thread started by /api/crons/run). The HTTP-side variant below
     resolves the home via TLS.
     """
 
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, *, cron_store_home: Path | None = None):
         self._home = Path(home)
+        self._cron_store_home = (
+            None if cron_store_home is None else Path(cron_store_home)
+        )
 
     def __enter__(self):
         _cron_env_lock.acquire()
@@ -795,6 +821,22 @@ class cron_profile_context_for_home:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
+            self._cron_store_context = None
+            if self._cron_store_home is not None and self._cron_store_home != self._home:
+                try:
+                    import cron.jobs as _cj
+                except ImportError:
+                    pass
+                else:
+                    use_cron_store = getattr(_cj, 'use_cron_store', None)
+                    if not callable(use_cron_store):
+                        raise RuntimeError(
+                            "unsupported Agent version: cron.jobs.use_cron_store "
+                            "is unavailable; cannot separate cron ownership from "
+                            "execution profile"
+                        )
+                    self._cron_store_context = use_cron_store(self._cron_store_home)
+                    self._cron_store_context.__enter__()
             _cron_context_stack.set((*_cron_context_stack.get(), self))
         except Exception:
             _pop_cron_profile_context_depth()
@@ -804,6 +846,9 @@ class cron_profile_context_for_home:
 
     def _restore_and_release(self):
         try:
+            if self._cron_store_context is not None:
+                self._cron_store_context.__exit__(None, None, None)
+                self._cron_store_context = None
             if self._prev_env is None:
                 os.environ.pop('HERMES_HOME', None)
             else:
@@ -2781,7 +2826,7 @@ def delete_profile_api(name: str) -> dict:
             raise RuntimeError(
                 f"Cannot delete active profile '{name}' while an agent is running. "
                 "Cancel or wait for it to finish."
-            ) from None
+            )
 
     try:
         from hermes_cli.profiles import delete_profile
@@ -2793,7 +2838,7 @@ def delete_profile_api(name: str) -> dict:
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:
-            raise ValueError(f"Profile '{name}' does not exist.") from None
+            raise ValueError(f"Profile '{name}' does not exist.")
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
