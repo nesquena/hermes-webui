@@ -36,11 +36,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.js_source_loader import read_extraction_source
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _read_sessions_js() -> str:
-    return (REPO_ROOT / "static" / "sessions.js").read_text()
+    return read_extraction_source(REPO_ROOT / "static" / "sessions.js")
 
 
 def _load_session_body() -> str:

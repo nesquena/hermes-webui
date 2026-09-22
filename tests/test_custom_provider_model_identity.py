@@ -7,13 +7,18 @@ from pathlib import Path
 
 import pytest
 
+from tests.js_source_loader import node_validated_read_options, node_validated_read_snippet
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS = REPO_ROOT / "static" / "ui.js"
 NODE = shutil.which("node")
 
-_DRIVER = r"""
-const fs=require('fs');
-const src=fs.readFileSync(process.argv[2],'utf8');
+_DRIVER = (
+    node_validated_read_snippet()
+    + "\nconst src=readValidated(process.argv[2], "
+    + node_validated_read_options(UI_JS)
+    + ");\n"
+    + r"""
 function extract(name){
   const start=src.indexOf('function '+name+'(');
   if(start<0) throw new Error('missing '+name);
@@ -68,6 +73,7 @@ console.log(JSON.stringify({
   qualifiedAfter:_modelStateForSelect(qualified,qualified.value),
 }));
 """
+)
 
 
 @pytest.mark.skipif(NODE is None, reason="node not in PATH")
@@ -96,9 +102,12 @@ def test_partial_then_live_catalog_preserves_exact_custom_provider_model(tmp_pat
 # when two options under the same custom provider normalize to the same target,
 # the hinted-fallback must refuse to guess and return null rather than pick
 # an arbitrary one.
-_AMBIGUITY_DRIVER = r"""
-const fs=require('fs');
-const src=fs.readFileSync(process.argv[2],'utf8');
+_AMBIGUITY_DRIVER = (
+    node_validated_read_snippet()
+    + "\nconst src=readValidated(process.argv[2], "
+    + node_validated_read_options(UI_JS)
+    + ");\n"
+    + r"""
 function extract(name){
   const start=src.indexOf('function '+name+'(');
   if(start<0) throw new Error('missing '+name);
@@ -127,6 +136,7 @@ console.log(JSON.stringify({
   exact:_findModelInDropdown('z-ai/glm-5.2', single, 'custom:tok'),
 }));
 """
+)
 
 
 @pytest.mark.skipif(NODE is None, reason="node not in PATH")
