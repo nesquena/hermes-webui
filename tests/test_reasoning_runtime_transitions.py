@@ -106,6 +106,17 @@ def test_required_agent_class_is_cached_and_destination_aware(monkeypatch):
     assert getattr(first, "_webui_destination_reasoning_guard", False) is True
 
 
+def test_missing_agent_symbol_preserves_lazy_import_retry(monkeypatch):
+    """Gateway-only startup may expose an intentionally empty run_agent stub."""
+    from api import agent_runtime
+
+    monkeypatch.setattr(agent_runtime, "_AIAgent", None)
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", None)
+    monkeypatch.setitem(sys.modules, "run_agent", ModuleType("run_agent"))
+
+    assert agent_runtime.get_ai_agent_class() is None
+
+
 def test_required_agent_class_replaces_canonical_symbol_and_replays_constructor_clamp(
     monkeypatch,
 ):
