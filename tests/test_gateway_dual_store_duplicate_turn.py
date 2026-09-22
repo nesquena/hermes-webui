@@ -141,9 +141,27 @@ identity there). Instead this reconciliation now builds a LOCAL candidate key,
 before. Once a twin is matched one-to-one on that narrower identity,
 ``api_content`` gets its own directional authority through the existing
 ``_copy_api_content_sidecar`` helper (Agent -> sidecar only, same lane as the
-semantic payload) rather than a generic dict merge. That helper is
-fill-only-if-absent on its own, so a conflicting non-empty pair on both sides
-fails closed: the identified survivor's own value is never overwritten.
+semantic payload) rather than a generic dict merge.
+
+Fifth review round
+------------------
+Rounds 1-4 all reasoned about what a matched pair should EXCHANGE. This one
+asked the prior question: what proves the two rows are the same turn at all?
+Nothing did. ``_cross_store_pairing_key`` compares role, visible content and
+``tool_calls``, and ``_cross_store_pairable`` adds tool identity -- so two
+genuinely different turns that answer with the same text matched, and the
+popped row was discarded with its own ``api_content`` and its Agent-owned
+``reasoning``, silently. ``_message_private_identity_compatible`` is the
+guard this module already uses for exactly that question (contradictory
+stable id, state.db row alias, or ``api_content`` means "not one message"),
+so ``_cross_store_pairable`` now consults it before any pairing.
+
+This CHANGES the round-4 conflicting-``api_content`` contract: that case no
+longer pairs-and-fails-closed, it does not pair at all and both turns
+survive (``test_conflicting_api_content_rows_are_not_paired_at_all``). The
+common production shape is untouched -- the sidecar copy has no
+``api_content`` at all, so there is nothing to contradict and pairing
+proceeds exactly as in round 4.
 """
 
 from __future__ import annotations
@@ -256,13 +274,25 @@ def test_gateway_reconciliation_pairs_across_differing_api_content():
     assert survivor.get("reasoning") == "AGENT REASONING"
 
 
-def test_conflicting_api_content_keeps_survivors_own_value():
-    """Two non-empty, DIFFERENT api_content values must not clobber each other.
+def test_conflicting_api_content_rows_are_not_paired_at_all():
+    """Two non-empty, DIFFERENT api_content values mean two turns, not one twin.
 
-    Mirrors the existing conflicting-semantic-payload contract: when the
-    identified survivor already carries its own non-empty `api_content`, the
-    Agent copy's value must not overwrite it -- fail closed via
-    `_copy_api_content_sidecar`'s own fill-only-if-absent policy.
+    CONTRACT CHANGE (review round 5). This case previously paired the rows and
+    relied on ``_copy_api_content_sidecar`` being fill-only-if-absent to keep
+    the survivor's own bytes -- which quietly assumed the two rows really were
+    one turn. Nothing established that: ``_cross_store_pairing_key`` compares
+    role, visible content and ``tool_calls`` only, so two genuinely different
+    turns answering with the same text match it. Pairing them discarded the
+    popped row outright, taking its ``api_content`` AND its Agent-owned
+    ``reasoning`` with it, silently.
+
+    ``_message_private_identity_compatible`` already treats contradictory
+    non-empty ``api_content`` as proof two rows are not the same message, so
+    pairing now fails closed on it and both turns survive intact. The failure
+    mode this trades into -- a visible duplicate row when the two copies of
+    ONE turn somehow disagree on provider bytes -- is the same trade this PR
+    made deliberately in round 4: a visible duplicate is recoverable, silent
+    deletion is not.
     """
     session = SimpleNamespace(
         messages=[
@@ -288,10 +318,14 @@ def test_conflicting_api_content_keeps_survivors_own_value():
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
-    survivor = next(m for m in merged if m.get("id") == 8)
+    answers = [m for m in merged if m.get("content") == "answer"]
+    assert len(answers) == 2, "contradictory provider bytes are not one turn"
+    survivor = next(m for m in answers if m.get("id") == 8)
     assert survivor.get("api_content") == "SIDECAR'S OWN BYTES"
-    # Non-conflicting fields still adopt normally on the same pass.
-    assert survivor.get("reasoning") == "AGENT REASONING"
+    assert "reasoning" not in survivor, "a non-twin's payload must not be adopted"
+    other = next(m for m in answers if m.get("id") != 8)
+    assert other.get("api_content") == "AGENT BYTES"
+    assert other.get("reasoning") == "AGENT REASONING"
 
 
 def test_gateway_reconciliation_keeps_agent_only_rows_and_order():
@@ -774,3 +808,122 @@ def test_unidentified_repeats_within_one_store_are_not_collapsed():
     merged = routes._merged_session_messages_for_display(session, cli_messages)
 
     assert [m.get("content") for m in merged].count("ping") == 3
+
+
+def test_divergent_state_db_row_identity_rows_are_not_paired():
+    """Same guard, the other identity leg: contradictory state.db provenance.
+
+    ``_state_db_row_identity_details`` reads durable state.db aliases, which
+    are independent of the WebUI-assigned ``id``/``message_id``. Two rows
+    disagreeing there are provably different database rows even with no
+    ``api_content`` on either side, so the Agent-owned ``reasoning`` of the
+    second one must not be dropped as though it were a duplicate.
+    """
+    session = SimpleNamespace(
+        messages=[
+            {
+                "id": 8,
+                "role": "assistant",
+                "content": "answer",
+                "timestamp": 10.5,
+                "_row_id": 501,
+            }
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "q", "timestamp": 1.0},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "timestamp": 10.4,
+            "_row_id": 999,
+            "reasoning": "the other turn's own reasoning",
+        },
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    answers = [m for m in merged if m.get("content") == "answer"]
+    assert len(answers) == 2, "conflicting state.db row identity means two turns"
+    survivor = next(m for m in answers if m.get("id") == 8)
+    assert "reasoning" not in survivor, "a non-twin's payload must not be adopted"
+    other = next(m for m in answers if m.get("id") != 8)
+    assert other.get("_row_id") == 999
+    assert other.get("reasoning") == "the other turn's own reasoning"
+
+
+def test_row_identity_steers_pairing_past_an_incompatible_queue_head():
+    """The guard also corrects WHICH survivor a row pairs with.
+
+    The FIFO queue hands out the oldest unmatched survivor for a visible key.
+    When the Agent row carries a state.db alias that matches the SECOND
+    survivor, pairing with the first would cross-wire its reasoning onto the
+    wrong turn -- the same class of defect the round-1 FIFO fix addressed,
+    reachable again whenever an alias disagrees with queue order. Skipping to
+    the identity-compatible entry leaves the first survivor untouched and
+    still available for its own twin.
+    """
+    session = SimpleNamespace(
+        messages=[
+            {"id": "s1", "role": "assistant", "content": "same", "timestamp": 10.5, "_row_id": 111},
+            {"id": "s2", "role": "assistant", "content": "same", "timestamp": 20.5, "_row_id": 222},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "q", "timestamp": 1.0},
+        {"role": "tool", "content": "tool out", "timestamp": 2.0, "tool_call_id": "c1"},
+        {
+            "role": "assistant",
+            "content": "same",
+            "timestamp": 20.4,
+            "_row_id": 222,
+            "reasoning": "belongs to s2",
+        },
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    by_id = {m["id"]: m for m in merged if m.get("id")}
+    assert set(by_id) == {"s1", "s2"}, "the twin collapses onto its own survivor"
+    assert by_id["s2"].get("reasoning") == "belongs to s2"
+    assert "reasoning" not in by_id["s1"], "the wrong survivor must not be written"
+
+
+def test_matching_state_db_row_identity_still_pairs():
+    """The guard must not break the case this reconciliation exists for.
+
+    A real gateway twin carries the SAME state.db row alias on both copies
+    (or none at all, the common shape), so the identity check has nothing to
+    contradict and pairing proceeds exactly as before.
+    """
+    session = SimpleNamespace(
+        messages=[
+            {
+                "id": 8,
+                "role": "assistant",
+                "content": "answer",
+                "timestamp": 10.5,
+                "_row_id": 501,
+            }
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "q", "timestamp": 1.0},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "timestamp": 10.4,
+            "_row_id": 501,
+            "api_content": "PROVIDER BYTES",
+            "reasoning": "AGENT REASONING",
+        },
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    answers = [m for m in merged if m.get("content") == "answer"]
+    assert len(answers) == 1, "a real twin must still render once"
+    survivor = answers[0]
+    assert survivor.get("id") == 8
+    assert survivor.get("api_content") == "PROVIDER BYTES"
+    assert survivor.get("reasoning") == "AGENT REASONING"

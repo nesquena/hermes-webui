@@ -10070,7 +10070,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 return row
 
             def _cross_store_pairable(survivor, dropped):
-                """Guard the pairing key's blind spot for tool identity.
+                """Guard the pairing key's blind spots for tool and private identity.
 
                 `_session_message_visible_key` carries role, content and
                 `tool_calls`, but NOT `tool_call_id` or `tool_name`. Two
@@ -10078,12 +10078,25 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 same text ("OK", "{}", "Command completed.") therefore share a
                 visible key, and reconciling them would delete a real tool
                 result. Require the tool identity to agree before pairing.
+
+                Nor does the visible key (or the coarse cross-store key) prove
+                the two rows are actually the same turn -- it only says their
+                role/content/tool_calls happen to match. `_reconcile_cross_store_twin`
+                then transfers `api_content` and semantic payload on the
+                strength of that match alone. `_message_private_identity_compatible`
+                is the guard this codebase already uses elsewhere to settle that
+                question (stable id, state.db row id, and `api_content` must
+                not *contradict* each other); reuse it here rather than pairing
+                on position/ordering alone, so a false match fails closed
+                instead of silently discarding one side's `api_content` or
+                `reasoning`.
                 """
                 return (
                     str(survivor.get("tool_call_id") or "")
                     == str(dropped.get("tool_call_id") or "")
                     and str(survivor.get("tool_name") or survivor.get("name") or "")
                     == str(dropped.get("tool_name") or dropped.get("name") or "")
+                    and _message_private_identity_compatible(survivor, dropped)
                 )
 
             def _pop_pairable(queue, dropped):
@@ -10744,6 +10757,7 @@ from api.models import (
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
     _adopt_agent_semantic_payload,
+    _message_private_identity_compatible,
     _session_message_merge_key,
     _session_message_dedup_key,
     _session_messages_have_prefix,
