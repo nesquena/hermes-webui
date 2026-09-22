@@ -6333,11 +6333,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof d.usage.used_model==='string'&&d.usage.used_model){
                 lastAsst._usedModel=d.usage.used_model;
               }
-              // Only sent when a LOCAL fallback served the turn with a different
-              // model (the backend already filtered notation-only differences),
-              // so the footer can surface it live rather than after a reload.
+              if(typeof d.usage.used_provider==='string'&&d.usage.used_provider){
+                lastAsst._usedProvider=d.usage.used_provider;
+              }
+              // requested_model / requested_provider are only sent when the
+              // Agent reported a LOCAL fallback AND the normalized (provider,
+              // model) identity changed — the backend owns that verdict — so
+              // the footer can surface it live rather than after a reload.
               if(typeof d.usage.requested_model==='string'&&d.usage.requested_model){
                 lastAsst._requestedModel=d.usage.requested_model;
+                if(typeof d.usage.requested_provider==='string'&&d.usage.requested_provider){
+                  lastAsst._requestedProvider=d.usage.requested_provider;
+                }
               }
             }
           }

@@ -5316,42 +5316,60 @@ function _bareModelIdCandidates(modelId, providerId){
   }
   return out;
 }
-function _localModelSwitchText(msg, requestedModel){
+function _normalizedProviderId(providerId){
+  // Lowercase, '@'-stripped provider id ('' when unknown). Production stamps
+  // canonical ids already (api/streaming.py::_normalized_runtime_provider_id);
+  // this only makes the renderer tolerant of spelling and case.
+  return String(providerId||'').trim().replace(/^@/,'').trim().toLowerCase();
+}
+function _localModelSwitchText(msg){
   // Notice for a LOCAL fallback switch: the configured provider failed and
-  // fallback_providers served the turn with another model. Gateway turns own
-  // their own warning via _gatewayModelWarningText, so stay silent there to
-  // keep one notice per turn. Fails closed: renders nothing unless both model
-  // identities are known, and keeps the warning on conflicting provenance.
+  // fallback_providers served the turn with another (provider, model).
+  // The backend owns the verdict: api/streaming.py stamps _requestedModel /
+  // _requestedProvider ONLY when the Agent reported a fallback runtime AND the
+  // constructor-normalized primary identity differs from the post-run one
+  // (see _local_fallback_switch). The renderer never infers a fallback from
+  // model spellings: without _requestedModel there is no notice.
+  // Gateway turns own their own warning via _gatewayModelWarningText, so stay
+  // silent there to keep one notice per turn. Fails closed: renders nothing
+  // unless both identities are known.
   if(!msg)return'';
   if(msg._gatewayRouting)return'';
   const used=String(msg._usedModel||'').trim();
-  const requested=String(requestedModel||msg._requestedModel||'').trim();
+  const requested=String(msg._requestedModel||'').trim();
   if(!used||!requested)return'';
-  const usedId=_bareModelId(used,msg._usedProvider).toLowerCase();
-  const usedCandidates=_bareModelIdCandidates(used,msg._usedProvider);
-  const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
-  const requestedCandidates=_bareModelIdCandidates(requested,msg._requestedProvider);
+  const requestedProvider=_normalizedProviderId(msg._requestedProvider);
+  const usedProvider=_normalizedProviderId(msg._usedProvider);
+  const usedId=_bareModelId(used,usedProvider).toLowerCase();
+  const requestedId=_bareModelId(requested,requestedProvider).toLowerCase();
   if(!usedId||!requestedId)return'';
-  const routeProvider=modelId=>{
-    const match=String(modelId||'').trim().match(/^@(custom:[^:]+|[^:]+):/i);
-    return match?match[1].toLowerCase():'';
-  };
-  const requestedRouteProvider=routeProvider(requested);
-  const usedRouteProvider=routeProvider(used);
-  const requestedProvider=String(msg._requestedProvider||'').trim().toLowerCase();
-  const usedProvider=String(msg._usedProvider||'').trim().toLowerCase();
-  const mismatch=(a,b)=>!!a&&!!b&&a!==b;
-  const provenanceContradicts=
-    mismatch(requestedRouteProvider,requestedProvider)
-    ||mismatch(usedRouteProvider,usedProvider)
-    ||mismatch(requestedProvider||requestedRouteProvider,usedProvider||usedRouteProvider);
-  // The @custom:A:B shape without provenance is ambiguous: A:B can be an
-  // endpoint host:port or a slug whose model starts with a numeric segment.
-  // No single parse can decide, so a switch is declared only when the served
-  // model matches NONE of the requested readings (and vice versa for the
-  // display-side comparison below).
-  const candidatesOverlap=(a,b)=>a.some(x=>b.includes(x));
-  if(candidatesOverlap(requestedCandidates,usedCandidates)&&!provenanceContradicts)return'';
+  let switched;
+  if(requestedProvider&&usedProvider){
+    // Production shape: complete (provider, model) identity on both sides.
+    // A different provider IS a switch even when the bare model reads the
+    // same; the same provider is a switch only when the bare model differs.
+    switched=requestedProvider!==usedProvider||requestedId!==usedId;
+  }else{
+    // Legacy/no-provenance shape (messages stamped without provider fields):
+    // the @custom:A:B shape is ambiguous (endpoint host:port or slug whose
+    // model starts with a numeric segment), so a switch is declared only when
+    // the served model matches NONE of the requested readings — unless an
+    // embedded route hint on one side contradicts the provider on the other.
+    const routeProvider=modelId=>{
+      const match=String(modelId||'').trim().match(/^@(custom:[^:]+|[^:]+):/i);
+      return match?match[1].toLowerCase():'';
+    };
+    const mismatch=(a,b)=>!!a&&!!b&&a!==b;
+    const provenanceContradicts=
+      mismatch(routeProvider(requested),requestedProvider)
+      ||mismatch(routeProvider(used),usedProvider)
+      ||mismatch(requestedProvider||routeProvider(requested),usedProvider||routeProvider(used));
+    const requestedCandidates=_bareModelIdCandidates(requested,requestedProvider);
+    const usedCandidates=_bareModelIdCandidates(used,usedProvider);
+    const candidatesOverlap=requestedCandidates.some(x=>usedCandidates.includes(x));
+    switched=!candidatesOverlap||provenanceContradicts;
+  }
+  if(!switched)return'';
   // _bareModelId removes only the @provider: routing notation. A remaining slash
   // namespace is identity-bearing, even when the other id has the same basename.
   const prefix=`${t('model_switched')||'Model switched'}: `;
@@ -5366,10 +5384,9 @@ function _localModelSwitchText(msg, requestedModel){
   // to provider-qualified (or bare) ids that preserve the distinction.
   const qualify=(modelId,providerId)=>{
     const m=String(modelId||'').trim();
-    const provider=String(providerId||'').trim();
-    return(m.charAt(0)!=='@'&&provider)?`@${provider}:${m}`:m;
+    return(m.charAt(0)!=='@'&&providerId)?`@${providerId}:${m}`:m;
   };
-  return`${prefix}${qualify(requested,msg._requestedProvider)} → ${qualify(used,msg._usedProvider)}`;
+  return`${prefix}${qualify(requested,requestedProvider)} → ${qualify(used,usedProvider)}`;
 }
 function _localModelSwitchTitle(){
   // Hover/assistive explanation for the LOCAL fallback notice: the label pair
