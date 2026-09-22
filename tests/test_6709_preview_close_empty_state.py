@@ -143,6 +143,9 @@ const $ = $id;
 const S = {session:{workspace:'/ws'}, entries: null, currentDir:'.', _dirCache:{}};
 let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
 let _workspacePanelMode='preview';
+// #6709 gate round 7: declared here because the real openWorkspacePanel() /
+// closeWorkspacePanel() bodies record and read it.
+let _workspacePanelRetainedMode=null;
 function t(k){ return k; }
 function _workspaceEntriesForRender(entries){ return Array.isArray(entries)?entries:[]; }
 function _noteWorkspaceBirthtimeSupport(){}
@@ -213,6 +216,9 @@ console.log('LIFECYCLE ' + JSON.stringify(result));
 """
     # entries_json is a JSON array literal; inject as JS directly
     lifecycle = lifecycle.replace("__ENTRIES__", entries_json)
+    # This harness deliberately keeps the preamble's panel-mode stubs: it asserts
+    # the renderFileTree/clearPreview tree-vs-empty-state contract, not the panel
+    # ownership contract (see _close_panel_reopen_harness for that).
     return _NODE_PREAMBLE + render_ft + "\n" + clear_pv + "\n" + lifecycle
 
 
@@ -226,11 +232,41 @@ def _close_panel_reopen_harness(entries_json: str) -> str:
     assumed the next explicit open would render fresh state — but
     openWorkspacePanel('browse') does not call renderFileTree(), leaving both
     the tree and empty-state placeholder hidden on reopen.
+
+    #6709 gate round 7: this harness used to keep the preamble's single-line
+    `openWorkspacePanel` / `closeWorkspacePanel` / `_hasWorkspacePreviewVisible`
+    stubs. `openWorkspacePanel(mode){ _workspacePanelMode=mode; }` satisfied the
+    "reopen → browse" assertion unconditionally, so the real
+    openWorkspacePanel() normalization could regress without this test noticing —
+    a false green. The real bodies are spliced in now, which is what makes the
+    assertion load-bearing.
     """
+    pre = _NODE_PREAMBLE
+    for _name in (
+        "closeWorkspacePanel",
+        "openWorkspacePanel",
+        "syncWorkspacePanelUI",
+        "_hasWorkspacePreviewVisible",
+    ):
+        pre = re.sub(r"^function %s\([^)]*\)\{[^\n]*\}\n" % _name, "", pre, flags=re.M)
+    fns = "\n".join(
+        _extract_boot_function(n)
+        for n in (
+            "_setWorkspacePanelMode",
+            "openWorkspacePanel",
+            "closeWorkspacePanel",
+            "_hasWorkspacePreviewVisible",
+            "syncWorkspacePanelUI",
+        )
+    )
     render_ft = _extract_render_file_tree()
     clear_pv = _extract_clear_preview()
     lifecycle = r"""
 // ── Lifecycle: preview → close panel → reopen
+const pa = $id('previewArea');
+const pset = new Set();
+pa.classList = {add(c){pset.add(c);}, remove(c){pset.delete(c);}, contains(c){return pset.has(c);}};
+pa.classList.add('visible');           // openFile() sets this alongside the path
 S.entries = __ENTRIES__;
 _previewCurrentPath = '/ws/file.txt';
 _previewCurrentMode = 'code';
@@ -258,7 +294,18 @@ const result = {duringPreview, afterClosePanel, afterReopen};
 console.log('LIFECYCLE ' + JSON.stringify(result));
 """
     lifecycle = lifecycle.replace("__ENTRIES__", entries_json)
-    return _NODE_PREAMBLE + render_ft + "\n" + clear_pv + "\n" + lifecycle
+    return (
+        pre
+        + _PANEL_MODE_SHIM
+        + "\n"
+        + render_ft
+        + "\n"
+        + clear_pv
+        + "\n"
+        + fns
+        + "\n"
+        + lifecycle
+    )
 
 
 # ── Scroll lifecycle harness (#6709 gate: scroll/read-position regression) ────
@@ -996,3 +1043,420 @@ def test_collapse_then_explicit_close_still_clears_preview(label):
     assert after["previewVisible"] is False, (label, data)
     # browse surfaces reconciled: the tree is back (non-empty directory)
     assert after["tree"] == "", (label, data)
+
+
+# ── Panel ownership across an ordinary collapse (#6709, gate round 7) ─────────
+#
+# Gate comment 5773362769 reproduced this at head 2000f7cc:
+#   candidate: browse -> open file (browse) -> collapse (closed) -> reopen (preview) -> X (closed)
+#   control:   browse -> open file (browse) -> collapse (closed) -> reopen (browse)  -> X (browse)
+#
+# A preview reached from a manually-opened Files tree is OWNED by `browse`. The
+# unconditional `if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview'`
+# turned every retained preview into `preview`, so the explicit X took
+# clearPreview()'s `closePanelAfter` branch and tore down the whole drawer instead
+# of revealing the still-open Files tree.
+#
+# These harnesses drive the REAL panel-mode functions and start from `closed`
+# with no mode seeded in — that seeding is precisely what masked the regression
+# in the older fixtures, which asserted the desired sequence against a
+# single-line `openWorkspacePanel` stub and so could never observe it.
+
+_OWNERSHIP_SHIM = r"""
+var document={documentElement:{dataset:{}}};
+var localStorage={setItem:function(){},getItem:function(){return null;}};
+function _workspacePanelEls(){
+  const layout={classList:{toggle(){},add(){},remove(){}}};
+  const panel={classList:{toggle(){},add(){},remove(){},contains(){return false;}}};
+  const btn={classList:{toggle(){}},setAttribute(){},set disabled(v){},get disabled(){return false;}};
+  return {layout:layout,panel:panel,toggleBtn:btn,edgeToggleBtn:btn,collapseBtn:btn};
+}
+function _isCompactWorkspaceViewport(){ return __COMPACT__; }
+function _uiText(k,d){ return d||k; }
+function _setButtonTooltip(){}
+"""
+
+# The harness preamble is shared with fixtures that stub the panel-mode functions,
+# so these harnesses build the real ones instead.
+_OWNERSHIP_PREAMBLE = r"""
+const store = {};
+const fileTreeBox = {
+  id:'fileTree', style:{}, innerHTML:'', _scrollTop:0,
+  get scrollTop(){ return this.style.display==='none' ? 0 : this._scrollTop; },
+  set scrollTop(v){ if(this.style.display!=='none'){ this._scrollTop=Math.max(0,Number(v)||0); } },
+  appendChild(){}, remove(){}, setAttribute(){}, getAttribute(){return null;},
+  querySelector(){return null;},
+  classList:{add(){},remove(){},toggle(){},contains(){return false;}},
+};
+store.fileTree = fileTreeBox;
+function $id(id){
+  if(id==='fileTree') return fileTreeBox;
+  if(store[id]) return store[id];
+  const el = {id, style:{}, classList:{add(){},remove(){},toggle(){},contains(){return false;}},
+    innerHTML:'', textContent:'', scrollTop:0, appendChild(){}, remove(){},
+    setAttribute(){}, getAttribute(){return null;}, querySelector(){return null;}};
+  store[id]=el; return el;
+}
+const $ = $id;
+const S = {session:{session_id:'s1', workspace:'/ws'}, entries:null, currentDir:'.', _dirCache:{}};
+let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
+let _workspacePanelMode='closed';
+let _workspacePanelRetainedMode=null;
+function t(k){ return k; }
+function renderBreadcrumb(){}
+function _syncWorkspaceBirthtimeSupportScope(){}
+function _noteWorkspaceBirthtimeSupport(){}
+function _saveExpandedDirs(){}
+function _workspaceEntriesForRender(entries){ return Array.isArray(entries)?entries:[]; }
+function _renderTreeItems(box, items){ box.innerHTML='items:'+items.length; }
+"""
+
+_OWNERSHIP_DRIVE = r"""
+const pa = $id('previewArea');
+const pset = new Set();
+pa.classList = {add(c){pset.add(c);}, remove(c){pset.delete(c);}, contains(c){return pset.has(c);}};
+S.entries = [{name:'a.txt', path:'a.txt', type:'file'},
+             {name:'b.txt', path:'b.txt', type:'file'}];
+S.session = {session_id:'s1', workspace:'/ws'};
+S.currentDir = '.';
+
+const results = [];
+function snap(label){
+  results.push({label,
+    mode: _workspacePanelMode,
+    retained: _workspacePanelRetainedMode,
+    preview: _hasWorkspacePreviewVisible(),
+    tree: store.fileTree.style.display || '(shown)',
+    empty: $id('wsEmptyState').style.display || '(hidden)',
+    // the blank panel the contract must never produce: neither surface visible
+    blank: (store.fileTree.style.display === 'none' && !_hasWorkspacePreviewVisible()),
+  });
+}
+function reset(){
+  _workspacePanelMode='closed';
+  _workspacePanelRetainedMode=null;
+  _previewCurrentPath=''; _previewCurrentMode=''; _previewDirty=false;
+  pset.clear();
+  store.fileTree.style.display='';
+  $id('wsEmptyState').style.display='none';
+}
+// exactly what openFile() does to these globals when a tree row is clicked:
+// it shows the preview and hides the tree but does NOT touch the panel mode
+function openFileLike(path){
+  pa.classList.add('visible');
+  store.fileTree.style.display = 'none';
+  _previewCurrentPath = path;
+  _previewCurrentMode = 'code';
+}
+
+function driveBrowse(){
+  reset();
+  openWorkspacePanel('browse');      snap('open');
+  openFileLike('/ws/a.txt');         snap('open_file');
+  closeWorkspacePanel();             snap('collapse');
+  openWorkspacePanel('browse');      snap('reopen');
+  handleWorkspaceClose();            snap('explicit_close');
+}
+function drivePreview(){
+  reset();
+  ensureWorkspacePreviewVisible();   snap('open');
+  openFileLike('/ws/a.txt');         snap('open_file');
+  closeWorkspacePanel();             snap('collapse');
+  openWorkspacePanel('browse');      snap('reopen');
+  handleWorkspaceClose();            snap('explicit_close');
+}
+function driveNoPreview(){
+  reset();
+  openWorkspacePanel('browse');      snap('open');
+  closeWorkspacePanel();             snap('collapse');
+  openWorkspacePanel('browse');      snap('reopen');
+}
+function driveEmptyDir(){
+  reset();
+  S.entries = [];
+  openWorkspacePanel('browse');      snap('open');
+  openFileLike('/ws/a.txt');         snap('open_file');
+  closeWorkspacePanel();             snap('collapse');
+  openWorkspacePanel('browse');      snap('reopen');
+  handleWorkspaceClose();            snap('explicit_close');
+}
+({browse:driveBrowse, preview:drivePreview,
+  no_preview:driveNoPreview, empty_dir:driveEmptyDir})[__SCENARIO__]();
+
+console.log('OWNERSHIP ' + JSON.stringify(results));
+"""
+
+
+def _ownership_harness(scenario: str, compact: bool = False) -> str:
+    """Drive the REAL panel-mode lifecycle from a closed panel (no mode seeded)."""
+    # clearPreview(opts={}) has a default parameter, so it comes from the
+    # paren-aware extractor: _extract_boot_function() delegates to
+    # tests.js_source_extract.extract_function(), which brace-matches from the
+    # FIRST `{` — the default-value brace — and returns the signature only, which
+    # is a syntax error in the harness rather than a failing assertion.
+    fns = "\n".join(
+        [_extract_boot_function(n) for n in (
+            "_hasWorkspacePreviewVisible",
+            "_setWorkspacePanelMode",
+            "syncWorkspacePanelUI",
+            "openWorkspacePanel",
+            "closeWorkspacePanel",
+            "handleWorkspaceClose",
+            "ensureWorkspacePreviewVisible",
+        )]
+        + [_extract_clear_preview()]
+    )
+    drive = _OWNERSHIP_DRIVE.replace("__SCENARIO__", repr(scenario))
+    return (
+        _OWNERSHIP_PREAMBLE
+        + _OWNERSHIP_SHIM.replace("__COMPACT__", "true" if compact else "false")
+        + "\n"
+        + _extract_render_file_tree()
+        + "\n"
+        + fns
+        + "\n"
+        + drive
+    )
+
+
+def _run_ownership(scenario: str, compact: bool = False) -> list:
+    proc = _run_node(_ownership_harness(scenario, compact))
+    assert proc.returncode == 0, proc.stderr
+    assert "OWNERSHIP" in proc.stdout, proc.stdout
+    return json.loads(proc.stdout.split("OWNERSHIP ", 1)[1].strip())
+
+
+def _modes(steps: list) -> list:
+    return [step["mode"] for step in steps]
+
+
+def _boot_code_lines(name: str) -> str:
+    """Extracted boot.js function with `//` comment lines stripped.
+
+    The doc comments deliberately quote the patterns the code must NOT contain
+    (the blanket normalization, the old clearPreview() teardown), so assertions
+    that search the raw body would match their own explanation.
+    """
+    body = _extract_boot_function(name)
+    return "\n".join(
+        line for line in body.split("\n") if not line.strip().startswith("//")
+    )
+
+
+def test_browse_owned_preview_reopens_as_browse():
+    """The gate's exact sequence: a preview opened from a manually-opened Files
+
+    tree must come back as `browse`, not `preview` — otherwise the explicit X is
+    a drawer-close instead of a return to the tree."""
+    steps = _run_ownership("browse")
+    assert _modes(steps) == ["browse", "browse", "closed", "browse", "browse"], steps
+    # the retained owner is what makes the reopen correct
+    assert steps[2]["retained"] == "browse", steps[2]
+    assert steps[3]["retained"] == "browse", steps[3]
+
+
+def test_browse_owned_explicit_close_reveals_the_files_tree():
+    """The regression the gate reproduced: after collapse → reopen, the explicit
+
+    preview X must leave the panel OPEN on the Files tree, not close the drawer."""
+    steps = _run_ownership("browse")
+    final = steps[-1]
+    assert final["mode"] == "browse", final
+    assert final["preview"] is False, final
+    assert final["tree"] != "none", final
+    assert final["blank"] is False, final
+
+
+def test_preview_owned_drawer_reopens_as_preview_and_closes_on_explicit_close():
+    """A preview that itself owns the drawer (artifact reveal with the panel
+
+    closed) keeps its own contract: reopen as `preview`, explicit X closes."""
+    steps = _run_ownership("preview")
+    assert _modes(steps) == ["preview", "preview", "closed", "preview", "closed"], steps
+    assert steps[2]["retained"] == "preview", steps[2]
+
+
+def test_collapse_without_preview_reopens_as_browse():
+    """No retained preview means nothing to restore — an ordinary browse."""
+    steps = _run_ownership("no_preview")
+    assert _modes(steps) == ["browse", "closed", "browse"], steps
+    assert steps[1]["retained"] is None, steps[1]
+    assert steps[2]["tree"] != "none", steps[2]
+
+
+def test_empty_directory_ownership_sequence_still_reconciles_the_empty_state():
+    """Ownership must not regress the empty-state reconciliation the gate called
+
+    converged: closing the preview must reveal the placeholder, not a blank pane."""
+    steps = _run_ownership("empty_dir")
+    assert _modes(steps) == ["browse", "browse", "closed", "browse", "browse"], steps
+    final = steps[-1]
+    assert final["empty"] == "flex", final
+    assert final["blank"] is False, final
+
+
+@pytest.mark.parametrize("scenario", ["browse", "preview", "no_preview", "empty_dir"])
+def test_no_ownership_sequence_leaves_a_blank_panel(scenario):
+    """No step of any ownership sequence may hide BOTH the tree and the preview."""
+    steps = _run_ownership(scenario)
+    blank = [s for s in steps if s["blank"]]
+    assert not blank, (scenario, blank)
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["desktop", "compact"])
+def test_ownership_survives_every_viewport(compact):
+    """The collapse path is shared by the composer toggle, the Settings toggle and
+
+    the mobile outside-tap close, so ownership must be recordable and restorable
+    at both viewport widths — not only the compact one."""
+    steps = _run_ownership("browse", compact=compact)
+    assert _modes(steps) == ["browse", "browse", "closed", "browse", "browse"], steps
+    assert steps[-1]["tree"] != "none", steps[-1]
+
+
+def test_ordinary_collapse_still_preserves_the_unsaved_draft():
+    """Round-6 contract, re-asserted alongside ownership: an ordinary collapse is
+
+    presentation-only, so the dirty flag, path and `.visible` all survive it."""
+    js = _ownership_harness("browse")
+    js = js.replace(
+        "_previewDirty=false;", "_previewDirty=false;", 1
+    )
+    # mark the preview dirty before the collapse and report it after
+    js = js.replace(
+        "  openFileLike('/ws/a.txt');         snap('open_file');",
+        "  openFileLike('/ws/a.txt'); _previewDirty=true; snap('open_file');",
+        1,
+    )
+    js = js.replace(
+        "    blank: (store.fileTree.style.display === 'none' && !_hasWorkspacePreviewVisible()),",
+        "    blank: (store.fileTree.style.display === 'none' && !_hasWorkspacePreviewVisible()),\n"
+        "    dirty: _previewDirty,\n    path: _previewCurrentPath,",
+    )
+    proc = _run_node(js)
+    assert proc.returncode == 0, proc.stderr
+    steps = json.loads(proc.stdout.split("OWNERSHIP ", 1)[1].strip())
+    collapsed = steps[2]
+    assert collapsed["mode"] == "closed", collapsed
+    assert collapsed["dirty"] is True, collapsed
+    assert collapsed["path"] == "/ws/a.txt", collapsed
+    assert collapsed["preview"] is True, collapsed
+
+
+def test_open_workspace_panel_no_longer_normalizes_every_retained_preview():
+    """Code contract: the unconditional browse→preview conversion must be gone, and
+
+    the decision must key off the recorded owner instead."""
+    body = _boot_code_lines("openWorkspacePanel")
+    assert (
+        "if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';" not in body
+    ), "the blanket browse→preview normalization is back"
+    assert "_workspacePanelRetainedMode==='preview'" in body, (
+        "openWorkspacePanel() must restore the recorded owner"
+    )
+
+
+def test_close_workspace_panel_records_the_retained_owner():
+    """Code contract: the ordinary collapse must record WHO owned the retained
+
+    preview, and stay presentation-only while doing it."""
+    body = _boot_code_lines("closeWorkspacePanel")
+    assert (
+        "_workspacePanelRetainedMode=_hasWorkspacePreviewVisible()?_workspacePanelMode:null;"
+        in body.replace(" ", "")
+    ), "closeWorkspacePanel() must record the retained owner"
+    assert "clearPreview(" not in body, (
+        "the ordinary collapse must stay presentation-only"
+    )
+
+
+# ── Real-browser ownership drive (#6709 gate round 7) ────────────────────────
+# The gate reproduced its finding "on a real 129-file workspace against candidate
+# and clean current master", so the ownership contract is asserted here against
+# the real booted app too — real openFile(), real panel-mode functions, and a
+# real click on the #btnClearPreview X — not only the Node harness.
+
+_DRIVE_OWNERSHIP_JS = r"""
+async (previewOwned) => {
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const ft = document.getElementById('fileTree');
+  S.session = {session_id: 'browser-6709-ownership', workspace: '/tmp/6709-browser-ws'};
+  S.currentDir = '.';
+  S.entries = Array.from({length: 12}, (_, i) => {
+    const name = 'file-' + String(i).padStart(3, '0') + '.txt';
+    return {name: name, path: name, type: 'file', mtime_ns: 1000 + i};
+  });
+  window.api = async () => ({content: '6709 ownership harness content'});
+  const snap = (label) => ({
+    label: label,
+    mode: _workspacePanelMode,
+    preview: _hasWorkspacePreviewVisible(),
+    tree: ft.style.display === 'none' ? 'none' : '(shown)',
+    blank: ft.style.display === 'none' && !_hasWorkspacePreviewVisible(),
+  });
+  const steps = [];
+  _setWorkspacePanelMode('closed');
+  if (previewOwned) {
+    ensureWorkspacePreviewVisible();          steps.push(snap('open'));
+  } else {
+    openWorkspacePanel('browse');             steps.push(snap('open'));
+  }
+  await openFile('file-000.txt');             steps.push(snap('open_file'));
+  closeWorkspacePanel();                      steps.push(snap('collapse'));
+  openWorkspacePanel('browse');               steps.push(snap('reopen'));
+  document.getElementById('btnClearPreview').click();   // the real explicit X
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  steps.push(snap('explicit_close'));
+  return steps;
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "width,height,label", [(1280, 800, "desktop"), (480, 800, "mobile")]
+)
+def test_browser_browse_owned_preview_returns_to_the_files_tree(width, height, label):
+    """Gate round 7, real browser: a file opened from a manually-opened Files tree
+
+    must survive collapse → reopen as `browse`, and the real #btnClearPreview X must
+    reveal the still-open tree instead of closing the drawer."""
+    pw = _require_playwright()
+    with pw.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context, page = _open_browser_page(browser, width, height)
+            try:
+                steps = page.evaluate(_DRIVE_OWNERSHIP_JS, False)
+            finally:
+                context.close()
+        finally:
+            browser.close()
+    modes = [s["mode"] for s in steps]
+    assert modes == ["browse", "browse", "closed", "browse", "browse"], (label, steps)
+    final = steps[-1]
+    assert final["preview"] is False, (label, steps)
+    assert final["tree"] != "none", (label, steps)
+    assert not any(s["blank"] for s in steps), (label, steps)
+
+
+@pytest.mark.parametrize(
+    "width,height,label", [(1280, 800, "desktop"), (480, 800, "mobile")]
+)
+def test_browser_preview_owned_drawer_still_closes_on_the_x(width, height, label):
+    """The other side of the contract, real browser: a drawer that a preview owns
+
+    must still reopen as `preview` and be closed by the real X."""
+    pw = _require_playwright()
+    with pw.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context, page = _open_browser_page(browser, width, height)
+            try:
+                steps = page.evaluate(_DRIVE_OWNERSHIP_JS, True)
+            finally:
+                context.close()
+        finally:
+            browser.close()
+    modes = [s["mode"] for s in steps]
+    assert modes == ["preview", "preview", "closed", "preview", "closed"], (label, steps)
+    assert not any(s["blank"] for s in steps), (label, steps)

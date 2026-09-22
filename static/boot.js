@@ -158,6 +158,15 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
 
 // Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+// #6709 (gate round 7): ownership of the preview retained across an ordinary
+// (presentation-only) panel collapse. A preview reached from a browse panel
+// reopens as `browse` — the explicit X then returns the reader to the file tree.
+// A preview that owned the panel reopens as `preview` — the explicit X closes
+// the drawer. Blanket-normalizing every retained preview to `preview` collapsed
+// that distinction, so closing such a preview tore the whole drawer down instead
+// of revealing the still-open Files tree. Recorded on every ordinary collapse and
+// read only while a preview is actually retained.
+let _workspacePanelRetainedMode=null; // 'browse' | 'preview' | null
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
@@ -286,15 +295,25 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
-  // #6709 (gate round 6): the panel is the preview's only host, and a panel
-  // collapse is now presentation-only (see closeWorkspacePanel) — it keeps the
+  // #6709 (gate round 7): the panel is the preview's only host, and a panel
+  // collapse is presentation-only (see closeWorkspacePanel) — it keeps the
   // preview alive: path, dirty flag, editor contents and the #previewArea
-  // `.visible` class. Reopening must therefore restore PREVIEW mode rather than
-  // expose a browse pane whose tree and empty-state are still suppressed by the
-  // retained preview path (renderFileTree() hides both while a preview path is
-  // set). Normalizing here fixes the blank Files pane at its root without
-  // destroying the user's unsaved draft.
-  if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';
+  // `.visible` class. Reopening must therefore restore the retained preview's
+  // OWNER, not convert every retained preview into `preview`.
+  //
+  // An earlier revision normalized unconditionally:
+  //   if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';
+  // That fixed the blank Files pane (renderFileTree() hides the tree while a
+  // preview path is set, so a browse reopen would expose a tree-less panel — the
+  // preview itself is what the reader sees either way, as the blank-pane
+  // regression below confirms) but destroyed the ownership distinction: a preview
+  // opened from a manually-opened Files tree also reopened as `preview`, so the
+  // explicit X hit clearPreview()'s `closePanelAfter` branch and closed the whole
+  // drawer instead of returning the reader to the tree. Restoring the recorded
+  // owner keeps the reader's intent: browse-opened previews come back as browse
+  // (X reveals the still-open Files tree), panel-owning previews come back as
+  // preview (X closes the drawer).
+  if(mode==='browse'&&_hasWorkspacePreviewVisible()&&_workspacePanelRetainedMode==='preview') mode='preview';
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
@@ -320,6 +339,18 @@ function closeWorkspacePanel(){
   // retained preview is what the user sees, and the tree is never exposed in
   // the suppressed state. Only the explicit preview-close action
   // (handleWorkspaceClose → clearPreview()) tears a preview down.
+  // #6709 (gate round 7): record WHO owned the retained preview before collapsing.
+  // This collapse keeps the preview (path, dirty flag, editor bytes, `.visible`),
+  // so the reopen in openWorkspacePanel() needs the mode it was reached from to
+  // restore the reader's intent — `browse` (a file opened from a manually-opened
+  // Files tree; X must reveal the still-open tree) vs `preview` (a preview that
+  // itself owns the drawer; X must close it). Only meaningful while a preview is
+  // actually retained: a collapse with no preview leaves no owner to restore, so
+  // the next open is an ordinary browse. Recorded on EVERY ordinary collapse
+  // rather than only the compact one, because this collapse path is shared by the
+  // composer toggle, the Settings workspace-panel toggle and the mobile
+  // outside-tap drawer close — all of which must preserve ownership equally.
+  _workspacePanelRetainedMode=_hasWorkspacePreviewVisible()?_workspacePanelMode:null;
   _setWorkspacePanelMode('closed');
 }
 
