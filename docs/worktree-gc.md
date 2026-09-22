@@ -101,14 +101,19 @@ Before publishing any eligibility verdict, the classifier also:
 - inspects index flags (`assume-unchanged`, `skip-worktree`) with bounded
   NUL-delimited probes: masked entries produce `KEEP_UNCERTAIN` because they
   can hide real modifications from `git status`;
+- rejects split indexes with `KEEP_UNCERTAIN` (`split_index_present`) because
+  the main index contains only a delta and cannot be audited without composing
+  its mutable shared index;
 - counts submodule gitlinks: any gitlink produces `KEEP_UNCERTAIN`
   (`submodules_present`) because top-level probes cannot see inside it;
 - rejects branch-exclusive merge commits unless the resulting tree is proven
   identical to the target tree, because `git cherry` omits merge commits;
 - pins the branch, target, and worktree HEAD OIDs and revalidates them right
-  before publishing eligibility, so a ref moved during the audit downgrades
-  the verdict to `KEEP_UNCERTAIN` (`pin_revalidation_failed`) instead of
-  certifying stale evidence.
+  before publishing eligibility; it also re-lists the worktree and rechecks its
+  path, branch, HEAD, and lock state. A moved ref or an operator lock added
+  during the audit downgrades the verdict to `KEEP_UNCERTAIN`
+  (`pin_revalidation_failed`) instead of certifying stale evidence. A worktree
+  already locked at the initial listing is kept as `worktree_locked`.
 
 Missing or invalid dates, unreadable or malformed sidecars, contradictory
 duplicate records, invalid workspace paths, an incomplete process scan, a

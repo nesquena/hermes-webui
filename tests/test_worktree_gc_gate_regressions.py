@@ -515,3 +515,84 @@ def test_oversized_git_output_fails_closed_instead_of_consuming_memory(
     assert decision.verdict == KEEP_UNCERTAIN
     assert decision.eligible is False
     assert "git_output_oversized" in decision.reasons
+
+
+def test_dirty_path_stored_only_in_split_index_fails_closed(tmp_path):
+    """Round-3: a shared-index-only path must never disappear from the scan."""
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/split-index-dirty")
+    _git(worktree, "update-index", "--split-index")
+    settle_index_clock(worktree)
+    (worktree / "base.txt").write_text("hidden local edit\n", encoding="utf-8")
+
+    assert _git(worktree, "status", "--porcelain").stdout.strip() == "M base.txt"
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/split-index-dirty",
+        case["repo"],
+    )
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert decision.reasons == ("split_index_present",)
+
+
+def test_clean_split_index_fails_closed(tmp_path):
+    """Round-3: split-index composition is unsupported even when currently clean."""
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/split-index-clean")
+    _git(worktree, "update-index", "--split-index")
+    settle_index_clock(worktree)
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/split-index-clean",
+        case["repo"],
+    )
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert decision.reasons == ("split_index_present",)
+
+
+def test_locked_worktree_is_never_eligible(tmp_path):
+    """Round-3: an operator lock is preservation authority, not decoration."""
+    case = make_remote_repo(tmp_path)
+    repo = case["repo"]
+    assert isinstance(repo, Path)
+    worktree = add_worktree(case, tmp_path, "gc/locked")
+    _git(repo, "worktree", "lock", "--reason", "operator preservation", str(worktree))
+
+    decision = classify_git_worktree(worktree, "gc/locked", repo)
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert decision.reasons == ("worktree_locked",)
+
+
+def test_lock_added_after_initial_scan_invalidates_eligibility(tmp_path, monkeypatch):
+    """Round-3: final pin validation must observe a concurrent operator lock."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    repo = case["repo"]
+    assert isinstance(repo, Path)
+    worktree = add_worktree(case, tmp_path, "gc/lock-toctou")
+    real_run_git = gc_git._run_git
+    locked = {"done": False}
+
+    def locking_run_git(args, cwd, *, timeout=gc_git.GIT_TIMEOUT):
+        if not locked["done"] and args[:2] == ["merge-base", "--is-ancestor"]:
+            locked["done"] = True
+            _git(repo, "worktree", "lock", "--reason", "concurrent hold", str(worktree))
+        return real_run_git(args, cwd, timeout=timeout)
+
+    monkeypatch.setattr(gc_git, "_run_git", locking_run_git)
+
+    decision = classify_git_worktree(worktree, "gc/lock-toctou", repo)
+
+    assert locked["done"] is True
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert "pin_revalidation_failed" in decision.reasons
