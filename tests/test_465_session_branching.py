@@ -603,8 +603,10 @@ def test_session_compact_includes_parent():
     src = _read('api/models.py')
     # Bound the assertion to the semantic method body instead of a fixed byte
     # window, which becomes stale whenever compact() gains legitimate logic.
+    # The signature may be wrapped across lines (``def compact(\n self, …``),
+    # so allow whitespace between the opening parenthesis and ``self``.
     compact_match = re.search(
-        r"(?ms)^    def compact\(self.*?(?=^    (?:def|@classmethod|@staticmethod)\b)",
+        r"(?ms)^    def compact\(\s*self.*?(?=^    (?:def|@classmethod|@staticmethod)\b)",
         src,
     )
     assert compact_match, "Could not find compact() method"
