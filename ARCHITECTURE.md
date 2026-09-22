@@ -57,6 +57,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     api/
       __init__.py          Package marker
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
+      frontdoor.py         Same-origin `/v1` adapter for native clients; device credentials and wire projection only
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge

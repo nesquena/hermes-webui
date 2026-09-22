@@ -1077,6 +1077,27 @@ def check_auth(handler, parsed) -> bool:
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
     if not is_auth_enabled():
         return True
+    # Native clients use the front-door device credential rather than the
+    # browser session cookie. Keep this allowlist route-scoped: the front-door
+    # handler still validates the token, origin binding, and device state.
+    _frontdoor_path = parsed.path or ""
+    _frontdoor_static = {
+        "/v1/health",
+        "/v1/capabilities",
+        "/v1/profiles",
+        "/v1/devices/enroll",
+        "/v1/devices/self",
+    }
+    _frontdoor_dynamic = (
+        _frontdoor_path.startswith("/v1/profiles/")
+        or _frontdoor_path.startswith("/v1/bot-chats/")
+        or _frontdoor_path.startswith("/v1/runs/")
+        or _frontdoor_path.startswith("/v1/approvals/")
+    )
+    _frontdoor_headers = getattr(handler, "headers", None)
+    _frontdoor_bearer = str(_frontdoor_headers.get("Authorization") if _frontdoor_headers is not None else "").lower().startswith("bearer ")
+    if _frontdoor_path in _frontdoor_static or (_frontdoor_dynamic and _frontdoor_bearer):
+        return True
     # Public paths don't require auth
     if (
         parsed.path in PUBLIC_PATHS

@@ -12865,6 +12865,12 @@ def _render_index_shell_base() -> str:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    if parsed.path.startswith("/v1/"):
+        from api.frontdoor import handle_get as _handle_frontdoor_get
+
+        result = _handle_frontdoor_get(handler, parsed)
+        if result is not False:
+            return result
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
@@ -14989,6 +14995,14 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+    if parsed.path.startswith("/v1/"):
+        from api.frontdoor import handle_post as _handle_frontdoor_post
+
+        result = _handle_frontdoor_post(handler, parsed, body)
+        if result is not False:
+            if diag:
+                diag.finish()
+            return result
     if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):
         if diag:
             diag.finish()
@@ -17656,6 +17670,12 @@ def handle_delete(handler, parsed) -> bool:
     if proxy_result is not False:
         return proxy_result
     body = read_body(handler)
+    if parsed.path.startswith("/v1/"):
+        from api.frontdoor import handle_delete as _handle_frontdoor_delete
+
+        result = _handle_frontdoor_delete(handler, parsed)
+        if result is not False:
+            return result
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):

@@ -135,3 +135,31 @@ locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
+
+## Native-client front door
+
+Native clients such as Luna can use the same WebUI/Hermes runtime through a
+small, same-origin `/v1` front door. The front door is an adapter: profiles,
+Bot Chat history, execution, approvals, and run journals remain owned by
+Hermes WebUI. Text and voice clients use the stable per-profile Bot Chat
+handle; voice transcription is submitted as an ordinary run message.
+
+Enable enrollment with a deployment secret and keep the server behind TLS or a
+trusted same-origin reverse proxy:
+
+```bash
+HERMES_FRONTDOOR_PAIRING_CODE=482916 ./ctl.sh start
+```
+
+The pairing code is accepted only by `POST /v1/devices/enroll`. Enrollment
+returns a device credential; subsequent `/v1` requests use
+`Authorization: Bearer ...`. Credentials are stored as SHA-256 hashes, bound
+to the origin that enrolled them, and can be revoked with
+`DELETE /v1/devices/self`. Use a distinct pairing code per deployment and
+rotate it after enrollment; never commit the code or a returned device token.
+
+The front door exposes the dynamic profile roster, stable Bot Chat handles,
+history, idempotent run creation, cursor-replay SSE events, run status,
+cancellation, steering when the active agent supports it, and approval
+decisions. Offline behavior remains a client concern: native clients may cache
+reading and drafting, but Hermes remains the only execution authority.
