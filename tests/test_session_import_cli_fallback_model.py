@@ -93,6 +93,7 @@ def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_diff
     floating-point timestamps for the same turns. This test verifies the handler
     accepts that as semantic equality and replaces with the longer, fresher tail.
     """
+    import api.models as models
     import api.routes as routes
 
     session_id = "ts_type_diff_001"
@@ -128,7 +129,17 @@ def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_diff
     monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid, profile=None: fresh if sid == session_id else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [{"session_id": session_id, "source_tag": "weixin", "raw_source": "weixin", "session_source": "messaging", "source_label": "WeChat"}])
+    monkeypatch.setattr(
+        models,
+        "lookup_cli_session_metadata",
+        lambda sid, *, all_profiles=False: {
+            "session_id": session_id,
+            "source_tag": "weixin",
+            "raw_source": "weixin",
+            "session_source": "messaging",
+            "source_label": "WeChat",
+        } if sid == session_id else {},
+    )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
 
@@ -144,6 +155,7 @@ def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverge
     If the refreshed message body diverges, we should keep the existing in-memory
     transcript instead of replacing it with potentially older content.
     """
+    import api.models as models
     import api.routes as routes
 
     session_id = "ts_type_diverge_001"
@@ -180,7 +192,17 @@ def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverge
     monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid, profile=None: fresh if sid == session_id else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [{"session_id": session_id, "source_tag": "telegram", "raw_source": "telegram", "session_source": "messaging", "source_label": "Telegram"}])
+    monkeypatch.setattr(
+        models,
+        "lookup_cli_session_metadata",
+        lambda sid, *, all_profiles=False: {
+            "session_id": session_id,
+            "source_tag": "telegram",
+            "raw_source": "telegram",
+            "session_source": "messaging",
+            "source_label": "Telegram",
+        } if sid == session_id else {},
+    )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
 
@@ -192,6 +214,7 @@ def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverge
 
 def test_session_import_cli_preserves_parent_metadata_on_existing_import(monkeypatch):
     """Refreshing an already-imported CLI session must persist lineage metadata."""
+    import api.models as models
     import api.routes as routes
 
     session_id = "existing_parent_lineage_001"
@@ -221,16 +244,16 @@ def test_session_import_cli_preserves_parent_metadata_on_existing_import(monkeyp
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid, profile=None: existing.messages if sid == session_id else [])
     monkeypatch.setattr(
-        routes,
-        "get_cli_sessions",
-        lambda source_filter=None, all_profiles=False: [{
+        models,
+        "lookup_cli_session_metadata",
+        lambda sid, *, all_profiles=False: {
             "session_id": session_id,
             "source_tag": "telegram",
             "raw_source": "telegram",
             "session_source": "messaging",
             "source_label": "Telegram",
             "parent_session_id": parent_id,
-        }],
+        } if sid == session_id else {},
     )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
@@ -243,6 +266,7 @@ def test_session_import_cli_preserves_parent_metadata_on_existing_import(monkeyp
 
 def test_read_only_import_payload_includes_parent_session_id(monkeypatch):
     """Read-only CLI/session imports should also expose lineage in the payload."""
+    import api.models as models
     import api.routes as routes
 
     session_id = "readonly_parent_lineage_001"
@@ -255,9 +279,9 @@ def test_read_only_import_payload_includes_parent_session_id(monkeypatch):
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid, profile=None: messages if sid == session_id else [])
     monkeypatch.setattr(
-        routes,
-        "get_cli_sessions",
-        lambda source_filter=None, all_profiles=False: [{
+        models,
+        "lookup_cli_session_metadata",
+        lambda sid, *, all_profiles=False: {
             "session_id": session_id,
             "title": "Read-only child",
             "model": "test-model",
@@ -269,7 +293,7 @@ def test_read_only_import_payload_includes_parent_session_id(monkeypatch):
             "source_label": "Discord",
             "parent_session_id": parent_id,
             "read_only": True,
-        }],
+        } if sid == session_id else {},
     )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})

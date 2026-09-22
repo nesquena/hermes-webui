@@ -36,7 +36,7 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
-_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
+_SESSIONS_CACHE: OrderedDict[tuple, tuple[float, object, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
 _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = 0
@@ -363,6 +363,22 @@ def _session_list_cache_key(
     )
 
 
+def _session_list_cache_stamp_structural_equal(cached_stamp, current_stamp) -> bool:
+    """True iff both stamps are well-formed ``(structural, volatile)`` pairs
+    with equal structural parts — i.e. the mismatch is volatile-only
+    (message-write churn).
+
+    Fail closed: legacy/monkeypatched stamp shapes (e.g. the 1-tuple
+    ``("changed",)`` used by the owner/follower test) are never volatile-only,
+    so they keep the synchronous-rebuild semantics pinned by commit 47d8ac94.
+    """
+    if not (isinstance(cached_stamp, tuple) and len(cached_stamp) == 2):
+        return False
+    if not (isinstance(current_stamp, tuple) and len(current_stamp) == 2):
+        return False
+    return cached_stamp[0] == current_stamp[0]
+
+
 def _session_list_cache_get(
     key: tuple,
     allow_stale: bool = False,
@@ -375,6 +391,18 @@ def _session_list_cache_get(
             return None, False
         ts, stamp, payload = entry
         if stamp != current_stamp:
+            # Message-write churn (volatile-only mismatch): the payload is still
+            # a usable sidebar snapshot. Serve it stale regardless of
+            # allow_stale and NEVER evict — the follower wait path in
+            # api.routes._get_cached_session_list_payload reads with
+            # allow_stale=False and used to pop the entry mid-rebuild, so the
+            # next request found no entry and took the synchronous rebuild path
+            # this cache exists to avoid. Structural mismatches keep today's
+            # semantics (pop unless allow_stale): the first request after an
+            # externally committed session/settings change must not serve stale.
+            if _session_list_cache_stamp_structural_equal(stamp, current_stamp):
+                _SESSIONS_CACHE.move_to_end(key)
+                return copy.deepcopy(payload), False
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
                 return _session_list_cache_copy_payload(payload), False
@@ -397,7 +425,14 @@ def _session_list_cache_get(
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
-    """Return why an existing cache entry is stale, if it is stale."""
+    """Return why an existing cache entry is stale, if it is stale.
+
+    ``"source"`` — the structural part of the stamp changed (row set / index /
+    settings), so the first request must rebuild synchronously.
+    ``"age"`` — volatile-only churn (message writes, WAL, gateway metadata) or
+    plain TTL expiry: the payload is served stale while a background rebuild
+    runs.
+    """
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
@@ -406,6 +441,8 @@ def _session_list_cache_stale_reason(key: tuple) -> str | None:
             return None
         ts, stamp, _payload = entry
         if stamp != current_stamp:
+            if _session_list_cache_stamp_structural_equal(stamp, current_stamp):
+                return "age"
             return "source"
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
@@ -419,11 +456,29 @@ def _session_list_cache_set(
     key: tuple,
     payload: dict,
     *,
+    stamp=None,
     expected_invalidation_stamp: tuple[int, int] | None = None,
 ) -> bool:
+    """Store ``payload`` under ``key``.
+
+    ``stamp`` defaults to the source stamp read at store time (the historical
+    behavior). The background rebuild passes the stamp its payload was BUILT
+    from instead: re-reading at store time would mark a payload built from an
+    obsolete row set as a fresh cache hit, so the next request would serve it
+    without rebuilding — defeating the commit-47d8ac94 invariant for up to the
+    TTL. With the build-time stamp the entry classifies correctly (structural
+    mismatch → synchronous rebuild; volatile-only → stale-while-revalidate).
+
+    ``expected_invalidation_stamp``, when given, is re-checked under the lock
+    before insertion (a rename/archive/delete clear that lands during
+    projection must not be undone by this stale write); the insert is skipped
+    and ``False`` returned when it moved. Callers that build synchronously
+    never skip the store (no cache starvation under churn).
+    """
     if not isinstance(payload, dict):
         return False
-    stamp = _session_list_cache_resolved_source_stamp(key)
+    if stamp is None:
+        stamp = _session_list_cache_resolved_source_stamp(key)
     bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
         # Projection intentionally happens outside the lock so large source rows
@@ -559,7 +614,36 @@ def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
         return None
 
 
-def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
+def _session_list_cache_fingerprint_parts(fingerprint) -> tuple[object, object]:
+    """Split a state.db content fingerprint into (structural, volatile) rowids.
+
+    ``_sqlite_content_fingerprint`` returns ``(MAX(rowid) sessions, MAX(rowid)
+    messages)`` from the same read, so the split costs nothing extra: a new
+    session row changes the sidebar's row set (structural → "source"), a new
+    message row only moves counts/timestamps (volatile → "age"). Unknown
+    shapes (``None``, a legacy monkeypatched scalar) fail closed into the
+    structural part, so any change in them still classifies as "source".
+    """
+    if isinstance(fingerprint, tuple) and len(fingerprint) == 2:
+        return fingerprint[0], fingerprint[1]
+    return fingerprint, None
+
+
+def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple, tuple]:
+    """Return the session-list cache's ``(structural, volatile)`` stamp parts.
+
+    structural — ``MAX(rowid) sessions``, the session ``_index.json`` stat, the
+    settings file stat and the settings write version. A change means the
+    sidebar's row set or the user's view settings may have changed, so the
+    first request after it must rebuild synchronously ("source" — the
+    commit-47d8ac94 invariant).
+    volatile — ``MAX(rowid) messages``, the state.db/WAL stats and the gateway
+    metadata stat. A change is message-write churn: the cached payload is still
+    a usable sidebar snapshot, so it is served stale while a background rebuild
+    runs ("age") and the entry is never evicted for it. Only well-formed pairs
+    on both sides get that treatment (see
+    ``_session_list_cache_stamp_structural_equal``).
+    """
     _cache_profile, _cache_all_profiles, _cache_show_cli_sessions, *_rest = key
     try:
         swv = _session_list_cache_settings_write_version()
@@ -573,22 +657,30 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
     # volatile state.db-derived components (db/WAL stat, gateway metadata, index
     # stat, content fingerprint) to a marker that only changes when a stream
     # starts or stops. This stops per-token message writes from busting the
-    # cache and triggering LOCK-contending rebuilds on every poll. The TTL still
-    # forces a periodic rebuild so the streaming session's own count/title stay
-    # fresh within the TTL window, and settings_file + the settings write
-    # version stay live so user-initiated sidebar/setting toggles invalidate
-    # immediately. Skipping the fingerprint's SQLite connect here also makes the
-    # streaming-path stamp strictly cheaper than the idle path.
+    # cache and triggering LOCK-contending rebuilds on every poll. The marker
+    # sits in BOTH parts, so a stream start/stop still flips the structural part
+    # → "source" → the just-finished turn's final title/count is rebuilt
+    # synchronously. The TTL still forces a periodic rebuild so the streaming
+    # session's own count/title stay fresh within the TTL window, and
+    # settings_file + the settings write version stay live so user-initiated
+    # sidebar/setting toggles invalidate immediately. Skipping the
+    # fingerprint's SQLite connect here also makes the streaming-path stamp
+    # strictly cheaper than the idle path.
     streaming_marker = _session_list_cache_streaming_freeze_marker()
     if streaming_marker is not None:
         return (
-            streaming_marker,
-            streaming_marker,
-            streaming_marker,
-            streaming_marker,
-            _session_list_cache_path_stamp(_session_list_cache_settings_file()),
-            streaming_marker,
-            swv,
+            (
+                streaming_marker,
+                _session_list_cache_path_stamp(_session_list_cache_settings_file()),
+                streaming_marker,
+                swv,
+            ),
+            (
+                streaming_marker,
+                streaming_marker,
+                streaming_marker,
+                streaming_marker,
+            ),
         )
     try:
         state_db_path = Path(_session_list_cache_state_db_path())
@@ -606,18 +698,28 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         session_index_path = _session_list_cache_session_dir() / "_index.json"
     except Exception:
         session_index_path = None
+    sessions_rowid, messages_rowid = _session_list_cache_fingerprint_parts(
+        _session_list_cache_state_db_fingerprint(state_db_path)
+    )
     return (
-        _session_list_cache_path_stamp(state_db_path),
-        _session_list_cache_path_stamp(state_db_wal_path),
-        _session_list_cache_path_stamp(gateway_metadata_path),
-        _session_list_cache_path_stamp(session_index_path),
-        _session_list_cache_path_stamp(_session_list_cache_settings_file()),
-        # Commit-reliable content fingerprint of state.db — the file-stat stamps
-        # above can collide under WAL-mode writes (same mtime_ns bucket + WAL
-        # frame size), so without this a freshly-committed CLI/gateway session
-        # could be served stale for the cache TTL. Mirrors the models-layer fix.
-        _session_list_cache_state_db_fingerprint(state_db_path),
-        swv,
+        (
+            _session_list_cache_path_stamp(session_index_path),
+            _session_list_cache_path_stamp(_session_list_cache_settings_file()),
+            # Commit-reliable content fingerprint of state.db — the file-stat
+            # stamps above can collide under WAL-mode writes (same mtime_ns
+            # bucket + WAL frame size), so without this a freshly-committed
+            # CLI/gateway session could be served stale for the cache TTL.
+            # Mirrors the models-layer fix. sessions → structural, messages →
+            # volatile (see _session_list_cache_fingerprint_parts).
+            sessions_rowid,
+            swv,
+        ),
+        (
+            _session_list_cache_path_stamp(state_db_path),
+            _session_list_cache_path_stamp(state_db_wal_path),
+            _session_list_cache_path_stamp(gateway_metadata_path),
+            messages_rowid,
+        ),
     )
 
 

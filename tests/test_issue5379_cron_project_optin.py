@@ -109,6 +109,7 @@ def test_sidebar_scan_zero_user_projects_skips_cron_project_creation(tmp_path):
 
 
 def test_recovery_endpoint_zero_user_projects_skips_cron_project_creation(monkeypatch, tmp_path):
+    import api.models as models
     import api.routes as routes
 
     sid = "cron_recover_0001"
@@ -143,7 +144,7 @@ def test_recovery_endpoint_zero_user_projects_skips_cron_project_creation(monkey
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: messages)
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [cron_meta])
+    monkeypatch.setattr(models, "lookup_cli_session_metadata", lambda session_id, *, all_profiles=False: cron_meta)
     monkeypatch.setattr(routes, "import_cli_session", lambda *a, **k: fake)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **k: None)
     monkeypatch.setattr(routes, "_queue_generated_title_for_imported_session", lambda *a, **k: None)
@@ -179,6 +180,7 @@ def test_sidebar_scan_with_user_project_still_autoassigns_cron(tmp_path):
 
 
 def test_recovery_endpoint_with_user_project_still_autoassigns_cron(monkeypatch, tmp_path):
+    import api.models as models
     import api.routes as routes
 
     projects_file = tmp_path / "projects.json"
@@ -218,7 +220,7 @@ def test_recovery_endpoint_with_user_project_still_autoassigns_cron(monkeypatch,
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: messages)
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [cron_meta])
+    monkeypatch.setattr(models, "lookup_cli_session_metadata", lambda session_id, *, all_profiles=False: cron_meta)
     monkeypatch.setattr(routes, "import_cli_session", lambda *a, **k: fake)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda *a, **k: None)
     monkeypatch.setattr(routes, "_queue_generated_title_for_imported_session", lambda *a, **k: None)

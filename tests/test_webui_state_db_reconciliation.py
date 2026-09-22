@@ -569,6 +569,8 @@ def test_state_db_duplicate_backfills_turn_duration():
 
 
 def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monkeypatch, tmp_path):
+    import time
+
     import api.routes as routes
 
     sid = "webui_desktop_sidebar_reconcile"
@@ -588,9 +590,13 @@ def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monke
     assert first_row["message_count"] == 2
 
     # Simulate the official Hermes Desktop App continuing the same WebUI-origin
-    # Hermes Agent session and settling its final rows into state.db. The second
-    # request happens immediately, so it only updates if the WebUI sidebar cache
-    # observes state.db changes even when the CLI/external-session tab is hidden.
+    # Hermes Agent session and settling its final rows into state.db. This is a
+    # message-only write (message INSERTs + the sessions.message_count UPDATE),
+    # which the sidebar cache classifies as volatile churn: the append must
+    # still be OBSERVED even when the CLI/external-session tab is hidden, but
+    # it surfaces through the background rebuild (stale-while-revalidate — the
+    # request path never blocks on the rebuild, so the next request may still
+    # serve the cached snapshot).
     _append_state_db_rows(
         tmp_path / "state.db",
         sid,
@@ -600,10 +606,27 @@ def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monke
         ],
     )
 
+    # This request observes the change (and kicks the background rebuild) and
+    # returns a valid payload; the settled summary lands within the rebuild
+    # window, so assert it becomes visible within a bounded wait. Wait for the
+    # SETTLED summary (count AND timestamp): the fast first-paint payload can
+    # overlay the count from the tier-1 state.db column before the messages
+    # aggregation lands, so a count-only wait could stop on a partial refresh.
     second = _GetHandler("/api/sessions?sidebar_source=webui")
     routes.handle_get(second, urlparse(second.path))
     assert second.status == 200
-    row = next(row for row in second.response_json["sessions"] if row["session_id"] == sid)
+
+    deadline = time.monotonic() + 10.0
+    row = None
+    while time.monotonic() < deadline:
+        poll = _GetHandler("/api/sessions?sidebar_source=webui")
+        routes.handle_get(poll, urlparse(poll.path))
+        assert poll.status == 200
+        row = next(row for row in poll.response_json["sessions"] if row["session_id"] == sid)
+        if row["message_count"] == 4 and row["last_message_at"] == 1003.0:
+            break
+        time.sleep(0.1)
+    assert row is not None
     assert row["message_count"] == 4
     assert row["last_message_at"] == 1003.0
     assert row["updated_at"] == 1003.0

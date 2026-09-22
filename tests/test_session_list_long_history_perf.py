@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+import time
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -81,6 +82,11 @@ def test_sessions_api_enriches_only_returned_rows_by_default(monkeypatch):
             row["_lineage_root_id"] = row["session_id"]
 
     monkeypatch.setattr(routes, "all_sessions", fake_all_sessions)
+    # The fast first-paint builder reads CLI rows through the same
+    # ``get_cli_sessions`` seam; leaving it real would pull rows from whatever
+    # state.db the test process points at (shared across the suite) into the
+    # enriched set. Pin it empty so the test is independent of store state.
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda **_kwargs: [])
     monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", fake_enrich)
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda rows: False)
     monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
@@ -96,7 +102,11 @@ def test_sessions_api_enriches_only_returned_rows_by_default(monkeypatch):
     assert body["archived_count"] == 1
     assert body["archived_webui_count"] == 1
     assert body["include_archived"] is False
-    assert enriched_batches == [["visible-active"]]
+    # Every enrichment batch — the served fast payload's and, when the cold
+    # path schedules it, the background full rebuild's — must contain exactly
+    # the returned visible row; the archived row is counted, never enriched.
+    assert enriched_batches, "expected the served payload to enrich its returned rows"
+    assert all(batch == ["visible-active"] for batch in enriched_batches), enriched_batches
     assert all_sessions_kwargs[0]["include_lineage_metadata"] is False
 
 
@@ -205,8 +215,15 @@ def test_sessions_api_legacy_all_sessions_monkeypatch_fallback_is_narrow(monkeyp
     handler = _FakeHandler()
     routes.handle_get(handler, urlparse("http://example.com/api/sessions"))
 
+    # Slice C: a cold fast-gated request serves the fast first-paint payload and
+    # rebuilds the full payload on the background thread, so the legacy fallback
+    # is called once per build — exactly twice, never more (no retry loop, no
+    # TypeError-swallow re-entry). This is the narrowness this test pins.
     assert handler.status == 200
-    assert len(calls) == 1
+    deadline = time.monotonic() + 5.0
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) == 2
 
 
 def test_sessions_api_internal_typeerror_is_not_hidden_by_legacy_fallback(monkeypatch):

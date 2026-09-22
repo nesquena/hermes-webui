@@ -42,6 +42,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
+    read_fast_sidebar_agent_rows,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -49,6 +50,11 @@ from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
+# Bound for the targeted single-session metadata lookup's parent_session_id
+# ancestor walk (``_cli_session_ancestor_ids``): sid + up to 19 ancestors, one
+# primary-key read per level. Deeper chains resolve their oldest segments
+# as-if-top-level, mirroring the bulk window's own bounded ancestor recovery.
+CLI_LOOKUP_MAX_ANCESTORS = 20
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -6201,7 +6207,32 @@ def _read_state_db_sidebar_overrides(
             return overrides
 
 
-def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
+def _call_apply_sidebar_state_db_overrides(
+    sessions: list[dict], *, include_message_counts: bool = True
+) -> None:
+    """Call ``_apply_sidebar_state_db_overrides``, tolerating the historical
+    one-arg signature.
+
+    Focused tests and third-party callers sometimes monkeypatch the applier
+    with the pre-``include_message_counts`` signature; the counts flag is then
+    dropped and the callable's own behavior stands (the same tolerance the
+    sidebar route applies to ``all_sessions``/``get_cli_sessions``).
+    """
+    if _callable_accepts_kwarg(
+        _apply_sidebar_state_db_overrides, "include_message_counts"
+    ):
+        _apply_sidebar_state_db_overrides(
+            sessions, include_message_counts=include_message_counts
+        )
+        return
+    _apply_sidebar_state_db_overrides(sessions)
+
+
+def _apply_sidebar_state_db_overrides(
+    sessions: list[dict],
+    *,
+    include_message_counts: bool = True,
+) -> None:
     """Apply state.db source/title overrides without full lineage enrichment.
 
     Source classification (source/title) is corrected for ALL rows because it
@@ -6214,6 +6245,12 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
     concurrent poll (#5132). The cap is env-configurable and fails open; rows
     beyond it keep their JSON message-count/last-message until the history panel
     opens (lazily corrected, exactly as with the lineage cap #4638).
+
+    ``include_message_counts=False`` (Slice C fast first paint) keeps the tier-1
+    primary-key source/title/count fetch for every row but skips the messages
+    aggregation entirely: the fast payload must not pay a ``messages`` scan on
+    the request thread, and the background full rebuild restores the aggregated
+    ``last_message_at`` overlay within its window.
     """
     import os as _os
     try:
@@ -6221,7 +6258,11 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
     except (TypeError, ValueError):
         _cap = 300
     all_ids = {str(s.get('session_id')) for s in sessions if s.get('session_id')}
-    if _cap > 0 and len(sessions) > _cap:
+    if not include_message_counts:
+        # Tier-1 only: ``_read_state_db_sidebar_overrides`` intersects this with
+        # the wanted ids, so an empty set skips every COUNT/MAX GROUP BY.
+        count_ids: set[str] | None = set()
+    elif _cap > 0 and len(sessions) > _cap:
         count_ids = {str(s.get('session_id')) for s in sessions[:_cap] if s.get('session_id')}
     else:
         count_ids = None  # cap disabled / under cap -> count every row too
@@ -6378,6 +6419,7 @@ def all_sessions(
     *,
     include_lineage_metadata: bool = True,
     sidebar_metadata_only: bool = False,
+    state_db_override_counts: bool = True,
 ):
     _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
@@ -6518,7 +6560,9 @@ def all_sessions(
                 _enrich_sidebar_lineage_metadata(result)
             else:
                 _diag_stage(diag, "all_sessions.state_db_overrides")
-                _apply_sidebar_state_db_overrides(result)
+                _call_apply_sidebar_state_db_overrides(
+                    result, include_message_counts=state_db_override_counts
+                )
                 _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
@@ -6580,7 +6624,9 @@ def all_sessions(
         _enrich_sidebar_lineage_metadata(result)
     else:
         _diag_stage(diag, "all_sessions.state_db_overrides")
-        _apply_sidebar_state_db_overrides(result)
+        _call_apply_sidebar_state_db_overrides(
+            result, include_message_counts=state_db_override_counts
+        )
         _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result
@@ -7196,6 +7242,59 @@ def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_file
     return sessions
 
 
+def _lookup_claude_code_session_row(sid: str, *, projects_dir: Path | str | None = None) -> dict:
+    """Return the single Claude Code JSONL session row for ``sid``, or ``{}``.
+
+    Targeted equivalent of ``get_claude_code_sessions()``: walk the same
+    iterator and early-exit on the file whose hash-derived id matches instead of
+    parsing every transcript. Field-for-field parity with the bulk row is pinned
+    by tests, including the no-message skip (a file whose parse yields no
+    messages produces no row) and the ``first_ts or last_ts or mtime``
+    timestamp fallback.
+    """
+    sid = str(sid or '')
+    if not sid.startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return {}
+    for path in _iter_claude_code_jsonl_files(projects_dir) or []:
+        if _claude_code_session_id(path) != sid:
+            continue
+        messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl_cached(path)
+        if not messages:
+            return {}
+        # Match the truthiness fallback used by get_claude_code_sessions(): a
+        # falsy-but-not-None first/last timestamp still falls back to mtime.
+        if not first_ts and not last_ts:
+            try:
+                _mtime = path.stat().st_mtime
+            except OSError:
+                _mtime = 0.0
+        else:
+            _mtime = None
+        created_at = first_ts or last_ts or _mtime
+        updated_at = last_ts or first_ts or _mtime
+        return {
+            'session_id': sid,
+            'title': _claude_code_title(messages, summary_title),
+            'workspace': str(get_last_workspace()),
+            'model': 'claude-code',
+            'message_count': len(messages),
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'last_message_at': updated_at,
+            'pinned': False,
+            'archived': False,
+            'project_id': None,
+            'profile': None,
+            'source_tag': CLAUDE_CODE_SOURCE,
+            'raw_source': CLAUDE_CODE_SOURCE,
+            'session_source': 'external_agent',
+            'source_label': CLAUDE_CODE_SOURCE_LABEL,
+            'is_cli_session': True,
+            'read_only': True,
+        }
+    return {}
+
+
 def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None) -> list:
     """Return messages for one read-only Claude Code JSONL session."""
     sid = str(sid or '')
@@ -7412,6 +7511,19 @@ def _path_stat_cache_key(path):
         return (st.st_mtime_ns, st.st_size)
     except OSError:
         return None
+
+
+def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    if kwarg_name in signature.parameters:
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 def _callable_accepts_include_claude_code(callable_obj) -> bool:
@@ -7712,6 +7824,90 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     return dict(metadata)
 
 
+def _build_cli_session_row(
+    row: dict,
+    *,
+    profile_value: str,
+    source_tag: str,
+    project_id,
+    workspace: str,
+    sidecar_meta: dict | None = None,
+    default_title: str,
+    merge_source_meta: bool = True,
+) -> dict:
+    """Build one sidebar CLI row from a projected agent-session row.
+
+    Shared by all four ``_load_cli_sessions_uncached`` passes (interactive,
+    cron, webhook, kanban). The callers keep the pass-specific work outside:
+    the webui tombstone check, the cron-title lookup, the ``existing_sids``
+    dedupe, and the ``_source != expected`` guards.
+
+    ``merge_source_meta`` controls the ``normalize_agent_session_source``
+    fallback fill for ``raw_source``/``session_source``/``source_label`` and the
+    dict fed to ``is_cli_session_row``: real projected rows already carry those
+    fields (``_with_normalized_source``), so the merge is a no-op for them, but
+    the cron pass has historically kept raw-field semantics (no fill) and that
+    is preserved by passing ``merge_source_meta=False``.
+    """
+    sid = row.get('id')
+    source_meta = (
+        normalize_agent_session_source(row.get('source') or source_tag)
+        if merge_source_meta
+        else {}
+    )
+    if merge_source_meta:
+        raw_source = row.get('raw_source') or source_meta.get('raw_source')
+        session_source = row.get('session_source') or source_meta.get('session_source')
+        source_label = row.get('source_label') or source_meta.get('source_label')
+        classify_row = {**row, **source_meta}
+    else:
+        # Raw-field semantics (cron pass): no normalize_agent_session_source()
+        # fallback fill, and is_cli_session_row sees the row exactly as read.
+        raw_source = row.get('raw_source')
+        session_source = row.get('session_source')
+        source_label = row.get('source_label')
+        classify_row = row
+    sidecar_meta = sidecar_meta or {}
+    _title = row.get('title')
+    if sidecar_meta.get('title'):
+        _title = sidecar_meta['title']
+    return {
+        'session_id': sid,
+        'title': _title or default_title,
+        'workspace': workspace,
+        'model': row['model'] or None,
+        'message_count': row.get('message_count') or row.get('actual_message_count') or 0,
+        'created_at': row.get('started_at'),
+        'updated_at': row.get('last_activity') or row.get('started_at'),
+        'pinned': False,
+        'archived': bool(sidecar_meta.get('archived')),
+        'project_id': project_id,
+        'profile': profile_value,
+        'source_tag': source_tag,
+        'raw_source': raw_source,
+        'user_id': row.get('user_id'),
+        'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+        'chat_type': row.get('chat_type'),
+        'thread_id': row.get('thread_id'),
+        'session_key': row.get('session_key'),
+        'platform': row.get('platform'),
+        'session_source': session_source,
+        'source_label': source_label,
+        'parent_session_id': row.get('parent_session_id'),
+        'parent_title': row.get('parent_title'),
+        'parent_source': row.get('parent_source'),
+        'relationship_type': row.get('relationship_type'),
+        '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+        'end_reason': row.get('end_reason'),
+        'actual_message_count': row.get('actual_message_count'),
+        'user_message_count': row.get('actual_user_message_count'),
+        '_lineage_root_id': row.get('_lineage_root_id'),
+        '_lineage_tip_id': row.get('_lineage_tip_id'),
+        '_compression_segment_count': row.get('_compression_segment_count'),
+        'is_cli_session': is_cli_session_row(classify_row),
+    }
+
+
 @profile_home_resolve_cache_scope()
 def _load_cli_sessions_uncached(
     hermes_home: Path,
@@ -7724,9 +7920,35 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    session_ids: tuple[str, ...] | None = None,
+    fast_window: bool = False,
 ) -> list:
     cli_sessions = []
-    if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
+    # Slice C: the bounded first-paint window (``read_fast_sidebar_agent_rows``)
+    # replaces the messages-JOIN projection for all four passes below. It is
+    # never cached by ``get_cli_sessions`` — only the fast route builder calls
+    # it, and the full rebuild must stay the source of the stored payload.
+    _read_sidebar_rows = (
+        read_fast_sidebar_agent_rows if fast_window else read_importable_agent_session_rows
+    )
+    # A targeted read (``session_ids`` set) must never pay the global Claude
+    # Code JSONL scan: the scan walks every ``~/.claude/projects`` transcript
+    # (lstat + parse, up to CLAUDE_CODE_MAX_FILES) and cannot be narrowed by
+    # session id, and live /api/session thread dumps parked in exactly that
+    # scan are what wedged the chat-open path. JSONL ``claude_code_*`` ids are
+    # resolved separately by ``_lookup_claude_code_session_row``.
+    #
+    # ``fast_window`` deliberately does NOT imply that skip: JSONL-backed rows
+    # have no state.db row, so skipping the scan there drops valid sessions from
+    # the fast first paint while the full builder returns them for the same
+    # request shape. The scan is bounded (CLAUDE_CODE_MAX_FILES) and per-file
+    # cached, and the fast window's caller passes the request's own
+    # ``include_claude_code``, so the two builders return the same session set.
+    if (
+        source_filter in (None, CLAUDE_CODE_SOURCE)
+        and include_claude_code
+        and session_ids is None
+    ):
         try:
             cli_sessions.extend(get_claude_code_sessions())
         except Exception:
@@ -7825,7 +8047,7 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
-    for row in read_importable_agent_session_rows(
+    for row in _read_sidebar_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
@@ -7839,9 +8061,9 @@ def _load_cli_sessions_uncached(
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
+        session_ids=session_ids,
     ):
         sid = row['id']
-        raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
         # the active CLI profile so sidebar filtering works either way.
         profile = profile_value  # CLI DB has no profile column; use active profile
@@ -7855,7 +8077,6 @@ def _load_cli_sessions_uncached(
             and not (SESSION_DIR / f"{sid}.json").exists()
         ):
             continue
-        _source_meta = normalize_agent_session_source(_source)
         _title = row['title']
         if not _title and _source == 'cron':
             # Look up the human-friendly cron job name (cron_{job_id}_{ts}) from
@@ -7866,46 +8087,15 @@ def _load_cli_sessions_uncached(
         # the state.db projection. This keeps archived cron/tool/API runs hidden
         # even when all_sessions() omits the hidden sidecar and the state row is
         # re-injected from Hermes state.db (#4397).
-        _sidecar_meta = _state_projection_sidecar_metadata(sid)
-        if _sidecar_meta.get('title'):
-            _title = _sidecar_meta['title']
-        _archived = bool(_sidecar_meta.get('archived'))
-        _display_title = _title or f'{_source.title()} Session'
-        cli_sessions.append({
-            'session_id': sid,
-            'title': _display_title,
-            'workspace': _cli_workspace(),
-            'model': row['model'] or None,
-            'message_count': row['message_count'] or row['actual_message_count'] or 0,
-            'created_at': row['started_at'],
-            'updated_at': raw_ts,
-            'pinned': False,
-            'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
-            'profile': profile,
-            'source_tag': _source,
-            'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
-            'user_id': row.get('user_id'),
-            'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-            'chat_type': row.get('chat_type'),
-            'thread_id': row.get('thread_id'),
-            'session_key': row.get('session_key'),
-            'platform': row.get('platform'),
-            'session_source': row.get('session_source') or _source_meta.get('session_source'),
-            'source_label': row.get('source_label') or _source_meta.get('source_label'),
-            'parent_session_id': row.get('parent_session_id'),
-            'parent_title': row.get('parent_title'),
-            'parent_source': row.get('parent_source'),
-            'relationship_type': row.get('relationship_type'),
-            '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-            'end_reason': row.get('end_reason'),
-            'actual_message_count': row.get('actual_message_count'),
-            'user_message_count': row.get('actual_user_message_count'),
-            '_lineage_root_id': row.get('_lineage_root_id'),
-            '_lineage_tip_id': row.get('_lineage_tip_id'),
-            '_compression_segment_count': row.get('_compression_segment_count'),
-            'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-        })
+        cli_sessions.append(_build_cli_session_row(
+            {**row, 'title': _title},
+            profile_value=profile,
+            source_tag=_source,
+            project_id=_state_row_project_id(sid, _source),
+            workspace=_cli_workspace(),
+            sidecar_meta=_state_projection_sidecar_metadata(sid),
+            default_title=f'{_source.title()} Session',
+        ))
 
     if source_filter is not None:
         return cli_sessions
@@ -7920,12 +8110,13 @@ def _load_cli_sessions_uncached(
     if cron_project_limit is not False:
         existing_sids = {s['session_id'] for s in cli_sessions}
         try:
-            for row in read_importable_agent_session_rows(
+            for row in _read_sidebar_rows(
                 db_path,
                 limit=cron_project_limit,
                 log=logger,
                 exclude_sources=None,
                 include_sources=("cron",),
+                session_ids=session_ids,
             ):
                 sid = row['id']
                 if sid in existing_sids:
@@ -7933,51 +8124,20 @@ def _load_cli_sessions_uncached(
                 _source = row['source'] or 'cli'
                 if _source != 'cron':
                     continue
-                raw_ts = row['last_activity'] or row['started_at']
                 _title = row['title']
                 if not _title:
                     # Friendly cron job name from the once-parsed jobs.json map.
                     _title = _cron_title_from_jobs(sid) or _title
-                _sidecar_meta = _state_projection_sidecar_metadata(sid)
-                if _sidecar_meta.get('title'):
-                    _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
-                _display_title = _title or 'Cron Session'
-                cli_sessions.append({
-                    'session_id': sid,
-                    'title': _display_title,
-                    'workspace': _cli_workspace(),
-                    'model': row['model'] or None,
-                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                    'created_at': row['started_at'],
-                    'updated_at': raw_ts,
-                    'pinned': False,
-                    'archived': _archived,
-                    'project_id': _cron_pid(),
-                    'profile': profile_value,
-                    'source_tag': 'cron',
-                    'raw_source': row.get('raw_source'),
-                    'user_id': row.get('user_id'),
-                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-                    'chat_type': row.get('chat_type'),
-                    'thread_id': row.get('thread_id'),
-                    'session_key': row.get('session_key'),
-                    'platform': row.get('platform'),
-                    'session_source': row.get('session_source'),
-                    'source_label': row.get('source_label'),
-                    'parent_session_id': row.get('parent_session_id'),
-                    'parent_title': row.get('parent_title'),
-                    'parent_source': row.get('parent_source'),
-                    'relationship_type': row.get('relationship_type'),
-                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-                    'end_reason': row.get('end_reason'),
-                    'actual_message_count': row.get('actual_message_count'),
-                    'user_message_count': row.get('actual_user_message_count'),
-                    '_lineage_root_id': row.get('_lineage_root_id'),
-                    '_lineage_tip_id': row.get('_lineage_tip_id'),
-                    '_compression_segment_count': row.get('_compression_segment_count'),
-                    'is_cli_session': is_cli_session_row(row),
-                })
+                cli_sessions.append(_build_cli_session_row(
+                    {**row, 'title': _title},
+                    profile_value=profile_value,
+                    source_tag='cron',
+                    project_id=_cron_pid(),
+                    workspace=_cli_workspace(),
+                    sidecar_meta=_state_projection_sidecar_metadata(sid),
+                    default_title='Cron Session',
+                    merge_source_meta=False,
+                ))
                 existing_sids.add(sid)
         except Exception:
             logger.debug("Cron project-chip second pass failed", exc_info=True)
@@ -7988,12 +8148,13 @@ def _load_cli_sessions_uncached(
     if webhook_project_limit is not False:
         existing_sids = {s['session_id'] for s in cli_sessions}
         try:
-            for row in read_importable_agent_session_rows(
+            for row in _read_sidebar_rows(
                 db_path,
                 limit=webhook_project_limit,
                 log=logger,
                 exclude_sources=None,
                 include_sources=("webhook",),
+                session_ids=session_ids,
             ):
                 sid = row['id']
                 if sid in existing_sids:
@@ -8001,49 +8162,15 @@ def _load_cli_sessions_uncached(
                 _source = row['source'] or 'webhook'
                 if _source != 'webhook':
                     continue
-                _source_meta = normalize_agent_session_source(_source)
-                raw_ts = row['last_activity'] or row['started_at']
-                _title = row['title']
-                _sidecar_meta = _state_projection_sidecar_metadata(sid)
-                if _sidecar_meta.get('title'):
-                    _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
-                _display_title = _title or 'Webhook Session'
-                cli_sessions.append({
-                    'session_id': sid,
-                    'title': _display_title,
-                    'workspace': _cli_workspace(),
-                    'model': row['model'] or None,
-                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                    'created_at': row['started_at'],
-                    'updated_at': raw_ts,
-                    'pinned': False,
-                    'archived': _archived,
-                    'project_id': _webhook_pid(),
-                    'profile': profile_value,
-                    'source_tag': 'webhook',
-                    'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
-                    'user_id': row.get('user_id'),
-                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-                    'chat_type': row.get('chat_type'),
-                    'thread_id': row.get('thread_id'),
-                    'session_key': row.get('session_key'),
-                    'platform': row.get('platform'),
-                    'session_source': row.get('session_source') or _source_meta.get('session_source'),
-                    'source_label': row.get('source_label') or _source_meta.get('source_label'),
-                    'parent_session_id': row.get('parent_session_id'),
-                    'parent_title': row.get('parent_title'),
-                    'parent_source': row.get('parent_source'),
-                    'relationship_type': row.get('relationship_type'),
-                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-                    'end_reason': row.get('end_reason'),
-                    'actual_message_count': row.get('actual_message_count'),
-                    'user_message_count': row.get('actual_user_message_count'),
-                    '_lineage_root_id': row.get('_lineage_root_id'),
-                    '_lineage_tip_id': row.get('_lineage_tip_id'),
-                    '_compression_segment_count': row.get('_compression_segment_count'),
-                    'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-                })
+                cli_sessions.append(_build_cli_session_row(
+                    row,
+                    profile_value=profile_value,
+                    source_tag='webhook',
+                    project_id=_webhook_pid(),
+                    workspace=_cli_workspace(),
+                    sidecar_meta=_state_projection_sidecar_metadata(sid),
+                    default_title='Webhook Session',
+                ))
                 existing_sids.add(sid)
         except Exception:
             logger.debug("Webhook project-chip second pass failed", exc_info=True)
@@ -8053,12 +8180,13 @@ def _load_cli_sessions_uncached(
     if kanban_project_limit is not False:
         existing_sids = {s['session_id'] for s in cli_sessions}
         try:
-            for row in read_importable_agent_session_rows(
+            for row in _read_sidebar_rows(
                 db_path,
                 limit=kanban_project_limit,
                 log=logger,
                 exclude_sources=None,
                 include_sources=("kanban",),
+                session_ids=session_ids,
             ):
                 sid = row['id']
                 if sid in existing_sids:
@@ -8066,48 +8194,15 @@ def _load_cli_sessions_uncached(
                 _source = row['source'] or 'kanban'
                 if _source != 'kanban':
                     continue
-                _source_meta = normalize_agent_session_source(_source)
-                raw_ts = row['last_activity'] or row['started_at']
-                _title = row['title']
-                _sidecar_meta = _state_projection_sidecar_metadata(sid)
-                if _sidecar_meta.get('title'):
-                    _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
-                cli_sessions.append({
-                    'session_id': sid,
-                    'title': _title or 'Kanban Session',
-                    'workspace': _cli_workspace(),
-                    'model': row['model'] or None,
-                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                    'created_at': row['started_at'],
-                    'updated_at': raw_ts,
-                    'pinned': False,
-                    'archived': _archived,
-                    'project_id': _state_row_project_id(sid, _source),
-                    'profile': profile_value,
-                    'source_tag': 'kanban',
-                    'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
-                    'user_id': row.get('user_id'),
-                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-                    'chat_type': row.get('chat_type'),
-                    'thread_id': row.get('thread_id'),
-                    'session_key': row.get('session_key'),
-                    'platform': row.get('platform'),
-                    'session_source': row.get('session_source') or _source_meta.get('session_source'),
-                    'source_label': row.get('source_label') or _source_meta.get('source_label'),
-                    'parent_session_id': row.get('parent_session_id'),
-                    'parent_title': row.get('parent_title'),
-                    'parent_source': row.get('parent_source'),
-                    'relationship_type': row.get('relationship_type'),
-                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-                    'end_reason': row.get('end_reason'),
-                    'actual_message_count': row.get('actual_message_count'),
-                    'user_message_count': row.get('actual_user_message_count'),
-                    '_lineage_root_id': row.get('_lineage_root_id'),
-                    '_lineage_tip_id': row.get('_lineage_tip_id'),
-                    '_compression_segment_count': row.get('_compression_segment_count'),
-                    'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-                })
+                cli_sessions.append(_build_cli_session_row(
+                    row,
+                    profile_value=profile_value,
+                    source_tag='kanban',
+                    project_id=_state_row_project_id(sid, _source),
+                    workspace=_cli_workspace(),
+                    sidecar_meta=_state_projection_sidecar_metadata(sid),
+                    default_title='Kanban Session',
+                ))
                 existing_sids.add(sid)
         except Exception:
             logger.debug("Kanban sidebar second pass failed", exc_info=True)
@@ -8115,17 +8210,155 @@ def _load_cli_sessions_uncached(
     return cli_sessions
 
 
+def _cli_session_ancestor_ids(
+    db_path: Path,
+    session_id: str,
+    *,
+    max_depth: int = CLI_LOOKUP_MAX_ANCESTORS,
+) -> tuple[str, ...]:
+    """Return ``session_id`` plus its bounded ``parent_session_id`` ancestor chain.
+
+    One primary-key lookup per level on a read-only handle. Used by the
+    targeted single-session metadata lookup so a mini-set can be projected
+    through the same path as the bulk window: a chain tip needs its root
+    (title/started_at/lineage), and a child needs its parent (parent_title/
+    parent_source/_parent_lineage_root_id). The walk starts at ``sid`` and
+    stops after ``max_depth`` ids or at the first missing parent, so it can
+    never loop on a cyclic chain. Always returns at least ``(sid,)``.
+    """
+    sid = str(session_id or '').strip()
+    if not sid:
+        return ()
+    import sqlite3
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    try:
+        db_path = Path(db_path)
+        try:
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        except sqlite3.Error:
+            # Missing/unreadable db: let the loader decide (it returns [] for a
+            # missing db). Deliberately no writable fallback here — a targeted
+            # read must never create or write the store.
+            return (sid,)
+        with closing(conn):
+            cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA table_info(sessions)")
+                session_cols = {row[1] for row in cur.fetchall()}
+            except sqlite3.Error:
+                session_cols = set()
+            if 'parent_session_id' not in session_cols:
+                return (sid,)
+            current = sid
+            while current and current not in seen and len(ids) < max_depth:
+                seen.add(current)
+                ids.append(current)
+                cur.execute(
+                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    (current,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    break
+                current = str(row[0] or '').strip()
+    except Exception:
+        logger.debug("CLI session ancestor walk failed for %s", sid, exc_info=True)
+    return tuple(ids) if ids else (sid,)
+
+
+def lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
+    """Single-session equivalent of the ``get_cli_sessions`` projection.
+
+    Targeted, chain-aware read for routes that need one session's CLI metadata
+    (chat-open, import/claim, archive, delete, ...). Instead of rebuilding the
+    full interactive/cron/webhook/kanban projection and the global Claude Code
+    JSONL scan, it fetches the session row plus its bounded
+    ``parent_session_id`` ancestor chain (``_cli_session_ancestor_ids``) and
+    projects that mini-set through the exact same ``_load_cli_sessions_uncached``
+    path, so:
+
+    - a compression/cli_close chain tip reproduces the merged root row (root
+      title/started_at plus ``_lineage_root_id``/``_lineage_tip_id``/
+      ``_compression_segment_count``);
+    - a child gets ``parent_title``/``parent_source``/``_parent_lineage_root_id``
+      exactly like the bulk window row whenever its parent is reachable (the
+      bulk window can miss a parent outside its 20-row slice; the targeted walk
+      resolves it up to ``CLI_LOOKUP_MAX_ANCESTORS`` levels).
+
+    Known accepted divergences (asserted in tests): a chain ROOT resolves to
+    its own row, while the bulk payload only contains the merged tip row; and
+    for a child whose parent is itself a continuation segment whose chain root
+    lies outside the bulk candidate window, the bulk row stops its lineage walk
+    at the immediate parent while the targeted walk resolves the true chain
+    root — ``parent_title``/``parent_source`` and ``_parent_lineage_root_id``
+    are therefore more faithful here (no lookup consumer reads these fields;
+    the bulk sidebar payload is unaffected).
+
+    Returns ``{}`` when nothing matches — including a tombstoned WebUI row,
+    which the loader drops exactly like the bulk projection does. The
+    ``all_profiles`` mode iterates profile contexts in the same order
+    ``get_cli_sessions`` merges them, so first-match semantics are preserved.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {}
+    try:
+        contexts = (
+            list(_all_profiles_cli_contexts()[0])
+            if all_profiles else [_resolve_cli_sessions_context(None)[:3]]
+        )
+    except Exception:
+        logger.debug("CLI metadata lookup context resolution failed for %s", sid, exc_info=True)
+        return {}
+    for ctx_home, ctx_db_path, ctx_profile in contexts:
+        try:
+            ids = _cli_session_ancestor_ids(ctx_db_path, sid)
+            rows = _load_cli_sessions_uncached(
+                ctx_home,
+                ctx_db_path,
+                ctx_profile,
+                session_ids=ids,
+                # Size the visible slice to the mini-set so the post-projection
+                # slice can never drop the requested row (the id filter is a
+                # WHERE clause, but the display slice is applied afterwards).
+                visible_session_limit=len(ids),
+            )
+        except Exception:
+            logger.debug("Targeted CLI metadata lookup failed for %s", sid, exc_info=True)
+            continue
+        for row in rows:
+            if row.get("session_id") == sid:
+                return row
+    if sid.startswith(f"{CLAUDE_CODE_SOURCE}_"):
+        return _lookup_claude_code_session_row(sid)
+    return {}
+
+
 def get_cli_sessions(
     source_filter=None,
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    fast_window: bool = False,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
     Returns empty list if the SQLite DB is missing or any error occurs -- the
-    bridge is purely additive and never crashes the WebUI.
+    bridge is purely additive and never crashes the WebUI. ``fast_window=True``
+    is the one exception: its read failure propagates to the caller (the
+    route's fast builder), whose failure path serves the synchronous full
+    build, because an empty fast CLI list would silently omit rows the full
+    builder returns.
+
+    ``fast_window=True`` (Slice C fast first paint) projects the bounded
+    ``read_fast_sidebar_agent_rows`` window through the same loader and NEVER
+    touches the models-layer CLI cache: a stored fast list is a bounded window
+    the full builder must not serve, and a stored full list would defeat the
+    fast path. Single-profile only — the aggregate ``all_profiles`` branch
+    ignores the flag and keeps its full loads.
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
     if all_profiles:
@@ -8166,6 +8399,15 @@ def get_cli_sessions(
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
         )
+        # Slice C: the bounded first-paint window is a single-profile read and is
+        # only ever requested by the fast route builder (all_profiles is out of
+        # the fast gate). A monkeypatched/legacy loader that cannot honor the
+        # flag keeps its own behavior.
+        use_fast_window = (
+            bool(fast_window)
+            and not all_profiles
+            and _callable_accepts_kwarg(_load_cli_sessions_uncached, 'fast_window')
+        )
         if all_profiles:
             merged: list[dict] = []
             for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
@@ -8190,12 +8432,31 @@ def get_cli_sessions(
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
+        if use_fast_window:
+            load_kwargs['fast_window'] = True
         return _load_cli_sessions_uncached(
             hermes_home,
             db_path,
             cli_profile,
             **load_kwargs,
         )
+
+    if fast_window and not all_profiles:
+        # Never read or write the models-layer CLI cache on the fast window: a
+        # stored fast list is a bounded window the full builder must not serve,
+        # and a stored full list would defeat the fast path. The background full
+        # rebuild is the only writer of that cache.
+        #
+        # A read failure PROPAGATES here, unlike the cached branches below
+        # (which degrade to the stale list / ``[]``): this window's only caller
+        # is the route's fast builder, whose documented failure path
+        # (``_get_cached_session_list_payload``: fast-build failure → the
+        # unchanged synchronous full build) owns the degradation. Swallowing
+        # into ``[]`` silently dropped every CLI/agent row — and the
+        # cron/webhook/kanban chips — from the fast first paint while the full
+        # builder returned them, with no exception for the route to fall back
+        # from: the omission class the fast path must not have.
+        return _load_sessions()
 
     if ttl > 0:
         stale_sessions = None

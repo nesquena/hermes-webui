@@ -1184,6 +1184,33 @@ def _invalidate_models_cache_after_test():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _drain_session_list_cache_rebuilds_around_test():
+    """Wait for in-flight session-list cache background rebuilds.
+
+    Slice C serves the fast first paint on cold cache misses and rebuilds the
+    full payload on a background thread. A rebuild started by one test's
+    request can still be running when the next test monkeypatches route
+    internals (``all_sessions``, ``_enrich_sidebar_lineage_metadata``, ...) —
+    the stray rebuild then records its calls into that test's spies (observed
+    as ``enriched_batches`` gaining a batch of real state.db rows). Drain
+    before and after every test body so rebuilds never cross test boundaries.
+    """
+    try:
+        from api import routes as _routes
+
+        _routes._drain_session_list_cache_rebuilds(timeout=5.0)
+    except Exception:
+        pass
+    yield
+    try:
+        from api import routes as _routes
+
+        _routes._drain_session_list_cache_rebuilds(timeout=5.0)
+    except Exception:
+        pass
+
+
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────
 # Several tests simulate "hermes_cli unavailable / CI without the package" by
 # swapping sys.modules['hermes_cli'] for a stub whose __path__ is [] (e.g.

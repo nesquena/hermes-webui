@@ -176,6 +176,7 @@ def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch,
 
 
 def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, tmp_path):
+    import api.models as models
     import api.routes as routes
 
     sid = "claude_code_fixture"
@@ -199,7 +200,7 @@ def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, t
     monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: messages if _sid == sid else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [meta])
+    monkeypatch.setattr(models, "lookup_cli_session_metadata", lambda session_id, *, all_profiles=False: meta)
     monkeypatch.setattr(routes, "get_last_workspace", lambda profile=None: tmp_path / "workspace")
     monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read-only import must not persist")))
 
@@ -220,6 +221,7 @@ def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, t
 
 
 def test_session_import_cli_queues_generated_title_for_writable_default_cli_title(monkeypatch):
+    import api.models as models
     import api.routes as routes
 
     sid = "cli_writable_default_title"
@@ -269,9 +271,9 @@ def test_session_import_cli_queues_generated_title_for_writable_default_cli_titl
         lambda _sid, profile=None: messages if _sid == sid else [],
     )
     monkeypatch.setattr(
-        routes,
-        "get_cli_sessions",
-        lambda source_filter=None, all_profiles=False: [cli_meta],
+        models,
+        "lookup_cli_session_metadata",
+        lambda session_id, *, all_profiles=False: cli_meta,
     )
     monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: imported)
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason, profile=None: published.append((reason, profile)))

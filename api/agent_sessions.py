@@ -514,6 +514,7 @@ def read_importable_agent_session_rows(
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
     include_sources: tuple[str, ...] | None = None,
+    session_ids: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """Return agent sessions projected as importable conversations.
 
@@ -543,6 +544,15 @@ def read_importable_agent_session_rows(
     oversample stays unresolved and its children render top-level, exactly as
     they did before. Widening that window is a ``candidate_limit`` change, not
     a change to this walk.
+
+    ``session_ids`` narrows the read to a targeted set of ids (the targeted
+    single-session metadata lookup in ``api/models.py``): it is appended to the
+    WHERE clause, so it composes with the include/exclude source filters and
+    wins over the recency slice — the requested ids are returned even when they
+    are far outside the candidate window. Passing an empty tuple matches
+    nothing. The read still goes through the candidate-CTE branch (the id set is
+    the candidate set; there is no limit bypass), and the subagent-parent
+    re-add below applies unchanged.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -678,6 +688,17 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+        if session_ids is not None:
+            # Targeted read: bound the query to the requested ids. Appended last
+            # so the include/exclude params stay in their original order in both
+            # the candidate-CTE branch ([*params, candidate_limit]) and the
+            # unbounded branch (params).
+            wanted_ids = tuple(str(sid).strip() for sid in session_ids if str(sid or "").strip())
+            if not wanted_ids:
+                return []
+            placeholders = ", ".join("?" for _ in wanted_ids)
+            where_clauses.append(f"s.id IN ({placeholders})")
+            params.extend(wanted_ids)
 
         use_preaggregated_candidate_order = (
             use_messages_join
@@ -697,6 +718,19 @@ def read_importable_agent_session_rows(
             candidate_order_clause = "ORDER BY COALESCE(lm.last_message_at, s.started_at) DESC, s.started_at DESC"
         elif use_messages_join and messages_has_timestamp:
             order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            # The candidate window MUST order by the exact activity key — the
+            # same ``COALESCE(MAX(m.timestamp), s.started_at)`` the display
+            # sorts by — never by the denormalized ``s.last_activity_at``. The
+            # column tracks the join key but lags it (live: seconds for most
+            # rows, up to ~hours for a handful, NULL-fallback rows up to
+            # 17.8 h), so an oversample of the approximate key is headroom,
+            # never a bound: a session resumed after a long gap ranks at the
+            # top by its latest message while the approximate key ranks it past
+            # the window, and the projection then never sees the row at all
+            # (upstream #2662 fixed exactly that regression). The correlated
+            # subquery resolves per session through ``idx_messages_session``,
+            # so the window stays a bounded per-row probe instead of a
+            # whole-store aggregate.
             candidate_order_clause = (
                 "ORDER BY COALESCE(\n"
                 "                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),\n"
@@ -731,11 +765,17 @@ def read_importable_agent_session_rows(
             # The sidebar only needs a small visible window. Bound the expensive
             # messages join to a recent-activity candidate set instead of
             # aggregating every historical Hermes state.db session before
-            # slicing in Python. The candidate ordering must include the latest
-            # message timestamp, not only ``started_at``: long-lived CLI sessions
-            # can be resumed days later and should still surface at the top.
-            # Oversampling preserves room for hidden compression segments or
-            # other rows filtered after projection.
+            # slicing in Python. The candidate ordering IS the exact activity
+            # key (see ``candidate_order_clause`` above), so the window is a
+            # strict prefix of the display order and no row the display would
+            # surface can be evicted by a candidate-key approximation.
+            #
+            # The window is still oversampled 8x (``limit * 8``): it is the
+            # headroom for candidate rows the projection drops after the window
+            # (zero-message rows, collapsed compression segments, invisible
+            # CLI/ACP rows) — those consume candidate slots without rendering.
+            # Widen ``candidate_limit`` if a future data shape filters more
+            # than that out of the newest candidates.
             candidate_limit = max(result_limit * 8, result_limit)
             if latest_messages_cte:
                 candidate_cte = (
@@ -833,6 +873,463 @@ def read_importable_agent_session_rows(
             pending.append(parent)
         return selected
 
+
+
+FAST_SIDEBAR_CANDIDATE_OVERSAMPLE = 8
+
+# Depth of each candidate-union pre-window (``_fast_candidate_union_cte``), as a
+# multiple of the candidate window. The message-recency window is 8x deeper
+# again: message rows are far denser than session rows, so a same-depth window
+# covers only a handful of sessions on a busy store.
+FAST_SIDEBAR_PREWINDOW_OVERSAMPLE = 8
+
+
+def _fast_candidate_union_cte(
+    *,
+    where_sql: str,
+    where_params: list[object],
+    session_cols: set[str],
+    session_indexes: set[str],
+    candidate_order_clause: str,
+    candidate_limit: int,
+) -> tuple[str | None, list[object]]:
+    """Candidate CTE for the fast reader: bounded pre-window union + exact key.
+
+    SQLite evaluates a correlated ordering expression for every qualifying row
+    *before* ``LIMIT``, so ordering the window directly by the exact
+    ``COALESCE(MAX(messages.timestamp), started_at)`` key costs one indexed
+    message probe per qualifying session at any window size — the window bounds
+    the projection, not the key. Measured on fixture stores (warm median / cold
+    first run): 0.7 ms / 11 ms at 1k sessions, 9.9 ms / 102 ms at 10k, 54.9 ms /
+    556 ms at 50k, and 5.3 ms / 271 ms on a clone of the live ~3k-session
+    4.2 GB store — linear in the session count, and already past the fast
+    build's ~100 ms budget on the cold runs.
+
+    Bound the probe count instead: seed the candidate set with a bounded UNION
+    of index-ordered pre-windows (each ``LIMIT candidate_limit``, so the union
+    is at most ``3 * candidate_limit`` session rows plus the distinct sessions
+    of the newest ``candidate_limit * FAST_SIDEBAR_PREWINDOW_OVERSAMPLE``
+    message rows), then apply the exact key only over that union. The final
+    exact sort and the window membership rule are unchanged; only the row set
+    the key is evaluated over is bounded. Cost is bounded by the pre-window
+    depth at any store size (measured on the same stores: 0.7-1.6 ms warm,
+    1-98 ms first-in-fresh-process — page-cache dependent).
+
+    The pre-windows are seeds, not a guarantee. With ``N`` the visible limit,
+    ``W = FAST_SIDEBAR_CANDIDATE_OVERSAMPLE * N`` the candidate window and
+    ``M = FAST_SIDEBAR_PREWINDOW_OVERSAMPLE * W`` the message window, a session
+    is in the union iff it is among the ``W`` largest by
+    ``COALESCE(last_activity_at, started_at)``, among the ``W`` largest by
+    ``started_at``, among the ``W`` largest by ``rowid``, or the session of one
+    of the newest ``M`` message rows. The window over the union equals the
+    exact window over all qualifying sessions iff every session in that exact
+    window satisfies one of those four. A session whose only recency evidence
+    is its messages is seeded by the fourth alone, so it is missed when its
+    newest message is more than ``M`` message rows behind the tail while it
+    fails the three session-row seeds (NULL/stale ``last_activity_at``, old
+    ``started_at``, low rowid). That shape is reachable — a busy period
+    dominated by a few long sessions — and pinned by
+    ``test_candidate_union_bound_drops_a_row_beyond_the_message_window``: at
+    ``N=20`` a target at exact rank 20 whose newest message sits behind 1530
+    newer rows (``M=1280``) is dropped from the fast window while the full
+    reader returns it. On the live store the union's exact top-160 does equal
+    the exact top-160: the three session-row seeds carry it (the message seed
+    covers 15 of 3017 sessions), and the worst exact-top-160 row sits at rank
+    156 of 160 in its best session-row seed — 4 rows of slack at the boundary.
+    No cheap provable bound check exists on this schema: an excluded session's
+    exact key cannot be bounded by the denormalized column (it lags by
+    construction — the resumed/NULL shapes are exactly where) nor by the
+    message window's boundary row (rowid order is not timestamp order on live
+    data — on a clone snapshot, 403 rows inside the newest 5,000 have a
+    newer-timestamped row before them — and ``messages(timestamp)`` has no
+    index, so a global timestamp-ordered read is a full scan of the store).
+    The bound and its measurements are documented in
+    ``docs/architecture/session-list-fast-path.md``.
+
+    Returns ``(sql, params)``, or ``(None, [])`` when the store has none of the
+    agent's standard sessions indexes (``idx_sessions_effective_activity`` /
+    ``idx_sessions_started``) to seed the union with: the caller then keeps the
+    plain exact-key window — the pre-union behaviour, bound with its own
+    parameters — instead of paying a whole-table sort per pre-window.
+    """
+    pre_windows: list[tuple[str, str]] = []
+    pre_params: list[object] = []
+
+    def _add_session_window(name: str, order_sql: str) -> None:
+        pre_windows.append((
+            name,
+            "SELECT s.id FROM sessions s\n"
+            f"                    WHERE {where_sql}\n"
+            f"                    ORDER BY {order_sql}\n"
+            "                    LIMIT ?",
+        ))
+        pre_params.extend([*where_params, candidate_limit])
+
+    # Session-row recency seeds. Each ordering is index-backed on the agent's
+    # standard schema, so the seed is a bounded index read, never a sort.
+    if 'last_activity_at' in session_cols and 'idx_sessions_effective_activity' in session_indexes:
+        _add_session_window(
+            "pre_activity", "COALESCE(s.last_activity_at, s.started_at) DESC, s.started_at DESC"
+        )
+    if 'idx_sessions_started' in session_indexes:
+        _add_session_window("pre_started", "s.started_at DESC")
+    if not pre_windows:
+        return None, []
+    # Insertion order; rowid is the sessions table's own b-tree, no index needed.
+    _add_session_window("pre_rowid", "s.rowid DESC")
+    # Message-recency seed: the sessions of the newest message rows, by
+    # insertion order (``messages.rowid``). This is the seed that covers a
+    # resumed session whose denormalized ``last_activity_at`` is NULL or stale
+    # while its messages are fresh.
+    pre_windows.append((
+        "pre_messages",
+        "SELECT DISTINCT m.session_id AS id FROM (\n"
+        "                        SELECT m.session_id FROM messages m\n"
+        "                        ORDER BY m.rowid DESC\n"
+        "                        LIMIT ?\n"
+        "                    ) m",
+    ))
+    pre_params.append(candidate_limit * FAST_SIDEBAR_PREWINDOW_OVERSAMPLE)
+
+    union_select = "\n                          UNION ".join(
+        f"SELECT id FROM {name}" for name, _body in pre_windows
+    )
+    ctes = ",\n".join(
+        f"                {name} AS (\n                    {body}\n                )"
+        for name, body in pre_windows
+    )
+    return (
+        "WITH " + ctes + ",\n"
+        "                candidates AS (\n"
+        "                    SELECT s.id FROM sessions s\n"
+        f"                    WHERE {where_sql}\n"
+        "                      AND s.id IN (\n"
+        f"                          {union_select}\n"
+        "                      )\n"
+        f"                    {candidate_order_clause}\n"
+        "                    LIMIT ?\n"
+        "                )",
+        [*pre_params, *where_params, candidate_limit],
+    )
+
+
+def _fill_fast_visibility_user_counts(cur, message_cols: set[str], rows: list[dict]) -> None:
+    """Fill ``actual_user_message_count`` for rows the visibility filter dropped.
+
+    The fast window deliberately does not aggregate user-turn counts for every
+    candidate (that ``COUNT(CASE WHEN LOWER(role) = 'user' ...)`` over the whole
+    window is a large slice of the full reader's cost). Rows the visibility
+    filter rejects get one id-bounded ``COUNT`` here — keyed on the lineage tip
+    because a collapsed compression row carries the tip's counts — so the second
+    filter pass reproduces the full projection's decision for default-titled CLI
+    rows and ACP rows, which are visible only when their user turns are known.
+
+    Legacy schemas without a usable ``messages.session_id`` (no ``messages``
+    table, or one without the column) cannot answer that query. The full reader
+    degrades to the denormalized ``s.message_count`` for both counts there
+    (``use_messages_join`` is keyed on ``session_id`` alone), so mirror that
+    instead of querying a missing table/column — the ``OperationalError`` would
+    escape the read and cost the caller its bounded fast window.
+    """
+    if not rows:
+        return
+    if 'session_id' not in message_cols:
+        for row in rows:
+            row['actual_user_message_count'] = row.get('message_count')
+        return
+    ids: list[str] = []
+    for row in rows:
+        sid = row.get('_lineage_tip_id') or row.get('id')
+        if sid:
+            ids.append(str(sid))
+    if not ids:
+        return
+    placeholders = ", ".join("?" for _ in ids)
+    role_clause = " AND LOWER(role) = 'user'" if 'role' in message_cols else ""
+    cur.execute(
+        f"SELECT session_id, COUNT(*) FROM messages "
+        f"WHERE session_id IN ({placeholders}){role_clause} GROUP BY session_id",
+        ids,
+    )
+    counts = {str(row[0]): int(row[1] or 0) for row in cur.fetchall()}
+    for row in rows:
+        sid = row.get('_lineage_tip_id') or row.get('id')
+        row['actual_user_message_count'] = counts.get(str(sid), 0)
+
+
+def read_fast_sidebar_agent_rows(
+    db_path: Path,
+    limit: int | None = 200,
+    log=None,
+    exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
+    include_sources: tuple[str, ...] | None = None,
+    session_ids: tuple[str, ...] | None = None,
+) -> list[dict]:
+    """Bounded first-paint variant of :func:`read_importable_agent_session_rows`.
+
+    The same exact ordering key as the full reader (``COALESCE(MAX(mx.timestamp),
+    s.started_at) DESC, s.started_at DESC`` with the 8x oversample) — the key,
+    not the row set: the fast reader evaluates it over a bounded union of
+    index-ordered pre-windows instead of over every qualifying session, so its
+    window is the display order's prefix over the seeded set and not over all
+    sessions (``_fast_candidate_union_cte`` states the precise bound and the
+    counterexample it pins). The same
+    ``_project_agent_session_rows`` compression/continuation collapse, the same
+    ``_with_normalized_source`` flags, the same ``is_cli_session_row_visible``
+    filter and the same subagent-parent re-add — only the user-turn aggregation
+    is deferred:
+
+    * ``actual_message_count`` stays the exact ``COUNT(m.id)`` and
+      ``last_activity`` the exact ``MAX(m.timestamp)`` over the candidate window
+      (one ``LEFT JOIN ... GROUP BY``, exactly like the full reader). The
+      denormalized ``sessions.message_count`` column is NOT a safe proxy for
+      either: supported rows exist with ``message_count > 0`` and no messages
+      (stale counters) and with ``message_count == 0`` and persisted messages,
+      and the projection's compression-tip selection and the ``message_count``
+      fallback both depend on the truthful value.
+    * the ``COUNT(CASE WHEN LOWER(role) = 'user' ...)`` aggregation is not run
+      for the window. Rows the visibility filter drops get one id-bounded
+      follow-up query (``_fill_fast_visibility_user_counts``) and a second
+      filter pass, which reproduces the full projection's decisions for
+      default-titled CLI rows and ACP rows.
+
+    Read-only by construction: no writable fallback, no defensive index
+    self-heal, no tombstone/prune bookkeeping. The full rebuild owns those (the
+    route cache runs it in the background after serving this payload).
+
+    ``limit=None`` (the unbounded projection used by ``all_profiles=1``) is not
+    a fast-path shape and delegates to the full reader.
+    """
+    if limit is None:
+        return read_importable_agent_session_rows(
+            db_path,
+            limit=None,
+            log=log,
+            exclude_sources=exclude_sources,
+            include_sources=include_sources,
+            session_ids=session_ids,
+        )
+    result_limit = max(0, int(limit))
+    if result_limit == 0:
+        return []
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return []
+    log = log or logger
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        # A first-paint read must never create or write the store; the full
+        # rebuild (backgrounded by the route cache) recovers the sidebar.
+        log.debug("fast sidebar read skipped: read-only open failed for %s", db_path)
+        return []
+    with closing(conn):
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(sessions)")
+        session_cols = {row[1] for row in cur.fetchall()}
+        cur.execute("PRAGMA table_info(messages)")
+        message_cols = {row[1] for row in cur.fetchall()}
+        # Index presence decides which pre-windows can seed the candidate union
+        # (``_fast_candidate_union_cte``): each seed must be an index-ordered
+        # bounded read, never a sort of the whole sessions table.
+        cur.execute("PRAGMA index_list(sessions)")
+        session_indexes = {str(row[1]) for row in cur.fetchall()}
+        if 'source' not in session_cols:
+            return []
+
+        parent_expr = _optional_col('parent_session_id', session_cols)
+        session_source_expr = _optional_col('session_source', session_cols)
+        ended_expr = _optional_col('ended_at', session_cols)
+        end_reason_expr = _optional_col('end_reason', session_cols)
+        user_id_expr = _optional_col('user_id', session_cols)
+        chat_id_expr = _optional_col('chat_id', session_cols)
+        chat_type_expr = _optional_col('chat_type', session_cols)
+        thread_id_expr = _optional_col('thread_id', session_cols)
+        session_key_expr = _optional_col('session_key', session_cols)
+        origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
+        origin_user_id_expr = _optional_col('origin_user_id', session_cols)
+        platform_expr = _optional_col('platform', session_cols)
+
+        # Older/minimal schemas can have NO ``messages`` table at all, or a
+        # ``messages`` table without a ``session_id`` / ``timestamp`` column.
+        # Mirror the full reader's degradation exactly (``use_messages_join``
+        # keyed on ``session_id`` alone; ``last_activity``/the display key only
+        # when a ``timestamp`` column exists — see
+        # ``read_importable_agent_session_rows``) so the fast first paint and
+        # the full payload cannot disagree on what a given schema means.
+        messages_has_session_id = 'session_id' in message_cols
+        messages_has_timestamp = 'timestamp' in message_cols
+        use_messages_join = messages_has_session_id
+        count_col = 'id' if 'id' in message_cols else 'session_id'
+        if use_messages_join:
+            actual_count_expr = f"COUNT(m.{count_col})"
+            last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
+            join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
+            group_by_clause = "GROUP BY s.id"
+            if messages_has_timestamp:
+                display_order_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            else:
+                display_order_clause = "ORDER BY s.started_at DESC"
+        else:
+            # No usable messages table: use the denormalized per-session counts
+            # and ``started_at`` so the rows still surface in the sidebar
+            # (identical to the full reader's no-messages degradation).
+            actual_count_expr = "s.message_count"
+            last_activity_expr = "NULL"
+            join_clause = ""
+            group_by_clause = ""
+            display_order_clause = "ORDER BY s.started_at DESC"
+
+        where_clauses = ["s.source IS NOT NULL"]
+        params: list[object] = []
+        included = ()
+        if include_sources:
+            included = tuple(str(source) for source in include_sources if source)
+            if included:
+                placeholders = ", ".join("?" for _ in included)
+                where_clauses.append(f"s.source IN ({placeholders})")
+                params.extend(included)
+        if exclude_sources:
+            excluded = tuple(str(source) for source in exclude_sources if source)
+            if excluded:
+                placeholders = ", ".join("?" for _ in excluded)
+                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                params.extend(excluded)
+        if session_ids is not None:
+            wanted_ids = tuple(str(sid).strip() for sid in session_ids if str(sid or "").strip())
+            if not wanted_ids:
+                return []
+            placeholders = ", ".join("?" for _ in wanted_ids)
+            where_clauses.append(f"s.id IN ({placeholders})")
+            params.extend(wanted_ids)
+
+        if use_messages_join and messages_has_timestamp:
+            # The same exact ordering key as the full reader — never an
+            # oversample of the lagging ``s.last_activity_at``. It is the key
+            # that matches, not the row set: the window is the display order's
+            # prefix over the seeded candidate set, and the seeds are bounded
+            # (``_fast_candidate_union_cte`` holds the precise bound, the
+            # counterexample it pins, and the measured cost curve).
+            #
+            # The key is evaluated per *qualifying* row before LIMIT, so the
+            # fast reader does not order the whole store by it: the candidate
+            # set is seeded with a bounded union of index-ordered pre-windows
+            # and the exact key is applied only over that union. The final exact
+            # sort is unchanged.
+            candidate_order_clause = (
+                "ORDER BY COALESCE((SELECT MAX(mx.timestamp) FROM messages mx "
+                "WHERE mx.session_id = s.id), s.started_at) DESC, s.started_at DESC"
+            )
+        else:
+            # No usable messages table / no ``timestamp`` column: the full
+            # reader degrades to ``started_at`` here too, so the window matches.
+            candidate_order_clause = "ORDER BY s.started_at DESC"
+
+        candidate_limit = max(result_limit * FAST_SIDEBAR_CANDIDATE_OVERSAMPLE, result_limit)
+        where_sql = " AND ".join(where_clauses)
+        candidates_cte = None
+        candidate_params: list[object] = [*params, candidate_limit]
+        if use_messages_join and messages_has_timestamp:
+            union_cte, union_params = _fast_candidate_union_cte(
+                where_sql=where_sql,
+                where_params=params,
+                session_cols=session_cols,
+                session_indexes=session_indexes,
+                candidate_order_clause=candidate_order_clause,
+                candidate_limit=candidate_limit,
+            )
+            if union_cte is not None:
+                candidates_cte, candidate_params = union_cte, union_params
+            # The helper declines the union (``(None, [])``) when the store has
+            # none of the agent's standard sessions indexes to seed it with: the
+            # plain exact-key window below then keeps ITS OWN bindings. Taking
+            # the union's params unconditionally bound ``[]`` against a
+            # statement with ``where_sql`` + ``LIMIT ?`` placeholders and raised
+            # ``Incorrect number of bindings supplied`` on exactly those stores.
+        if candidates_cte is None:
+            candidates_cte = (
+                "WITH candidates AS (\n"
+                "                SELECT s.id\n"
+                "                FROM sessions s\n"
+                f"                WHERE {where_sql}\n"
+                f"                {candidate_order_clause}\n"
+                "                LIMIT ?\n"
+                "            )"
+            )
+        cur.execute(
+            f"""
+            {candidates_cte}
+            SELECT s.id, s.title, s.model, s.message_count,
+                   s.started_at, s.source,
+                   {session_source_expr},
+                   {user_id_expr},
+                   {chat_id_expr},
+                   {chat_type_expr},
+                   {thread_id_expr},
+                   {session_key_expr},
+                   {origin_chat_id_expr},
+                   {origin_user_id_expr},
+                   {platform_expr},
+                   {parent_expr},
+                   {ended_expr},
+                   {end_reason_expr},
+                   {actual_count_expr} AS actual_message_count,
+                   {last_activity_expr} AS last_activity,
+                   NULL AS actual_user_message_count
+            FROM sessions s
+            JOIN candidates c ON c.id = s.id
+            {join_clause}
+            {group_by_clause}
+            {display_order_clause}
+            """,
+            candidate_params,
+        )
+        projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
+        projected = [_with_normalized_source(row) for row in projected]
+
+        visible: list[dict] = []
+        hidden: list[dict] = []
+        for row in projected:
+            (visible if is_cli_session_row_visible(row) else hidden).append(row)
+        if hidden:
+            _fill_fast_visibility_user_counts(cur, message_cols, hidden)
+            recovered = [row for row in hidden if is_cli_session_row_visible(row)]
+            if recovered:
+                visible.extend(recovered)
+                # Restore the projection's exact-recency order after the
+                # recovered rows were appended out of order.
+                visible.sort(
+                    key=lambda row: _as_score(row.get('last_activity'), row.get('started_at')),
+                    reverse=True,
+                )
+        projected = visible
+        selected = projected[:result_limit]
+
+    # Same subagent re-add as the full reader: a leaf renders as a child only
+    # when its parent row is in the same payload. Bounded by the candidate
+    # window (``by_id`` only holds projected candidates), so an ancestor older
+    # than the oversample stays unresolved exactly as in the full reader.
+    have = {row.get('id') for row in selected}
+    by_id = {row.get('id'): row for row in projected if row.get('id')}
+    pending = list(selected)
+    while pending:
+        row = pending.pop()
+        if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
+            continue
+        parent_id = row.get('parent_session_id')
+        if not parent_id or parent_id in have:
+            continue
+        parent = by_id.get(parent_id)
+        if parent is None:
+            continue
+        if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+            continue
+        selected.append(parent)
+        have.add(parent_id)
+        pending.append(parent)
+    return selected
 
 
 def _lineage_report_row(row: dict, role: str) -> dict:

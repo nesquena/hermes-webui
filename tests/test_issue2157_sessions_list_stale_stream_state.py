@@ -1,5 +1,6 @@
 import io
 import json
+import time
 from urllib.parse import urlparse
 
 import api.profiles as profiles
@@ -79,10 +80,18 @@ def test_sessions_list_reconciles_stale_stream_state_before_serializing(monkeypa
     assert handler.status == 200
     payload = handler.json_body()
     sessions = payload["sessions"]
-    assert all_sessions_calls["count"] == 2
+    # Slice C: the cold fast-gated request builds the fast first-paint payload
+    # (initial read + the post-repair re-read = 2 calls) and then rebuilds the
+    # full payload on the background thread (1 more: the rows are already
+    # repaired, so no second reconcile pass). The SERVED payload must be the
+    # repaired read, and the background rebuild must complete.
     assert repaired["value"] is True
     assert sessions[0]["active_stream_id"] is None
     assert sessions[0]["is_streaming"] is False
+    deadline = time.monotonic() + 5.0
+    while all_sessions_calls["count"] < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert all_sessions_calls["count"] == 3
     routes._session_list_cache_clear()
 
 

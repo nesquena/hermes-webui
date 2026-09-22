@@ -7,6 +7,7 @@ The route must keep `show_cli_sessions` as the parent gate while allowing
 import io
 import json
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -274,7 +275,13 @@ def test_sessions_route_supports_historical_get_cli_sessions_signature(monkeypat
     body = handler.json_body()
 
     assert handler.status == 200
-    assert calls == [(None, False)]
+    # Slice C: the cold fast-gated request builds the fast first-paint payload
+    # and rebuilds the full payload on the background thread, so the historical
+    # signature is used by both builds — never with the newer keyword.
+    deadline = time.monotonic() + 5.0
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert calls == [(None, False), (None, False)]
     assert {row["session_id"] for row in body["sessions"]} == {"webui-1", "external-cli"}
 
 

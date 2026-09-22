@@ -772,3 +772,311 @@ def test_streaming_window_does_not_extend_idle_ttl(monkeypatch):
     _age_cache_entry(key, routes._SESSIONS_CACHE_TTL_SECONDS + 0.5)
     payload, fresh = routes._session_list_cache_get(key)
     assert payload is None and fresh is False
+
+
+# ---------------------------------------------------------------------------
+# Slice B1 — structural/volatile source-stamp split
+#
+# The stamp is ``(structural, volatile)``:
+#   structural — MAX(rowid) sessions, _index.json stat, settings stat + write
+#                version; a change means the sidebar's ROW SET may have moved,
+#                so the first request after it must rebuild synchronously
+#                ("source", the commit-47d8ac94 invariant).
+#   volatile   — MAX(rowid) messages, state.db + WAL stats, gateway metadata
+#                stat; a change means only message-level activity moved, so a
+#                stale payload may be served while a background rebuild runs
+#                ("age"), and the entry must never be evicted for it.
+# ---------------------------------------------------------------------------
+
+
+def _build_sqlite_stamp_env(tmp_path, monkeypatch):
+    """Wire the stamp environment around a REAL SQLite state.db.
+
+    Unlike ``_build_stamp_env`` (text-file db + monkeypatched fingerprint) this
+    leaves ``_session_list_cache_state_db_fingerprint`` unpatched so the
+    structural/volatile split of ``MAX(rowid) sessions``/``messages`` is
+    exercised for real. Returns ``(key, state_db_path)``.
+    """
+    import sqlite3
+
+    state_db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(state_db))
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT)")
+    conn.commit()
+    conn.close()
+    gateway = tmp_path / "gateway-sessions.json"
+    gateway.write_text("{}", encoding="utf-8")
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text("{}", encoding="utf-8")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(state_db))
+    monkeypatch.setattr(routes, "_gateway_session_metadata_path", lambda: gateway)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SETTINGS_FILE", settings_file)
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    return key, state_db
+
+
+def _append_message_row(state_db, session_id: str) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(str(state_db))
+    conn.execute("INSERT INTO messages (session_id) VALUES (?)", (session_id,))
+    conn.commit()
+    conn.close()
+
+
+def _insert_session_row(state_db, session_id: str) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(str(state_db))
+    conn.execute("INSERT INTO sessions (id) VALUES (?)", (session_id,))
+    conn.commit()
+    conn.close()
+
+
+def _stored_stamp(key):
+    with routes._SESSIONS_CACHE_LOCK:
+        return routes._SESSIONS_CACHE[key][1]
+
+
+def test_source_stamp_split_isolates_message_writes_as_volatile(tmp_path, monkeypatch):
+    """B1: appending a message row moves only the VOLATILE part, so the change
+    classifies as "age" (stale-serve + background rebuild) instead of "source"
+    (synchronous rebuild on the request thread)."""
+    key, state_db = _build_sqlite_stamp_env(tmp_path, monkeypatch)
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    stored_stamp = _stored_stamp(key)
+
+    _append_message_row(state_db, "sess-1")
+
+    current_stamp = routes._session_list_cache_source_stamp(key)
+    assert isinstance(current_stamp, tuple) and len(current_stamp) == 2
+    assert current_stamp[0] == stored_stamp[0]  # structural unchanged
+    assert current_stamp[1] != stored_stamp[1]  # volatile advanced
+    assert routes._session_list_cache_stale_reason(key) == "age"
+
+
+def test_source_stamp_split_treats_session_insert_as_structural(tmp_path, monkeypatch):
+    """B1: inserting a session row moves the STRUCTURAL part (MAX(rowid)
+    sessions) — a changed row set must still rebuild synchronously."""
+    key, state_db = _build_sqlite_stamp_env(tmp_path, monkeypatch)
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    stored_stamp = _stored_stamp(key)
+
+    _insert_session_row(state_db, "sess-new")
+
+    current_stamp = routes._session_list_cache_source_stamp(key)
+    assert current_stamp[0] != stored_stamp[0]
+    assert routes._session_list_cache_stale_reason(key) == "source"
+
+
+def test_source_stamp_split_messages_rowid_backstop_moves_only_the_volatile_part(
+    monkeypatch,
+):
+    """Slice D note 2: the volatile part must carry the ``MAX(rowid) messages``
+    fingerprint element — the commit-reliable backstop for the WAL-mode stat
+    collision documented on ``_session_list_cache_source_stamp``. With every
+    path-stat helper pinned to a constant and only the fingerprint varied, each
+    stamp part must move with its own element: structural with ``MAX(rowid)
+    sessions``, volatile with ``MAX(rowid) messages``.
+
+    This is the only test that pins the messages-rowid element directly: the
+    e2e overlay test and the rest of this file keep passing when it is dropped
+    from the volatile part (verified by mutation), because the state.db/WAL
+    stats still move on a message write.
+    """
+    from api import route_session_list_cache as route_session_list_cache
+
+    # Freeze every non-fingerprint stamp input: all path stats, the settings
+    # write version and the streaming freeze marker.
+    monkeypatch.setattr(
+        route_session_list_cache, "_session_list_cache_path_stamp", lambda _path: ("stat", 0)
+    )
+    monkeypatch.setattr(routes, "_session_list_cache_settings_write_version", lambda: 7)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    fingerprint = {"value": (11, 21)}
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_state_db_fingerprint",
+        lambda _path: fingerprint["value"],
+    )
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    stamp_a = routes._session_list_cache_source_stamp(key)
+    # The fingerprint elements sit in their documented slots: sessions rowid in
+    # the structural part, messages rowid in the volatile part.
+    assert 11 in stamp_a[0]
+    assert 21 in stamp_a[1]
+
+    # A sessions-rowid-only change moves the STRUCTURAL part, not the volatile.
+    fingerprint["value"] = (12, 21)
+    stamp_b = routes._session_list_cache_source_stamp(key)
+    assert stamp_b[0] != stamp_a[0]
+    assert stamp_b[1] == stamp_a[1]
+
+    # A messages-rowid-only change moves the VOLATILE part, not the structural.
+    fingerprint["value"] = (12, 22)
+    stamp_c = routes._session_list_cache_source_stamp(key)
+    assert stamp_c[0] == stamp_b[0]
+    assert stamp_c[1] != stamp_b[1]
+
+
+def test_source_stamp_split_wal_stat_change_is_volatile_only(tmp_path, monkeypatch):
+    """B1: a WAL-stat-only change (fingerprint pinned) is volatile → "age"."""
+    key, state_db_wal, _settings_file, _fingerprint = _build_stamp_env(
+        tmp_path, monkeypatch
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    stored_stamp = _stored_stamp(key)
+
+    state_db_wal.write_text("wal-2-more", encoding="utf-8")
+
+    current_stamp = routes._session_list_cache_source_stamp(key)
+    assert current_stamp[0] == stored_stamp[0]
+    assert current_stamp[1] != stored_stamp[1]
+    assert routes._session_list_cache_stale_reason(key) == "age"
+
+
+def test_source_stamp_split_settings_change_is_structural(tmp_path, monkeypatch):
+    """B1: a settings-file change is structural → "source" (immediate rebuild);
+    user-initiated sidebar toggles are never held stale."""
+    key, _state_db_wal, settings_file, _fingerprint = _build_stamp_env(
+        tmp_path, monkeypatch
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    stored_stamp = _stored_stamp(key)
+
+    settings_file.write_text('{"show_cli_sessions": true}', encoding="utf-8")
+
+    current_stamp = routes._session_list_cache_source_stamp(key)
+    assert current_stamp[0] != stored_stamp[0]
+    assert routes._session_list_cache_stale_reason(key) == "source"
+
+
+def test_source_stamp_split_stream_transition_is_structural(tmp_path, monkeypatch):
+    """B1: the streaming freeze marker lives in BOTH parts, so a stream
+    start/stop flips the STRUCTURAL part → "source" → today's synchronous
+    rebuild (a finished turn's final title/count is picked up immediately)."""
+    key, _wal, _settings, _fp = _build_stamp_env(tmp_path, monkeypatch)
+    streams = {"value": set()}
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set(streams["value"]))
+
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    stored_stamp = _stored_stamp(key)
+
+    streams["value"] = {"turn-1"}
+
+    current_stamp = routes._session_list_cache_source_stamp(key)
+    assert current_stamp[0] != stored_stamp[0]
+    assert routes._session_list_cache_stale_reason(key) == "source"
+
+
+def test_session_list_cache_get_keeps_entry_on_volatile_only_mismatch(tmp_path, monkeypatch):
+    """B1-F1: a volatile-only mismatch with allow_stale=False must NOT pop the
+    entry. The follower wait path in ``_get_cached_session_list_payload`` used
+    to evict it mid-rebuild, so the next request found no entry and took the
+    synchronous rebuild path — the stall this cache exists to avoid."""
+    key, state_db = _build_sqlite_stamp_env(tmp_path, monkeypatch)
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+
+    _append_message_row(state_db, "sess-1")
+
+    payload, fresh = routes._session_list_cache_get(key, allow_stale=False)
+    assert payload == _session_cache_payload("stale")
+    assert fresh is False
+    with routes._SESSIONS_CACHE_LOCK:
+        assert key in routes._SESSIONS_CACHE
+
+
+def test_session_list_cache_get_still_pops_on_structural_mismatch(tmp_path, monkeypatch):
+    """B1: structural mismatches keep today's eviction semantics."""
+    key, state_db = _build_sqlite_stamp_env(tmp_path, monkeypatch)
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+
+    _insert_session_row(state_db, "sess-new")
+
+    payload, fresh = routes._session_list_cache_get(key, allow_stale=False)
+    assert payload is None
+    assert fresh is False
+    with routes._SESSIONS_CACHE_LOCK:
+        assert key not in routes._SESSIONS_CACHE
+
+
+def test_session_list_cache_legacy_stamp_shape_still_classifies_source(monkeypatch):
+    """B1-F2 fail-closed: legacy/monkeypatched stamp shapes (1-tuple) are never
+    treated as volatile-only, so they keep the synchronous-rebuild semantics
+    pinned by commit 47d8ac94 (and by
+    test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_stale)."""
+    routes._session_list_cache_clear()
+    key = _streaming_ttl_key()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("changed",))
+
+    assert routes._session_list_cache_stale_reason(key) == "source"
+    payload, fresh = routes._session_list_cache_get(key, allow_stale=False)
+    assert payload is None
+    assert fresh is False
+
+
+def test_session_list_cache_message_write_serves_stale_and_rebuilds_in_background(
+    tmp_path, monkeypatch
+):
+    """B1 end-to-end: a message-write-stale entry (volatile-only mismatch) is
+    served stale on the request thread while the rebuild runs in the background
+    — the builder is never called synchronously on the request thread."""
+    key, state_db = _build_sqlite_stamp_env(tmp_path, monkeypatch)
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+
+    _append_message_row(state_db, "sess-1")
+
+    builder_threads = []
+    started = threading.Event()
+    release = threading.Event()
+    diag = _StageRecorder()
+
+    def builder():
+        builder_threads.append(threading.current_thread().name)
+        started.set()
+        release.wait(2.0)
+        return _session_cache_payload("fresh")
+
+    try:
+        result = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+        assert result == _session_cache_payload("stale")
+        assert "session_list_cache_stale_background_rebuild" in diag.stages
+        assert started.wait(1.0), "message-write staleness must kick a background rebuild"
+        assert builder_threads == ["session-list-cache-rebuild"], (
+            "the builder must not run on the request thread"
+        )
+    finally:
+        release.set()
+
+    cached = None
+    fresh = False
+    for _ in range(40):
+        cached, fresh = routes._session_list_cache_get(key, allow_stale=True)
+        if cached == _session_cache_payload("fresh"):
+            break
+        threading.Event().wait(0.05)
+    assert cached == _session_cache_payload("fresh")
+    assert fresh is True
