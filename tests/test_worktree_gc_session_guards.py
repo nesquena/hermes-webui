@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +42,9 @@ class FakeGitBackend:
     def classify_git_worktree(self, path, branch, repo_root, *, target_ref):
         self.classify_calls.append((path, branch, repo_root, target_ref))
         return FakeGitDecision(path, branch, repo_root, target_ref)
+
+    def list_linked_worktrees(self, repo_root):
+        return ([], None)
 
 
 def _write_session(
@@ -376,6 +381,7 @@ def test_missing_sessions_directory_is_a_blocking_inventory_failure(tmp_path):
         "sidecars_scanned": 0,
         "errors": 1,
         "error_kinds": ["session_directory_missing"],
+        "foreign_profile_references": 0,
     }
 
 
@@ -601,7 +607,8 @@ def test_descendant_workspace_blocks(tmp_path):
     assert report["candidates"][0]["session_ids"] == ["descendant", "managed"]
 
 
-def test_different_profile_shared_workspace_does_not_block(tmp_path):
+def test_different_profile_shared_workspace_blocks(tmp_path):
+    """Round-2 gate: a foreign profile referencing the worktree must block."""
     state_dir = tmp_path / "state"
     repo = tmp_path / "repo"
     worktree = tmp_path / "worktree"
@@ -620,9 +627,126 @@ def test_different_profile_shared_workspace_does_not_block(tmp_path):
 
     report = _audit(state_dir, repo, backend)
 
-    assert len(backend.classify_calls) == 1
-    assert report["candidates"][0]["verdict"] == "REMOVE_ANCESTOR"
-    assert report["candidates"][0]["session_ids"] == ["managed"]
+    assert backend.classify_calls == []
+    assert report["candidates"][0]["verdict"] == "KEEP_UNCERTAIN"
+    assert "foreign_profile_reference" in report["candidates"][0]["reasons"]
+    assert report["has_blocking_anomalies"] is True
+
+
+def test_foreign_profile_worktree_metadata_blocks_eligibility(tmp_path):
+    """A foreign sidecar with direct worktree_* metadata must also block."""
+    state_dir = tmp_path / "state"
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+    worktree.mkdir()
+    _write_session(state_dir, "managed", worktree, repo)
+    _write_session(
+        state_dir,
+        "foreign",
+        worktree,
+        repo,
+        profile="other",
+        archived=True,
+    )
+    backend = FakeGitBackend()
+
+    report = _audit(state_dir, repo, backend)
+
+    assert backend.classify_calls == []
+    assert report["candidates"][0]["verdict"] == "KEEP_UNCERTAIN"
+    assert "foreign_profile_reference" in report["candidates"][0]["reasons"]
+
+
+def test_symlinked_sidecar_fails_closed_without_being_read(tmp_path):
+    state_dir = tmp_path / "state"
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+    worktree.mkdir()
+    _write_session(state_dir, "valid", worktree, repo)
+    outside = tmp_path / "outside.json"
+    outside.write_text(
+        json.dumps({"secret": "must-not-leak"}),
+        encoding="utf-8",
+    )
+    os.symlink(outside, state_dir / "sessions" / "planted.json")
+    backend = FakeGitBackend()
+
+    report = _audit(state_dir, repo, backend)
+
+    assert "session_sidecar_not_regular_file" in report["session_scan"]["error_kinds"]
+    assert report["has_blocking_anomalies"] is True
+    assert "must-not-leak" not in json.dumps(report)
+
+
+def test_fifo_sidecar_fails_closed_without_blocking(tmp_path):
+    state_dir = tmp_path / "state"
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+    worktree.mkdir()
+    _write_session(state_dir, "valid", worktree, repo)
+    os.mkfifo(state_dir / "sessions" / "planted.json")
+    backend = FakeGitBackend()
+
+    started = time.monotonic()
+    report = _audit(state_dir, repo, backend)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5, "a FIFO sidecar must not block the audit"
+    assert "session_sidecar_not_regular_file" in report["session_scan"]["error_kinds"]
+    assert report["has_blocking_anomalies"] is True
+
+
+def test_oversized_sidecar_fails_closed_without_full_read(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+    worktree.mkdir()
+    _write_session(state_dir, "valid", worktree, repo)
+    oversized = state_dir / "sessions" / "huge.json"
+    oversized.write_bytes(b" " * 4096)
+    monkeypatch.setattr(
+        "api.worktree_gc_inventory._SIDECAR_SIZE_LIMIT",
+        1024,
+    )
+    backend = FakeGitBackend()
+
+    report = _audit(state_dir, repo, backend)
+
+    assert "session_sidecar_oversized" in report["session_scan"]["error_kinds"]
+    assert report["has_blocking_anomalies"] is True
+
+
+def test_health_probe_fails_closed_on_oversized_body(monkeypatch):
+    from api import worktree_gc_inventory as inventory
+
+    class _HugeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self, limit: int = -1) -> bytes:
+            return self._body if limit < 0 else self._body[:limit]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    body = b" " * (inventory._HEALTH_BODY_LIMIT + 8)
+    monkeypatch.setattr(
+        inventory.request,
+        "urlopen",
+        lambda _url, timeout: _HugeResponse(body),
+    )
+
+    probe = inventory.probe_webui_health("http://127.0.0.1:1/health")
+
+    assert probe.reachable is False
+    assert probe.reason == "body_oversized"
 
 
 @pytest.mark.parametrize(

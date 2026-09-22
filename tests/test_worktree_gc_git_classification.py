@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -33,7 +35,25 @@ def _commit(repo: Path, filename: str, content: str, message: str) -> str:
     (repo / filename).write_text(content, encoding="utf-8")
     _git(repo, "add", "--", filename)
     _git(repo, "commit", "-m", message)
+    settle_index_clock(repo)
     return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _index_path(worktree: Path) -> Path:
+    git_dir = _git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip()
+    return Path(git_dir) / "index"
+
+
+def settle_index_clock(worktree: Path) -> None:
+    """Move the index timestamp past every entry mtime.
+
+    ``git worktree add`` writes the files and the index within the same
+    second, which leaves every entry racy.  A real worktree loses that
+    raciness on the first ordinary ``git status``/refresh; the audit cannot
+    refresh anything, so tests emulate the settled state directly.
+    """
+    future = time.time() + 3600
+    os.utime(_index_path(worktree), (future, future))
 
 
 def make_remote_repo(tmp_path: Path) -> dict[str, Path | str]:
@@ -79,6 +99,7 @@ def add_worktree(
     )
     _git(worktree, "config", "user.email", "gc-tests@example.invalid")
     _git(worktree, "config", "user.name", "Worktree GC Tests")
+    settle_index_clock(worktree)
     return worktree
 
 
@@ -216,6 +237,7 @@ def test_ignored_files_are_kept_without_reading_contents(tmp_path, ignored_name)
     )
     _git(worktree, "add", ".gitignore")
     _git(worktree, "commit", "-m", "ignore private file")
+    settle_index_clock(worktree)
 
     decision = classify_git_worktree(
         worktree,
@@ -472,7 +494,16 @@ def test_absent_unlisted_path_is_uncertain_not_a_prune_instruction(tmp_path):
     assert decision.listed is False
 
 
-def test_non_interpretable_porcelain_status_fails_closed(tmp_path, monkeypatch):
+def _is_diff_index_probe(args: list[str]) -> bool:
+    return (
+        args[:5]
+        == ["diff-index", "--cached", "-z", "--name-only", "--no-renames"]
+        and len(args) == 7
+        and args[6] == "--"
+    )
+
+
+def test_non_interpretable_tracked_status_fails_closed(tmp_path, monkeypatch):
     import api.worktree_gc_git as gc_git
 
     case = make_remote_repo(tmp_path)
@@ -480,11 +511,11 @@ def test_non_interpretable_porcelain_status_fails_closed(tmp_path, monkeypatch):
     real_run_git = gc_git._run_git
 
     def corrupt_status(args, cwd, *, timeout=gc_git.GIT_TIMEOUT):
-        if args == ["status", "--porcelain=v1", "-z", "--untracked-files=all"]:
+        if _is_diff_index_probe(list(args)):
             return subprocess.CompletedProcess(
                 ["git", *args],
                 0,
-                stdout=b"?? unterminated",
+                stdout=b"unterminated",
                 stderr=b"",
             )
         return real_run_git(args, cwd, timeout=timeout)
@@ -504,7 +535,7 @@ def test_non_interpretable_porcelain_status_fails_closed(tmp_path, monkeypatch):
     assert "status_unparseable" in decision.reasons
 
 
-def test_status_timeout_fails_closed(tmp_path, monkeypatch):
+def test_tracked_status_timeout_fails_closed(tmp_path, monkeypatch):
     import api.worktree_gc_git as gc_git
 
     case = make_remote_repo(tmp_path)
@@ -512,7 +543,7 @@ def test_status_timeout_fails_closed(tmp_path, monkeypatch):
     real_run_git = gc_git._run_git
 
     def timeout_status(args, cwd, *, timeout=gc_git.GIT_TIMEOUT):
-        if args == ["status", "--porcelain=v1", "-z", "--untracked-files=all"]:
+        if _is_diff_index_probe(list(args)):
             raise gc_git._GitInvocationError("git_timeout")
         return real_run_git(args, cwd, timeout=timeout)
 

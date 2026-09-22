@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from api.worktree_gc_inventory import (  # noqa: E402
     audit_managed_worktrees,
+    validate_report_destination,
     write_report_atomic,
 )
 
@@ -151,6 +152,29 @@ def _audit_exit_code(report: dict[str, Any]) -> int:
     return 2 if report.get("has_blocking_anomalies", False) else 0
 
 
+def _report_forbidden_roots(
+    args: argparse.Namespace,
+    report: dict[str, Any] | None,
+) -> tuple[Any, ...]:
+    """Destinations the report may never overwrite.
+
+    The audited repository (including its ``.git`` directory), the session
+    state directory, this source checkout, and every audited or discovered
+    worktree are off-limits as report targets.
+    """
+    roots: list[Any] = [args.repo, args.state_dir, REPO_ROOT]
+    if report is not None:
+        for candidate in report.get("candidates", []):
+            worktree_path = candidate.get("worktree_path")
+            if worktree_path:
+                roots.append(worktree_path)
+        for unmanaged in report.get("unmanaged_worktrees", []):
+            unmanaged_path = unmanaged.get("path")
+            if unmanaged_path:
+                roots.append(unmanaged_path)
+    return tuple(roots)
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -167,6 +191,13 @@ def main(
         if args.report_path is not None
         else default_report_path()
     )
+    try:
+        validate_report_destination(
+            report_path,
+            forbidden_roots=_report_forbidden_roots(args, None),
+        )
+    except ValueError as exc:
+        parser.exit(2, f"{parser.prog}: error: {exc}\n")
     report = audit_fn(
         state_dir=args.state_dir,
         profile=args.profile,
@@ -178,7 +209,14 @@ def main(
     )
     report["mode"] = "dry-run"
     report["collection_requested"] = False
-    write_report_atomic(report, report_path)
+    try:
+        write_report_atomic(
+            report,
+            report_path,
+            forbidden_roots=_report_forbidden_roots(args, report),
+        )
+    except (ValueError, OSError) as exc:
+        parser.exit(2, f"{parser.prog}: error: {exc}\n")
     _emit_summary(
         report,
         report_path,

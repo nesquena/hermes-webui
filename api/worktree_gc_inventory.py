@@ -6,6 +6,8 @@ import errno
 import json
 import math
 import os
+import secrets
+import stat
 import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -15,6 +17,8 @@ from urllib import request
 
 
 _DAY_SECONDS = 24 * 60 * 60
+_SIDECAR_SIZE_LIMIT = 16 * 1024 * 1024
+_HEALTH_BODY_LIMIT = 64 * 1024
 _GIT_REPORT_FIELDS = (
     "path",
     "branch",
@@ -146,8 +150,17 @@ class WorktreeGcDecision:
 class _SessionScan:
     candidates: tuple[ManagedWorktreeCandidate, ...]
     workspace_sessions: tuple[_WorkspaceSession, ...]
+    foreign_refs: _ForeignProfileRefs
     sidecars_scanned: int
     errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ForeignProfileRefs:
+    """Worktree/workspace paths referenced by sessions of *other* profiles."""
+
+    worktree_paths: frozenset[str]
+    workspace_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -228,8 +241,15 @@ def _process_holds_open_path_within(
     )
 
 
-def _read_process_open_paths(pid_dir: Path) -> tuple[str, ...] | None:
-    """Read open FD target paths for one process; ``None`` when unreadable.
+def _read_process_open_paths(
+    pid_dir: Path,
+) -> tuple[tuple[str, ...] | None, str | None]:
+    """Read open FD target paths for one process.
+
+    Returns ``(paths, None)`` on success.  ``(None, "disappeared")`` when the
+    process exited mid-scan; ``(None, "unreadable")`` when the FD table cannot
+    be enumerated — an unreadable FD table must never be treated as proof
+    that the process holds nothing inside the worktree.
 
     Only FDs whose link target is an absolute path inside a filesystem are
     kept; sockets, pipes, anon_inodes, and deleted entries are ignored.
@@ -238,8 +258,12 @@ def _read_process_open_paths(pid_dir: Path) -> tuple[str, ...] | None:
     open_paths: list[str] = []
     try:
         fd_entries = list(os.scandir(fd_dir))
-    except OSError:
-        return None
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ESRCH, errno.ENOTDIR}:
+            if not pid_dir.exists():
+                return None, "disappeared"
+            return None, "unreadable"
+        return None, "unreadable"
     for fd_entry in fd_entries:
         try:
             raw_target = os.readlink(fd_entry.path)
@@ -253,7 +277,7 @@ def _read_process_open_paths(pid_dir: Path) -> tuple[str, ...] | None:
         text = str(canonical)
         if text not in open_paths:
             open_paths.append(text)
-    return tuple(open_paths)
+    return tuple(open_paths), None
 
 
 def scan_process_cwds(proc_root: Path = Path("/proc")) -> ProcessScan:
@@ -296,9 +320,14 @@ def scan_process_cwds(proc_root: Path = Path("/proc")) -> ProcessScan:
         if canonical is None:
             unreadable += 1
             continue
-        open_paths = _read_process_open_paths(root / entry.name)
-        if open_paths is None:
+        open_paths, fd_error = _read_process_open_paths(root / entry.name)
+        if fd_error == "disappeared":
+            disappeared += 1
+            continue
+        if fd_error == "unreadable":
+            unreadable += 1
             open_paths = ()
+        assert open_paths is not None
         processes.append(
             ProcessCwd(
                 pid=int(entry.name),
@@ -317,11 +346,25 @@ def scan_process_cwds(proc_root: Path = Path("/proc")) -> ProcessScan:
 
 
 def probe_webui_health(health_url: str, *, timeout: float = 3.0) -> HealthProbe:
-    """Read the non-sensitive active-run count from the WebUI health endpoint."""
+    """Read the non-sensitive active-run count from the WebUI health endpoint.
+
+    The response body is read with a hard cap: an unbounded or malformed
+    endpoint must fail closed, never exhaust memory or be trusted.
+    """
     try:
         with request.urlopen(health_url, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            body = response.read(_HEALTH_BODY_LIMIT + 1)
     except Exception as exc:
+        return HealthProbe(
+            reachable=False,
+            active_runs=None,
+            reason=type(exc).__name__,
+        )
+    if len(body) > _HEALTH_BODY_LIMIT:
+        return HealthProbe(False, None, "body_oversized")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
         return HealthProbe(
             reachable=False,
             active_runs=None,
@@ -619,6 +662,71 @@ def _attach_workspace_sessions(
     return tuple(result)
 
 
+def _read_session_payload(path: Path) -> tuple[Any, str | None]:
+    """Read a session sidecar without following links or over-reading.
+
+    Symlinks, FIFOs, devices, and oversized files are rejected: the audit
+    must never block on a pipe, follow a planted link, or exhaust memory on
+    a hostile state directory.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "session_sidecar_not_regular_file"
+        return None, f"session_sidecar_{type(exc).__name__}"
+    try:
+        info = os.fstat(file_descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return None, "session_sidecar_not_regular_file"
+        if info.st_size > _SIDECAR_SIZE_LIMIT:
+            return None, "session_sidecar_oversized"
+        with os.fdopen(file_descriptor, "rb") as handle:
+            file_descriptor = -1
+            data = handle.read(_SIDECAR_SIZE_LIMIT + 1)
+        if len(data) > _SIDECAR_SIZE_LIMIT:
+            return None, "session_sidecar_oversized"
+    except OSError as exc:
+        return None, f"session_sidecar_{type(exc).__name__}"
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        return None, f"session_sidecar_{type(exc).__name__}"
+    if not isinstance(payload, dict):
+        return None, "session_sidecar_invalid_payload"
+    return payload, None
+
+
+def _foreign_profile_refs(
+    payload: dict[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """Extract a foreign session's worktree/workspace references.
+
+    Returns ``(worktree_path, workspace, error)`` with canonical paths; an
+    error is returned when a present reference cannot be canonicalized, so
+    the scan fails closed instead of silently dropping the collision.
+    """
+    worktree_path: str | None = None
+    workspace: str | None = None
+    if payload.get("worktree_path") is not None:
+        canonical = _canonical_absolute_path(payload.get("worktree_path"))
+        if canonical is None:
+            return None, None, "foreign_reference_invalid"
+        worktree_path = str(canonical)
+    raw_workspace = payload.get("workspace")
+    if raw_workspace not in (None, ""):
+        canonical_workspace = _canonical_absolute_path(raw_workspace)
+        if canonical_workspace is None:
+            return None, None, "foreign_reference_invalid"
+        workspace = str(canonical_workspace)
+    return worktree_path, workspace, None
+
+
 def _scan_managed_worktree_sessions(
     state_dir: str | Path,
     *,
@@ -631,12 +739,14 @@ def _scan_managed_worktree_sessions(
     )
     if repo_filter is not None and canonical_filter is None:
         raise ValueError("repo_filter must be a valid, non-root path")
+    empty_refs = _ForeignProfileRefs(frozenset(), ())
     try:
         paths = sorted(sessions_dir.iterdir(), key=lambda path: path.name)
     except FileNotFoundError:
         return _SessionScan(
             (),
             (),
+            empty_refs,
             0,
             ("session_directory_missing",),
         )
@@ -644,12 +754,15 @@ def _scan_managed_worktree_sessions(
         return _SessionScan(
             (),
             (),
+            empty_refs,
             0,
             (f"session_directory_{type(exc).__name__}",),
         )
 
     candidates: list[ManagedWorktreeCandidate] = []
     workspace_sessions: list[_WorkspaceSession] = []
+    foreign_worktree_paths: set[str] = set()
+    foreign_workspace_paths: list[str] = []
     errors: list[str] = []
     scanned = 0
     for path in paths:
@@ -662,13 +775,21 @@ def _scan_managed_worktree_sessions(
         ):
             continue
         scanned += 1
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            errors.append(f"session_sidecar_{type(exc).__name__}")
+        payload, read_error = _read_session_payload(path)
+        if read_error:
+            errors.append(read_error)
             continue
-        if not isinstance(payload, dict):
-            errors.append("session_sidecar_invalid_payload")
+        stored_profile = payload["profile"] if "profile" in payload else "default"
+        if stored_profile != profile:
+            foreign_path, foreign_workspace, foreign_error = (
+                _foreign_profile_refs(payload)
+            )
+            if foreign_error:
+                errors.append(foreign_error)
+            if foreign_path is not None:
+                foreign_worktree_paths.add(foreign_path)
+            if foreign_workspace is not None:
+                foreign_workspace_paths.append(foreign_workspace)
             continue
         workspace_session, workspace_error = _workspace_session_from_payload(
             payload,
@@ -701,6 +822,10 @@ def _scan_managed_worktree_sessions(
     return _SessionScan(
         deduplicated,
         tuple(workspace_sessions),
+        _ForeignProfileRefs(
+            frozenset(foreign_worktree_paths),
+            tuple(sorted(set(foreign_workspace_paths))),
+        ),
         scanned,
         tuple(errors),
     )
@@ -720,6 +845,80 @@ def load_managed_worktree_sessions(
             repo_filter=repo_filter,
         ).candidates
     )
+
+
+def _foreign_conflicted_paths(
+    candidates: tuple[ManagedWorktreeCandidate, ...],
+    foreign_refs: _ForeignProfileRefs,
+) -> set[str]:
+    """Return candidate paths another profile also references, indexed.
+
+    A foreign session holding the same physical worktree — directly or
+    through a workspace at or below it — must block eligibility; the other
+    profile's runtime state is outside this audit's authority.
+    """
+    path_set = {
+        candidate.worktree_path
+        for candidate in candidates
+        if candidate.worktree_path is not None
+    }
+    conflicted = set(path_set & set(foreign_refs.worktree_paths))
+    for workspace in foreign_refs.workspace_paths:
+        workspace_path = Path(workspace)
+        for ancestor in (workspace_path, *workspace_path.parents):
+            key = str(ancestor)
+            if key in path_set:
+                conflicted.add(key)
+    return conflicted
+
+
+def _unmanaged_linked_worktrees(
+    git_backend: Any,
+    canonical_repo: Path,
+    session_scan: _SessionScan,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """List registered worktrees no session sidecar references.
+
+    A linked worktree absent from the sidecar inventory must surface in the
+    report as an uncertainty instead of disappearing from the audit.
+    """
+    lister = getattr(git_backend, "list_linked_worktrees", None)
+    if not callable(lister):
+        return None, "worktree_inventory_unavailable"
+    try:
+        listed = lister(str(canonical_repo))
+    except Exception:
+        return None, "worktree_inventory_unavailable"
+    if not isinstance(listed, tuple) or len(listed) != 2:
+        return None, "worktree_inventory_unavailable"
+    entries, error = listed
+    if error or entries is None:
+        return None, "worktree_inventory_unavailable"
+    covered = {
+        candidate.worktree_path
+        for candidate in session_scan.candidates
+        if candidate.worktree_path is not None
+    }
+    unmanaged: list[dict[str, Any]] = []
+    for entry in entries:
+        entry_path = _canonical_absolute_path(getattr(entry, "path", None))
+        if entry_path is None or entry_path == canonical_repo:
+            continue
+        if str(entry_path) in covered:
+            continue
+        unmanaged.append(
+            {
+                "path": str(entry_path),
+                "branch": getattr(entry, "branch", None),
+                "head_oid": getattr(entry, "head_oid", None),
+                "locked": bool(getattr(entry, "locked", False)),
+                "verdict": "KEEP_UNCERTAIN",
+                "eligible": False,
+                "reasons": ["worktree_without_session"],
+            }
+        )
+    unmanaged.sort(key=lambda item: item["path"])
+    return unmanaged, None
 
 
 def _timestamp(value: Any) -> float | None:
@@ -834,6 +1033,15 @@ def audit_managed_worktrees(
             if candidate.worktree_path is not None
         )
     )
+    foreign_conflicts = _foreign_conflicted_paths(
+        session_scan.candidates,
+        session_scan.foreign_refs,
+    )
+    unmanaged_worktrees, inventory_error = _unmanaged_linked_worktrees(
+        git_backend,
+        canonical_repo,
+        session_scan,
+    )
 
     global_reasons: list[str] = []
     if session_scan.errors:
@@ -844,6 +1052,10 @@ def audit_managed_worktrees(
         global_reasons.append("health_unavailable")
     elif health.active_runs > 0:
         global_reasons.append("active_runs")
+    if inventory_error:
+        global_reasons.append(inventory_error)
+    elif unmanaged_worktrees:
+        global_reasons.append("unmanaged_worktrees_present")
 
     decisions: list[WorktreeGcDecision] = []
     for candidate in session_scan.candidates:
@@ -859,6 +1071,11 @@ def audit_managed_worktrees(
             or candidate.worktree_repo_root is None
         ):
             uncertain_reasons.append("incomplete_worktree_metadata")
+        if (
+            candidate.worktree_path is not None
+            and candidate.worktree_path in foreign_conflicts
+        ):
+            uncertain_reasons.append("foreign_profile_reference")
 
         created_at = _timestamp(candidate.worktree_created_at)
         age_source: str | None = "worktree_created_at"
@@ -1049,7 +1266,12 @@ def audit_managed_worktrees(
             "sidecars_scanned": session_scan.sidecars_scanned,
             "errors": len(session_scan.errors),
             "error_kinds": sorted(set(session_scan.errors)),
+            "foreign_profile_references": len(
+                session_scan.foreign_refs.worktree_paths
+            )
+            + len(session_scan.foreign_refs.workspace_paths),
         },
+        "unmanaged_worktrees": unmanaged_worktrees or [],
         "candidates": report_candidates,
         "counts": {
             "candidates": len(decisions),
@@ -1066,10 +1288,130 @@ def audit_managed_worktrees(
     }
 
 
-def write_report_atomic(report: dict[str, Any], path: str | Path) -> None:
-    """Durably replace a JSON report using a temporary file beside its target."""
-    destination = Path(path).expanduser()
-    destination.parent.mkdir(parents=True, exist_ok=True)
+def validate_report_destination(
+    path: str | Path,
+    *,
+    forbidden_roots: tuple[Any, ...] = (),
+) -> Path:
+    """Resolve and policy-check a report destination.
+
+    The destination must be an absolute path outside every forbidden root
+    (audited repository, state directory, audited worktrees, this source
+    checkout).  The parent directory is resolved to its real path so the
+    final write location is known exactly.
+    """
+    raw = Path(path).expanduser()
+    if not raw.is_absolute():
+        raise ValueError("report path must be absolute")
+    if raw.name in {"", ".", ".."}:
+        raise ValueError("report path must name a file")
+    parent = Path(os.path.realpath(raw.parent))
+    destination = parent / raw.name
+    if destination == Path(destination.anchor):
+        raise ValueError("report path must not be a filesystem root")
+    for root in forbidden_roots:
+        if root is None:
+            continue
+        try:
+            real_root = Path(os.path.realpath(os.fspath(root)))
+        except (OSError, RuntimeError, ValueError, TypeError):
+            continue
+        if destination == real_root or real_root in destination.parents:
+            raise ValueError(
+                "report path must not be inside an audited or state directory"
+            )
+    return destination
+
+
+def _verify_directory_handle(parent: Path, dir_fd: int) -> None:
+    """Prove the opened descriptor is the resolved parent directory."""
+    fd_stat = os.fstat(dir_fd)
+    path_stat = os.stat(parent)
+    if not stat.S_ISDIR(fd_stat.st_mode):
+        raise ValueError("report parent is not a directory")
+    if (fd_stat.st_dev, fd_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        raise ValueError("report parent changed while opening")
+
+
+def _write_report_via_dirfd(
+    payload: str,
+    destination: Path,
+) -> None:
+    """Create and replace the report relative to a pinned parent handle."""
+    dir_flags = os.O_RDONLY | os.O_CLOEXEC
+    dir_flags |= getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(destination.parent, dir_flags)
+    temporary_name: str | None = None
+    try:
+        _verify_directory_handle(destination.parent, dir_fd)
+        try:
+            existing = os.stat(
+                destination.name,
+                dir_fd=dir_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise ValueError(
+                "report destination exists and is not a regular file"
+            )
+        create_flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        )
+        create_flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor: int | None = None
+        for _attempt in range(8):
+            temporary_name = f".{destination.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                file_descriptor = os.open(
+                    temporary_name,
+                    create_flags,
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        if file_descriptor is None or temporary_name is None:
+            raise OSError("could not create a unique report temporary file")
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+                file_descriptor = None
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(
+                temporary_name,
+                destination.name,
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            temporary_name = None
+            os.fsync(dir_fd)
+        finally:
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+    finally:
+        try:
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+        finally:
+            os.close(dir_fd)
+
+
+def _write_report_via_paths(payload: str, destination: Path) -> None:
+    """Portable fallback for platforms without ``dir_fd`` support."""
+    try:
+        existing = os.lstat(destination)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise ValueError("report destination exists and is not a regular file")
     file_descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",
         suffix=".tmp",
@@ -1082,15 +1424,7 @@ def write_report_atomic(report: dict[str, Any], path: str | Path) -> None:
         except OSError:
             pass
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-            json.dump(
-                report,
-                handle,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                allow_nan=False,
-            )
-            handle.write("\n")
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, destination)
@@ -1110,3 +1444,39 @@ def write_report_atomic(report: dict[str, Any], path: str | Path) -> None:
             pass
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def write_report_atomic(
+    report: dict[str, Any],
+    path: str | Path,
+    *,
+    forbidden_roots: tuple[Any, ...] = (),
+) -> None:
+    """Durably replace a JSON report under a verified directory handle.
+
+    The destination is policy-checked (absolute, outside forbidden roots,
+    existing target regular and not a symlink), created and renamed relative
+    to a pinned parent directory descriptor on platforms that support it.
+    """
+    destination = validate_report_destination(
+        path,
+        forbidden_roots=forbidden_roots,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        report,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ) + "\n"
+    if (
+        os.name != "nt"
+        and os.open in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+    ):
+        _write_report_via_dirfd(payload, destination)
+    else:
+        _write_report_via_paths(payload, destination)
