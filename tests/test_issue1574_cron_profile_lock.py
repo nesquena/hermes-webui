@@ -1,5 +1,7 @@
+import json
 import multiprocessing
 import os
+import pickle
 import queue
 import sys
 import threading
@@ -431,6 +433,48 @@ def test_shared_cron_subprocess_contract_executes_requested_operation(monkeypatc
     )
 
     assert result == ("contract", "ok")
+
+
+def test_cron_child_target_keeps_owner_home_separate(monkeypatch, tmp_path):
+    from api import cron_runtime, profiles
+
+    execution_home = tmp_path / "execution"
+    owner_home = tmp_path / "owner"
+    contexts = []
+
+    class Context:
+        def __init__(self, home, *, cron_store_home=None):
+            contexts.append((Path(home), None if cron_store_home is None else Path(cron_store_home)))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    scheduler = types.ModuleType("cron.scheduler")
+    scheduler.run_one_job = lambda job: job["id"]
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.scheduler", scheduler)
+    monkeypatch.setattr(profiles, "cron_profile_context_for_home", Context)
+
+    result_queue = queue.Queue()
+    cron_runtime._cron_job_subprocess_main(
+        json.dumps({"id": "owner-boundary"}),
+        str(execution_home),
+        str(owner_home),
+        "run_one_job",
+        json.dumps(()),
+        json.dumps({}),
+        result_queue,
+    )
+
+    status, payload = result_queue.get_nowait()
+    assert status == "ok"
+    assert pickle.loads(payload) == "owner-boundary"
+    assert contexts == [(execution_home, owner_home)]
 
 
 def _run_lock_probe_with_context(context_name, target, result_queue):

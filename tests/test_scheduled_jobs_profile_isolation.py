@@ -139,6 +139,42 @@ def test_cron_profile_context_for_home_separates_execution_and_store(tmp_path):
         ]
 
 
+def test_cron_profile_context_for_home_restores_after_store_capability_error(
+    monkeypatch, tmp_path
+):
+    import cron.jobs as cron_jobs
+
+    from api import profiles as p
+
+    execution_home = tmp_path / "execution"
+    owner_home = tmp_path / "owner"
+    _write_jobs(execution_home, [])
+    _write_jobs(owner_home, [])
+    before_paths = (
+        cron_jobs.HERMES_DIR,
+        cron_jobs.CRON_DIR,
+        cron_jobs.JOBS_FILE,
+        cron_jobs.OUTPUT_DIR,
+    )
+    before_env = os.environ.get("HERMES_HOME")
+    monkeypatch.delattr(cron_jobs, "use_cron_store")
+
+    with pytest.raises(RuntimeError, match="use_cron_store is unavailable"):
+        p.cron_profile_context_for_home(
+            execution_home, cron_store_home=owner_home
+        ).__enter__()
+
+    assert os.environ.get("HERMES_HOME") == before_env
+    assert (
+        cron_jobs.HERMES_DIR,
+        cron_jobs.CRON_DIR,
+        cron_jobs.JOBS_FILE,
+        cron_jobs.OUTPUT_DIR,
+    ) == before_paths
+    assert p._cron_profile_context_depth() == 0
+    assert not p._cron_env_lock.locked()
+
+
 def test_cron_profile_context_serializes_concurrent_access(tmp_path):
     """The lock must prevent concurrent contexts from interleaving."""
     from api.profiles import cron_profile_context_for_home

@@ -783,12 +783,32 @@ class cron_profile_context_for_home:
         self._cron_store_home = (
             None if cron_store_home is None else Path(cron_store_home)
         )
+        self._prev_env = None
+        self._prev_cj = None
+        self._prev_cs = None
+        self._cron_store_context = None
 
     def __enter__(self):
         _cron_env_lock.acquire()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
+            if self._cron_store_home is not None and self._cron_store_home != self._home:
+                try:
+                    import cron.jobs as _cj
+                except ImportError:
+                    pass
+                else:
+                    use_cron_store = getattr(_cj, 'use_cron_store', None)
+                    if not callable(use_cron_store):
+                        raise RuntimeError(
+                            "unsupported Agent version: cron.jobs.use_cron_store "
+                            "is unavailable; cannot separate cron ownership from "
+                            "execution profile"
+                        )
+                    self._cron_store_context = use_cron_store(self._cron_store_home)
+                    self._cron_store_context.__enter__()
+
             os.environ['HERMES_HOME'] = str(self._home)
 
             # Re-patch cron.jobs module-level constants (see main context manager
@@ -821,26 +841,9 @@ class cron_profile_context_for_home:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
-            self._cron_store_context = None
-            if self._cron_store_home is not None and self._cron_store_home != self._home:
-                try:
-                    import cron.jobs as _cj
-                except ImportError:
-                    pass
-                else:
-                    use_cron_store = getattr(_cj, 'use_cron_store', None)
-                    if not callable(use_cron_store):
-                        raise RuntimeError(
-                            "unsupported Agent version: cron.jobs.use_cron_store "
-                            "is unavailable; cannot separate cron ownership from "
-                            "execution profile"
-                        )
-                    self._cron_store_context = use_cron_store(self._cron_store_home)
-                    self._cron_store_context.__enter__()
             _cron_context_stack.set((*_cron_context_stack.get(), self))
         except Exception:
-            _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            self._restore_and_release()
             raise
         return self
 
