@@ -10,6 +10,35 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def _start_agent_cache_governor_thread(governor, interval_secs: int):
+    """Start the cache-governor loop, or return None when disabled.
+
+    Zero is the documented disable value.  Keeping the guard here (rather
+    than only at the call site) makes it impossible to accidentally create a
+    daemon that busy-spins through ``time.sleep(0)``.
+    """
+    if interval_secs <= 0:
+        return None
+
+    def _governor_loop():
+        while True:
+            try:
+                governor.run_pass()
+            except Exception as e:
+                print(f'[!!] Agent-cache governance pass failed: {e}', flush=True)
+            time.sleep(interval_secs)
+
+    thread = threading.Thread(
+        target=_governor_loop,
+        name='agent-cache-governor',
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _ignore_sigpipe() -> None:
     """Keep broken client writes from terminating the server process."""
     if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
@@ -646,6 +675,55 @@ def main() -> None:
             print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+    # Agent-cache governance: idle-TTL eviction + memory-pressure soft eviction.
+    # Port of the gateway's agent_cache pressure valves (#80764) — the LRU cap
+    # bounds the *count* of cached agents but each pins a live transcript in
+    # RAM, so a long-running WebUI grows without bound without these two passes.
+    try:
+        from api.agent_cache_governance import (
+            AgentCacheGovernor, resolve_memory_high_mb,
+        )
+        from api.config import (
+            SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
+            SESSION_AGENT_CACHE_IDLE_TTL, SESSION_AGENT_CACHE_MEMORY_HIGH_MB,
+            SESSION_AGENT_CACHE_PROTECT_RECENT, SESSION_AGENT_CACHE_GOVERN_INTERVAL,
+        )
+
+        def _governor_close_agent(key: str, agent) -> None:
+            try:
+                from api.streaming import _close_evicted_agent_at_session_boundary
+                _close_evicted_agent_at_session_boundary(key, agent)
+            except Exception as e:
+                print(f'[!!] WARNING: Agent-cache idle eviction teardown failed for {key}: {e}', flush=True)
+
+        _governor = AgentCacheGovernor(
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            idle_ttl_secs=SESSION_AGENT_CACHE_IDLE_TTL,
+            memory_high_mb=resolve_memory_high_mb(SESSION_AGENT_CACHE_MEMORY_HIGH_MB),
+            protect_recent=SESSION_AGENT_CACHE_PROTECT_RECENT,
+            close_agent_fn=_governor_close_agent,
+            eviction_hook=None,
+        )
+
+        # A zero interval means "governance disabled", not "sweep forever":
+        # starting the loop would busy-spin (time.sleep(0)) and pin a CPU core.
+        _governor_thread = _start_agent_cache_governor_thread(
+            _governor, SESSION_AGENT_CACHE_GOVERN_INTERVAL
+        )
+        if _governor_thread is not None:
+            _mem_budget = _governor.memory_high_mb
+            _budget_disp = f'{_mem_budget}MB' if _mem_budget else 'off'
+            print(
+                f'[ok] Agent-cache governor: idle_ttl={SESSION_AGENT_CACHE_IDLE_TTL}s '
+                f'pressure={_budget_disp} protect_recent={SESSION_AGENT_CACHE_PROTECT_RECENT}',
+                flush=True,
+            )
+        else:
+            print('[ok] Agent-cache governor: disabled (GOVERN_INTERVAL=0)', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Agent-cache governor failed to start: {e}', flush=True)
 
     try:
         from api.background_process import start_drain_thread
