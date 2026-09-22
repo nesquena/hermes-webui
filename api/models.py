@@ -1234,6 +1234,11 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+def _parse_nonnegative_json_int(value):
+    """Accept only a non-boolean JSON integer, without coercion."""
+    return value if type(value) is int and value >= 0 else None
+
+
 def model_explicit_pick_signature(model, model_provider) -> str:
     """Stable signature of a (model, provider) selection for #5979 explicit-pick
     provenance. The persisted ``Session.model_explicit_pick_signature`` is set to
@@ -1448,10 +1453,8 @@ class Session:
         # sidecars written before this key existed; readers must treat None as
         # "unknown" and fall back to a full load rather than trust message_count.
         _raw_post_collapse_count = kwargs.get('post_collapse_message_count')
-        self._metadata_post_collapse_message_count = (
-            None
-            if isinstance(_raw_post_collapse_count, bool)  # bool is an int subclass
-            else _parse_nonnegative_int(_raw_post_collapse_count)
+        self._metadata_post_collapse_message_count = _parse_nonnegative_json_int(
+            _raw_post_collapse_count
         )
 
     @property
@@ -1480,6 +1483,12 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        # Freeze the message payload once for this save. The list is live shared
+        # state and can be mutated by a streaming worker while serialization is
+        # in progress; deriving counts from it and then serializing it again can
+        # otherwise persist a trusted count for different transcript bytes.
+        # Deep-copy so nested row mutation cannot split the provenance either.
+        message_snapshot = copy.deepcopy(self.messages or [])
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1517,7 +1526,7 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(message_snapshot)
         # Explicit-provenance twin of message_count: the row count AFTER
         # _collapse_adjacent_duplicate_partials(), which is what Session.load()
         # applies before any consumer sees the messages. message_count stays the
@@ -1527,7 +1536,7 @@ class Session:
         # transcript without paying for the load — the lineage cold-load
         # shortcut in api/routes.py — must use only this count and fail closed
         # (full load) when it is absent.
-        _collapsed_messages, _ = _collapse_adjacent_duplicate_partials(self.messages or [])
+        _collapsed_messages, _ = _collapse_adjacent_duplicate_partials(message_snapshot)
         meta['post_collapse_message_count'] = len(_collapsed_messages or [])
         self._metadata_post_collapse_message_count = meta['post_collapse_message_count']
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
@@ -1537,7 +1546,7 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
+        meta['messages'] = message_snapshot
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
@@ -1571,7 +1580,7 @@ class Session:
                     existing_msg_count = len(existing.get('messages') or [])
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(message_snapshot)
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0

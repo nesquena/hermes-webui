@@ -181,12 +181,15 @@ and 5; it does not mark every run-state boundary implemented.
    adjacent duplicate partial rows before the prefix test, the raw
    `message_count` is not the loaded length; only the post-normalization
    `post_collapse_message_count` that `Session.save()` persists may prove the
-   prefix return cannot apply. Missing, invalid, or prefix-permitting
-   metadata fails closed: the immediate parent is fully loaded and the prefix
-   return is kept, exactly as in the full traversal. Because skipped ancestry
-   lacks complete provenance, shortcut results remain excluded from the
-   lineage display cache and must serialize identically to the unoptimized
-   traversal.
+   prefix return cannot apply. The save must derive that count and serialize
+   `messages` from one immutable snapshot. Readers accept only a non-boolean,
+   non-negative JSON integer for this provenance field; floats, numeric strings,
+   booleans, negative values, non-finite values, missing values, and other
+   malformed metadata fail closed. The immediate parent is then fully loaded
+   and the prefix return is kept, exactly as in the full traversal. Because
+   skipped ancestry lacks complete provenance, shortcut results remain excluded
+   from the lineage display cache and must serialize identically to the
+   unoptimized traversal.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
