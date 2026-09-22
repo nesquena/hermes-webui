@@ -10758,6 +10758,7 @@ def merge_session_messages_append_only(
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
             incoming_provenance=incoming_provenance,
+            preserve_state_rows_after_watermark=preserve_state_rows_after_watermark,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -10770,6 +10771,7 @@ def _merge_session_messages_append_only_impl(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance=None,
+    preserve_state_rows_after_watermark: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
