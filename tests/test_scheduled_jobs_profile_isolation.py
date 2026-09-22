@@ -142,8 +142,7 @@ def test_cron_profile_context_for_home_separates_execution_and_store(tmp_path):
 def test_cron_profile_context_for_home_restores_after_store_capability_error(
     monkeypatch, tmp_path
 ):
-    pytest.importorskip("cron.jobs")
-    import cron.jobs as cron_jobs
+    cron_jobs = pytest.importorskip("cron.jobs")
 
     from api import profiles as p
 
