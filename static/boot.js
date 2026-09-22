@@ -295,25 +295,25 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
-  // #6709 (gate round 7): the panel is the preview's only host, and a panel
-  // collapse is presentation-only (see closeWorkspacePanel) — it keeps the
-  // preview alive: path, dirty flag, editor contents and the #previewArea
-  // `.visible` class. Reopening must therefore restore the retained preview's
-  // OWNER, not convert every retained preview into `preview`.
+  // #6709 (gate round 7, extended after the Greptile P1 on that fix): when a
+  // preview is retained, the RECORDED OWNER decides whether the panel comes back
+  // as `browse` or `preview`. Callers must not guess it from
+  // `_hasWorkspacePreviewVisible()` — toggleWorkspacePanel() does exactly that
+  // (`_hasWorkspacePreviewVisible()?'preview':'browse'`) and therefore requested
+  // `preview` for a browse-owned preview, restoring the panel in the very state
+  // whose explicit X closes the whole drawer instead of returning the reader to
+  // the still-open tree.
   //
-  // An earlier revision normalized unconditionally:
-  //   if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';
-  // That fixed the blank Files pane (renderFileTree() hides the tree while a
-  // preview path is set, so a browse reopen would expose a tree-less panel — the
-  // preview itself is what the reader sees either way, as the blank-pane
-  // regression below confirms) but destroyed the ownership distinction: a preview
-  // opened from a manually-opened Files tree also reopened as `preview`, so the
-  // explicit X hit clearPreview()'s `closePanelAfter` branch and closed the whole
-  // drawer instead of returning the reader to the tree. Restoring the recorded
-  // owner keeps the reader's intent: browse-opened previews come back as browse
-  // (X reveals the still-open Files tree), panel-owning previews come back as
-  // preview (X closes the drawer).
-  if(mode==='browse'&&_hasWorkspacePreviewVisible()&&_workspacePanelRetainedMode==='preview') mode='preview';
+  // Making the owner authoritative here fixes every entry point at the one place
+  // that actually knows the answer — the composer Files toggle, the Settings
+  // workspace-panel toggle and the mobile toggle all funnel through this
+  // function — instead of teaching each caller the rule and hoping the next one
+  // gets it right.
+  //
+  // An earlier revision normalized unconditionally to `preview`: the same end
+  // state for browse-owned previews, but it destroyed the ownership distinction
+  // entirely.
+  if(_hasWorkspacePreviewVisible()&&_workspacePanelRetainedMode) mode=_workspacePanelRetainedMode;
   if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();

@@ -1171,6 +1171,16 @@ function driveNoPreview(){
   closeWorkspacePanel();             snap('collapse');
   openWorkspacePanel('browse');      snap('reopen');
 }
+function driveToggle(){
+  // the composer Files button: onclick="toggleWorkspacePanel()" on
+  // #btnWorkspacePanelToggle, which passes `preview` whenever a preview is visible
+  reset();
+  toggleWorkspacePanel(true);        snap('open');
+  openFileLike('/ws/a.txt');         snap('open_file');
+  toggleWorkspacePanel(false);       snap('collapse');
+  toggleWorkspacePanel(true);        snap('reopen');
+  handleWorkspaceClose();            snap('explicit_close');
+}
 function driveEmptyDir(){
   reset();
   S.entries = [];
@@ -1180,7 +1190,7 @@ function driveEmptyDir(){
   openWorkspacePanel('browse');      snap('reopen');
   handleWorkspaceClose();            snap('explicit_close');
 }
-({browse:driveBrowse, preview:drivePreview,
+({browse:driveBrowse, preview:drivePreview, toggle:driveToggle,
   no_preview:driveNoPreview, empty_dir:driveEmptyDir})[__SCENARIO__]();
 
 console.log('OWNERSHIP ' + JSON.stringify(results));
@@ -1203,6 +1213,7 @@ def _ownership_harness(scenario: str, compact: bool = False) -> str:
             "closeWorkspacePanel",
             "handleWorkspaceClose",
             "ensureWorkspacePreviewVisible",
+            "toggleWorkspacePanel",
         )]
         + [_extract_clear_preview()]
     )
@@ -1276,6 +1287,22 @@ def test_preview_owned_drawer_reopens_as_preview_and_closes_on_explicit_close():
     assert steps[2]["retained"] == "preview", steps[2]
 
 
+def test_composer_files_toggle_preserves_browse_ownership():
+    """Greptile P1 on the ownership fix (22 Sep): the composer Files toggle calls
+
+    toggleWorkspacePanel(), which passes `preview` whenever a preview is visible
+    (`_hasWorkspacePreviewVisible()?'preview':'browse'`). That bypassed the
+    browse-only owner restoration, so this entry point put the panel back in
+    `preview` and the explicit X closed the drawer. The recorded owner is now
+    authoritative in openWorkspacePanel(), so every entry point agrees."""
+    steps = _run_ownership("toggle")
+    assert _modes(steps) == ["browse", "browse", "closed", "browse", "browse"], steps
+    final = steps[-1]
+    assert final["preview"] is False, final
+    assert final["tree"] != "none", final
+    assert final["blank"] is False, final
+
+
 def test_collapse_without_preview_reopens_as_browse():
     """No retained preview means nothing to restore — an ordinary browse."""
     steps = _run_ownership("no_preview")
@@ -1295,7 +1322,9 @@ def test_empty_directory_ownership_sequence_still_reconciles_the_empty_state():
     assert final["blank"] is False, final
 
 
-@pytest.mark.parametrize("scenario", ["browse", "preview", "no_preview", "empty_dir"])
+@pytest.mark.parametrize(
+    "scenario", ["browse", "preview", "toggle", "no_preview", "empty_dir"]
+)
 def test_no_ownership_sequence_leaves_a_blank_panel(scenario):
     """No step of any ownership sequence may hide BOTH the tree and the preview."""
     steps = _run_ownership(scenario)
@@ -1351,8 +1380,15 @@ def test_open_workspace_panel_no_longer_normalizes_every_retained_preview():
     assert (
         "if(mode==='browse'&&_hasWorkspacePreviewVisible()) mode='preview';" not in body
     ), "the blanket browse→preview normalization is back"
-    assert "_workspacePanelRetainedMode==='preview'" in body, (
-        "openWorkspacePanel() must restore the recorded owner"
+    # the owner must be authoritative regardless of the requested mode, not only
+    # when the caller asked for `browse` — that browse-only gate is what let the
+    # composer Files toggle through
+    assert (
+        "if(mode==='browse'&&_hasWorkspacePreviewVisible()&&_workspacePanelRetainedMode"
+        not in body.replace(" ", "")
+    ), "the owner restoration must not be gated on the requested mode"
+    assert "mode=_workspacePanelRetainedMode;" in body.replace(" ", ""), (
+        "openWorkspacePanel() must make the recorded owner authoritative"
     )
 
 
@@ -1459,4 +1495,65 @@ def test_browser_preview_owned_drawer_still_closes_on_the_x(width, height, label
             browser.close()
     modes = [s["mode"] for s in steps]
     assert modes == ["preview", "preview", "closed", "preview", "closed"], (label, steps)
+    assert not any(s["blank"] for s in steps), (label, steps)
+
+
+_DRIVE_TOGGLE_JS = r"""
+async () => {
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const ft = document.getElementById('fileTree');
+  S.session = {session_id: 'browser-6709-toggle', workspace: '/tmp/6709-browser-ws'};
+  S.currentDir = '.';
+  S.entries = Array.from({length: 12}, (_, i) => {
+    const name = 'file-' + String(i).padStart(3, '0') + '.txt';
+    return {name: name, path: name, type: 'file', mtime_ns: 1000 + i};
+  });
+  window.api = async () => ({content: '6709 toggle harness content'});
+  const snap = (label) => ({
+    label: label,
+    mode: _workspacePanelMode,
+    preview: _hasWorkspacePreviewVisible(),
+    tree: ft.style.display === 'none' ? 'none' : '(shown)',
+    blank: ft.style.display === 'none' && !_hasWorkspacePreviewVisible(),
+  });
+  // the real composer Files button: onclick="toggleWorkspacePanel()"
+  const toggle = document.getElementById('btnWorkspacePanelToggle');
+  const steps = [];
+  _setWorkspacePanelMode('closed');
+  toggle.click();                           steps.push(snap('toggle_open'));
+  await openFile('file-000.txt');           steps.push(snap('open_file'));
+  toggle.click();                           steps.push(snap('toggle_close'));
+  toggle.click();                           steps.push(snap('toggle_reopen'));
+  document.getElementById('btnClearPreview').click();   // the real explicit X
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  steps.push(snap('explicit_close'));
+  return steps;
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "width,height,label", [(1280, 800, "desktop"), (480, 800, "mobile")]
+)
+def test_browser_composer_files_toggle_keeps_browse_ownership(width, height, label):
+    """Greptile P1 on the ownership fix, real browser: clicking the actual
+
+    #btnWorkspacePanelToggle (onclick="toggleWorkspacePanel()") must not lose the
+    browse ownership, and the real X must leave the Files tree open."""
+    pw = _require_playwright()
+    with pw.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context, page = _open_browser_page(browser, width, height)
+            try:
+                steps = page.evaluate(_DRIVE_TOGGLE_JS)
+            finally:
+                context.close()
+        finally:
+            browser.close()
+    modes = [s["mode"] for s in steps]
+    assert modes == ["browse", "browse", "closed", "browse", "browse"], (label, steps)
+    final = steps[-1]
+    assert final["preview"] is False, (label, steps)
+    assert final["tree"] != "none", (label, steps)
     assert not any(s["blank"] for s in steps), (label, steps)
