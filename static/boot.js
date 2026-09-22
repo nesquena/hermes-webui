@@ -2273,8 +2273,12 @@ function clearPreview(opts={}){
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
   // Exit fullscreen if active — route through the single lifecycle helper so
   // listeners, inline sizing, classes, and the button presentation all reset.
+  // deferFocus: this function hides the zoom/fullscreen controls a few lines
+  // below, so the helper must NOT restore focus now — it would land on the
+  // fullscreen button and then be stranded there when that button is hidden.
+  // This function owns the flush and runs it after the controls are hidden.
   if(typeof setPreviewFullscreen==='function'&&document.documentElement.classList.contains('preview-fullscreen-active')){
-    setPreviewFullscreen(false);
+    setPreviewFullscreen(false, {deferFocus:true});
   }
   // Hide zoom/fullscreen controls
   if(typeof _showPreviewZoomControls==='function') _showPreviewZoomControls(false, false);

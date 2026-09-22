@@ -1148,8 +1148,15 @@ function _exitNativePreviewFullscreen(){
  * the toolbar button, the document Escape handler, and clearPreview() —
  * must go through here so listeners, inline sizing, classes, and button
  * presentation can never drift out of sync.
+ *
+ * `opts.deferFocus` is set by callers that are about to change the control
+ * visibility (clearPreview() hides the zoom/fullscreen controls right after).
+ * Flushing here would move focus to the fullscreen button while it is still
+ * visible, and the caller would then hide the button focus had just landed on —
+ * the caller owns the flush in that case. Without the flag (toolbar toggle,
+ * document Escape) the preview stays open, so the focus is restored immediately.
  */
-function setPreviewFullscreen(active){
+function setPreviewFullscreen(active, opts={}){
   const panel = document.querySelector('.rightpanel');
   if(!panel) return;
   const isFullscreen = !!active;
@@ -1190,7 +1197,7 @@ function setPreviewFullscreen(active){
     // entered on (desktop fullscreen -> phone width). Re-derive the compact
     // class from the restored mode so the panel is not left off-screen.
     if(typeof _reconcileWorkspacePanelBreakpoint==='function') _reconcileWorkspacePanelBreakpoint();
-    _flushPreviewFullscreenFocus();
+    if(!opts.deferFocus) _flushPreviewFullscreenFocus();
   }
 }
 function togglePreviewFullscreen(){

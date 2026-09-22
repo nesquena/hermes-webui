@@ -55,6 +55,35 @@ def _function(name: str, prefix: str = "function") -> str:
     return extract_function(source, name, prefix=prefix)
 
 
+def _function_with_defaults(name: str, prefix: str = "function") -> str:
+    """Like ``_function()`` but safe for signatures with default parameters.
+
+    ``extract_function()`` brace-matches from the FIRST ``{``, which for
+    ``setPreviewFullscreen(active, opts={})`` is the default-value brace — it
+    returns the signature only, and every assertion against the body then fails
+    against a string that has no body at all. Match the parameter-closing ``){``
+    instead and brace-match from there.
+    """
+    source = _read(WORKSPACE_JS_PATH)
+    marker = f"{prefix} {name}("
+    if marker not in source:
+        source = _read(BOOT_JS_PATH)
+    start = source.index(marker)
+    params_close = source.index("){", start)
+    brace = params_close + 1
+    depth = 0
+    i = brace
+    while i < len(source):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : i + 1]
+        i += 1
+    raise AssertionError(f"{name} body never closed")
+
+
 # ── F1: CSS zoom coverage ────────────────────────────────────────────────────
 
 
@@ -318,7 +347,7 @@ def test_fullscreen_lifecycle_entrypoints_manage_covered_chrome():
     """F4 needs the enter/exit helpers actually invoked by setPreviewFullscreen —
     checking the helper bodies alone would pass even if nothing called them, which
     is exactly the shape of dead-code that the gate caught elsewhere."""
-    fs = extract_function(_read(WORKSPACE_JS_PATH), "setPreviewFullscreen")
+    fs = _function_with_defaults("setPreviewFullscreen")
     assert "_previewFullscreenEnter(panel)" in fs, (
         "setPreviewFullscreen must invoke the enter helper, otherwise no chrome is "
         "ever marked inert and focus is never moved into the panel"
@@ -576,8 +605,7 @@ def test_resize_and_fullscreen_exit_call_the_reconciler():
     assert "_reconcileWorkspacePanelBreakpoint" in boot[idx:idx + 500], (
         "the resize path must reconcile the panel breakpoint"
     )
-    ws = _read(WORKSPACE_JS_PATH)
-    fs_exit = extract_function(ws, "setPreviewFullscreen")
+    fs_exit = _function_with_defaults("setPreviewFullscreen")
     assert "_reconcileWorkspacePanelBreakpoint" in fs_exit, (
         "exiting fullscreen must reconcile the panel breakpoint"
     )
@@ -958,7 +986,7 @@ def test_fullscreen_uses_the_native_api_so_escape_works_from_iframe_focus():
     """A document keydown listener cannot see Escape pressed inside the iframe,
 
     so the mode must be owned by the browser's own fullscreen implementation."""
-    body = _function("setPreviewFullscreen")
+    body = _function_with_defaults("setPreviewFullscreen")
     assert "_requestNativePreviewFullscreen" in body, (
         "entering fullscreen must request native fullscreen, or Escape pressed "
         "while focus is inside #previewHtmlIframe/#previewPdfFrame never exits"
@@ -1176,4 +1204,66 @@ def test_stateful_fullscreen_button_has_no_static_i18n_key():
     tail = i18n[apply_idx : apply_idx + 2000]
     assert "_setPreviewFullscreenButtonState" in tail, (
         "a locale change must re-sync the fullscreen button's stateful label"
+    )
+
+
+# ── Greptile (21 Sep, post-fix): the exit must not flush before the caller ────
+#
+# `setPreviewFullscreen(false)` flushed the queued focus target itself. On the
+# clearPreview() path that flush happened while the fullscreen button was STILL
+# visible, so focus moved onto it — and clearPreview() then hid that exact
+# button, leaving focus stranded and the final flush with no pending target.
+# The exit must defer the flush to that caller, while keeping the immediate
+# restore for exit paths that leave the preview open.
+
+
+def test_exit_defers_the_focus_flush_when_the_caller_asks():
+    body = _function_with_defaults("setPreviewFullscreen")
+    assert "opts.deferFocus" in body, (
+        "setPreviewFullscreen must accept a deferFocus option, otherwise a caller "
+        "that hides the controls right after cannot prevent the stranded focus"
+    )
+    flush_line = [l for l in body.split("\n") if "_flushPreviewFullscreenFocus" in l]
+    assert flush_line, "the exit no longer flushes focus at all"
+    assert all("deferFocus" in l for l in flush_line), (
+        "the exit flushes focus unconditionally, so clearPreview() strands it"
+    )
+
+
+def test_clear_preview_defers_the_flush_and_owns_it():
+    """The caller hides the controls, so the caller must defer the helper's
+
+    flush and perform the single flush itself afterwards."""
+    body = _clear_preview_body()
+    compact = body.replace(" ", "")
+    assert "setPreviewFullscreen(false,{deferFocus:true})" in compact, (
+        "clearPreview() must ask the exit to defer the flush, since it hides the "
+        "controls immediately afterwards"
+    )
+    # Exactly one flush CALL (comments mention the name too, so count code lines
+    # only), and it comes after the controls are hidden.
+    code_lines = [
+        l for l in body.split("\n")
+        if not l.strip().startswith("//")
+    ]
+    flush_calls = [i for i, l in enumerate(code_lines) if "_flushPreviewFullscreenFocus()" in l]
+    assert len(flush_calls) == 1, (
+        f"clearPreview() must flush exactly once, got {len(flush_calls)}"
+    )
+    hide_calls = [i for i, l in enumerate(code_lines)
+                  if "_showPreviewZoomControls(false, false)" in l]
+    assert hide_calls, "clearPreview() no longer hides the preview controls"
+    assert flush_calls[0] > hide_calls[0], (
+        "clearPreview() flushes focus before the controls are hidden, so focus "
+        "lands on a display:none button"
+    )
+
+
+def test_other_exit_paths_still_restore_focus_immediately():
+    """Toolbar toggle / document Escape leave the preview open, so the exit must
+
+    still restore focus right away — only the deferring caller opts out."""
+    body = _function_with_defaults("setPreviewFullscreen")
+    assert "if(!opts.deferFocus) _flushPreviewFullscreenFocus();" in body.replace("  ", " "), (
+        "the non-deferring exit path lost its focus restore"
     )
