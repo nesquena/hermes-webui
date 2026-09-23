@@ -8,6 +8,7 @@ import copy
 import hashlib
 import inspect
 import errno
+import functools
 import io
 import gzip
 import json
@@ -1984,6 +1985,7 @@ _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cach
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
+_session_list_cache_key_profile = _route_session_list_cache._session_list_cache_key_profile
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
 _session_list_cache_path_stamp = _route_session_list_cache._session_list_cache_path_stamp
@@ -2045,6 +2047,105 @@ def _session_list_cache_key(
         archived_limit=archived_limit,
         archived_offset=archived_offset,
     ) + (bool(show_claude_code_sessions),)
+
+
+def _session_list_request_shape(parsed) -> dict:
+    """Parse the request-shape params of a ``/api/sessions`` request.
+
+    Single source for the request-shape half of the cache key. The route and the
+    startup warm-up both feed this into ``_session_list_cache_request_plan`` so a
+    warm-up key can never drift from the key a real request builds.
+    """
+    sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
+    if sidebar_source not in ("webui", "cli"):
+        sidebar_source = None
+    return {
+        "all_profiles": _all_profiles_enabled(parsed),
+        "include_archived": _query_flag(parsed, "include_archived"),
+        "exclude_hidden": _query_flag(parsed, "exclude_hidden"),
+        "archived_limit": _query_positive_int(parsed, "archived_limit", default=None, maximum=2000),
+        "archived_offset": _query_positive_int(parsed, "archived_offset", default=0, maximum=200000),
+        "sidebar_source": sidebar_source,
+    }
+
+
+def _session_list_cache_request_plan(settings: dict, *, all_profiles: bool,
+                                     include_archived: bool, exclude_hidden: bool,
+                                     archived_limit, archived_offset: int,
+                                     sidebar_source,
+                                     active_profile: str | None = None) -> tuple[tuple, dict]:
+    """Assemble the cache key AND the builder kwargs for ONE request shape.
+
+    The settings-derived flags, the active profile and the request shape together
+    determine the key. They are read in exactly one place so the route and the
+    startup warm-up cannot disagree about which cache slot a shape maps to (the
+    cache is capped at ``_SESSIONS_CACHE_MAX_ENTRIES`` with LRU eviction, so a
+    drifted key would warm a slot no request reads).
+
+    ``active_profile`` defaults to the request's thread-local profile (the
+    ``hermes_profile`` cookie path applied by server.py). The startup warm-up
+    runs with no request context, so it passes each profile it enumerates
+    explicitly — see ``_warmup_profile_names``.
+    """
+    from api import profiles as profiles_api
+
+    if active_profile is None:
+        active_profile = profiles_api.get_active_profile_name()
+    show_cli_sessions = bool(settings.get("show_cli_sessions"))
+    show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+    show_previous_messaging_sessions = bool(settings.get("show_previous_messaging_sessions"))
+    show_cron_sessions = bool(settings.get("show_cron_sessions"))
+    show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
+    show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
+    agent_session_source_filter = settings.get("agent_session_source_filter")
+    key = _session_list_cache_key(
+        active_profile=active_profile,
+        all_profiles=all_profiles,
+        show_cli_sessions=show_cli_sessions,
+        show_claude_code_sessions=show_claude_code_sessions,
+        show_previous_messaging_sessions=show_previous_messaging_sessions,
+        show_cron_sessions=show_cron_sessions,
+        include_archived=include_archived,
+        exclude_hidden=exclude_hidden,
+        visible_only=True,
+        show_webhook_sessions=show_webhook_sessions,
+        show_kanban_sessions=show_kanban_sessions,
+        source_filter=agent_session_source_filter,
+        sidebar_source=sidebar_source,
+        archived_limit=archived_limit,
+        archived_offset=archived_offset,
+    )
+    builder_kwargs = {
+        "active_profile": active_profile,
+        "all_profiles": all_profiles,
+        "show_cli_sessions": show_cli_sessions,
+        "show_claude_code_sessions": show_claude_code_sessions,
+        "show_previous_messaging_sessions": show_previous_messaging_sessions,
+        "show_cron_sessions": show_cron_sessions,
+        "include_archived": include_archived,
+        "exclude_hidden": exclude_hidden,
+        "visible_only": True,
+        "show_webhook_sessions": show_webhook_sessions,
+        "show_kanban_sessions": show_kanban_sessions,
+        "source_filter": agent_session_source_filter,
+        "sidebar_source": sidebar_source,
+        "archived_limit": archived_limit,
+        "archived_offset": archived_offset,
+    }
+    return key, builder_kwargs
+
+
+# The default /api/sessions shape the sidebar sends on first paint — mirrors
+# static/sessions.js `_sessionListQueryString()`: the webui source tab, no
+# project filter (so exclude_hidden=1), active profile only, no archived rows.
+_DEFAULT_SIDEBAR_REQUEST_SHAPE = {
+    "all_profiles": False,
+    "include_archived": False,
+    "exclude_hidden": True,
+    "archived_limit": None,
+    "archived_offset": 0,
+    "sidebar_source": "webui",
+}
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2752,6 +2853,73 @@ def _hidden_archived_sidebar_reference_sessions(
     return references
 
 
+def _start_session_list_cache_background_rebuild(key: tuple, event, builder, *,
+                                                 profile: str | None = None) -> None:
+    """Run ``builder`` off-thread for ``key`` and release the claim in every path.
+
+    ``event`` MUST be the event ``_session_list_cache_claim_rebuild(key)``
+    returned: ``_session_list_cache_done`` matches on event identity, so a
+    home-made ``threading.Event`` would leave the registered claim in place and
+    its waiters blocked. The thread is a daemon, and the claim is released in a
+    ``finally`` even when the builder raises.
+
+    ``profile`` (optional): run the WHOLE rebuild — the builder and the cache
+    write, whose source stamp resolves the active Hermes home — under this
+    profile's thread-local request context. The rebuild thread carries no request
+    cookie, so without this a rebuild keyed for a non-default profile would read
+    and stamp the process default profile's state.db; the slot would then be
+    invalidated on the first real request that reads it.
+    """
+    def _rebuild():
+        if profile:
+            try:
+                from api.profiles import set_request_profile
+                set_request_profile(profile)
+            except Exception:
+                pass
+        try:
+            rebuild_attempts = 0
+            while True:
+                invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                try:
+                    payload = builder()
+                except Exception:
+                    logger.exception(
+                        "session list stale-cache background rebuild failed"
+                    )
+                    return
+                if (
+                    _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                    and _session_list_cache_set(
+                        key,
+                        payload,
+                        expected_invalidation_stamp=invalidation_stamp,
+                    )
+                ):
+                    return
+                rebuild_attempts += 1
+                if rebuild_attempts >= 3:
+                    return
+        finally:
+            _session_list_cache_done(key, event)
+            if profile:
+                try:
+                    from api.profiles import clear_request_profile
+                    clear_request_profile()
+                except Exception:
+                    pass
+
+    try:
+        thread = threading.Thread(
+            target=_rebuild,
+            name="session-list-cache-rebuild",
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        _session_list_cache_done(key, event)
+
+
 def _get_cached_session_list_payload(
     *,
     key: tuple,
@@ -2783,43 +2951,16 @@ def _get_cached_session_list_payload(
                     diag.stage("session_list_cache_stale_background_rebuild")
                 except Exception:
                     pass
-
-            def _rebuild_stale_session_list_cache():
-                try:
-                    rebuild_attempts = 0
-                    while True:
-                        invalidation_stamp = _session_list_cache_invalidation_stamp(key)
-                        try:
-                            payload = builder()
-                        except Exception:
-                            logger.exception(
-                                "session list stale-cache background rebuild failed"
-                            )
-                            return
-                        if (
-                            _session_list_cache_invalidation_stamp(key) == invalidation_stamp
-                            and _session_list_cache_set(
-                                key,
-                                payload,
-                                expected_invalidation_stamp=invalidation_stamp,
-                            )
-                        ):
-                            return
-                        rebuild_attempts += 1
-                        if rebuild_attempts >= 3:
-                            return
-                finally:
-                    _session_list_cache_done(key, event)
-
-            try:
-                thread = threading.Thread(
-                    target=_rebuild_stale_session_list_cache,
-                    name="session-list-cache-rebuild",
-                    daemon=True,
-                )
-                thread.start()
-            except Exception:
-                _session_list_cache_done(key, event)
+            # Rebuild under the profile the key belongs to: this thread carries no
+            # request context, so without it a non-default profile's key would be
+            # rebuilt (and stamped) against the process default's home and the
+            # entry would be invalidated on the first request that reads it.
+            _start_session_list_cache_background_rebuild(
+                key,
+                event,
+                builder,
+                profile=_session_list_cache_key_profile(key),
+            )
         elif diag is not None:
             try:
                 diag.stage("session_list_cache_stale_return")
@@ -2911,6 +3052,279 @@ def _get_cached_session_list_payload(
             expected_invalidation_stamp=invalidation_stamp,
         )
     return payload
+
+
+# Upper bound on the number of profile slots the startup warm-up fills. Each
+# slot is one bounded sidebar rebuild on the warm daemon thread, so a large
+# profile set must not turn startup into N heavy builds; when the registry
+# reports more, the process default plus the next names are warmed and the cap
+# is reported in the [warmup] log line.
+_WARMUP_MAX_PROFILES = 4
+
+
+def _warmup_profile_recency_ns(path) -> int:
+    """Newest mtime among a profile's own session-store artifacts (0 when none).
+
+    Used only to ORDER the warm-up's remaining profiles, most recently used first.
+    The registry row already carries the profile home (``list_profiles_api()``),
+    so this reads data the registry points at — no new store. Deliberately NOT
+    ``state.db-shm`` (any reader touches it, including this warm-up's own reads,
+    which would make every warmed profile look recently used) and NOT the profile
+    home directory itself (the WebUI's per-profile ``webui_state`` resolution can
+    create entries in it, so its mtime measures setup, not use).
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return 0
+    try:
+        home = Path(raw).expanduser()
+    except Exception:
+        return 0
+    newest = 0
+    for candidate in (home / "state.db", home / "state.db-wal", home / "sessions"):
+        try:
+            newest = max(newest, int(candidate.stat().st_mtime_ns))
+        except OSError:
+            continue
+    return newest
+
+
+def _warmup_profile_names() -> tuple[list[str], int]:
+    """Return (profile names to warm IN WARM ORDER, profiles known pre-cap).
+
+    Order: the sticky/active profile first — the ``active_profile`` file
+    ``init_profile_state()`` reads at startup and process-wide switches write — then
+    the process default, then the remaining registry profiles by most-recently-used
+    (``_warmup_profile_recency_ns``; ties keep the registry's own order). The sticky
+    clause is a tie-break, not a claim about the returning browser: the WebUI's
+    profile switch is per-client (``process_wide=False``) and does not write that
+    file, and ``init_profile_state()`` reads the same file at startup, so on a
+    WebUI-only box the sticky name equals the process default and the order
+    degenerates to default-first (it diverges only when the file changed after
+    startup — CLI / another process / isolated-profile mode).
+
+    The warm-up runs on a daemon thread with no request context, so
+    ``get_active_profile_name()`` resolves the process default there — while a
+    real ``/api/sessions`` request resolves the browser's ``hermes_profile``
+    cookie via ``server.py`` → ``set_request_profile()``. Enumerating the same
+    registry surface the profile switcher uses (``list_profiles_api()``) means
+    cookie values map onto the warm order rather than only onto ``default``
+    (bounded by ``_WARMUP_MAX_PROFILES``).
+
+    The process default is always included (even if the registry call fails); the
+    sticky name is honored only when the registry reports it, so a stale
+    ``active_profile`` cannot burn one of the capped slots. The result is bounded
+    to ``_WARMUP_MAX_PROFILES`` and ``known`` is the pre-cap count.
+    """
+    from api import profiles as profiles_api
+
+    ordered: list[str] = []
+
+    def _add(name) -> None:
+        normalized = str(name or "").strip()
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+
+    sticky: str | None = None
+    try:
+        sticky = profiles_api.get_sticky_active_profile_name()
+    except Exception:
+        sticky = None
+
+    process_default: str
+    try:
+        process_default = profiles_api.get_active_profile_name()
+    except Exception:
+        process_default = "default"
+
+    rows: list = []
+    try:
+        rows = list(profiles_api.list_profiles_api() or [])
+    except Exception:
+        rows = []  # best-effort: the process default is always warmed
+
+    registry_names: list[str] = []
+    recency: dict[str, int] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            name, path = row.get("name"), row.get("path")
+        else:
+            name, path = getattr(row, "name", None), getattr(row, "path", None)
+        normalized = str(name or "").strip()
+        if not normalized or normalized in recency:
+            continue
+        registry_names.append(normalized)
+        recency[normalized] = _warmup_profile_recency_ns(path)
+
+    if sticky and sticky in recency:
+        _add(sticky)
+    _add(process_default)
+    # Stable sort: profiles with equal recency (or no session store at all) keep
+    # the registry's own enumeration order.
+    for name in sorted(registry_names, key=lambda candidate: -recency[candidate]):
+        _add(name)
+    return ordered[:_WARMUP_MAX_PROFILES], len(ordered)
+
+
+def _warmup_key_has_fresh_entry(profile: str, key: tuple) -> bool:
+    """Route-freshness check for ``key`` under ``profile``'s request context.
+
+    Uses the cache's own helper — the same ``allow_stale=False`` lookup the route
+    performs after waiting on a claim — so "fresh" here means exactly what it
+    means on the request path. The source stamp is profile-resolved
+    (``_active_state_db_path`` → ``get_active_hermes_home``), so the check must
+    run with the profile's thread-local context, otherwise a non-default slot
+    always looks stale.
+    """
+    from api.profiles import clear_request_profile, set_request_profile
+
+    set_request_profile(profile)
+    try:
+        _payload, fresh = _session_list_cache_get(key, allow_stale=False)
+        return bool(fresh)
+    finally:
+        clear_request_profile()
+
+
+def warm_default_session_list_cache(*, wait_timeout: float = 30.0) -> dict:
+    """Claim and drive background rebuilds for the sidebar's default shape.
+
+    Startup-only best-effort warm for the exact keys the frontend's first
+    ``/api/sessions?sidebar_source=webui&exclude_hidden=1`` request reads. The
+    warm-up runs on a daemon thread with no request context, so
+    ``get_active_profile_name()`` resolves the process default there — while a
+    real request resolves the browser's ``hermes_profile`` cookie per-thread
+    (``server.py`` → ``set_request_profile``). Warming only the process default
+    would fill a slot a non-default browser never reads, so every profile the
+    registry reports is warmed (bounded to ``_WARMUP_MAX_PROFILES``, process
+    default first; ``profiles_known`` carries the pre-cap count so the caller
+    can log the cap). Each rebuild runs under its profile's thread-local context
+    (``_start_session_list_cache_background_rebuild(profile=...)``) so both the
+    payload and the profile-resolved source stamp match what a cookie request
+    will compute.
+
+    Each rebuild goes through the registered claim event
+    (``_session_list_cache_claim_rebuild`` → ``_start_session_list_cache_background_rebuild``)
+    so any concurrent waiter is released by the normal ``_session_list_cache_done``
+    path; an already-owned key is left to its owner (``skipped``).
+
+    ``completed`` only means the claim event was signaled — builder exceptions,
+    exhausted invalidation retries and worker-start failures all signal it. The
+    reported outcome therefore comes from the cache itself: after the rebuild
+    settles, the key must hold a FRESH entry by the route's own freshness notion
+    (``_warmup_key_has_fresh_entry``). Per profile: ``ok`` (fresh entry landed),
+    ``failed`` (event signaled, no fresh entry), ``timeout`` (event never
+    signaled in the wait budget) or ``skipped`` (another rebuild owns the key).
+    The overall ``status`` is ``failed`` if any profile failed, else ``timeout``,
+    else ``ok`` if at least one landed, else ``skipped``; ``profiles_warmed``
+    counts the ``ok`` slots.
+
+    Warm order and budget: profiles' rebuilds are STARTED one at a time (a build
+    that outlives its slice keeps running while the next starts), in the order
+    ``_warmup_profile_names`` returns (sticky/active first, then the process
+    default, then most-recently-used), and each profile's wait is bounded to its
+    OWN slice of what is left of the overall deadline — ``wait_timeout`` divided by
+    the number of profiles still to warm (with the shipped ``_WARMUP_MAX_PROFILES``
+    cap of 4 and ``_WARMUP_SESSION_WAIT_SECONDS = 30.0`` that is at least 7.5 s
+    each; budget a fast profile leaves unused is redistributed to the ones behind
+    it). Serializing matters on a loaded box: four concurrent rebuilds under one
+    shared deadline contend with each other and with the first real request, and a
+    single slow profile would otherwise consume the whole window. Each entry also
+    carries the ``slice_seconds`` it was given, and ``profiles`` is in warm order.
+    A profile whose build is still running when its slice expires keeps its claim:
+    the slot fills later, and the honest outcome is ``timeout``.
+
+    Never raises: the returned stats dict carries the outcome for logging. The
+    builder writes what the request path already writes (the session index /
+    sidecars); it does not write state.db.
+    """
+    started = time.monotonic()
+    stats: dict = {
+        "owner": False,
+        "completed": False,
+        "key": None,
+        "status": "skipped",
+        "profiles": [],
+        "profiles_considered": 0,
+        "profiles_warmed": 0,
+        "profiles_known": 0,
+        "capped": False,
+        "elapsed_ms": 0,
+        "error": None,
+    }
+    try:
+        settings = load_settings()
+        names, known = _warmup_profile_names()
+        stats["profiles_known"] = known
+        stats["capped"] = known > len(names)
+        deadline = started + wait_timeout
+        entries: list[dict] = []
+        planned: list[tuple[str, tuple, dict]] = []
+        seen_keys: set = set()
+        for name in names:
+            key, builder_kwargs = _session_list_cache_request_plan(
+                settings, active_profile=name, **_DEFAULT_SIDEBAR_REQUEST_SHAPE
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            planned.append((name, key, builder_kwargs))
+        for index, (name, key, builder_kwargs) in enumerate(planned):
+            event, is_owner = _session_list_cache_claim_rebuild(key)
+            entry = {
+                "profile": name,
+                "key": key,
+                "owner": bool(is_owner),
+                "completed": False,
+                "fresh": False,
+                "status": "pending",
+            }
+            entries.append(entry)
+            if not is_owner:
+                entry["status"] = "skipped"
+                continue
+            # Serialized: this profile's rebuild is started only now — after the
+            # previous profile's wait — so starts never pile up (a build that
+            # outlived its slice may still be running alongside this one).
+            _start_session_list_cache_background_rebuild(
+                key,
+                event,
+                functools.partial(_build_session_list_cache_payload, **builder_kwargs),
+                profile=name,
+            )
+            slice_seconds = max(0.0, deadline - time.monotonic()) / max(
+                1, len(planned) - index
+            )
+            entry["slice_seconds"] = round(slice_seconds, 3)
+            entry["completed"] = bool(event.wait(slice_seconds))
+            if not entry["completed"]:
+                entry["status"] = "timeout"
+                continue
+            entry["fresh"] = _warmup_key_has_fresh_entry(entry["profile"], entry["key"])
+            entry["status"] = "ok" if entry["fresh"] else "failed"
+        stats["profiles"] = entries
+        stats["profiles_considered"] = len(entries)
+        stats["profiles_warmed"] = sum(
+            1 for entry in entries if entry["status"] == "ok"
+        )
+        statuses = {entry["status"] for entry in entries}
+        if "failed" in statuses:
+            stats["status"] = "failed"
+        elif "timeout" in statuses:
+            stats["status"] = "timeout"
+        elif "ok" in statuses:
+            stats["status"] = "ok"
+        owned = [entry for entry in entries if entry["owner"]]
+        stats["owner"] = bool(owned)
+        stats["completed"] = bool(owned) and all(entry["completed"] for entry in owned)
+        if entries:
+            stats["key"] = entries[0]["key"]
+    except Exception as exc:
+        stats["error"] = f"{type(exc).__name__}: {exc}"
+        stats["status"] = "error"
+    stats["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    return stats
+
 
 from api.config import (
     STATE_DIR,
@@ -14386,46 +14800,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
         try:
-            from api import profiles as profiles_api
-
             diag.stage("load_settings")
             settings = load_settings()
-            show_cli_sessions = bool(settings.get("show_cli_sessions"))
-            show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
-            show_previous_messaging_sessions = bool(
-                settings.get("show_previous_messaging_sessions")
-            )
-            show_cron_sessions = bool(settings.get("show_cron_sessions"))
-            show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
-            show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
-            agent_session_source_filter = settings.get("agent_session_source_filter")
-            active_profile = profiles_api.get_active_profile_name()
-            all_profiles = _all_profiles_enabled(parsed)
-            include_archived = _query_flag(parsed, "include_archived")
-            exclude_hidden = _query_flag(parsed, "exclude_hidden")
-            archived_limit = _query_positive_int(parsed, "archived_limit", default=None, maximum=2000)
-            archived_offset = _query_positive_int(parsed, "archived_offset", default=0, maximum=200000)
-            sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
-            if sidebar_source not in ("webui", "cli"):
-                sidebar_source = None
             # /api/sessions is the default sidebar contract, so keep the route-owned
             # visible-row filter in the shared cache builder for both cache hits and misses.
-            key = _session_list_cache_key(
-                active_profile=active_profile,
-                all_profiles=all_profiles,
-                show_cli_sessions=show_cli_sessions,
-                show_claude_code_sessions=show_claude_code_sessions,
-                show_previous_messaging_sessions=show_previous_messaging_sessions,
-                show_cron_sessions=show_cron_sessions,
-                include_archived=include_archived,
-                exclude_hidden=exclude_hidden,
-                visible_only=True,
-                show_webhook_sessions=show_webhook_sessions,
-                show_kanban_sessions=show_kanban_sessions,
-                source_filter=agent_session_source_filter,
-                sidebar_source=sidebar_source,
-                archived_limit=archived_limit,
-                archived_offset=archived_offset,
+            # Key AND builder kwargs come from ONE assembly shared with the
+            # startup warm-up (warm_default_session_list_cache), so the warm-up
+            # can only ever fill the slot this route reads.
+            key, builder_kwargs = _session_list_cache_request_plan(
+                settings, **_session_list_request_shape(parsed)
             )
             # Keep the visible /api/sessions contract unchanged even though the
             # heavy lifting now lives in the cache builder: profile scoping via
@@ -14434,22 +14817,7 @@ def handle_get(handler, parsed) -> bool:
             payload = _get_cached_session_list_payload(
                 key=key,
                 builder=lambda: _build_session_list_cache_payload(
-                    active_profile=active_profile,
-                    all_profiles=all_profiles,
-                    show_cli_sessions=show_cli_sessions,
-                    show_claude_code_sessions=show_claude_code_sessions,
-                    show_previous_messaging_sessions=show_previous_messaging_sessions,
-                    show_cron_sessions=show_cron_sessions,
-                    include_archived=include_archived,
-                    exclude_hidden=exclude_hidden,
-                    visible_only=True,
-                    show_webhook_sessions=show_webhook_sessions,
-                    show_kanban_sessions=show_kanban_sessions,
-                    source_filter=agent_session_source_filter,
-                    sidebar_source=sidebar_source,
-                    archived_limit=archived_limit,
-                    archived_offset=archived_offset,
-                    diag=diag,
+                    diag=diag, **builder_kwargs
                 ),
                 diag=diag,
             )

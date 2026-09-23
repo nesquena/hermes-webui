@@ -492,6 +492,21 @@ def get_active_profile_name() -> str:
     return _active_profile
 
 
+def get_sticky_active_profile_name() -> str:
+    """Return the STICKY active profile — the ``active_profile`` file, or 'default'.
+
+    Unlike ``get_active_profile_name()`` this ignores the request thread-local and
+    the process-level switch: it is the on-disk choice ``init_profile_state()``
+    reads at startup and process-wide switches write. Read-only and never creates
+    the file, so a background caller with no request context (the startup warm-up)
+    can order its work around it — as a tie-break: the WebUI's own profile switch
+    is per-client (``process_wide=False``) and does not write the file, and on a
+    plain start this equals the process default, so it degenerates to
+    default-first.
+    """
+    return _read_active_profile_file()
+
+
 def set_request_profile(name: str) -> None:
     """Set the per-request profile context for this thread.
 

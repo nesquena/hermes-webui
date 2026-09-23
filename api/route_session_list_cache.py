@@ -319,6 +319,24 @@ def _session_list_cache_profile_scope(profile: str | None) -> str:
     return normalized
 
 
+def _session_list_cache_key_profile(key) -> str | None:
+    """Return the profile a cache key belongs to, or None when it names none.
+
+    The key's first element is the profile scope (``_session_list_cache_profile_scope``
+    of the request's active profile), so this is the inverse of that
+    normalization. Callers that rebuild a key OUTSIDE a request (the startup
+    warm-up, the route's stale-path background rebuild) must run the rebuild
+    under this profile's thread-local context: the cache's source stamp resolves
+    the profile's Hermes home, so a rebuild in the process-default context stores
+    an entry that is source-stale for the profile the key belongs to.
+    """
+    if isinstance(key, (tuple, list)) and key:
+        profile = key[0]
+        if isinstance(profile, str) and profile.strip():
+            return profile.strip()
+    return None
+
+
 def _session_list_cache_key(
     active_profile: str | None,
     all_profiles: bool,

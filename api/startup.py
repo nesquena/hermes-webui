@@ -1,6 +1,6 @@
 """Hermes Web UI -- startup helpers."""
 from __future__ import annotations
-import os, stat, subprocess, sys
+import os, stat, subprocess, sys, threading, time
 from pathlib import Path
 
 # Credential files that should never be world-readable
@@ -11,6 +11,18 @@ _SENSITIVE_FILES = (
     '.signing_key',
     'auth.json',
 )
+
+# Cold-start warm-up (post-bind, best-effort). Disable with
+# HERMES_WEBUI_NO_WARMUP=1 (e.g. profiling, debugging a cold-path bug).
+_WARMUP_DISABLE_ENV = 'HERMES_WEBUI_NO_WARMUP'
+# Upper bound the warm thread waits for the session-list rebuild before it logs
+# and gives up. It never blocks readiness (daemon thread) and the claim stays
+# with the background rebuild either way, so waiters are still released. The
+# routes-side warm-up splits this budget into per-profile slices and warms one
+# profile at a time, so a single slow profile cannot consume the whole window.
+_WARMUP_SESSION_WAIT_SECONDS = 30.0
+_warmup_lock = threading.Lock()
+_warmup_started = False
 
 
 def fix_credential_permissions() -> None:
@@ -126,3 +138,140 @@ def auto_install_agent_deps() -> bool:
     except Exception as e:
         print(f'[!!] Auto-install error: {e}', flush=True)
         return False
+
+
+def _warmup_disabled() -> bool:
+    return os.environ.get(_WARMUP_DISABLE_ENV, '').strip().lower() in ('1', 'true', 'yes')
+
+
+def start_cold_start_warmup():
+    """Start the bounded post-bind cold-start warm-up thread (best-effort).
+
+    Called once right after the HTTP server has bound, so it can never delay
+    readiness. Returns the started thread, or None when disabled
+    (``HERMES_WEBUI_NO_WARMUP=1``) or already started this process. The thread is
+    a daemon and every failure inside it is logged, never raised.
+    """
+    global _warmup_started
+    if _warmup_disabled():
+        return None
+    with _warmup_lock:
+        if _warmup_started:
+            return None
+        _warmup_started = True
+    thread = threading.Thread(
+        target=_run_cold_start_warmup,
+        name='webui-cold-start-warmup',
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def start_cold_start_warmup_after_bind():
+    """Post-bind entry point for server.py: start the warm-up, never raise.
+
+    ``server.py`` calls this in ONE line after the socket has bound and before
+    ``serve_forever()`` (the wiring lives here so the thin routing shell stays
+    thin). Returns the warm-up thread, or None when the kill switch
+    (``HERMES_WEBUI_NO_WARMUP=1``) is set or an attempt already ran this process;
+    a failure to START the thread is logged, never raised, so startup always
+    proceeds to serve. The warm-up's own lifecycle is documented in
+    ARCHITECTURE.md ("Cold-start warm-up").
+    """
+    try:
+        return start_cold_start_warmup()
+    except Exception as e:
+        print(f'[!!] WARNING: cold-start warm-up failed to start: {e}', flush=True)
+        return None
+
+
+def _run_cold_start_warmup() -> dict:
+    """Warm the first-paint caches once; returns per-component stats.
+
+    Never raises.
+
+    Models: ``warm_models_catalog_provenance_if_cold()`` only — the disk-cache
+    provenance publish. Deliberately NOT ``get_available_models()``: that can
+    hold ``_available_models_cache_lock`` + ``_cache_build_in_progress`` for up
+    to 60 s (waiting on an in-flight live probe), which would make the first
+    user ``/api/models`` slower, not faster. The helper takes the lock
+    non-blocking and reads disk only, so this step is bounded.
+
+    Session list: claims the real default-shape cache key and drives the same
+    builder the route uses, as a background rebuild — the builder writes what
+    the request path already writes (the session index / sidecars), not state.db.
+    """
+    started = time.monotonic()
+    stats: dict = {}
+
+    t0 = time.monotonic()
+    try:
+        from api.config import warm_models_catalog_provenance_if_cold
+
+        warm_models_catalog_provenance_if_cold()
+        status = 'ok'
+    except Exception as exc:
+        status = f'failed ({type(exc).__name__}: {exc})'
+    stats['models_provenance'] = {
+        'status': status,
+        'elapsed_ms': int((time.monotonic() - t0) * 1000),
+    }
+
+    t0 = time.monotonic()
+    result: dict = {}
+    try:
+        from api.routes import warm_default_session_list_cache
+
+        result = warm_default_session_list_cache(
+            wait_timeout=_WARMUP_SESSION_WAIT_SECONDS
+        )
+        error = result.get('error')
+        if error:
+            status = f'failed ({error})'
+        else:
+            # The routes-side warm-up derives this from the cache itself: a
+            # signaled claim event alone (builder exception, exhausted
+            # invalidation retries, worker-start failure) is NOT success, so
+            # 'ok' here means the slot really holds a fresh cache entry.
+            status = str(result.get('status') or 'unknown')
+    except Exception as exc:
+        status = f'failed ({type(exc).__name__}: {exc})'
+    stats['session_list'] = {
+        'status': status,
+        'elapsed_ms': int((time.monotonic() - t0) * 1000),
+        'profiles': result.get('profiles') or [],
+        'profiles_warmed': result.get('profiles_warmed') or 0,
+        'profiles_considered': result.get('profiles_considered') or 0,
+        'profiles_known': result.get('profiles_known') or 0,
+        'capped': bool(result.get('capped')),
+    }
+
+    stats['total_ms'] = int((time.monotonic() - started) * 1000)
+    session_list = stats['session_list']
+    session_detail = f"{session_list['status']} {session_list['elapsed_ms']} ms"
+    if session_list['profiles_considered']:
+        session_detail += (
+            f" profiles={session_list['profiles_warmed']}"
+            f"/{session_list['profiles_considered']}"
+        )
+        if session_list['capped']:
+            session_detail += f" (capped of {session_list['profiles_known']} known)"
+        # The warm order (sticky/active first, then the process default, then
+        # most-recently-used) — the per-profile outcome is the profiles= ratio
+        # above, so an operator can tell which profile was warmed first.
+        order = ",".join(
+            str(entry.get("profile"))
+            for entry in session_list['profiles']
+            if isinstance(entry, dict) and entry.get("profile")
+        )
+        if order:
+            session_detail += f" order={order}"
+    print(
+        f"[warmup] cold-start warm-up finished in {stats['total_ms']} ms "
+        f"(models_provenance={stats['models_provenance']['status']} "
+        f"{stats['models_provenance']['elapsed_ms']} ms; "
+        f"session_list={session_detail})",
+        flush=True,
+    )
+    return stats

@@ -738,6 +738,22 @@ def _read_update_channel() -> str:
         return DEFAULT_UPDATE_CHANNEL
 
 
+# The badge is display-only, but /api/settings reads it on EVERY request and it
+# shells out to git describe (+ a dirty-suffix diff probe) — measured 4.1-10.4 s
+# per request on a loaded box. Memoize the string per (channel, repo) for a
+# short TTL: bounded work per TTL window, still picks up a channel switch or a
+# fresh checkout within a minute.
+_CHANNEL_VERSION_BADGE_TTL_SECONDS = 60.0
+_channel_version_badge_cache: dict[tuple[str, str], tuple[float, str]] = {}
+_channel_version_badge_cache_lock = threading.Lock()
+
+
+def _channel_version_badge_cache_reset() -> None:
+    """Drop the memoized display badge (tests; callers after an in-place update)."""
+    with _channel_version_badge_cache_lock:
+        _channel_version_badge_cache.clear()
+
+
 def channel_version_badge(channel=None) -> str:
     """Return a channel-scoped version string for the Settings display badge ONLY.
 
@@ -752,10 +768,28 @@ def channel_version_badge(channel=None) -> str:
     Returns the channel-matched ``git describe`` (e.g. ``v0.52.47`` on stable,
     ``exp-v0.52.51`` on experimental), or falls back to ``WEBUI_VERSION`` when no
     channel tag is reachable (fresh clone, Docker image without channel tags).
+
+    Memoized per (channel, repo path) for ``_CHANNEL_VERSION_BADGE_TTL_SECONDS``
+    so /api/settings does not pay a ``git describe`` subprocess on every request.
+    The response shape and the returned string are unchanged; the cache only
+    bounds how often the value is recomputed.
     """
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    cache_key = (channel, str(REPO_ROOT))
+    now = time.monotonic()
+    with _channel_version_badge_cache_lock:
+        cached = _channel_version_badge_cache.get(cache_key)
+        if cached is not None and (now - cached[0]) < _CHANNEL_VERSION_BADGE_TTL_SECONDS:
+            return cached[1]
+        value = _compute_channel_version_badge(channel)
+        _channel_version_badge_cache[cache_key] = (time.monotonic(), value)
+        return value
+
+
+def _compute_channel_version_badge(channel: str) -> str:
+    """Compute the channel-scoped badge (one ``git describe`` + dirty suffix)."""
     # NOTE: no ``--always`` here (deliberately different from _detect_webui_version).
     # The current version is channel-INDEPENDENT — it's just what's installed. The
     # channel only picks which tag family we compare AGAINST for updates. On a

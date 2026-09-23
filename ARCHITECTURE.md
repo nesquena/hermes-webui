@@ -65,7 +65,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
-      startup.py           Startup helpers: auto_install_agent_deps()
+      startup.py           Startup helpers: credential permissions, agent-dep install, post-bind cold-start warm-up (see 4.10)
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
       updates.py           Self-update check and release notes
@@ -474,6 +474,77 @@ split moves another name, route it through `agent_attr` and add pre-split and
 pointer-removed cases to `tests/test_agent_compat.py`. The resolver is
 compatibility-only: delete it, and import directly from the new homes, once the WebUI
 stops supporting Agents that predate the split.
+
+### 4.10 Cold-Start Warm-Up (post-bind, best-effort)
+
+`server.py` starts one warm-up right AFTER the HTTP socket has bound and BEFORE
+`serve_forever()` — the single line `start_cold_start_warmup_after_bind()` (wiring lives
+in `api/startup.py`, keeping the routing shell thin). It exists because the first sidebar
+load otherwise pays a multi-second cold build on the request path.
+
+Lifecycle and guarantees:
+
+- **One bounded attempt per process.** `api.startup.start_cold_start_warmup()` holds
+  `_warmup_started` under `_warmup_lock`, so later calls (or a second bind) return `None`.
+  The work runs on ONE daemon thread (`webui-cold-start-warmup`): it can never delay
+  readiness and never keeps the process alive at shutdown. A failure to start the thread
+  is logged (`[!!] WARNING: cold-start warm-up failed to start: …`), never raised.
+- **Failures are logged, not fatal.** Every step is wrapped; a failing component is
+  reported in the single `[warmup] cold-start warm-up finished in N ms (…)` line and the
+  process serves normally.
+- **Kill switch.** `HERMES_WEBUI_NO_WARMUP=1` (`true`/`yes` accepted) disables the whole
+  warm-up for that process — use it when profiling, or when debugging a cold-path bug
+  that the warm-up would mask. When disabled no `[warmup]` line is printed at all.
+- **What it warms.** (a) The models catalog provenance **disk** cache
+  (`warm_models_catalog_provenance_if_cold()`): disk-only, takes the models cache lock
+  non-blocking, and deliberately never enters the live provider-catalog rebuild (which can
+  hold `_available_models_cache_lock` for up to 60 s and would make the first `/api/models`
+  slower, not faster). (b) The sidebar session-list cache slot for the frontend's default
+  request shape (`sidebar_source=webui` + `exclude_hidden=1`), driven through the same
+  claim/rebuild machinery the route uses (`api/routes.py: warm_default_session_list_cache`,
+  `_start_session_list_cache_background_rebuild`). The warm-up runs on a thread with no
+  request context, so it warms **every profile the registry reports** (deduped, bounded to
+  `_WARMUP_MAX_PROFILES = 4`; the cap is reported in the `[warmup]` line as
+  `capped of N known`) — each rebuild runs under that profile's thread-local context so
+  both the payload and the profile-resolved cache source stamp match what the browser's
+  `hermes_profile` cookie will resolve on its first request. The builder writes what the
+  request path already writes (session index / sidecars); it does not write `state.db`.
+- **Warm order** (`_warmup_profile_names`): the **sticky/active profile first** — the
+  `active_profile` file `init_profile_state()` reads at startup and process-wide switches
+  write — then the **process default**, then the remaining registry profiles
+  **most-recently-used first**. The sticky clause is a tie-break, not a claim about the
+  returning browser: the WebUI's own profile switch is per-client (`process_wide=False`)
+  and does not write that file, and `init_profile_state()` reads the same file at startup,
+  so on a WebUI-only box the sticky name equals the process default and the order
+  degenerates to default-first (it diverges only when the file changed after startup —
+  CLI / another process / isolated-profile mode). What covers the likely profiles is the
+  ordering guarantee — the first slot is warmed first and cannot be starved — plus the MRU
+  order for the rest. Recency is read from the registry rows' own `path`
+  (`state.db` / `state.db-wal` / `sessions` mtime; ties keep the registry's order — no new
+  store, and deliberately not `state.db-shm` or the profile home, which readers/WebUI state
+  resolution touch). The sticky name is honored only when the registry reports it, so a
+  stale `active_profile` cannot burn one of the capped slots; the process default is always
+  included, even when the registry call fails.
+- **One profile's rebuild started at a time, each with its own slice of the budget.**
+  `warm_default_session_list_cache(wait_timeout=…)` claims, starts and waits for one
+  profile's rebuild before it touches the next, so the starts are serialized: a build that
+  outlives its slice keeps running while the next starts (measured overlap 2 on a slow-first
+  profile; bounded by the timed-out builds + 1, versus the old all-at-once launch), and a
+  slow profile cannot consume the window the profiles behind it need. Each profile's wait
+  is bounded to `remaining / profiles-left` of the overall deadline: with the shipped cap of
+  4 and `_WARMUP_SESSION_WAIT_SECONDS = 30.0` that is at least 7.5 s per profile, and budget
+  a fast profile leaves unused is redistributed to the ones behind it. The wait is the only
+  thing bounded — a build that outlives its slice keeps its claim and still fills the slot
+  when it finishes; the reported outcome for it is `timeout`, not a lie about the cache.
+  Each per-profile entry carries the `slice_seconds` it was given, and `profiles` is in
+  warm order, which the `[warmup]` line prints as `order=<names>`.
+- **Reported outcome ≠ event completion.** The claim event is signaled even when the
+  builder raises, so the `[warmup]` line reports what the cache actually holds: per
+  profile `ok` (fresh entry landed) / `failed` (event signaled, no fresh entry) /
+  `timeout` (no completion inside its slice) / `skipped` (another rebuild owns the key),
+  plus `profiles=warmed/considered` and `order=…`. A cold-start request that arrives while
+  a rebuild is still running still pays that build; the warm-up removes the build from the
+  request path for requests that arrive after it completes.
 
 ---
 
