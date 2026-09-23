@@ -35,6 +35,8 @@ import queue
 import threading
 import types
 
+from tests._wakeup_helpers import live_wakeup_origin  # noqa: F401 — autouse fixture
+
 
 # --------------------------------------------------------------------------
 # Fakes / fixtures (mirrors test_process_complete_ab_coexistence +
