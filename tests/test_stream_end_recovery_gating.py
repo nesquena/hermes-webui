@@ -88,11 +88,11 @@ def test_stream_end_fallback_helper_clears_owner_state_before_closing():
     fn = _function_body("_finalizeStreamEndFallback")
     assert "_terminalStateReached=true;" in fn
     assert "_streamFinalized=true;" in fn
-    assert "_clearOwnerInflightState();" in fn
+    assert "_clearOwnerInflightState(source);" in fn
     assert "_clearApprovalForOwner();" in fn
     assert "_clearClarifyForOwner('terminal');" in fn
     assert "renderMessages({preserveScroll:true});" in fn
-    assert "_setActivePaneIdleIfOwner();" in fn
+    assert "_setActivePaneIdleIfOwner(source);" in fn
     assert "_closeSource(source)" in fn
 
 

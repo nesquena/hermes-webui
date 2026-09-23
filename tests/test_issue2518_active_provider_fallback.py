@@ -41,6 +41,72 @@ def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
 
+def _matching_delimiter(src: str, start: int, opener: str, closer: str) -> int:
+    """Return the matching delimiter while ignoring JS strings/comments."""
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    i = start
+    while i < len(src):
+        char = src[i]
+        next_char = src[i + 1] if i + 1 < len(src) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            i += 1
+            continue
+        if block_comment:
+            if char == "*" and next_char == "/":
+                block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            i += 1
+            continue
+        if char == "/" and next_char == "/":
+            line_comment = True
+            i += 2
+            continue
+        if char == "/" and next_char == "*":
+            block_comment = True
+            i += 2
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise AssertionError(f"unbalanced JavaScript {opener}{closer} pair")
+
+
+def _function_source(src: str, name: str) -> str:
+    """Extract a complete function declaration with brace-balanced parsing."""
+    marker = f"function {name}("
+    start = src.find(marker)
+    assert start != -1, f"function {name} not found"
+    declaration_start = start - len("async ") if src[start - 6:start] == "async " else start
+    params_start = src.find("(", start)
+    params_end = _matching_delimiter(src, params_start, "(", ")")
+    body_start = src.find("{", params_end)
+    assert body_start != -1, f"function {name} body not found"
+    body_end = _matching_delimiter(src, body_start, "{", "}")
+    return src[declaration_start : body_end + 1]
+
+
 # ---------------------------------------------------------------------------
 # Client-side: source-shape check that the fallback is wired in newSession().
 # ---------------------------------------------------------------------------
@@ -51,9 +117,7 @@ class TestClientFallbackSourceShape:
 
     def test_active_provider_fallback_present(self):
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        assert idx != -1
-        body = src[idx:idx + 6000]
+        body = _function_source(src, "newSession")
         assert "window._activeProvider" in body, (
             "newSession() must consult window._activeProvider when the dropdown "
             "did not yield a truthy model_provider (cold boot, empty "
@@ -62,8 +126,7 @@ class TestClientFallbackSourceShape:
 
     def test_previous_session_fallback_present(self):
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 6000]
+        body = _function_source(src, "newSession")
         assert "S.session&&S.session.model_provider" in body, (
             "newSession() must fall back to the previous session's "
             "model_provider when neither the dropdown nor window._activeProvider "
@@ -73,8 +136,7 @@ class TestClientFallbackSourceShape:
     def test_fallback_chain_order(self):
         """Fallback order: explicit > _activeProvider > prev-session > null."""
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 6000]
+        body = _function_source(src, "newSession")
         explicit = body.find("newModelState.model_provider")
         active = body.find("window._activeProvider")
         prev = body.find("S.session&&S.session.model_provider")
@@ -88,11 +150,7 @@ class TestClientFallbackSourceShape:
     def test_issue_referenced_in_source(self):
         """Future readers should be able to trace this back to the issue."""
         src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        # Window covers the model-fallback region of newSession(); the function
-        # has grown over time (e.g. pre-session toolset staging #4490), so keep
-        # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 5000]
+        body = _function_source(src, "newSession")
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."
@@ -205,16 +263,12 @@ def _provider_assignment_in_new_session() -> str:
             || (_bareModel ? (window._activeProvider || (S.session && S.session.model_provider)) : null)
             || null;
 
-    Both lines live in the same 4000-char slice of newSession()'s
-    function body, so the helper can read them as a single contract
-    unit. Anchors on the ``=`` of the assignment (not a prose mention
-    in a comment) and on the guard declaration so future comments
-    referencing ``reqBody.model_provider`` cannot confuse it.
+    Anchors on the ``=`` of the assignment (not a prose mention in a
+    comment) and on the guard declaration so future comments referencing
+    ``reqBody.model_provider`` cannot confuse it.
     """
     src = _read("static/sessions.js")
-    idx = src.find("async function newSession(flash, options={}){")
-    assert idx != -1, "newSession() must be defined in static/sessions.js"
-    body = src[idx : idx + 7000]
+    body = _function_source(src, "newSession")
     guard_start = body.find("const _bareModel")
     assert guard_start != -1, (
         "newSession() must declare a 'const _bareModel' guard for the "

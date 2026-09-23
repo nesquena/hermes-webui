@@ -165,6 +165,10 @@ Requirements:
   mutate the visible pane for another session.
 - A terminal event should settle the same turn it belongs to, or route through
   a background/error path if the user is no longer viewing that session.
+- Clearing the active-pane stream flag does not revoke an in-flight terminal
+  snapshot restore. Trailing transport or metadata events must not cancel that
+  restore; a newer attachment or optimistic turn still supersedes its authority.
+  Release the retained snapshot owner on both success and failure.
 - Sidebar state should not contradict the visible owner. If the sidebar says a
   session is running, opening it should show live work, a restoring/degraded
   state, or an honest terminal state.

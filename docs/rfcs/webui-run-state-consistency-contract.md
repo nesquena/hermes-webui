@@ -49,6 +49,13 @@ parent's workspace binding. Clients without this handling must reload the
 session before retrying. Server wakeups, regeneration semantics and Gateway
 routing are not silently retargeted by this recovery path.
 
+A rejected optimistic send must release its replaced parent attachment before
+awaiting continuation loading, including when that load later fails or loses a
+navigation race. Release removes the old transport registration and retained
+owner payload; it must not close a newer, unreplaced attachment. A pending
+terminal snapshot keeps its owner until replacement, after which its late
+response must not overwrite the continuation or a newer turn.
+
 ## Goals
 
 - Define the state layers involved in active and recovered WebUI turns.

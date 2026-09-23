@@ -187,6 +187,8 @@ const assert = require('node:assert/strict');
 let S={session:{session_id:'old'}}, INFLIGHT={old:{}};
 const calls=[];
 const stopApprovalPolling=()=>{},stopClarifyPolling=()=>{},removeThinking=()=>{},setBusy=()=>{},setComposerStatus=()=>{},showToast=()=>{};
+// Attachment semantics are covered by the composed #6304 harness.
+const _releaseReplacedLiveAttachment=sid=>calls.push(['release',sid]);
 const loadSession=async sid=>{calls.push(['load',sid]);S.session={session_id:sid}};
 const _restoreComposerDraftAfterFailedSend=(...args)=>calls.push(['restore',...args]);
 const api=()=>{throw Error('must not repost')};
@@ -194,12 +196,13 @@ const api=()=>{throw Error('must not repost')};
 const err={status:409,body:JSON.stringify({code:'session_rotated',continuation_session_id:'new'})};
 const files=[{name:'drawing.png'}], promise=Promise.resolve();
 assert.equal(await _recoverCompressedSend(err,'old','conclusion?',files,promise),true);
-assert.deepEqual(calls[0],['load','new']);
-assert.deepEqual(calls[1],['restore','conclusion?',files,'new',promise]);
+assert.deepEqual(calls[0],['release','old']);
+assert.deepEqual(calls[1],['load','new']);
+assert.deepEqual(calls[2],['restore','conclusion?',files,'new',promise]);
 assert.equal(INFLIGHT.old,undefined);
 assert.equal(await _recoverCompressedSend({status:500},'new','x',[],promise),false);
 assert.equal(await _recoverCompressedSend(err,'old','x',[],promise),false);
-assert.equal(calls.length,2);
+assert.equal(calls.length,3);
 })().catch(e=>{console.error(e);process.exit(1)});
 '''
     subprocess.run(['node', '-e', helper + script], check=True, timeout=15)
