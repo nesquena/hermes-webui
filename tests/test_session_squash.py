@@ -543,6 +543,33 @@ def test_injected_failure_rolls_back_exactly(env, monkeypatch, stage):
     _assert_unchanged(env, before)
 
 
+def test_legacy_state_schema_without_session_rows_is_nonprojecting(env):
+    _make_session(env)
+    db = env.home / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, active INTEGER)")
+        conn.execute("INSERT INTO messages (session_id, active) VALUES (?, 1)", ("other-session",))
+    job, _ = _squash()
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["state_barrier"] == "no-session-rows"
+    with sqlite3.connect(db) as conn:
+        assert {row[1] for row in conn.execute("PRAGMA table_info(messages)")} == {"id", "session_id", "active"}
+        assert conn.execute("SELECT active FROM messages WHERE session_id = ?", ("other-session",)).fetchall() == [(1,)]
+
+
+def test_legacy_state_schema_without_session_id_fails_closed(env):
+    _make_session(env)
+    db = env.home / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, active INTEGER)")
+    before_bytes = (env.sessions_dir / f"{SID}.json").read_bytes()
+    job, _ = _squash()
+    assert job["status"] == "error" and "required squash barrier" in job["error"]
+    assert (env.sessions_dir / f"{SID}.json").read_bytes() == before_bytes
+    with sqlite3.connect(db) as conn:
+        assert {row[1] for row in conn.execute("PRAGMA table_info(messages)")} == {"id", "active"}
+
+
 def test_missing_state_barrier_schema_rolls_back_without_success(env):
     _make_session(env)
     db = env.home / "state.db"
