@@ -7636,11 +7636,32 @@ def _resolve_compatible_session_model_state(
     # state, so a normalized display answer silently reroutes the next turn
     # to a backend the user did not pick.
     #
-    # Only fires when BOTH model and provider are present on the call: empty
-    # model or empty provider still need the catalog as a default-model
-    # backstop, and the persisted pair is incomplete in those cases.
+    # Only fires when BOTH model and provider are present AND the request is
+    # an ``@provider:model`` form whose provider is statically known or
+    # configured. Everything else must fall through to the
+    # compatibility-repair path below, because that path is what fixes stuck
+    # stale selections:
+    #
+    #   * a provider that no longer exists (``@removed:mistral-large`` /
+    #     ``removed``) has nothing left to preserve — the browser echoes the
+    #     stale pair back (static/sessions.js:3022, marked explicit at
+    #     static/messages.js:1822) and ``/api/chat/start`` routes to a provider
+    #     that is gone. ``_provider_is_known_or_configured()`` decides this
+    #     from the static provider registry + config state, never from the cold
+    #     catalog, and is the same predicate the slow path uses below for its
+    #     preserve-vs-repair split (catalog-absence has two causes: a
+    #     cold live-discovery provider that is still configured, vs a
+    #     genuinely removed one).
+    #   * the legacy non-``@`` forms (``openai/gpt-5.4-mini`` /
+    #     ``openai-codex`` — a stale OpenRouter-shaped id from before Codex
+    #     persisted its provider) are exactly what compatibility repair exists
+    #     for; a cold wakeup must still repair them to the active default.
     if catalog.get("_non_authoritative") and model and requested_provider:
-        return model, requested_provider, False
+        _bare_model_hint, _hinted_provider = _split_provider_qualified_model(model)
+        if _hinted_provider and _provider_is_known_or_configured(
+            _hinted_provider
+        ):
+            return model, requested_provider, False
 
     # Profile-aware resolution: when the caller supplies profile context
     # (not an explicit per-chat override), use the profile's provider and

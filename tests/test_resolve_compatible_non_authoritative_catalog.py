@@ -239,6 +239,103 @@ def test_resolver_still_normalizes_against_authoritative_catalog(
 
 
 # ---------------------------------------------------------------------------
+# 1b. Narrowed guard — removed providers and legacy non-@ forms must STILL
+#     be repaired against a non-authoritative catalog (re-review #7568 round 7,
+#     nesquena-hermes 2026-09-23)
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_still_repairs_removed_provider_against_non_authoritative_catalog(
+    no_copilot_in_providers_cfg,
+):
+    """A session pointing at a REMOVED provider must still be repaired on a
+    cold load even when the catalog is non-authoritative (round 7).
+
+    The round-6 guard was too broad: it returned any complete persisted pair
+    verbatim, so a session whose provider no longer exists
+    (``@removed:mistral-large`` / ``removed``) never repaired to the active
+    default — the browser echoed the stale pair back
+    (static/sessions.js:3022, marked explicit at static/messages.js:1822) and
+    ``/api/chat/start`` routed to a provider that is gone. The narrowed guard
+    only passes through a ``@provider:model`` whose provider is statically
+    known or configured; ``removed`` is neither, so the request must fall
+    through to the real compatibility-repair path below.
+    """
+    # Premise: this provider must genuinely be statically unknown, otherwise
+    # the test silently stops exercising the repair path.
+    assert cfg._provider_is_known_or_configured("removed") is False, (
+        "test premise: 'removed' must not be in the static provider registry "
+        "or configured anywhere, else this regression no longer covers the "
+        "round-7 removed-provider finding"
+    )
+
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ) as mock_catalog:
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "@removed:mistral-large", "removed"
+            )
+        )
+
+    assert mock_catalog.call_count == 1, (
+        "the resolver must still consult the catalog on the repair path"
+    )
+    assert effective_model == "gpt-5.5", (
+        f"removed provider was NOT repaired on a cold non-authoritative "
+        f"catalog: got model {effective_model!r} (review #7568 round 7)"
+    )
+    assert effective_provider == "openai-codex", (
+        f"removed provider was NOT repaired on a cold non-authoritative "
+        f"catalog: got provider {effective_provider!r} (review #7568 round 7)"
+    )
+    assert normalized is True, (
+        "a repaired pair must be reported as normalized so callers know the "
+        "stale selection was replaced"
+    )
+
+
+def test_resolver_still_repairs_legacy_codex_model_against_non_authoritative_catalog(
+    no_copilot_in_providers_cfg,
+):
+    """A legacy OpenAI-Codex session model must still be repaired on a cold
+    non-authoritative catalog (round 7).
+
+    ``openai/gpt-5.4-mini`` / ``openai-codex`` is the legacy non-``@`` shape:
+    the round-6 guard passed it through verbatim, so a cold server wakeup kept
+    the stale model, while ``origin/master`` repairs it to the current Codex
+    default (``gpt-5.5`` / ``openai-codex``). The narrowed guard must not fire
+    for non-``@`` forms — they are exactly what compatibility repair exists
+    for.
+    """
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ) as mock_catalog:
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "openai/gpt-5.4-mini", "openai-codex"
+            )
+        )
+
+    assert mock_catalog.call_count == 1, (
+        "the resolver must still consult the catalog on the repair path"
+    )
+    assert effective_model == "gpt-5.5", (
+        f"legacy Codex model was NOT repaired on a cold non-authoritative "
+        f"catalog: got model {effective_model!r} (review #7568 round 7)"
+    )
+    assert effective_provider == "openai-codex", (
+        f"legacy Codex model was NOT repaired on a cold non-authoritative "
+        f"catalog: got provider {effective_provider!r} (review #7568 round 7)"
+    )
+    assert normalized is True, (
+        "the legacy Codex repair must be reported as a normalization"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2. Display response — what GET /api/session?resolve_model=1 returns
 # ---------------------------------------------------------------------------
 
