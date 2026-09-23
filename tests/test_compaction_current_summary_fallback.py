@@ -333,6 +333,8 @@ function _formatInServerTz() { return ''; }
 function _formatMessageFooterTimestamp() { return ''; }
 function _questionJumpButtonHtml() { return ''; }
 function _formatTurnTps() { return ''; }
+// No hidden background-wakeup rows in this transcript: default-preserving stub.
+function _hasHiddenProcessWakeupBoundaryBefore() { return false; }
 function isTpsDisplayEnabled() { return false; }
 function _renderAttachmentHtml() { return ''; }
 function _isMarkerOnlyAssistantCompressionMessage() { return false; }
