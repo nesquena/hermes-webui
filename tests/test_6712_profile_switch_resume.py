@@ -862,18 +862,7 @@ def test_an_unowned_new_session_still_installs_normally():
 # these schedules — which is exactly what the gate asked for.
 
 
-def test_a_superseded_profile_load_writes_nothing():
-    """B1: `A load starts -> B advances switch authority and completes without
-    starting loadSession -> A resolves`, asserting A performs NO session,
-    storage, URL, stream or transcript writes.
-
-    `loadSession()` folded profile-switch ownership only into its 409 recovery
-    path; the normal metadata/message path used the load generation alone, so a
-    switch that took its no-load fallback left A as the current load — free to
-    install S.session/localStorage/URL/stream/transcript under B's cookie.
-    """
-    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function loadSession(")
-    js = r"""
+_SUPERSEDED_LOAD_TEMPLATE = js = r"""
 const params = __PARAMS__;
 
 // ── module state the shipped body touches ────────────────────────────────────
@@ -1047,18 +1036,38 @@ __LOAD_SESSION_BODY__
     messages: (S.messages || []).map(m => m.content),
     rearm: calls.rearm,
     bodyFetches: calls.bodyFetches,
+    loadingSid: (_loadingSessionId === undefined ? 'undefined' : _loadingSessionId),
   }));
 })();
 """
+
+
+def _run_superseded_profile_load():
+    """Drive the real `loadSession()` for a switch-owned load that loses ownership.
+
+    Switch B advances authority and takes its no-load fallback while A's metadata
+    request is in flight, so nothing replaces A: by the load generation alone A is
+    still the current load.
+    """
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function loadSession(")
     ownership = _read(SESSIONS_JS_PATH)
     ownership = ownership[ownership.index("function _profileSwitchOwnsLoad("):]
     ownership = ownership[: ownership.index("\n}\n") + 3]
-    js = js.replace("__OWNERSHIP_BODY__", ownership).replace(
+    js = _SUPERSEDED_LOAD_TEMPLATE.replace("__OWNERSHIP_BODY__", ownership).replace(
         "__LOAD_SESSION_BODY__", body).replace("__PARAMS__", json.dumps(
         {"sid": "A-sid", "switchGen": 1, "genAfter": 2}))
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
-    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_superseded_profile_load_writes_nothing():
+    """B1 (gate round 8): a switch-owned load that lost ownership writes nothing.
+
+    Asserts A installs no session, leaves localStorage/URL/stream untouched, fetches
+    no body and does not report success.
+    """
+    out = _run_superseded_profile_load()
     assert out["session"] == "seed", (
         f"a superseded profile load installed {out['session']!r} into S.session — the "
         f"browser now holds a session under the cookie the newer switch owns: {out}"
@@ -1080,6 +1089,29 @@ __LOAD_SESSION_BODY__
     assert out["returned"] == "undefined", (
         f"a superseded load must not report success: {out}"
     )
+
+
+def test_a_superseded_profile_load_releases_its_loading_marker():
+    """Greptile P1 (round 9): the stale exit must not strand `_loadingSessionId`.
+
+    When a switch-owned load loses profile-switch ownership and nothing replaces it,
+    the load's own stale exit is the only writer left. Marker ownership therefore has
+    to be narrower than the install predicate: a load still owns the marker until a
+    newer loadSession() supersedes it, so readers of the form
+    `_loadingSessionId !== null && _loadingSessionId !== sid` stop rejecting the
+    current pane.
+    """
+    out = _run_superseded_profile_load()
+    assert out["loadingSid"] is None, (
+        f"the superseded profile load left _loadingSessionId={out['loadingSid']!r} "
+        f"behind: the abandoned session stays marked as loading, which suppresses "
+        f"active-session reconciliation and rejects current-pane stream events until "
+        f"another navigation overwrites the marker (Greptile P1, round 9): {out}"
+    )
+    # The installs must still be refused — narrowing the marker must not reopen B1.
+    assert out["session"] == "seed", out
+    assert out["stored"] is None, out
+    assert out["urls"] == [], out
 
 
 def test_message_body_without_session_is_a_failed_resume():

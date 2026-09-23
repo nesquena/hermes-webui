@@ -114,8 +114,12 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
     # #6712 (gate round 8): ownership is the load generation AND the switch
     # generation the load started under — combined in ONE predicate so every
     # guard site (metadata path included) shares it.
-    assert "_isCurrentLoad = () => _loadingSessionId === sid" in body
+    # #6712 (round 9): the predicate is composed of two named helpers — marker
+    # ownership (load generation only) and the install predicate that adds the
+    # switch generation on top.
+    assert "_ownsLoadMarker = () => _loadingSessionId === sid" in body
     assert "_loadSessionGeneration === _loadGeneration" in body
+    assert "_isCurrentLoad = () => _ownsLoadMarker() && _profileSwitchOwnsLoad(_loadSwitchGen)" in body
     assert "_profileSwitchOwnsLoad(_loadSwitchGen)" in body, (
         "loadSession() must fold profile-switch ownership into its guard, not "
         "only into the 409 recovery path"

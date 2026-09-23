@@ -68,7 +68,8 @@ def test_load_session_acknowledges_visit_before_and_after_message_load():
     block = _load_session_block()
     # Metadata-arrival acknowledgment.
     first_ack = block.find("_acknowledgeSessionVisit(\n    S.session.session_id,")
-    loading_clear = block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
+    # #6712 (round 9): the marker clear uses the marker-ownership predicate.
+    loading_clear = block.find("if (_ownsLoadMarker()) _loadingSessionId = null;\n\n  // Re-acknowledge")
     second_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
 
     assert first_ack != -1, "loadSession must acknowledge the visit when metadata arrives"
@@ -86,7 +87,7 @@ def test_post_load_reack_is_guarded_by_active_view():
     # correctly marked unread — an UNCONDITIONAL post-load ack would wrongly
     # clear that hidden-tab-completion marker.
     block = _load_session_block()
-    loading_clear = block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
+    loading_clear = block.find("if (_ownsLoadMarker()) _loadingSessionId = null;\n\n  // Re-acknowledge")
     guard = block.find("_isSessionActivelyViewedForList(sid)", loading_clear)
     second_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
     assert guard != -1 and guard < second_ack, (

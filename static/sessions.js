@@ -1865,9 +1865,18 @@ async function loadSession(sid){
   const _loadSwitchGen = (opts.profileSwitchOwned && typeof opts.switchGen === 'number')
     ? opts.switchGen
     : null;
-  const _isCurrentLoad = () => _loadingSessionId === sid
-    && _loadSessionGeneration === _loadGeneration
-    && _profileSwitchOwnsLoad(_loadSwitchGen);
+  // Ownership of the in-flight MARKER is deliberately separate from ownership of
+  // the INSTALLS below. A load the user is waiting on owns the marker until a
+  // newer loadSession() supersedes it — but a profile switch taking over is not a
+  // supersede, so folding the switch into the marker predicate would strand the
+  // marker when this load takes a stale exit: every stale exit clears the marker
+  // through the same predicate, and readers such as
+  // `if (_loadingSessionId !== null && _loadingSessionId !== sid) return;` would
+  // then keep rejecting the current pane's reconciliation and stream events until
+  // another navigation overwrote it (Greptile P1 on #6712, round 9).
+  const _ownsLoadMarker = () => _loadingSessionId === sid
+    && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentLoad = () => _ownsLoadMarker() && _profileSwitchOwnsLoad(_loadSwitchGen);
   // The same ownership token, forwarded to _ensureMessagesLoaded() so a stale
   // message response cannot write the transcript either. Keeps the load's opts
   // in one place instead of re-spelling them at each call site.
@@ -2035,7 +2044,7 @@ async function loadSession(sid){
            && opts.switchGen !== _profileSwitchGeneration){
           return false;
         }
-        if (_isCurrentLoad()) _loadingSessionId = null;
+        if (_ownsLoadMarker()) _loadingSessionId = null;
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
@@ -2050,6 +2059,11 @@ async function loadSession(sid){
     // load, re-arm the active session's stream and bail before any DOM mutation
     // or self-heal.
     if (!_isCurrentLoad()) {
+      // Marker ownership is narrower than install ownership (Greptile P1, round 9):
+      // a superseded switch is not a superseded LOAD, so this exit is the last
+      // writer the marker has. Release it, or the abandoned session stays marked
+      // as loading and readers reject the current pane.
+      if (_ownsLoadMarker()) _loadingSessionId = null;
       _rearmActiveSessionStream();
       return;
     }
@@ -2070,7 +2084,7 @@ async function loadSession(sid){
         if(!currentSid || currentSid===sid){
           try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
+          if (_ownsLoadMarker()) _loadingSessionId = null;
           if(!currentSid){
             throw e;
           }
@@ -2094,7 +2108,7 @@ async function loadSession(sid){
     // NOT restart — doing so would spin the SSE reconnect loop against a dead
     // session_id.
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
-    if (_isCurrentLoad()) _loadingSessionId = null;
+    if (_ownsLoadMarker()) _loadingSessionId = null;
     // The session stream was stopped unconditionally at the top of this load
     // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
     // lines below, but this failure exit never reaches that point — leaving
@@ -2123,7 +2137,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
-    if (_isCurrentLoad()) _loadingSessionId = null;
+    if (_ownsLoadMarker()) _loadingSessionId = null;
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
     _rearmActiveSessionStream();
@@ -2137,6 +2151,7 @@ async function loadSession(sid){
     // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
     // newer load arms its own sid).
     _rearmActiveSessionStream();
+    if (_ownsLoadMarker()) _loadingSessionId = null;
     return;
   }
   // #2980: if this (current) load resolved a hidden pre-compression snapshot,
@@ -2302,6 +2317,7 @@ async function loadSession(sid){
       _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch(e) {
       if (!_isCurrentLoad()) {
+        if (_ownsLoadMarker()) _loadingSessionId = null;
         _rearmActiveSessionStream();
         return;
       }
@@ -2309,6 +2325,7 @@ async function loadSession(sid){
       if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     }
     if (!_isCurrentLoad()) {
+      if (_ownsLoadMarker()) _loadingSessionId = null;
       _rearmActiveSessionStream();
       return;
     }
@@ -2421,6 +2438,7 @@ async function loadSession(sid){
       _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch (e) {
       if (!_isCurrentLoad()) {
+        if (_ownsLoadMarker()) _loadingSessionId = null;
         _rearmActiveSessionStream();
         return;
       }
@@ -2434,11 +2452,14 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
-      if (_isCurrentLoad()) _loadingSessionId = null;
+      if (_ownsLoadMarker()) _loadingSessionId = null;
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) {
+      if (_ownsLoadMarker()) _loadingSessionId = null;
+      return;
+    }
     // #6712 (gate round 8): the body was not accepted (lost ownership, or a
     // response without `session`). Record it so loadSession() reports failure
     // and the profile-switch resume runs its fresh-session fallback instead of
@@ -2562,7 +2583,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  if (_isCurrentLoad()) _loadingSessionId = null;
+  if (_ownsLoadMarker()) _loadingSessionId = null;
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in
