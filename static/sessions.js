@@ -7778,7 +7778,14 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // trigger from archived to filtered-out. A cross-surface WebUI child of a
       // genuinely external (messaging/CLI) parent is handled by the parentIsExternal
       // branch above and still orphans as before.
-      if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
+      //
+      // The cross-surface marker alone under-covers this: the server only sets
+      // it when the child's source differs from its parent's. Under nested
+      // delegation (a subagent that itself delegated) parent and child are both
+      // raw source `subagent`, so the marker is absent; key the suppression on
+      // the delegated raw role too. Ordinary same-source WebUI children of an
+      // absent parent keep their top-level fallback.
+      if(child&&_isChildSession(child)&&(child._cross_surface_child_session||childIsDelegatedSubagent)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
