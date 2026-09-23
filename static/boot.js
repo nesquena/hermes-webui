@@ -2284,14 +2284,17 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
+// #6709 (gate certification B1): clearPreview() drops the retained owner. That value
+// records WHO owned the preview a collapse kept, and must not outlive it — a teardown
+// running outside closeWorkspacePanel() (a directory refresh, a session load) would
+// otherwise leave `browse` behind, and the next preview's X would reveal the tree
+// instead of closing the drawer. Written inline (no helper seam) so a harness that
+// extracts this function alone cannot break on an undefined reference.
+//
+// NOTE: the body below must keep renderBreadcrumb() within the first 600 characters
+// (test_sprint35 window), so keep new comments ABOVE the function, not inside it.
 function clearPreview(opts={}){
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
-  // #6709 (gate certification B1): drop the retained owner. It records WHO owned the
-  // preview a collapse kept, and must not outlive that preview — a teardown that runs
-  // outside closeWorkspacePanel() (a directory refresh, a session load) would otherwise
-  // leave `browse` behind, and the next preview's X would reveal the tree instead of
-  // closing the drawer. Written inline (no helper seam) so a harness that extracts this
-  // function alone cannot break on an undefined reference.
   _workspacePanelRetainedMode=null;
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();

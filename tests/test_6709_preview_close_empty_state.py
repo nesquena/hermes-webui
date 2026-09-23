@@ -329,7 +329,7 @@ _SCROLL_VARIANTS = {
         "extra": (
             "await openFile('file-031.txt');\n"
             "renderFileTree();\n"
-            "const extra = {snapshot: S._wsBrowseScrollTop};"
+            "const extra = {snapshot: S._wsBrowseScrollTop, scope: S._wsBrowseScrollScope};"
         ),
         "close": "clearPreview({keepPanelOpen:true});",
         "post": "",
@@ -546,6 +546,29 @@ def test_file_to_file_switch_keeps_tree_scroll_snapshot():
     close = data["close"]
     assert extra["snapshot"] == 600, extra
     assert close["display"] == "", close
+    assert close["scrollTop"] == 600, close
+    assert close["snapshot"] is None, close
+
+
+def test_file_to_file_switch_keeps_the_scroll_scope_too():
+    """Greptile P1: a second preview opened while the tree is ALREADY hidden must keep
+    the offset *and* its browse identity. Clearing the scope there made the next
+    renderFileTree() see a mismatch and drop the offset, so closing the second preview
+    returned a long tree to the top instead of the position captured before the FIRST
+    preview opened."""
+    data = _run_scroll("switch")
+    extra = data["extra"]
+    close = data["close"]
+    assert extra["snapshot"] == 600, extra
+    # the scope survived the second openFile() — a file-to-file switch happens on the
+    # same browse surface, so its identity must not be cleared
+    assert extra["scope"] is not None, (
+        f"the file-to-file switch dropped the browse scope, so the next render would "
+        f"treat the surviving offset as a mismatch and reset a long tree to the top "
+        f"(Greptile P1): {extra}"
+    )
+    assert extra["scope"].get("dir") == ".", extra
+    # …and the reader's position still survives the close
     assert close["scrollTop"] == 600, close
     assert close["snapshot"] is None, close
 

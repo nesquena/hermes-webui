@@ -1150,9 +1150,14 @@ async function openFile(path, opts={}){
       workspace: (typeof S!=='undefined'&&S&&S.session&&S.session.workspace)?String(S.session.workspace):null,
       dir: (typeof S!=='undefined'&&S&&S.currentDir!=null)?String(S.currentDir):null,
     };
-  } else {
-    S._wsBrowseScrollScope=null;
   }
+  // #6709 (Greptile P1): when the tree is ALREADY hidden — a file-to-file switch inside an
+  // open preview — keep the offset AND its scope untouched. Clearing either here made the
+  // next renderFileTree() see a scope mismatch and drop the offset, so closing the second
+  // preview returned a long tree to the top instead of the position captured before the
+  // FIRST preview opened. The existing offset describes this same browse surface (the
+  // identity check in renderFileTree() re-validates it against the live model), and only a
+  // visible tree may replace it.
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
