@@ -100,7 +100,14 @@ function _isSessionCurrentPane(sid) {
     const paneProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
       ? S.session.profile.trim()
       : 'default';
-    if(!_paneProfileMatchesActiveProfile(paneProfile, S.activeProfile)) return false;
+    if(!_paneProfileMatchesActiveProfile(paneProfile, S.activeProfile)){
+      // Rejected — but if the last root scope was not a resolved server listing, this
+      // may be a renamed root we simply cannot prove yet. Kick one refresh + re-arm so
+      // the pane reconnects instead of going silent forever; a no-op once a resolved
+      // scope holds a matching alias (Greptile P1, round 14).
+      if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope();
+      return false;
+    }
   }
   return true;
 }

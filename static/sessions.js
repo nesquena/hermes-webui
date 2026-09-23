@@ -640,15 +640,15 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
   return {isCron, profile: profile || ''};
 }
 
-// A profile name provably resolving to the root profile: the literal
-// 'default' alias, or a roster entry flagged is_default (renamed root).
-// Unknown names fail closed — exact-name matching still applies to them.
-// Root-alias resolution for profile-scope AUTHORITY. Prefers the canonical set the
-// server delivers atomically with the active-profile state (`S.activeProfileRootNames`,
-// from /api/profile/active and /api/profile/switch). The roster fallback below is only
-// for surfaces that were never authority inputs - the roster starts empty, can be five
-// minutes stale from localStorage, and is warmed only after the window-load timer, so it
-// cannot answer during a cold boot (Greptile gate, round 12).
+// Root-alias resolution for profile-scope AUTHORITY. The ONLY admissible input is the
+// canonical set the server delivers atomically with the active-profile state
+// (`S.activeProfileRootNames`, from /api/profile/active and /api/profile/switch). The
+// UI roster (_profilesCache) and the server's memoized root-name cache are both
+// unacceptable here: the roster starts empty / can be five minutes stale from
+// localStorage, and the memoized cache is only invalidated by mutations this process
+// performed — an out-of-band rename would leave stale aliases deciding authority
+// (Greptile gate rounds 12-14, AGENTS.md "scope caches by the complete identity",
+// "for authority checks fail closed when safety cannot be confirmed").
 function _activeProfileRootNamesSet(){
   if(typeof S !== 'undefined' && S && Array.isArray(S.activeProfileRootNames)
      && S.activeProfileRootNames.length){
@@ -657,11 +657,19 @@ function _activeProfileRootNamesSet(){
   return null;
 }
 
+// False when the last payload's root scope was the fail-closed default rather than a
+// resolved listing (server `root_names_authoritative === false`). Authority fails
+// closed either way; this only decides whether we REVALIDATE so a renamed root is not
+// silently rejected for the life of the page (Greptile P1, round 14).
+function _activeProfileRootNamesResolved(){
+  return !(typeof S !== 'undefined' && S && S.activeProfileRootNamesAuthoritative === false);
+}
+
 // Canonical-scope root admission for AUTHORITY (pane/frame/stream). Deliberately
 // stricter than `_cronProfileNameIsRootAlias` below: that helper serves cron-marker
 // scope, where an eventually-consistent roster is an acceptable input, but it must
-// never decide stream authority (gate round 13). With no canonical scope in hand we
-// fail CLOSED — an unknown name is not admitted as the renamed root.
+// never decide stream authority. With no canonical scope in hand we fail CLOSED — an
+// unknown name is not admitted as the renamed root.
 function _canonicalProfileRootAlias(name){
   if (name === 'default') return true;
   const serverRoots = (typeof _activeProfileRootNamesSet === 'function')
@@ -1803,11 +1811,40 @@ function _rearmActiveSessionStream(){
   // session — and /api/session/stream is keyed by session id alone, with frames
   // carrying no profile, so that profile's turns could attach to this pane. The
   // switch owns arming its own session, so leave arming to it.
-  const sessionProfile = (S.session && typeof S.session.profile === 'string' && S.session.profile.trim())
+  const paneProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
     ? S.session.profile.trim()
     : 'default';
-  if(!_paneProfileMatchesActiveProfile(sessionProfile, S.activeProfile || 'default')) return;
+  if(!_paneProfileMatchesActiveProfile(paneProfile, S.activeProfile)){
+    // Rejected, but the last root scope was not a resolved listing: this may be a
+    // renamed root we simply cannot prove yet. Refresh the scope and re-arm rather
+    // than letting the pane go silent (fail closed, then reconcile). The call is a
+    // no-op once a resolved scope holds a matching alias.
+    if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope();
+    return;
+  }
   startSessionStream(activeSid);
+}
+
+// Revalidate the canonical root scope from the server when the last snapshot was not
+// a resolved view, then reconcile this pane's stream. Single-flight: concurrent pane
+// events during a failure window must not stampede the endpoint. On success we adopt
+// the fresh scope and re-arm, which is exactly what "reconnect the stream when server
+// root metadata changes" requires — a renamed root that was absent from the stale
+// scope no longer silently stops receiving live updates (Greptile P1, round 14).
+let _profileRootScopeRefresh = null;
+function _revalidateActiveProfileRootScope(){
+  if(typeof _activeProfileRootNamesResolved === 'function' && _activeProfileRootNamesResolved()) return;
+  if(_profileRootScopeRefresh) return;
+  if(typeof api !== 'function') return;
+  _profileRootScopeRefresh = api('/api/profile/active', {redirect401: false})
+    .then((d) => {
+      if(!d || typeof d !== 'object') return;
+      if(Array.isArray(d.root_names) && typeof S !== 'undefined' && S) S.activeProfileRootNames = d.root_names.slice();
+      if(typeof S !== 'undefined' && S) S.activeProfileRootNamesAuthoritative = d.root_names_authoritative !== false;
+      _rearmActiveSessionStream();
+    })
+    .catch(() => { /* stale scope: authority stays fail-closed until a later snapshot */ })
+    .finally(() => { _profileRootScopeRefresh = null; });
 }
 
 function _sessionProfileMismatchFromError(e){

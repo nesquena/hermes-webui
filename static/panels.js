@@ -7186,6 +7186,7 @@ async function switchToProfile(name) {
     S.activeProfileRootNames = Array.isArray(data.root_names)
       ? data.root_names.slice()
       : null;
+    S.activeProfileRootNamesAuthoritative = data.root_names_authoritative !== false;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }

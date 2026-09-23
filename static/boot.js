@@ -3591,6 +3591,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           profile: p.name || 'default',
           isDefault: !!p.is_default,
           rootNames: Array.isArray(p.root_names) ? p.root_names : null,
+          // False when the server listing failed and `root_names` is just the
+          // fail-closed default: authority still fails closed, but it REVALIDATES
+          // instead of treating that partial set as the final word (round 14).
+          rootNamesAuthoritative: p.root_names_authoritative !== false,
         };
       }
       if (p === undefined && !alreadyAttempted) {
@@ -3633,6 +3637,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   S.activeProfileRootNames = Array.isArray(activeProfileState.rootNames)
     ? activeProfileState.rootNames.slice()
     : null;
+  S.activeProfileRootNamesAuthoritative = activeProfileState.rootNamesAuthoritative !== false;
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

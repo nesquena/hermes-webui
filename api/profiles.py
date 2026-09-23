@@ -449,30 +449,43 @@ def _is_root_profile(name: str) -> bool:
         return name in _root_profile_name_cache
 
 
-def _root_profile_names() -> list[str]:
-    """Canonical root-profile alias set, resolved server-side.
+def _root_profile_scope_payload() -> dict:
+    """`root_names` + `root_names_authoritative` from ONE listing."""
+    names, authoritative = _root_profile_scope()
+    return {'root_names': names, 'root_names_authoritative': authoritative}
 
-    Same source of truth as `_is_root_profile` (the legacy 'default' alias plus
-    every name `list_profiles_api()` reports with is_default=True), exposed so the
-    WebUI can decide profile-scope authority WITHOUT consulting its own eventually
-    consistent profile roster. The frontend cache starts empty, may be up to five
-    minutes stale from localStorage, and is warmed only after the window-load
-    timer - so it cannot answer during a cold boot.
-    Fail-open: never raise on a boot-critical path.
+
+def _root_profile_scope() -> tuple[list[str], bool]:
+    """Canonical root-alias scope, resolved server-side, plus whether it is COMPLETE.
+
+    The single source of the root-alias set for profile-scope authority. Same source
+    of truth as `_is_root_profile`: the legacy 'default' alias plus every name
+    ``list_profiles_api()`` reports with is_default=True — so the WebUI can decide
+    authority WITHOUT consulting its own eventually consistent roster (which starts
+    empty, may be five minutes stale from localStorage, and is warmed only after the
+    window-load timer, so it cannot answer during a cold boot).
+
+    Returns ``(names, authoritative)``. ``authoritative=False`` means the listing
+    raised and *names* is the fail-closed default alias, not a resolved view of the
+    profiles that exist; the client then revalidates from a fresh snapshot instead of
+    treating that partial set as the final word.
+
+    The memoized `_root_profile_name_cache` is deliberately NOT used here: it is
+    invalidated only by mutations this process performs (create/clone/delete), so a
+    root renamed out-of-band while the WebUI stays up would leave stale aliases
+    deciding authority. AGENTS.md: authority checks fail closed, and caches are scoped
+    by the complete identity.
+
+    Reachability note: both callers (GET /api/profile/active and POST
+    /api/profile/switch) build their payload alongside `list_profiles_api()` in the
+    SAME request, so a listing that raises here also fails that response. This branch
+    exists to keep authority fail-closed, not as a routine path. Never raises.
     """
     try:
         infos = list_profiles_api()
     except Exception:
-        # Do NOT publish a partial set as authoritative: the client prefers a
-        # non-empty canonical set and would stop consulting its own roster, so
-        # emitting just ['default'] here would reject a restored session tagged
-        # with the renamed root and its stream would never be reopened. Fall back
-        # to the memoized root-name cache, which already knows the renamed alias.
-        logger.debug("Failed to list profiles for root-name lookup", exc_info=True)
-        with _root_profile_name_cache_lock:
-            if _root_profile_name_cache_loaded:
-                return sorted(_root_profile_name_cache)
-        return ['default']
+        logger.debug("Failed to list profiles for root-name scope", exc_info=True)
+        return ['default'], False
     names = {'default'}
     for p in infos:
         try:
@@ -480,7 +493,7 @@ def _root_profile_names() -> list[str]:
                 names.add(p['name'])
         except (AttributeError, TypeError):
             continue
-    return sorted(names)
+    return sorted(names), True
 
 
 def _profiles_match(row_profile, active_profile) -> bool:
@@ -1807,7 +1820,11 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         # Canonical root-alias set for profile-scope authority in the WebUI, carried
         # with the switch result so it is atomic with the new active profile — the
         # client's own roster is not an authority input (Greptile gate, round 12).
-        'root_names': _root_profile_names(),
+        # One resolution for both fields: the canonical root-alias set and whether
+        # it is a RESOLVED view or the fail-closed default. The client revalidates on
+        # a non-authoritative scope instead of treating ['default'] as the final word
+        # (Greptile P1, round 14).
+        **_root_profile_scope_payload(),
         'default_model': default_model,
         'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,

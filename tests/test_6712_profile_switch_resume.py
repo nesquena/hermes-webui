@@ -1372,6 +1372,11 @@ const params = __PARAMS__;
 const S = { session: params.session, activeProfile: params.activeProfile };
 let started = [];
 function startSessionStream(sid){ started.push(sid); }
+// Revalidation is a network hop; the harness records the REQUEST. The contract under
+// test is "an unresolved scope must ask instead of silently rejecting", and the
+// recovered case proves a resolved scope is adopted and re-armed.
+let revalidated = false;
+function _revalidateActiveProfileRootScope(){ revalidated = true; }
 let _loadingSessionId = null;
 
 // The production ownership helper, injected verbatim.
@@ -1521,10 +1526,18 @@ const params = __PARAMS__;
 
 const S = { session: params.session, activeProfile: params.activeProfile,
             activeProfileIsDefault: !!params.activeProfileIsDefault,
-            activeProfileRootNames: params.rootNames };
+            activeProfileRootNames: params.rootNames,
+            // False == the server listing failed, so this scope is the fail-closed
+            // default rather than a resolved view of the profiles that exist.
+            activeProfileRootNamesAuthoritative: !!params.rootNamesAuthoritative };
 let _loadingSessionId = null;
 let started = [];
 function startSessionStream(sid){ started.push(sid); }
+// Revalidation is a network hop; the harness records the REQUEST. The contract under
+// test is "an unresolved scope must ask instead of silently rejecting", and the
+// recovered case proves a resolved scope is adopted and re-armed.
+let revalidated = false;
+function _revalidateActiveProfileRootScope(){ revalidated = true; }
 // Server-provided profile cache: the entry flagged is_default IS the root, whatever
 // its name — that is exactly how a renamed root is reported. Gate round 13: authority
 // no longer comes from this roster, so the harness also carries the CANONICAL scope
@@ -1552,9 +1565,11 @@ __HELPER_BODY__
 
 __REARM_BODY__
 
+const pane = _isSessionCurrentPane('pane');
 const rearm = (() => { _rearmActiveSessionStream(); return started.slice(); })();
 console.log(JSON.stringify({
-  pane: _isSessionCurrentPane('pane'),
+  pane: pane,
+  revalidated: revalidated,
   rearm: rearm,
 }));
 """
@@ -1585,6 +1600,7 @@ def _run_renamed_root(*, pane_profile, active_profile, active_is_default, profil
             # Canonical scope, as delivered by /api/profile/active: the root-flagged
             # roster entries ARE the canonical root names.
             "rootNames": [p["name"] for p in profiles if p.get("is_default") and p.get("name")] or None,
+            "rootNamesAuthoritative": True,
         }))
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
@@ -1731,10 +1747,18 @@ const params = __PARAMS__;
 // has not been fetched yet. Authority must still resolve.
 const S = { session: params.session, activeProfile: params.activeProfile,
             activeProfileIsDefault: !!params.activeProfileIsDefault,
-            activeProfileRootNames: params.rootNames };
+            activeProfileRootNames: params.rootNames,
+            // False == the server listing failed, so this scope is the fail-closed
+            // default rather than a resolved view of the profiles that exist.
+            activeProfileRootNamesAuthoritative: !!params.rootNamesAuthoritative };
 let _loadingSessionId = null;
 let started = [];
 function startSessionStream(sid){ started.push(sid); }
+// Revalidation is a network hop; the harness records the REQUEST. The contract under
+// test is "an unresolved scope must ask instead of silently rejecting", and the
+// recovered case proves a resolved scope is adopted and re-armed.
+let revalidated = false;
+function _revalidateActiveProfileRootScope(){ revalidated = true; }
 
 function _profileMatchesActiveProfile(profile, activeProfile){
   const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
@@ -1764,15 +1788,17 @@ __HELPER_BODY__
 
 __REARM_BODY__
 
+const pane = _isSessionCurrentPane('pane');
 const rearm = (() => { _rearmActiveSessionStream(); return started.slice(); })();
-console.log(JSON.stringify({ pane: _isSessionCurrentPane('pane'), rearm: rearm }));
+console.log(JSON.stringify({ pane: pane, rearm: rearm, revalidated: revalidated }));
 """
 
 
 def _run_authority(*, pane_profile, active_profile, active_is_default, root_names,
-                   stale_roster=False):
+                   stale_roster=False, root_names_authoritative=True):
     src_js = _read(SESSIONS_JS_PATH)
-    for name in ("_activeProfileRootNamesSet", "_canonicalProfileRootAlias",
+    for name in ("_activeProfileRootNamesSet", "_activeProfileRootNamesResolved",
+                 "_canonicalProfileRootAlias",
                  "_cronProfileNameIsRootAlias", "_paneProfileMatchesActiveProfile"):
         helper = src_js[src_js.index("function %s(" % name):]
         if name == "_cronProfileNameIsRootAlias":
@@ -1783,7 +1809,8 @@ def _run_authority(*, pane_profile, active_profile, active_is_default, root_name
             helper = helper[: helper.index("\n}\n") + 3]
         globals()["_h_" + name] = helper
     helpers = "\n".join(globals()["_h_" + n] for n in
-                        ("_activeProfileRootNamesSet", "_canonicalProfileRootAlias",
+                        ("_activeProfileRootNamesSet", "_activeProfileRootNamesResolved",
+                         "_canonicalProfileRootAlias",
                          "_cronProfileNameIsRootAlias", "_paneProfileMatchesActiveProfile"))
     rearm = src_js[src_js.index("function _rearmActiveSessionStream("):]
     rearm = rearm[: rearm.index("\n}\n") + 3]
@@ -1796,6 +1823,7 @@ def _run_authority(*, pane_profile, active_profile, active_is_default, root_name
             "activeProfile": active_profile,
             "activeProfileIsDefault": active_is_default,
             "rootNames": root_names,
+            "rootNamesAuthoritative": bool(root_names_authoritative),
             "staleRoster": bool(stale_roster),
         }))
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
@@ -1833,9 +1861,9 @@ def test_profile_authority_ignores_a_stale_roster_in_the_other_direction():
 
 
 def test_a_stale_roster_cannot_grant_stream_authority():
-    """Gate round 13: the previous "stale roster" case never actually created a stale
-    roster, so it could not catch the roster fallback. This one does — and asserts the
-    fallback cannot grant authority in EITHER direction."""
+    """Gate round 13 + Greptile round 14: a stale roster must not stand in for canonical
+    authority. This harness genuinely creates the stale states (a real roster insisting
+    `kinni` is root, a genuinely unresolved scope), which the earlier case did not."""
     # A roster insisting `kinni` is the root, with NO canonical scope resolved: the
     # roster must not stand in for canonical authority.
     no_scope = _run_authority(pane_profile="kinni", active_profile="default",
@@ -1843,6 +1871,25 @@ def test_a_stale_roster_cannot_grant_stream_authority():
                               stale_roster=True)
     assert no_scope["pane"] is False and no_scope["rearm"] == [], (
         f"a stale roster granted stream authority with no canonical scope: {no_scope}"
+    )
+    # A genuinely UNRESOLVED scope (server listing failed -> fail-closed default) must
+    # not be treated as a resolved view of the profiles that exist.
+    unresolved = _run_authority(pane_profile="kinni", active_profile="default",
+                                active_is_default=True, root_names=["default"],
+                                root_names_authoritative=False, stale_roster=True)
+    assert unresolved["pane"] is False, (
+        f"an unresolved scope must still fail closed: {unresolved}"
+    )
+    assert unresolved["revalidated"] is True, (
+        f"an unresolved scope must trigger revalidation instead of silently rejecting "
+        f"the renamed root for the life of the page (Greptile P1, round 14): {unresolved}"
+    )
+    # …and revalidation must actually RECONNECT the pane once a resolved scope arrives.
+    recovered = _run_authority(pane_profile="kinni", active_profile="default",
+                               active_is_default=True, root_names=["default", "kinni"],
+                               root_names_authoritative=True, stale_roster=True)
+    assert recovered["pane"] is True and recovered["rearm"] == ["pane"], (
+        f"a resolved scope must re-admit the renamed root and re-arm its stream: {recovered}"
     )
     # A roster still listing a name the canonical scope does NOT: canonical wins.
     stale_extra = _run_authority(pane_profile="rogue-root", active_profile="default",
@@ -2078,19 +2125,21 @@ def test_marker_is_retired_when_ownership_is_lost_at_each_abandonment_exit():
         f"{out['markerAfterSwitchRecovery']!r} installed (gate G2): {out}"
     )
 
-# ── Greptile round 13: a failed listing must not publish a partial root set ───
+# ── Greptile round 14: authority never comes from a stale cache ───────────────
 #
-# `_root_profile_names()` returns `['default']` when `list_profiles_api()` raises.
-# The client prefers a non-empty canonical set and stops consulting its roster, so
-# publishing that partial set would reject a restored session tagged with the
-# renamed root — its stream would never be reopened. The memoized root-name cache
-# already knows the renamed alias, so the failure path must fall back to it.
+# `_root_profile_scope()` must fail closed to ['default'] when the listing raises,
+# and must NOT publish the memoized root-name cache: that cache is invalidated only
+# by mutations this process performed, so a root renamed out-of-band while the WebUI
+# stays up would leave stale aliases deciding authority (AGENTS.md: authority checks
+# fail closed; caches scoped by the complete identity). The same failure is reported
+# as NON-authoritative so the client revalidates instead of treating the partial set
+# as the final word.
 
 PROFILES_PY = REPO_ROOT / "api" / "profiles.py"
 
 
-def _run_root_names_on_failure(*, cache_loaded: bool):
-    """Call the real `_root_profile_names()` with the profile listing failing."""
+def _run_root_scope_on_failure(*, cache_loaded: bool):
+    """Drive the real `_root_profile_scope()` with the profile listing failing."""
     py = textwrap.dedent("""
         import json
         import sys
@@ -2102,22 +2151,80 @@ def _run_root_names_on_failure(*, cache_loaded: bool):
             p._root_profile_name_cache.add('kinni')
             p._root_profile_name_cache_loaded = {loaded!r}
         p.list_profiles_api = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
-        print(json.dumps(p._root_profile_names()))
+        names, authoritative = p._root_profile_scope()
+        print(json.dumps({{'names': names, 'authoritative': authoritative}}))
     """).format(repo=str(REPO_ROOT), loaded=cache_loaded)
     proc = subprocess.run([sys.executable, "-c", py], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, f"probe failed:\n{proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def test_a_failed_profile_listing_keeps_the_cached_root_alias():
-    """Greptile round 13: the renamed root must survive a failed listing."""
-    names = _run_root_names_on_failure(cache_loaded=True)
-    assert "kinni" in names, (
-        f"a failed profile listing published {names!r}, dropping the renamed root; the "
-        f"client prefers a non-empty canonical set, so its pane/stream authority would "
-        f"reject a restored renamed-root session (Greptile P1, round 13)"
+def test_a_failed_listing_fails_closed_and_never_publishes_the_stale_cache():
+    """Greptile round 14: stale memoized aliases must not become authority."""
+    loaded = _run_root_scope_on_failure(cache_loaded=True)
+    assert loaded["names"] == ["default"], (
+        f"a failed listing published the memoized cache instead of failing closed: "
+        f"{loaded!r}. A root renamed out-of-band never invalidates that cache, so its "
+        f"stale aliases would become canonical authority (Greptile P1, round 14)."
     )
-    assert "default" in names, names
-    # Cold cache (nothing proved yet) still fails closed to the literal alias.
-    cold = _run_root_names_on_failure(cache_loaded=False)
-    assert cold == ["default"], cold
+    assert loaded["authoritative"] is False, (
+        f"a failed listing must be reported NON-authoritative so the client revalidates "
+        f"rather than treating ['default'] as final: {loaded!r}"
+    )
+    cold = _run_root_scope_on_failure(cache_loaded=False)
+    assert cold["names"] == ["default"] and cold["authoritative"] is False, cold
+
+
+def test_a_successful_listing_is_authoritative():
+    """Positive control for the fail-closed path above."""
+    import api.profiles as p
+    scope_names, authoritative = p._root_profile_scope()
+    assert scope_names and scope_names[0] == "default", scope_names
+    assert authoritative is True, (
+        f"a successful listing must be authoritative, otherwise the client revalidates "
+        f"forever: {scope_names!r}"
+    )
+
+
+# ── Greptile round 14: fail closed, then RECONCILE ────────────────────────────
+#
+# With an unresolved root scope a renamed-root pane is correctly rejected — but the
+# pane must not go silent for the life of the page. The pane-frame guard has to request
+# one refresh so the stream reconnects once a resolved scope arrives. This pins the
+# guard's own hook, not the re-arm path (which also requests it).
+
+_PANE_HOOK_HARNESS = r"""
+const params = __PARAMS__;
+const S = { session: params.session, activeProfile: params.activeProfile,
+            activeProfileIsDefault: !!params.activeProfileIsDefault };
+let _loadingSessionId = null;
+let revalidated = false;
+function _revalidateActiveProfileRootScope(){ revalidated = true; }
+// Reject everything: the point is what the guard does about a rejection.
+function _paneProfileMatchesActiveProfile(){ return false; }
+__PANE_BODY__
+console.log(JSON.stringify({ pane: _isSessionCurrentPane('pane'), revalidated: revalidated }));
+"""
+
+
+def test_a_rejected_pane_requests_scope_revalidation():
+    """Greptile round 14: a rejected pane must ask for a fresh scope, not go silent."""
+    pane = _read(MESSAGES_JS_PATH)
+    pane_body = pane[pane.index("function _isSessionCurrentPane("):]
+    pane_body = pane_body[: pane_body.index("\n}\n") + 3]
+    js = _PANE_HOOK_HARNESS.replace("__PANE_BODY__", pane_body).replace(
+        "__PARAMS__", json.dumps({
+            "session": {"session_id": "pane", "profile": "kinni"},
+            "activeProfile": "default",
+            "activeProfileIsDefault": True,
+        }))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["pane"] is False, (
+        f"the guard must still reject an unprovable pane (fail closed): {out}"
+    )
+    assert out["revalidated"] is True, (
+        f"a rejected pane went silent without requesting a fresh root scope, so a renamed "
+        f"root would stop receiving live updates permanently (Greptile P1, round 14): {out}"
+    )
