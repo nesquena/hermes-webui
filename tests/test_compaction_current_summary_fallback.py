@@ -333,6 +333,7 @@ function _formatInServerTz() { return ''; }
 function _formatMessageFooterTimestamp() { return ''; }
 function _questionJumpButtonHtml() { return ''; }
 function _formatTurnTps() { return ''; }
+function _reasoningEffortChipLabel() { return ''; }
 function isTpsDisplayEnabled() { return false; }
 function _renderAttachmentHtml() { return ''; }
 function _isMarkerOnlyAssistantCompressionMessage() { return false; }
