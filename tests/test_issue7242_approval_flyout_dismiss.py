@@ -422,6 +422,8 @@ globalThis.localStorage = {
 };
 globalThis.setTimeout = (fn) => { if (typeof fn === "function") { fn(); } return 1; };
 globalThis.clearTimeout = () => {};
+globalThis.setInterval = (fn) => 1;
+globalThis.clearInterval = () => {};
 
 let apiCalls = [];
 let apiImpl = async () => { throw new Error("no apiImpl configured"); };
@@ -441,6 +443,10 @@ function showApproval(pending, sid) {
   S.session = { session_id: sid };
   showApprovalCard(pending, 1);
 }
+async function _runPollTick(sid) {
+  _approvalFallbackPollInFlight = false;
+  _startApprovalFallbackPoll(sid);
+}
 '''
 
 _JS_MAIN_RUNNER = r'''
@@ -458,12 +464,10 @@ _JS_MAIN_RUNNER = r'''
 
 def _approval_frontend_block(src: str) -> str:
     """Extract the full approval frontend state + helpers: from the state vars
-    that open the block up to the end of respondApproval()."""
+    that open the block up to the end of stopApprovalPolling()."""
     start = src.index("let _approvalHideTimer = null;")
-    anchor = "async function respondApproval("
+    anchor = "function stopApprovalPolling("
     aidx = src.index(anchor)
-    # The opening brace of the body is the LAST brace on the header line
-    # (default params like `options = {}` open earlier).
     header_end = src.index("\n", aidx)
     brace = src.rfind("{", aidx, header_end)
     if brace == -1:
@@ -583,9 +587,10 @@ async function main() {
     assert out["visible"] is True
 
 
-def test_node_dismiss_404_keeps_hidden():
-    """An authoritative 404 (the entry or its session is gone) keeps the
-    dismissal — never restores a card whose server entry no longer exists."""
+def test_node_dismiss_bare_404_restores_card():
+    """A bare 404 is overloaded (e.g. cross-profile session not found from a
+    sibling tab) — it must restore the card with a retry affordance rather than
+    permanently suppressing a healthy session's approval (#7242)."""
     out = _run_node_scenario(r'''
 async function main() {
   showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
@@ -594,8 +599,28 @@ async function main() {
   apiImpl = async () => { throw err; };
   dismissApprovalCard();
   await flush();
-  assertTrue(!cardVisible(), "404 keeps the card hidden");
-  assertTrue(_isApprovalDismissed("sidA", "a1"), "dismissal stands after 404");
+  assertTrue(cardVisible(), "bare 404 restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "dismissal marker cleared after bare 404");
+  assertTrue(toasts.length >= 1, "restore toast for bare 404");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_authoritative_404_keeps_hidden():
+    """An authoritative 404 with code approval_not_found keeps the dismissal —
+    the entry is specifically confirmed absent server-side."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  const err = new Error("not found");
+  err.status = 404;
+  err.body = JSON.stringify({ code: "approval_not_found" });
+  apiImpl = async () => { throw err; };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(!cardVisible(), "authoritative 404 keeps the card hidden");
   assertEq(toasts.length, 0, "no restore toast for authoritative 404");
   assertEq(_approvalResponding, null, "response owner released");
   return { visible: cardVisible() };
@@ -1133,3 +1158,107 @@ def test_node_dismiss_409_run_unavailable_malformed_pending_restores_card():
         if out["visible"] is not True or out["desc"] != "cmd A":
             failures.append(f"{label} ({payload}): restored state {out!r}")
     assert not failures, "malformed `pending` shapes not handled fail-closed:\n" + "\n".join(failures)
+
+
+def test_node_dismiss_success_reused_id_in_same_session_renders_next_run():
+    """A gateway client may reuse an approval_id (e.g. approval_id: '1') across
+    different runs within the SAME session. Settling run1 must not permanently
+    suppress run2 carrying the same approval_id (#7242)."""
+    out = _run_node_scenario(r'''
+async function main() {
+  // 1. First approval arrives with approval_id: "1", run_id: "r1", mirror_token: "t1"
+  showApproval({ approval_id: "1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd run1" }, "sidA");
+  assertTrue(cardVisible(), "run 1 card visible");
+
+  // 2. User dismisses it, API accepts deny
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertTrue(!cardVisible(), "run 1 settled hidden");
+  assertTrue(_isApprovalDismissed("sidA", "1", "r1", "t1"), "run 1 marker is retained");
+
+  // 3. Second approval arrives with SAME approval_id: "1", but run_id: "r2", mirror_token: "t2"
+  showApproval({ approval_id: "1", run_id: "r2", _gateway_mirror_token: "t2", description: "cmd run2" }, "sidA");
+  assertTrue(cardVisible(), "run 2 with same approval_id is NOT suppressed");
+  assertEq(els.approvalDesc.textContent, "cmd run2", "run 2 owns the card");
+
+  // 4. Dismissing run 2 targets run 2
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls[1].body.approval_id, "1");
+  assertEq(apiCalls[1].body.run_id, "r2");
+  assertEq(apiCalls[1].body.mirror_token, "t2");
+  assertTrue(!cardVisible(), "run 2 settled hidden");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 2
+
+
+def test_node_poll_dismissed_head_force_hides_matching_displayed_card():
+    """In multi-tab scenarios, tab B displays approval A. User dismisses A in tab A
+    (persisting to localStorage). Tab B's poll receives head A; it must force-hide
+    the displayed card and clear session pending."""
+    out = _run_node_scenario(r'''
+async function main() {
+  // Tab B receives and displays approval A
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  assertTrue(cardVisible(), "tab B initially displays approval A");
+
+  // Tab A dismissed approval A (simulated by marking it in localStorage)
+  _markApprovalDismissed("sidA", "a1", "r1", "t1");
+
+  // Tab B poll runs and receives head A from server
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: { approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1" }, pending_count: 1 };
+    }
+    return { ok: true };
+  };
+
+  // Run the poll tick in Tab B
+  await _runPollTick("sidA");
+  await flush();
+
+  assertTrue(!cardVisible(), "tab B poll force-hides the matching dismissed card");
+  assertTrue(!_approvalPendingBySession.has("sidA"), "tab B pending projection cleared");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is False
+
+
+def test_node_poll_stale_dismissed_head_does_not_wipe_successor():
+    """When a successor approval B has already arrived and is stored in session state,
+    a stale in-flight poll returning previously-dismissed head A must NOT wipe B's
+    pending projection."""
+    out = _run_node_scenario(r'''
+async function main() {
+  // Approval A was dismissed
+  _markApprovalDismissed("sidA", "a1", "r1", "t1");
+
+  // Successor B arrived and was remembered
+  showApproval({ approval_id: "b2", run_id: "r2", _gateway_mirror_token: "t2", description: "cmd B" }, "sidA");
+  assertTrue(cardVisible(), "successor B is visible");
+
+  // A slow poll returns stale head A
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: { approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1" }, pending_count: 1 };
+    }
+    return { ok: true };
+  };
+
+  // Run poll tick with stale head A
+  await _runPollTick("sidA");
+  await flush();
+
+  assertTrue(cardVisible(), "successor B remains visible");
+  assertEq(els.approvalDesc.textContent, "cmd B", "successor B still owns displayed card");
+  assertTrue(_approvalPendingBySession.has("sidA"), "successor B pending projection NOT wiped");
+  const stored = _approvalPendingBySession.get("sidA");
+  assertEq(stored.pending.approval_id, "b2", "stored pending is still successor B");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True

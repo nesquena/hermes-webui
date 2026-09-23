@@ -7580,13 +7580,42 @@ let _approvalDisplayedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
-// Dismissed approvals are namespaced by session so that two sessions carrying
-// the SAME approval_id (e.g. a gateway/run source that reuses externally
-// supplied IDs across sessions) can't have a dismissal in one session hide the
-// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
-function _approvalDismissKey(sid, approvalId) {
+// Dismissed approvals are namespaced by profile, session, approval_id, run_id,
+// and mirror_token so that:
+// (a) cross-profile and cross-session approvals are isolated;
+// (b) a gateway client that numbers approvals (approval_id: "1", "2", ...)
+//     reusing IDs within a session will not have a later approval suppressed
+//     by an earlier settled approval (#7242).
+function _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile) {
   if (!approvalId) return '';
-  return String(sid || '') + '\u0000' + String(approvalId);
+  let r = runId;
+  let m = mirrorToken;
+  let prof = profile;
+  if ((r === undefined || m === undefined) && sid) {
+    if (typeof _approvalResponding !== 'undefined' && _approvalResponding && _approvalResponding.sid === sid && _approvalResponding.approvalId === approvalId) {
+      if (r === undefined) r = _approvalResponding.runId;
+      if (m === undefined) m = _approvalResponding.mirrorToken;
+      if (prof === undefined) prof = _approvalResponding.profile;
+    }
+    if (typeof _approvalDisplayedOwner !== 'undefined' && _approvalDisplayedOwner && _approvalDisplayedOwner.sid === sid && _approvalDisplayedOwner.approvalId === approvalId) {
+      if (r === undefined) r = _approvalDisplayedOwner.runId;
+      if (m === undefined) m = _approvalDisplayedOwner.mirrorToken;
+      if (prof === undefined) prof = _approvalDisplayedOwner.profile;
+    }
+    if (typeof _approvalPendingBySession !== 'undefined' && _approvalPendingBySession) {
+      const entry = _approvalPendingBySession.get(sid);
+      const p = entry && entry.pending;
+      if (p && p.approval_id === approvalId) {
+        if (r === undefined) r = p.run_id;
+        if (m === undefined) m = p._gateway_mirror_token;
+        if (prof === undefined) prof = p.profile;
+      }
+    }
+  }
+  const resolvedProf = prof || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  const resolvedRun = String(r || '').trim();
+  const resolvedMirror = String(m || '').trim();
+  return String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000' + resolvedRun + '\u0000' + resolvedMirror;
 }
 
 function _getDismissedApprovals() {
@@ -7594,14 +7623,43 @@ function _getDismissedApprovals() {
   catch (_) { return []; }
 }
 
-function _isApprovalDismissed(sid, approvalId) {
-  const key = _approvalDismissKey(sid, approvalId);
-  if (!key) return false;
-  return _getDismissedApprovals().includes(key);
+function _isApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
+  if (!approvalId) return false;
+  let r = runId;
+  let m = mirrorToken;
+  let prof = profile;
+  if ((r === undefined || m === undefined) && sid) {
+    if (typeof _approvalResponding !== 'undefined' && _approvalResponding && _approvalResponding.sid === sid && _approvalResponding.approvalId === approvalId) {
+      if (r === undefined) r = _approvalResponding.runId;
+      if (m === undefined) m = _approvalResponding.mirrorToken;
+      if (prof === undefined) prof = _approvalResponding.profile;
+    }
+    if (typeof _approvalDisplayedOwner !== 'undefined' && _approvalDisplayedOwner && _approvalDisplayedOwner.sid === sid && _approvalDisplayedOwner.approvalId === approvalId) {
+      if (r === undefined) r = _approvalDisplayedOwner.runId;
+      if (m === undefined) m = _approvalDisplayedOwner.mirrorToken;
+      if (prof === undefined) prof = _approvalDisplayedOwner.profile;
+    }
+    if (typeof _approvalPendingBySession !== 'undefined' && _approvalPendingBySession) {
+      const entry = _approvalPendingBySession.get(sid);
+      const p = entry && entry.pending;
+      if (p && p.approval_id === approvalId) {
+        if (r === undefined) r = p.run_id;
+        if (m === undefined) m = p._gateway_mirror_token;
+        if (prof === undefined) prof = p.profile;
+      }
+    }
+  }
+  const resolvedProf = prof || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  if (r !== undefined || m !== undefined) {
+    const key = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000' + String(r || '').trim() + '\u0000' + String(m || '').trim();
+    return _getDismissedApprovals().includes(key);
+  }
+  const prefix = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000';
+  return _getDismissedApprovals().some(k => k === prefix || k.startsWith(prefix));
 }
 
-function _markApprovalDismissed(sid, approvalId) {
-  const key = _approvalDismissKey(sid, approvalId);
+function _markApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
+  const key = _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile);
   if (!key) return;
   const set = _getDismissedApprovals().filter(k => k !== key);
   set.push(key);
@@ -7609,10 +7667,17 @@ function _markApprovalDismissed(sid, approvalId) {
   catch (_) {}
 }
 
-function _unmarkApprovalDismissed(sid, approvalId) {
-  const key = _approvalDismissKey(sid, approvalId);
-  if (!key) return;
-  const set = _getDismissedApprovals().filter(k => k !== key);
+function _unmarkApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
+  if (!approvalId) return;
+  const resolvedProf = profile || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  let set = _getDismissedApprovals();
+  if (runId !== undefined || mirrorToken !== undefined) {
+    const key = _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile);
+    set = set.filter(k => k !== key);
+  } else {
+    const prefix = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000';
+    set = set.filter(k => k !== prefix && !k.startsWith(prefix));
+  }
   try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
   catch (_) {}
 }
@@ -7941,9 +8006,13 @@ function dismissApprovalCard() {
         try { errorPayload = JSON.parse(err.body); } catch (_) { /* non-JSON HTTP error body */ }
       }
       if (err && err.status === 404) {
-        // Authoritative: the entry (or its session) no longer exists
-        // server-side — it can never re-render. Keep it hidden. (#7242)
-        _releaseApprovalResponseOwner(owner);
+        if (errorPayload && (errorPayload.code === "approval_not_found" || errorPayload.error === "approval_not_found")) {
+          _releaseApprovalResponseOwner(owner);
+          return;
+        }
+        const notFoundMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+          || "Approval or session unavailable in active profile. Try again.";
+        restoreAfterFailure(notFoundMsg);
         return;
       }
       const code = errorPayload && errorPayload.code;
@@ -8242,11 +8311,34 @@ function _startApprovalFallbackPoll(sid) {
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) {
-        if (data.pending.approval_id && _isApprovalDismissed(sid, data.pending.approval_id)) {
-          // Durable dismissal: the server-side head still lingers (best-effort
-          // deny may have been stale), but this tab must not re-render it or
-          // keep the attention indicator lit. (#7242)
-          _clearApprovalPendingForSession(sid);
+        if (data.pending.approval_id && _isApprovalDismissed(sid, data.pending.approval_id, data.pending.run_id, data.pending._gateway_mirror_token, data.pending.profile)) {
+          // Durable dismissal: compare the fetched owner against the stored/displayed owner:
+          // ignore stale responses when a successor owns the state, and force-hide only
+          // the exact dismissed card. (#7242)
+          const currentOwner = _captureApprovalResponseOwner();
+          const fetchedRunId = String(data.pending.run_id || '').trim();
+          const fetchedMirrorToken = String(data.pending._gateway_mirror_token || '').trim();
+          const matchesDisplayed = !!(
+            currentOwner &&
+            currentOwner.sid === sid &&
+            currentOwner.approvalId === data.pending.approval_id &&
+            String(currentOwner.runId || '').trim() === fetchedRunId &&
+            String(currentOwner.mirrorToken || '').trim() === fetchedMirrorToken
+          );
+          if (matchesDisplayed) {
+            hideApprovalCard(true);
+          }
+          const stored = _approvalPendingBySession.get(sid);
+          const storedPending = stored && stored.pending;
+          const matchesStored = !!(
+            storedPending &&
+            storedPending.approval_id === data.pending.approval_id &&
+            String(storedPending.run_id || '').trim() === fetchedRunId &&
+            String(storedPending._gateway_mirror_token || '').trim() === fetchedMirrorToken
+          );
+          if (matchesStored) {
+            _clearApprovalPendingForSession(sid);
+          }
         } else {
           showApprovalForSession(sid, data.pending, data.pending_count||1);
         }

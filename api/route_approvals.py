@@ -555,6 +555,9 @@ def retire_gateway_pending_mirror(
         queue = _pending.get(session_key)
         entries = queue if isinstance(queue, list) else [queue] if queue else []
         normalized_run_id = str(run_id or "").strip()
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = gateway_queue
+        gateway_queue_changed = False
         if approval_id:
             match = _gateway_pending_mirror_locked(
                 session_key,
@@ -604,6 +607,11 @@ def retire_gateway_pending_mirror(
             return changed
         for match in retired:
             entries.remove(match)
+        if normalized_run_id and not approval_id:
+            if retained_gateway_queue:
+                _gateway_queues[session_key] = retained_gateway_queue
+            else:
+                _gateway_queues.pop(session_key, None)
         if entries:
             _pending[session_key] = entries
         else:
