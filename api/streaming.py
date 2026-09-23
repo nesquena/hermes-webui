@@ -4799,8 +4799,6 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         choice = choices[0] if choices else None
         message = _safe_obj_value(choice, 'message')
         content = _safe_text_value(_safe_obj_value(message, 'content'))
-        if content:
-            return content, ''
         finish_reason = _safe_text_value(_safe_obj_value(choice, 'finish_reason')).lower()
         reasoning = (
             _safe_text_value(_safe_obj_value(message, 'reasoning'))
@@ -4813,10 +4811,12 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         # via LM Studio loops indefinitely on auto-title generation).  Report
         # this case distinctly so callers can short-circuit instead of double-
         # billing the GPU/credit on a near-certain repeat.
-        if reasoning:
+        if reasoning and not content:
             return '', f'llm_empty_reasoning{suffix}'
         if finish_reason == 'length':
-            return '', f'llm_length{suffix}'
+            return content, f'llm_length{suffix}'
+        if content:
+            return content, ''
         return '', f'llm_empty{suffix}'
     except Exception:
         return '', f'llm_empty{suffix}'
@@ -4851,33 +4851,45 @@ def _title_unwrap_schema_content(content: str) -> str:
     non-compliant gateways; providers that ignore ``response_format`` return
     prose, which is passed through unchanged for the shared sanitizer.
 
-    Returns '' when the content IS JSON but carries no usable string
-    ``title`` (a different object shape, an array, ...) — the caller then
-    falls back to the reasoning-disable mode instead of storing a JSON blob
-    as the session title.
+    Returns '' when the content IS JSON or a truncated/malformed JSON fragment
+    carrying no usable string ``title`` (e.g. truncated `{"title": "Truncated`,
+    a different object shape, an array, ...) — the caller then falls back to the
+    reasoning-disable mode instead of storing a raw JSON blob or fragment as
+    the session title.
     """
     if not content:
         return ''
     raw = content.strip()
     # Fenced JSON from gateways that wrap structured output in markdown.
-    fenced = re.match(r'^```(?:json)?\s*(.*?)\s*```$', raw, re.DOTALL)
+    fenced = re.match(r'^```(?:json)?\s*(.*?)\s*(?:```)?$', raw, re.DOTALL | re.IGNORECASE)
     if fenced:
         raw = fenced.group(1).strip()
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, dict) and isinstance(parsed.get('title'), str):
+        if isinstance(parsed, dict) and isinstance(parsed.get('title'), str) and parsed['title'].strip():
             return parsed['title'].strip()
-        # Valid JSON that is not a {"title": ...} object — not prose, unusable.
+        # Valid JSON that is not a usable {"title": ...} object — unusable.
         return ''
     except (ValueError, TypeError):
         pass
-    # Loose scan: a compliant object embedded in surrounding chatter.
+    # Loose scan: a complete compliant object embedded in surrounding chatter.
     match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     if match:
         try:
-            return json.loads('"%s"' % match.group(1)).strip()
+            val = json.loads('"%s"' % match.group(1)).strip()
+            if val:
+                return val
         except ValueError:
-            return match.group(1).strip()
+            val = match.group(1).strip()
+            if val:
+                return val
+    # If the text is JSON-shaped or contains structured-output markers (e.g.
+    # starts with '{', contains '"title":', starts with markdown fence), but
+    # failed to parse or yield a valid title, it is a truncated or malformed
+    # JSON fragment. Return '' so the caller falls back to compatibility mode
+    # instead of persisting the raw fragment as prose (#7417 re-gate).
+    if raw.startswith(('{', '[', '```')) or re.search(r'^\s*\{', raw) or '"title"' in raw or '"title":' in raw:
+        return ''
     return raw  # prose: leave to the shared sanitizer
 
 
@@ -4989,28 +5001,41 @@ def generate_title_raw_via_aux(
                                 continue  # try the reasoning-disable mode instead
                             raise
                         raw, empty_status = _extract_title_response(resp, aux=True)
+                        last_status = empty_status or 'llm_empty_aux'
+                        is_length_truncated = (empty_status == 'llm_length_aux')
+
                         if raw:
                             if mode == 'schema':
                                 # json_schema responses arrive as
                                 # ``{"title": ...}`` (possibly markdown-fenced);
                                 # unwrap before the shared sanitizer runs.
                                 # Returns '' when the JSON object has no usable
-                                # title, so the reasoning-disable mode gets a
-                                # chance instead of storing a JSON blob.
+                                # title or is a truncated fragment, so the reasoning-disable
+                                # mode gets a chance instead of storing a JSON blob or fragment.
                                 raw = _title_unwrap_schema_content(raw)
-                            if raw:
+                            # Length-truncated schema responses must not be persisted as
+                            # successful titles on the first budget attempt; preserve
+                            # llm_length_aux so the doubled-budget retry still fires (#7417 re-gate).
+                            if raw and not is_length_truncated:
                                 return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
-                        last_status = empty_status or 'llm_empty_aux'
-                        if mode == 'schema' and last_status == 'llm_empty_aux':
-                            # Route answered with no content at all: it likely
-                            # ignored ``response_format``.  Fall back to the
-                            # reasoning-disable mode for this same slot.
-                            schema_dead = True
-                            continue
-                        # llm_empty_reasoning / llm_length keep today's semantics:
-                        # reasoning-only output short-circuits (#2083) and length
-                        # truncation retries with a doubled budget — in whichever
-                        # mode is active.
+
+                        if mode == 'schema':
+                            # Defect 1: when schema mode returns hidden reasoning
+                            # (llm_empty_reasoning_aux), the route accept-but-ignored
+                            # response_format or burned its budget on reasoning tokens.
+                            # Treat this as "schema unavailable" and continue to the
+                            # reasoning-disable mode for this same slot rather than
+                            # short-circuiting (#7417 re-gate). Also fall back if the
+                            # route answered with no content or an invalid JSON shape.
+                            if last_status in ('llm_empty_aux', 'llm_empty_reasoning_aux') or (not raw and not is_length_truncated):
+                                schema_dead = True
+                                continue
+                            # Defect 2: if length-truncated output persists even after
+                            # the doubled-budget retry (budget_idx > 0), fall back to
+                            # compatibility mode rather than persisting the fragment or failing.
+                            if is_length_truncated and budget_idx > 0:
+                                schema_dead = True
+                                continue
                         break
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))

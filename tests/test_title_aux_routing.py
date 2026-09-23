@@ -509,9 +509,10 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(status, 'llm_empty_reasoning_aux')
-        # One call per prompt at the base budget — no retry on prompt 0, no
-        # second-prompt attempt either (short-circuited).
-        self.assertEqual(call_count[0], 1)
+        # Schema attempt (call 1) falls through to reasoning attempt (call 2);
+        # both return hidden reasoning so it short-circuits with no budget retry
+        # and no second prompt (#7417 re-gate).
+        self.assertEqual(call_count[0], 2)
 
     def test_aux_still_retries_finish_length_without_reasoning(self):
         """Length-truncated responses WITHOUT reasoning tokens still get the
@@ -1576,6 +1577,107 @@ class TestAuxSchemaFirstTitleGeneration(unittest.TestCase):
         self.assertEqual(result, 'Retried Json Title')
         self.assertEqual(status, 'llm_aux_retry')
         self.assertEqual(captured_budgets, [512, 1024])
+
+    def test_schema_reasons_falls_back_to_reasoning_disable_and_succeeds(self):
+        """#7417 (Defect 1): when schema mode answers with hidden reasoning tokens
+        (llm_empty_reasoning_aux), it must not short-circuit — treat as schema
+        unavailable and continue to the reasoning-disable mode, which succeeds."""
+        from api.streaming import generate_title_raw_via_aux
+
+        calls = []
+
+        def fake_call_llm(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                # Schema mode returns hidden reasoning and no content
+                return {
+                    'choices': [
+                        {
+                            'message': {
+                                'content': '',
+                                'reasoning_content': 'Thinking about title...',
+                            },
+                            'finish_reason': 'stop',
+                        }
+                    ]
+                }
+            # Fallback reasoning-disabled mode returns a valid title
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'Reasoning Disabled Works'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'deepseek', 'model': 'deepseek-reasoner', 'base_url': 'https://api.deepseek.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Why does quantum tunneling occur?',
+                    assistant_text='Particles penetrate barrier.',
+                )
+
+        self.assertEqual(result, 'Reasoning Disabled Works')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(len(calls), 2)
+        # Call 1 was schema-only
+        self.assertIn('response_format', calls[0].get('extra_body') or {})
+        # Call 2 was reasoning-disabled fallback
+        self.assertEqual(calls[1].get('extra_body'), {'reasoning': {'enabled': False}})
+
+    def test_schema_truncated_json_fragment_retries_and_falls_back(self):
+        """#7417 (Defect 2): truncated JSON fragments (finish_reason=length) must
+        not be persisted as titles. Retries with doubled budget; if still invalid,
+        falls back to reasoning-disabled mode."""
+        from api.streaming import generate_title_raw_via_aux
+
+        calls = []
+
+        def fake_call_llm(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                # Truncated JSON fragment on call 1
+                return {
+                    'choices': [
+                        {
+                            'message': {'content': '{"title": "Truncated structured title'},
+                            'finish_reason': 'length',
+                        }
+                    ]
+                }
+            elif len(calls) == 2:
+                # Still truncated on doubled-budget retry
+                return {
+                    'choices': [
+                        {
+                            'message': {'content': '{"title": "Still truncated JSON fragment'},
+                            'finish_reason': 'length',
+                        }
+                    ]
+                }
+            # Fallback reasoning-disabled mode returns clean prose title
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'Prose Recovered Title'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'ollama', 'model': 'kimi-k2.6', 'base_url': 'https://ollama.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Testing truncated schema output',
+                    assistant_text='Testing.',
+                )
+
+        self.assertEqual(result, 'Prose Recovered Title')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertNotIn('Truncated structured title', result)
+        self.assertNotIn('{', result)
+        self.assertEqual(len(calls), 3)
 
 
 if __name__ == '__main__':
