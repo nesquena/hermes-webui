@@ -897,6 +897,15 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     This mirrors ``tools.skills_tool.skills_list`` closely, but keeps the local
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
+
+    Plugin-registered skills (Hermes Agent plugin manager) are merged into the
+    result so the WebUI's ``GET /api/skills`` and slash-command autocomplete
+    surface them alongside directory-installed skills (#7770). The plugin
+    manager import is best-effort: a WebUI deployment that runs without
+    Hermes Agent (or where ``hermes_cli.plugins`` cannot be imported) gets the
+    directory-only listing it had before, not a 500. The category filter
+    treats ``"plugin"`` as its own bucket; a non-plugin category excludes them
+    and ``category=None`` returns the combined set.
     """
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
@@ -960,6 +969,21 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                 logger.debug(
                     "Skipping skill at %s: failed to parse: %s", skill_md, e, exc_info=True
                 )
+
+    # Surface plugin-registered skills alongside directory skills so the
+    # WebUI's /api/skills endpoint and the slash-command autocomplete see the
+    # same set the agent's `skills_list` does (#7770). Plugin-skill entries
+    # use the qualified ``plugin:skill`` form and carry an explicit
+    # ``source: "plugin"`` marker so the frontend can group/label them
+    # distinctly without losing round-trip identity. The plugin manager
+    # import is best-effort; an isolated WebUI (no agent on sys.path) returns
+    # an empty list here and the directory listing still ships.
+    for plugin_entry in _list_plugin_skills_for_response():
+        plugin_name = plugin_entry.get("name")
+        if not plugin_name or plugin_name in seen_names:
+            continue
+        seen_names.add(plugin_name)
+        all_skills.append(plugin_entry)
 
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
@@ -12742,6 +12766,63 @@ def _get_plugin_manager_for_visibility():
     return get_plugin_manager()
 
 
+def _list_plugin_skills_for_response(manager=None) -> list:
+    """Return plugin-registered skills formatted for the WebUI skill listing.
+
+    Each entry is a dict with the same shape as a local-skill entry plus a
+    ``source`` marker (``"plugin"``) and the ``plugin`` namespace, so the UI can
+    group/label them distinctly while reusing the existing skill-row rendering
+    path. The qualified ``name`` (``plugin_namespace:skill``) is preserved so
+    the slash-command autocomplete can round-trip it losslessly (#7770).
+
+    Isolated WebUI deployments (no Hermes Agent import path) MUST NOT crash;
+    every failure path returns an empty list and lets the directory-based
+    listing proceed unchanged. The same fail-soft posture as
+    ``_get_plugin_manager_for_visibility`` and the existing plugin-skill
+    content-lookup branch around L1140-1150.
+    """
+    try:
+        from agent.skill_utils import is_valid_namespace, parse_qualified_name
+    except Exception:
+        return []
+    try:
+        pm = manager if manager is not None else _get_plugin_manager_for_visibility()
+    except Exception:
+        return []
+    try:
+        entries = pm.list_plugin_skill_metadata() or []
+    except Exception:
+        return []
+    if not isinstance(entries, list):
+        return []
+    out: list = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_name = str(entry.get("name", "") or "").strip()
+        if not raw_name:
+            continue
+        if ":" not in raw_name:
+            # Plugin-skill registry always uses the qualified form; an
+            # un-qualified name would be ambiguous against a local skill and
+            # is filtered out so it cannot leak into the picker.
+            continue
+        namespace, bare = parse_qualified_name(raw_name)
+        if not is_valid_namespace(namespace) or not bare:
+            continue
+        out.append(
+            {
+                "name": raw_name,
+                "description": str(entry.get("description", "") or "").strip(),
+                "category": "plugin",
+                "plugin": namespace,
+                "source": "plugin",
+                "disabled": False,
+            }
+        )
+    return out
+
+
 def _clean_plugin_visibility_text(value, *, limit=240) -> str:
     """Return bounded display text without path/callback-like internals."""
     if value is None:
@@ -14889,6 +14970,18 @@ def handle_get(handler, parsed) -> bool:
             skill_dir, _skill_md = _find_skill_in_dirs(
                 name, _active_skill_search_dirs(skills_dir)
             )
+            if not skill_dir:
+                # Plugin-registered skills live outside the local skills
+                # tree but expose the same SKILL.md / references / templates
+                # layout, so resolve the parent directory through the plugin
+                # manager before giving up (#7770).
+                try:
+                    pm = _get_plugin_manager_for_visibility()
+                    plugin_path = pm.find_plugin_skill(name)
+                except Exception:
+                    plugin_path = None
+                if plugin_path is not None:
+                    skill_dir = plugin_path.parent
             if not skill_dir:
                 return bad(handler, "Skill not found", 404)
             target = (skill_dir / file_path).resolve()
