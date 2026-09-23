@@ -4,7 +4,8 @@ isolated test server (conftest ``test_server`` / ``base_url`` fixtures).
 Scenario
 --------
 1. Seed a 50-message sidecar directly into the test state dir.
-2. POST /api/session/squash with matching confirm_session_id.
+2. POST /api/session/squash/preview, then POST /api/session/squash echoing
+   the returned authority.
 3. Poll GET /api/session/squash/status until the job finishes.
 4. Verify the read path (GET /api/session?messages=1) serves exactly the
    squashed transcript — this is the regression guard for the "Loading
@@ -49,7 +50,7 @@ def _post(base, path, body=None):
             return {"_http_error": e.code}
 
 
-def _seed_session() -> Path:
+def _seed_session(*, archived=True, sid=SID) -> Path:
     sessions_dir = STATE_DIR / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     messages = []
@@ -60,7 +61,7 @@ def _seed_session() -> Path:
             content += "\n# CONCLUSION\n---\n> 🟢 étape validée"
         messages.append({"id": f"m{i}", "role": role, "content": content, "timestamp": 1000.0 + i})
     payload = {
-        "session_id": SID,
+        "session_id": sid,
         "title": "e2e squash",
         "workspace": "/tmp",
         "created_at": 1000.0,
@@ -70,11 +71,12 @@ def _seed_session() -> Path:
         "tool_calls": [],
         "message_count": len(messages),
         "profile": "default",
+        "archived": archived,
         "active_stream_id": None,
         "pending_user_message": None,
         "pending_attachments": [],
     }
-    path = sessions_dir / f"{SID}.json"
+    path = sessions_dir / f"{sid}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return path
 
@@ -83,7 +85,11 @@ def test_squash_end_to_end(base_url):
     sidecar = _seed_session()
     original_sha = hashlib.sha256(sidecar.read_bytes()).hexdigest()
 
-    start = _post(base_url, "/api/session/squash", {"session_id": SID, "confirm_session_id": SID})
+    preview = _post(base_url, "/api/session/squash/preview", {"session_id": SID})
+    assert preview.get("ok"), f"squash preview failed: {preview}"
+    authority = preview["authority"]
+    assert authority["source_sha256"] == original_sha
+    start = _post(base_url, "/api/session/squash", {"session_id": SID, "confirm": authority})
     assert start.get("ok"), f"squash start failed: {start}"
     job_id = start["job"]["job_id"]
 
@@ -101,9 +107,10 @@ def test_squash_end_to_end(base_url):
     assert result["before"]["message_count"] == 50
     assert result["after"]["message_count"] == 1
     assert result["original_sha256"] == original_sha
-    # No network in the sandbox → the aux-LLM summary honestly degrades to
-    # the fallback template instead of failing the squash.
-    assert result["summary_source"] == "fallback-template"
+    # The summary source depends on whether an auxiliary LLM is reachable
+    # from the test host; without one the squash honestly degrades to the
+    # fallback template instead of failing. Either way it is labelled.
+    assert result["summary_source"] in ("fallback-template", "auxiliary-llm")
     assert result["summary_chars"] >= 400
 
     # Read path: exactly the squashed transcript, served fast (stale-cache
@@ -130,8 +137,9 @@ def test_squash_end_to_end(base_url):
     # No stale #1558 .bak may survive (startup recovery could undo the squash).
     assert not sidecar.with_suffix(".json.bak").exists()
 
-    # Idempotent second squash.
-    start2 = _post(base_url, "/api/session/squash", {"session_id": SID, "confirm_session_id": SID})
+    # Idempotent second squash (fresh authority for the squashed sidecar).
+    authority2 = _post(base_url, "/api/session/squash/preview", {"session_id": SID})["authority"]
+    start2 = _post(base_url, "/api/session/squash", {"session_id": SID, "confirm": authority2})
     assert start2.get("ok")
     job2_id = start2["job"]["job_id"]
     deadline = time.time() + 30
@@ -147,6 +155,20 @@ def test_squash_end_to_end(base_url):
 
 def test_squash_requires_confirm_end_to_end(base_url):
     sidecar = _seed_session()
-    sidecar = sidecar  # seeded; mismatch must be rejected before any mutation
-    resp = _post(base_url, "/api/session/squash", {"session_id": SID, "confirm_session_id": "nope"})
-    assert not resp.get("ok"), f"confirm mismatch was accepted: {resp}"
+    original = sidecar.read_bytes()
+    resp = _post(base_url, "/api/session/squash", {"session_id": SID, "confirm": {"session_id": SID}})
+    assert not resp.get("ok"), f"incomplete confirmation was accepted: {resp}"
+    authority = _post(base_url, "/api/session/squash/preview", {"session_id": SID})["authority"]
+    resp = _post(base_url, "/api/session/squash",
+                 {"session_id": SID, "confirm": dict(authority, source_sha256="0" * 64)})
+    assert not resp.get("ok"), f"stale digest was accepted: {resp}"
+    assert sidecar.read_bytes() == original
+
+
+def test_squash_refuses_non_archived_end_to_end(base_url):
+    sid = "20260801_120000_e2esq2"
+    sidecar = _seed_session(archived=False, sid=sid)
+    original = sidecar.read_bytes()
+    resp = _post(base_url, "/api/session/squash/preview", {"session_id": sid})
+    assert not resp.get("ok") and "archived" in str(resp), resp
+    assert sidecar.read_bytes() == original
