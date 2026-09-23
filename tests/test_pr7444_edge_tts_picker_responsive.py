@@ -14,7 +14,7 @@ makes it render the Edge voice list, and at each viewport width we assert:
   - the surrounding settings field has no layout violations
 
 Set ``PR7444_SCREENSHOT_DIR`` to also drop proof screenshots of the populated
-picker at each width (see docs/images/ for the established pattern).
+picker at each width. They are review evidence only and are not committed.
 """
 import os
 from pathlib import Path

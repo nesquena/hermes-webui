@@ -11,6 +11,7 @@ the option values it renders — not by grepping the source.
 """
 import io
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -123,7 +124,10 @@ process.stdout.write(JSON.stringify(ttsVoiceSel.options.map(function (o) {{
   return {{value: o.value, label: o.textContent, selected: o.selected}};
 }})));
 """
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the real picker population logic")
+    proc = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
     return json.loads(proc.stdout)
 
 
@@ -164,3 +168,26 @@ def test_edge_picker_renders_exactly_the_french_voices_and_server_accepts_each(m
         status, captured, body = _synthesize(monkeypatch, voice, f"10.98.1.{idx}")
         assert status == [200], (voice, body)
         assert captured == [voice]
+
+
+# The Edge voices that shipped before the French entries, in their original
+# picker order. The French voices are appended after them so the blank
+# "Default (Xiaoxiao)" option stays next to its own voice family and existing
+# users see the list they already know.
+PRE_EXISTING_EDGE_VOICES = [
+    "zh-CN-XiaoxiaoNeural",
+    "zh-CN-XiaoyiNeural",
+    "zh-CN-YunxiNeural",
+    "zh-CN-YunjianNeural",
+    "zh-CN-YunyangNeural",
+    "en-US-AriaNeural",
+    "en-US-GuyNeural",
+    "id-ID-GadisNeural",
+]
+
+
+def test_edge_picker_appends_french_voices_after_existing_entries():
+    # The stub <select> resets on innerHTML, so the blank "Default (Xiaoxiao)"
+    # placeholder is not in this list; only the edgeVoices options are.
+    values = [o["value"] for o in _render_edge_picker_options("")]
+    assert values == PRE_EXISTING_EDGE_VOICES + VOICES
