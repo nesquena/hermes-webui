@@ -22991,6 +22991,15 @@ function renderMessages(options){
   const recoveryOwnership=_captureMessageRecoveryOwnership();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
+  // Apply any cached code highlights synchronously so blocks that were already
+  // highlighted in a prior render are NOT painted unhighlighted for one frame
+  // on virtualized rebuild (#7752). Genuinely new blocks (no cache hit) are
+  // untouched here — they keep the existing rAF deferral below and are
+  // highlighted the next frame by the post-process pass, preserving the
+  // deferred-frame design for first-appearance code blocks.
+  // NOTE: stays BELOW master's _maybeRecoverVirtualizedBlankViewport() call —
+  // that helper owns the blank-viewport recovery and must run first.
+  if(typeof _applyCachedCodeHighlights==='function') _applyCachedCodeHighlights(inner);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
@@ -24276,6 +24285,40 @@ function postProcessRenderedMessages(container) {
   initTreeViews(container);
 }
 
+// Cache of pre-highlighted code blocks, keyed by `language + "\0" + textContent`
+// with the highlighted innerHTML as the value. Populated by highlightCode() after
+// a successful Prism pass; consulted by _applyCachedCodeHighlights() to
+// synchronously re-highlight blocks at virtualized rebuild time. This is the
+// #7752 fix: when a virtualized render rebuilds the transcript, the freshly-built
+// <pre><code> nodes are missing `data-highlighted`, so they would otherwise paint
+// unhighlighted for one frame before the deferred rAF post-process runs. For
+// blocks whose source was already highlighted in a prior render, the cached
+// innerHTML is applied synchronously, eliminating the one-frame flash without
+// regressing the deferred-frame design for genuinely new blocks. Capped at
+// `_CODE_HIGHLIGHT_CACHE_MAX` entries (FIFO eviction) to bound memory.
+const _CODE_HIGHLIGHT_CACHE_MAX = 512;
+const _codeHighlightCache = new Map();
+function _codeHighlightCacheKey(block){
+  if(!block) return '';
+  const m=(block.className||'').match(/language-([\w-]+)/);
+  return (m?m[1]:'') + '\0' + (block.textContent||'');
+}
+function _applyCachedCodeHighlights(container){
+  if(!container) return 0;
+  const blocks = container.querySelectorAll('pre code:not([data-highlighted])');
+  if(blocks.length === 0) return 0;
+  let applied = 0;
+  for(let i = 0; i < blocks.length; i++){
+    const block = blocks[i];
+    const cached = _codeHighlightCache.get(_codeHighlightCacheKey(block));
+    if(cached !== undefined){
+      block.innerHTML = cached;
+      block.dataset.highlighted = '1';
+      applied++;
+    }
+  }
+  return applied;
+}
 function highlightCode(container) {
   // Apply Prism.js syntax highlighting only to *new* code blocks.
   // Previously every renderMessages() called Prism.highlightAllUnder() which
@@ -24292,6 +24335,16 @@ function highlightCode(container) {
     const block = blocks[i];
     if(typeof Prism.highlightElement === 'function') Prism.highlightElement(block);
     block.dataset.highlighted = '1';
+    // Populate the sync-rebuild cache so the next virtualized rebuild of this
+    // same code text can apply the highlight synchronously (#7752).
+    const cacheKey = _codeHighlightCacheKey(block);
+    if(cacheKey && !_codeHighlightCache.has(cacheKey)){
+      if(_codeHighlightCache.size >= _CODE_HIGHLIGHT_CACHE_MAX){
+        // FIFO eviction — drop the oldest entry.
+        _codeHighlightCache.delete(_codeHighlightCache.keys().next().value);
+      }
+      _codeHighlightCache.set(cacheKey, block.innerHTML);
+    }
   }
 }
 
