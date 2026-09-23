@@ -5336,6 +5336,32 @@ def _filter_reasoning_efforts_for_provider(
         return [eff for eff in normalized if eff != "ultra"]
     if zai_supports is False:
         return []
+    # Installed Agent provider plugins that clamp onto a declared wire ladder
+    # (DeepInfra, Ollama Cloud, Meta AI, profile-declared ladders): levels
+    # above the ladder's top are not sendable, so strip them unless the
+    # operator explicitly allowlisted them. ``ultra`` is left to the
+    # model-scoped default-deny below (the Agent maps it to ``max``).
+    agent_ladder = _agent_provider_reasoning_ladder(provider_id, model_id)
+    if agent_ladder:
+        ranks = [
+            VALID_REASONING_EFFORTS.index(eff)
+            for eff in agent_ladder
+            if eff in VALID_REASONING_EFFORTS
+        ]
+        if ranks:
+            top = max(ranks)
+            ladder_allow = set(_configured_model_reasoning_efforts(
+                provider, model_id, config_data=config_data
+            ))
+            ladder_allow.update(_provider_configured_reasoning_efforts(
+                provider, config_data=config_data
+            ))
+            normalized = [
+                eff for eff in normalized
+                if eff == "ultra"
+                or VALID_REASONING_EFFORTS.index(eff) <= top
+                or eff in ladder_allow
+            ]
     # ULTRA default-deny, model-scoped (gate 2026-09-09): ``ultra`` is the
     # GPT-5.6 product tier. It survives ONLY for the GPT-5.6 family (every
     # other model ceiling above has already fired) or when the operator
@@ -5360,7 +5386,7 @@ def _filter_reasoning_efforts_for_provider(
     # authorized them via a provider ``reasoning_efforts`` allowlist. An empty
     # provider id skips this gate: the caller simply didn't name a provider,
     # which is not the same as naming one we don't recognize. (#6018)
-    if provider and not capability_confirmed and not _provider_known_reasoning_capable(provider):
+    if provider and not capability_confirmed and not _provider_known_reasoning_capable(provider, model_id):
         # The model-scoped allowlist is the most specific operator authority.
         allow = set(_configured_model_reasoning_efforts(
             provider, model_id, config_data=config_data
@@ -5399,16 +5425,108 @@ _KNOWN_REASONING_PROVIDERS = frozenset({
 })
 
 
-def _provider_known_reasoning_capable(provider_id) -> bool:
+# Installed Hermes Agent provider plugins that clamp ``reasoning_effort`` onto a
+# declared wire ladder (``agent.reasoning_effort`` constants) although the
+# Agent's models.dev table has no mapping for them, so capability metadata
+# always misses. Each entry names the Agent constant (read live when the Agent
+# is importable) and a static mirror for standalone WebUI installs. A ladder
+# containing ``max`` makes the lane recognized for ``max``; a lower ladder is a
+# hard ceiling. ``ultra`` stays subject to the model-scoped default-deny.
+_AGENT_PROVIDER_REASONING_LADDERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    # plugins/model-providers/deepinfra: clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
+    "deepinfra": (
+        "OPENAI_COMPAT_WIRE_EFFORTS",
+        ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+    ),
+    # plugins/model-providers/ollama-cloud: OLLAMA_CLOUD_EFFORTS (+ xhigh→max)
+    "ollama-cloud": (
+        "OLLAMA_CLOUD_EFFORTS",
+        ("none", "low", "medium", "high", "max"),
+    ),
+    # plugins/model-providers/meta-ai: Muse tops out at xhigh.
+    "meta-ai": (
+        "META_AI_EFFORTS",
+        ("minimal", "low", "medium", "high", "xhigh"),
+    ),
+}
+# Agent plugin aliases for the lanes above, for installs without the Agent's
+# provider registry (the registry resolves them itself when importable).
+_AGENT_PROVIDER_REASONING_ALIASES = {
+    "deep-infra": "deepinfra",
+    "deepinfra-ai": "deepinfra",
+    "ollama_cloud": "ollama-cloud",
+    "muse": "meta-ai",
+    "muse-spark": "meta-ai",
+}
+
+
+def _agent_provider_reasoning_ladder(provider_id, model_id: str = "") -> tuple[str, ...] | None:
+    """Wire ladder the installed Agent's provider plugin clamps efforts onto.
+
+    Derived from the Agent provider registry when importable: the registry
+    canonicalizes plugin aliases, and a profile's declared
+    ``supported_reasoning_efforts(model)`` hook is authoritative. The generic
+    ``custom`` profile (and every ``custom:*`` route it serves) is excluded —
+    it accepts any vocabulary, which proves nothing about the real endpoint, so
+    unknown/custom lanes keep the top-tier default-deny. Falls back to the
+    static table above. ``None`` means no declared ladder.
+    """
+    raw = str(provider_id or "").strip().lower()
+    if not raw or raw == "custom" or raw.startswith("custom:"):
+        return None
+    canonical = _AGENT_PROVIDER_REASONING_ALIASES.get(raw) or _resolve_provider_alias(raw)
+    canonical = _AGENT_PROVIDER_REASONING_ALIASES.get(canonical, canonical)
+    declared = None
+    try:
+        from providers import get_provider_profile  # Hermes Agent registry
+
+        profile = get_provider_profile(raw) or get_provider_profile(canonical)
+    except Exception:
+        profile = None
+    if profile is not None:
+        name = str(getattr(profile, "name", "") or "").strip().lower()
+        if name == "custom":
+            return None
+        if name:
+            canonical = name
+        try:
+            declared = profile.supported_reasoning_efforts(model_id or None)
+        except Exception:
+            declared = None
+    if declared:
+        ladder = tuple(str(x).strip().lower() for x in declared)
+        return ladder or None
+    entry = _AGENT_PROVIDER_REASONING_LADDERS.get(canonical)
+    if entry is None:
+        return None
+    const_name, fallback = entry
+    try:
+        import agent.reasoning_effort as _agent_re
+
+        live = getattr(_agent_re, const_name, None)
+        if live:
+            return tuple(str(x).strip().lower() for x in live)
+    except Exception:
+        pass
+    return fallback
+
+
+def _provider_known_reasoning_capable(provider_id, model_id: str = "") -> bool:
     """True if the provider is one we recognize as reasoning-capable.
 
     Used to gate the top-tier default-deny: for a RECOGNIZED provider whose
     specific model we couldn't resolve (empty capability list), preserve
     ``max``/``ultra``; for a truly unknown/custom provider, degrade either to
     ``xhigh`` so we never send a supra-ceiling level that would 400.
+
+    Installed Agent provider plugins with a declared reasoning wire ladder
+    (e.g. DeepInfra, whose models.dev metadata always misses) are recognized
+    too; a ladder below ``max`` is enforced as a ceiling by the filter.
     """
     prov = _resolve_provider_alias(str(provider_id or "").strip().lower())
-    return prov in _KNOWN_REASONING_PROVIDERS
+    if prov in _KNOWN_REASONING_PROVIDERS:
+        return True
+    return bool(_agent_provider_reasoning_ladder(provider_id, model_id))
 
 def _provider_configured_reasoning_efforts(
     provider_id: str,
@@ -6128,7 +6246,7 @@ def coerce_reasoning_effort_for_model(
         raw in {"max", "ultra"}
         and not supported
         and provider
-        and not _provider_known_reasoning_capable(provider)
+        and not _provider_known_reasoning_capable(provider, model)
         and raw not in ceiling
     ):
         return "high"
@@ -6172,7 +6290,7 @@ def coerce_reasoning_effort_for_model(
     if not supported:
         if _zai_glm_reasoning_efforts_supported(model, provider) is False:
             return ""
-        if raw in {"max", "ultra"} and not _provider_known_reasoning_capable(provider):
+        if raw in {"max", "ultra"} and not _provider_known_reasoning_capable(provider, model):
             # An explicit provider/model allowlist is authoritative — the
             # ceiling filter preserves an authorized top tier through the
             # default-deny, so honor it verbatim.
