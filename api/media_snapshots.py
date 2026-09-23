@@ -228,6 +228,66 @@ def snapshot_path_for_digest(digest: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def codex_commentary_text(message) -> str:
+    """#7565: typed public assistant commentary carried in
+    ``codex_message_items`` is eligible for the same exact
+    session-scoped MEDIA: grant as public top-level assistant content.
+
+    The Agent producer (``agent/codex_responses_adapter.py``) stamps
+    message items with ``role: assistant`` and a normalized phase.
+    Only the public ``commentary`` phase, only the textual
+    ``output_text`` part, and only when the outer row role is
+    ``assistant`` is honored. Reasoning, analysis, final phases,
+    user-owned sidecars, and arbitrary nested fields are not
+    inspected — keeping the extraction in one neutral helper so
+    the authorization predicate (``api/routes.py::
+    _session_media_token_allows_path``) and the snapshot scan
+    (``annotate_media_snapshots`` below) cannot drift apart.
+
+    Fail-closed predicate, in order: outer role is assistant;
+    ``codex_message_items`` is a list; item type is ``message``;
+    item role is ``assistant``; item phase normalizes to
+    ``commentary``; content is a list; the part is textual
+    ``output_text`` with a string ``text`` value. Any step that
+    fails returns an empty string, so this helper is safe to
+    concatenate with the existing top-level text extraction.
+    """
+    if not isinstance(message, dict):
+        return ""
+    # Outer role must be assistant. User rows and their sidecars
+    # cannot mint grants even when the sidecar contains a
+    # commentary-shaped item, preserving the implicit threat model
+    # that user-authored content cannot mint allow-list entries.
+    role = str(message.get("role") or "").strip().lower()
+    if role != "assistant":
+        return ""
+    items = message.get("codex_message_items")
+    if not isinstance(items, list):
+        return ""
+    parts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip().lower() != "message":
+            continue
+        if str(item.get("role") or "").strip().lower() != "assistant":
+            continue
+        if str(item.get("phase") or "").strip().lower() != "commentary":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").strip().lower() != "output_text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)
+
+
 def _binding_path_for_digest(digest: str) -> Path:
     """Sidecar holding the source-path set for a digest (``<digest>.src.json``)."""
     return get_snapshot_dir() / f"{digest}.src.json"
@@ -445,14 +505,40 @@ def annotate_media_snapshots(
     if allowed_predicate is None:
         allowed_predicate = media_capture_allowed
     media_re = _re.compile(r"MEDIA:([^\s\)\]]+)")
+    # #7680 re-gate (9/22): two-pass scan. First strip backtick
+    # wrappers (`` `MEDIA:path` `` → ``MEDIA:path``) so the bare
+    # class below does not consume the closing backtick as part of
+    # the path. Then the bare class (no backtick in the exclusion
+    # set) captures the full filename even when the path itself
+    # contains a backtick (e.g. ``report`final.png``).
+    backtick_re = _re.compile(r"`MEDIA:([^`\s]+)`")
     captured = 0
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
+        # #7565: also inspect typed public assistant commentary
+        # carried in ``codex_message_items`` (Agent phase:
+        # "commentary"). The concatenated text below is the union of
+        # the existing top-level string extraction and the new
+        # commentary-only helper, so otherwise-capture-eligible
+        # commentary previews are snapshotted at settle time. The
+        # commentary helper is fail-closed (outer role must be
+        # assistant; item type/role/phase all constrained; only
+        # textual output_text parts are read) and matches the auth
+        # predicate's extraction so capture and serve cannot drift
+        # apart.
         content = msg.get("content")
-        if not isinstance(content, str) or "MEDIA:" not in content:
+        commentary = codex_commentary_text(msg)
+        text_parts = []
+        if isinstance(content, str) and "MEDIA:" in content:
+            text_parts.append(content)
+        if commentary and "MEDIA:" in commentary:
+            text_parts.append(commentary)
+        if not text_parts:
             continue
-        refs = media_re.findall(content)
+        text = "\n".join(text_parts)
+        text = backtick_re.sub(lambda m: f"MEDIA:{m.group(1)}", text)
+        refs = media_re.findall(text)
         if not refs:
             continue
         existing = msg.get("_media_snapshots")

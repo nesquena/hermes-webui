@@ -278,6 +278,16 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function jsArg(s){
+  // Encode a value for safe interpolation inside an inline on* handler's JS
+  // string literal. JSON.stringify quotes/escapes for the JS context; esc()
+  // then makes the result safe inside the HTML attribute. Without this, a
+  // value containing a quote breaks out of the handler (esc() alone is
+  // HTML-escaping, which the browser decodes BEFORE executing the inline
+  // handler). Promoted to a shared helper from the kanban dependency fix
+  // (#3797). Use as onclick="fn(${jsArg(v)})" — no manual quotes.
+  return esc(JSON.stringify(String(s == null ? '' : s)));
+}
 function _matchBacktickFenceLine(line){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
   if(!m) return null;
@@ -498,6 +508,16 @@ async function startCompressionRecovery(btn){
     const composer=$('msg');
     if(composer&&typeof composer.focus==='function') composer.focus();
   }catch(e){
+    // #7710: a cross-profile refusal now also arrives as 409
+    // (``session_profile_mismatch``). That is NOT a stale recovery action —
+    // the card is still valid, the request was simply refused because the
+    // session belongs to another profile. Retiring it would hide a live card
+    // and show a false "conversation already moved on" note.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)){
+      if(typeof setStatus==='function') setStatus('Session belongs to a different profile');
+      return;
+    }
     // A 409 means this session no longer has an active recovery action (the
     // session already moved on — e.g. a substantive prompt cleared it). The
     // persisted card in the transcript is stale, so retire it and show a neutral
@@ -608,6 +628,9 @@ function _resetMessageRenderWindow(sid){
   _clearRenderCache();
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
+}
+function _restoreMessageRenderWindowAfterSettledRender(){
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 }
 function _cancelMessageVirtualizedRender(){
   if(_messageVirtualScrollRaf){
@@ -1625,6 +1648,14 @@ async function jumpToSessionStart(){
     // insertion is blocked by !S.busy, losing Activity until "done" fires.
     if(!(S.busy||S.activeStreamId)){
       renderMessages({ preserveScroll:true });
+    }else if(typeof _scheduleMessageVirtualizedRender==='function'){
+      // ...but on a virtualized transcript SOMETHING still has to mount the new
+      // render window. The scroll listener used to do it; it now correctly skips
+      // while a programmatic scroll is in flight (the idle re-render-loop fix),
+      // and this path deliberately does not call renderMessages() — so without an
+      // explicit schedule the jump lands on an all-spacer, zero-row transcript.
+      // Force the window update here, after invalidating _messageVirtualWindowKey.
+      _scheduleMessageVirtualizedRender(true);
     }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
@@ -3918,6 +3949,27 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
   const rawId=String(modelId||'');
+  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
+  // key must not become a second picker row. configured_model_badges holds every
+  // spelling of a configured model and renderModelDropdown() synthesises a row
+  // for each key this predicate does not recognise. The provider-qualified
+  // spelling was missed because _normalizeConfiguredModelKey() strips only one
+  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
+  // so `acme/example-model` and `custom/acme/example-model` normalise to
+  // different keys and the picker lists one model twice.
+  // Match it the way the `@provider:` rule below does: the badge declares a
+  // provider, the key starts with that provider's `<provider>/` prefix, and an
+  // existing row from the same provider normalises equal to the remainder. Two
+  // different models never satisfy the last clause, so this can only drop a
+  // duplicate of a row the catalog already produced.
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const slashRoutedId=rawId.slice(slashPrefix.length);
+    if(slashRoutedId&&(entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
+    )) return true;
+  }
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
@@ -4572,10 +4624,16 @@ function renderModelDropdown(){
     else if(_prevHasSearch){ for(const k in _groupOpenState) delete _groupOpenState[k]; }
     _prevHasSearch=hasSearch;
     const found=new Set();
+    // Fold whitespace/hyphens/dots on both sides so "ox alpha", "ox-alpha" and
+    // "ox.alpha" all match the same model (OpenRouter display names use spaces,
+    // ids use slashes/hyphens) (#7228).
+    const _foldModelSearch=(s)=>String(s||'').toLowerCase().replace(/[\s._-]+/g,'');
+    const foldTerm=_foldModelSearch(term);
     for(const m of _modelData){
       const name=m.name.toLowerCase();
       const id=m.id.toLowerCase();
-      if(name.includes(term)||id.includes(term)){
+      if(name.includes(term)||id.includes(term)
+         ||(foldTerm&&(_foldModelSearch(name).includes(foldTerm)||_foldModelSearch(id).includes(foldTerm)))){
         found.add(m.value);
       }
     }
@@ -5064,11 +5122,41 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
-  footer.classList.remove('cf-icons','cf-burger');
-  if(!overflows()) return;
-  footer.classList.add('cf-icons');
-  if(!overflows()) return;
-  footer.classList.add('cf-burger');
+  // Measure without ever PAINTING the expanded state. Stripping the stage
+  // classes makes the footer briefly full-width, which grows the composer and
+  // shrinks #messages by a few px; restoring them a moment later shrinks it
+  // back. A pinned reader sees that as a vertical up/down jitter on every
+  // fit pass (and fit passes run on each context-indicator update during SSE).
+  // `visibility:hidden` + a fixed height freeze the layout box during the
+  // measurement, so the scroll container's clientHeight never changes.
+  const prevVisibility=footer.style.visibility;
+  const prevHeight=footer.style.height;
+  const frozenHeight=footer.getBoundingClientRect().height;
+  if(frozenHeight>0){
+    footer.style.height=frozenHeight+'px';
+    footer.style.visibility='hidden';
+  }
+  let next='';
+  try{
+    footer.classList.remove('cf-icons','cf-burger');
+    if(overflows()){
+      footer.classList.add('cf-icons');
+      next='cf-icons';
+      if(overflows()){
+        footer.classList.add('cf-burger');
+        next='cf-icons cf-burger';
+      }
+    }
+  }finally{
+    // Restore the measured stage, then release the frozen box in the same
+    // task so no intermediate geometry is ever committed to the screen.
+    footer.classList.toggle('cf-icons',next.includes('cf-icons'));
+    footer.classList.toggle('cf-burger',next.includes('cf-burger'));
+    if(frozenHeight>0){
+      footer.style.height=prevHeight;
+      footer.style.visibility=prevVisibility;
+    }
+  }
 }
 window._fitComposerFooter=_fitComposerFooter;
 
@@ -6345,12 +6433,12 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
     if(_freshProgrammaticScrollActive()) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -6400,7 +6488,18 @@ if(typeof window!=='undefined'){
         return;
       }
       _lastScrollTop=top;
-      if(movedUp){
+      if(movedUp&&bottomDistance>1){
+        // Only a real scroll-away unpins. A collapse ABOVE the tail (worklog
+        // "Done" fold, thinking/tool card collapse, interim-note collapse) shrinks
+        // scrollHeight while the reader is still flush at the tail, so the browser
+        // clamps scrollTop DOWN by the collapsed height and fires a scroll event:
+        // movedUp is true while bottomDistance stays ~0. Reading that as user
+        // intent killed live-follow mid-stream on a reader who never scrolled.
+        // The render-artifact suppression below cannot cover it: it needs a
+        // renderMessages() within the last 1400ms, and the collapse paths above run
+        // from the streaming handlers, which update the DOM incrementally and never
+        // stamp _lastMessageRenderAt. A genuine upward scroll always leaves the true
+        // bottom first, so it still has bottomDistance>1 here.
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;
@@ -7318,18 +7417,51 @@ function _stripDottedModelPrefix(bare){
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
-  // Preserve custom gateway model IDs exactly as configured.
+  // The catalog is the authority on model identity: the backend knows the real
+  // provider/model split and ships an exact `m.label` per routing id, so a
+  // catalogued id — including a plain-lane `@custom:` id whose model contains
+  // colons (`@custom:ollamacloud/qwen3.5:397b`) — renders verbatim. The
+  // string parsing below is only a legacy fallback for ids the catalog has
+  // never seen (pre-hydration, stale sessions, removed providers), where a
+  // first-colon split alone cannot tell a `@custom:<slug>:<model>` from a
+  // plain-lane `@custom:<model-with-colon>` (#7240).
+  if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
+  // Preserve custom gateway model IDs exactly as configured. A custom id is
+  // `@custom:<model>` in the plain custom lane or `@custom:<slug>:<model>` for
+  // a named custom provider; the provider slug may itself be an endpoint
+  // authority (e.g. `custom:10.8.71.41:8080`). The model portion may contain
+  // colons (tag/variant suffixes like `:free`, `:31b`, `:397b`) and vendor
+  // slashes, so only the leading provider segment is peeled (#7240).
   // Examples:
-  //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
-  //   @custom:qwen397b-64k               -> qwen397b-64k
+  //   @custom:ai_gateway:Qwen3.6-35B-A3B            -> Qwen3.6-35B-A3B
+  //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
+  //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
     const rest=rawId.slice('@custom:'.length);
-    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
-    return rest||rawId;
+    const sep=rest.indexOf(':');
+    if(sep<0) return rest||rawId;
+    // A provider slug is a config key or a host:port authority — it never
+    // contains a `/`. A slash-bearing first segment is therefore the model
+    // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
+    // must render the whole remainder, not just `397b`), mirroring the
+    // `/`-means-routable rule api/config.py applies when building ids.
+    if(rest.slice(0,sep).includes('/')) return rest||rawId;
+    let model=rest.slice(sep+1);
+    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
+    // to the provider segment, mirroring the host:port slug check in
+    // api/config.py, so it is consumed before the model label starts.
+    const portMatch=/^(\d{1,5}):/.exec(model);
+    if(portMatch){
+      const port=Number(portMatch[1]);
+      if(port>=1&&port<=65535){
+        const host=rest.slice(0,sep).toLowerCase();
+        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
+          model=model.slice(portMatch[0].length);
+        }
+      }
+    }
+    return model||rawId;
   }
-  // Check dynamic labels first, then fall back to splitting the ID
-  if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
@@ -7496,7 +7628,7 @@ function _stripXmlToolCallsDisplay(s){
   s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
   // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
   s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-  return s.trim();
+  return s.replace(/^\s+/, '');
 }
 
 function _sanitizeThinkingDisplayText(text){
@@ -7591,6 +7723,16 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
+  // #7680 re-gate (9/22): two-pass scan.
+  //   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
+  //      the wrapping backticks so the bare-token pass below sees a
+  //      plain ``MEDIA:path`` and the closing backtick is not consumed
+  //      as part of the path.
+  //   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
+  //      class) so a filename that legally contains a backtick
+  //      (``report`final.png``) is captured in full instead of being
+  //      truncated at the first backtick.
+  s=s.replace(/`MEDIA:([^`\s]+)`/g,'MEDIA:$1');
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
@@ -7706,10 +7848,43 @@ function renderMd(raw){
   });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
-  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
-  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
+  // Keep boundary whitespace OUTSIDE the generated *...* delimiters: the inline
+  // emphasis regex below deliberately rejects a leading/trailing space (so
+  // `a * b * c` is not italicised), and `<em> x </em>` would otherwise degrade
+  // into literal asterisks (or a bullet list at line start).
+  const _emphasis=(t)=>{
+    const m=String(t).match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return (m && m[2]) ? m[1]+'*'+m[2]+'*'+m[3] : t;
+  };
+  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>_emphasis(t));
+  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
-  s=s.replace(/<br\s*\/?>/gi,'\n');
+  // Convert <br> to a newline, EXCEPT inside genuine markdown table rows — there a
+  // newline would split the row and destroy the table. No sentinel token is used on
+  // purpose: any fixed placeholder is attacker-suppliable in message text and would be
+  // rewritten on the way out.
+  // The "is this a table row" test must match the DOWNSTREAM table parser's grammar
+  // exactly (a run of pipe-lines whose SECOND line is a separator). A looser per-line
+  // test would treat pipe-wrapped prose like `| note<br># heading |` as a table row and
+  // silently strip its heading/list rendering.
+  {
+    const _rowRe=/^ {0,3}\|.+\|[ \t]*$/;
+    const _sepRe=/^\|[\s|:-]+\|$/;
+    const _lines=s.split('\n');
+    const _isTableRow=new Array(_lines.length).fill(false);
+    for(let i=0;i<_lines.length;){
+      if(!_rowRe.test(_lines[i])){ i++; continue; }
+      let j=i;
+      while(j<_lines.length && _rowRe.test(_lines[j])) j++;
+      // A block qualifies only if the parser would accept it: >=2 rows and a separator
+      // in the second position.
+      if(j-i>=2 && _sepRe.test(_lines[i+1].trim())){
+        for(let k=i;k<j;k++) _isTableRow[k]=true;
+      }
+      i=j;
+    }
+    s=_lines.map((line,i)=>_isTableRow[i]?line:line.replace(/<br\s*\/?>/gi,'\n')).join('\n');
+  }
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:
@@ -7747,7 +7922,7 @@ function renderMd(raw){
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
-    t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     // Strikethrough: ~~text~~ → <del>text</del>
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
@@ -7767,7 +7942,7 @@ function renderMd(raw){
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
-    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
+    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
@@ -7777,55 +7952,104 @@ function renderMd(raw){
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
-  s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
-  function _renderListBlock(lines, ordered){
-    const marker=ordered?'\\d+\\. ':'[-*+] ';
-    let html=ordered?'<ol>':'<ul>';
-    let item=null;
-    const flush=()=>{
-      if(!item) return;
-      const body=item.parts.join('\n').trim();
-      const text=body;
-      let inner;
-      if(!ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(!ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else inner=inlineMd(text);
-      const valueAttr=item.value!==null?` value="${item.value}"`:'';
-      const styleAttr=item.indent?` style="margin-left:16px"`:'';
-      html+=`<li${valueAttr}${styleAttr}>${inner}</li>`;
-      item=null;
+  function _renderListBlock(lines){
+    // Single-pass mixed-marker list renderer (#6700). Builds a real nested
+    // <ul>/<ol> tree with a stack keyed by indentation depth + marker kind
+    // instead of rendering one marker family and re-parsing the generated
+    // HTML with the other. Only item text goes through inlineMd(); tags
+    // emitted here are never parsed as Markdown again.
+    const root={ordered:false,items:[]};   // container for top-level lists
+    const listStack=[];                    // listStack[k]: list open at depth k
+    const itemStack=[];                    // itemStack[k]: last item at depth k
+    const openList=(depth,ordered)=>{
+      const ln={ordered,items:[]};
+      // Attach to the nearest open ancestor item when indentation jumps by
+      // more than one level (e.g. 4-space indent straight from the top), so
+      // the new list nests under the right parent instead of detaching.
+      let parentItem=null;
+      for(let k=depth-1;k>=0;k--){
+        if(itemStack[k]){ parentItem=itemStack[k]; break; }
+      }
+      (parentItem?parentItem.sublists:root.items).push(ln);
+      listStack[depth]=ln;
+      return ln;
+    };
+    const openItem=(depth,ordered,value,content)=>{
+      for(let k=listStack.length-1;k>depth;k--) listStack.pop();
+      if(!listStack[depth]||listStack[depth].ordered!==ordered){
+        if(listStack[depth]) listStack.pop();
+        listStack[depth]=openList(depth,ordered);
+      }
+      const item={ordered,value,content:[content],sublists:[]};
+      listStack[depth].items.push(item);
+      itemStack[depth]=item;
+      for(let k=itemStack.length-1;k>depth;k--) itemStack.pop();
+      return item;
     };
     for(const raw of lines){
       const line=String(raw||'');
-      const nested=line.match(new RegExp(`^ {2,}(${marker})(.*)$`));
-      if(nested){
-        flush();
-        item={indent:true,value:ordered?parseInt(nested[1],10):null,parts:[nested[2]]};
-        continue;
+      const om=line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      const um=line.match(/^(\s*)([-*+])\s+(.*)$/);
+      const m=om||um;
+      if(m){
+        const depth=m[1].length<2?0:Math.floor(m[1].length/2);
+        openItem(depth,!!om,om?parseInt(om[2],10):null,m[3]);
+      } else if(itemStack.length){
+        itemStack[itemStack.length-1].content.push(line.replace(/^ {2,}/,'').trim());
       }
-      const top=line.match(new RegExp(`^(?:  )?(${marker})(.*)$`));
-      if(top){
-        flush();
-        item={indent:false,value:ordered?parseInt(top[1],10):null,parts:[top[2]]};
-        continue;
-      }
-      if(!item) continue;
-      item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
-    flush();
-    return html+(ordered?'</ol>':'</ul>');
+    // Iterative depth-first emit (#6700 re-gate). The recursive
+    // renderList/renderItem pair recursed once per nesting level, so a
+    // pathologically deep list (an agent dumping deeply nested structured
+    // data) threw RangeError at ~2,000 levels; renderMd() runs after the
+    // transcript container is cleared, so the uncaught throw blanked the
+    // whole session. Emit order is identical — list open, items, nested
+    // sublists, item close, list close — but sublists are pushed onto an
+    // explicit work stack instead of the call stack.
+    const html=[];
+    const work=[];                                  // {open:list} | {item} | {close:list} | {closeItem:true}
+    for(let i=root.items.length-1;i>=0;i--) work.push({open:root.items[i]});
+    while(work.length){
+      const f=work.pop();
+      if(f.item){
+        const it=f.item;
+        const text=it.content.join('\n').trim();
+        let inner;
+        if(!it.ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+        else if(!it.ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+        else inner=inlineMd(text);
+        const valueAttr=it.value!==null?` value="${it.value}"`:'';
+        html.push(`<li${valueAttr}>`,inner);
+        work.push({closeItem:true});                // </li> after any nested sublists
+        for(let i=it.sublists.length-1;i>=0;i--) work.push({open:it.sublists[i]});
+      } else if(f.closeItem){
+        html.push('</li>');
+      } else if(f.open){
+        const ln=f.open;
+        html.push('<',ln.ordered?'ol':'ul','>');
+        work.push({close:ln});                      // </ul>/</ol> after all items
+        for(let i=ln.items.length-1;i>=0;i--) work.push({item:ln.items[i]});
+      } else {
+        html.push('</',f.close.ordered?'ol':'ul','>');
+      }
+    }
+    return html.join('');
   }
-  function _renderLists(src, ordered){
+  function _renderLists(src){
+    // Single pass over source lines: collect a contiguous list region (any
+    // marker family, top-level or nested, plus continuation lines) and hand
+    // it to _renderListBlock, which builds the structural <ul>/<ol> tree.
     const lines=src.split('\n');
     const out=[];
-    const topRe=ordered?/^(?:  )?\d+\. /:/^(?:  )?[-*+] /;
-    const nestedRe=ordered?/^ {2,}\d+\. /:/^ {2,}[-*+] /;
+    const topRe=/^(?:  )?(?:\d+\.|[-*+]) /;
+    const nestedRe=/^ {2,}(?:\d+\.|[-*+]) /;
     const contRe=/^ {2,}\S/;
     let i=0;
     while(i<lines.length){
@@ -7852,18 +8076,16 @@ function renderMd(raw){
         }
         break;
       }
-      out.push(_renderListBlock(block,ordered));
+      out.push(_renderListBlock(block));
     }
     return out.join('\n');
   }
-  // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
-  // inside list items without changing the wider markdown pipeline.
-  s=_renderLists(s,false);
-  // Ordered-list parsing intentionally runs on the post-unordered string; the
-  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
-  // Keep continuation lines attached to their item and preserve explicit
-  // numbering via value= even when blank lines split the markdown.
-  s=_renderLists(s,true);
+  // Single-pass list stage (#6700): one parser handles both marker families
+  // with a stack keyed by indentation + marker kind, so mixed nested lists
+  // (ul→ol→ul) build valid <ul>/<ol> structure instead of re-parsing
+  // renderer-generated HTML as Markdown. value="N" is still emitted on every
+  // ordered <li> so explicit numbering survives blank-line splits (#886).
+  s=_renderLists(s);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
@@ -8026,8 +8248,7 @@ function renderMd(raw){
     const a=_attrs(rawAttrs);
     if(name==='li'){
       const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
-      const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
-      return `<li${value}${style}>`;
+      return `<li${value}>`;
     }
     if(name==='span'){
       return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
@@ -8959,6 +9180,12 @@ function _stripForTTS(text){
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
+  // #7680 re-gate (9/22): TTS does not need the backtick-aware
+  // terminator. Inline code was already stripped at the top of this
+  // function (`:9137`), so a bare ``MEDIA:[^\s]+`` is correct and
+  // round-trips the original filename including a backtick in the
+  // path — the only thing the TTS ever does with the captured
+  // substring is throw it away.
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
@@ -9054,7 +9281,7 @@ function _playEdgeTtsChunked(text, btn){
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge'})
     })
     .then(function(r){
       if(!r.ok){
@@ -9738,6 +9965,99 @@ function _liveAssistantSegmentTextLength(seg){
   return String(body.textContent||'').trim().length;
 }
 
+// ── #6948 follow-up: settled-transcript ownership of a live-turn node ──────
+// (duplicate assistant answer; upstream symptom report #2051)
+//
+// Both live-turn insertion paths — the renderMessages() re-attach and
+// restoreLiveTurnHtmlForSession() — have one branch that ADDS a turn the
+// settled rebuild did not produce. The assistant row is persisted a few ms
+// BEFORE the stream's terminal event clears S.activeStreamId, so a dead live
+// node left behind by an INFLIGHT entry that outlived its stream is re-attached
+// on top of the settled transcript: the same answer twice, self-sustaining
+// across later renders (the node keeps id=liveAssistantTurn and is re-preserved
+// by the #6948 guard), healed only by a reload.
+//
+// Dropping a live node must be an OWNERSHIP proof, never "the rendered text
+// looks the same":
+//   * the live body is built by the streaming smd parser and the settled body
+//     by renderMd + post-processing, so their textContent differs for anything
+//     past single-paragraph plain text (lists, fenced code with its language
+//     label, tables, `_underscore_` emphasis, the injected copy button) — a
+//     text comparison would miss most real answers; and
+//   * an identical answer earlier in the history (a repeated "Done.", a
+//     greeting, a same-prompt resend) would delete a GENUINELY LIVE turn: while
+//     the current turn is unpersisted, the last settled assistant message IS the
+//     previous turn's answer.
+// So ownership is proved from state: the transcript must END with a settled
+// assistant message that THIS stream produced, and the node must carry nothing
+// the settled rebuild could not have produced.
+
+// Stream identity persisted on a settled assistant message. The server stamps
+// _anchor_stream_id from the anchor-scene sidecar record (api/routes.py); the
+// client stamps _anchor_stream_id and scene.identity.stream_id at stream end
+// (_attachProjectedAnchorSceneToLastAssistant, static/messages.js).
+function _settledAssistantStreamId(message){
+  if(!message) return '';
+  const scene=message._anchor_activity_scene||null;
+  const identity=(scene&&scene.identity)||null;
+  return String(message._anchor_stream_id||(scene&&scene.stream_id)||(identity&&identity.stream_id)||'');
+}
+// The live-projection markers the #6948 preserve guard already treats as proof
+// of a live owner. A message the client still considers live is never evidence
+// that the turn has settled.
+function _messageHasLiveAssistantProjection(m){
+  return !!(m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined));
+}
+// True when the live turn holds something the settled rebuild cannot have
+// produced from S.messages — an unpersisted tool card, reasoning/thinking row,
+// transparent-stream row, or a second live segment. Such a node is never
+// dropped: #3714's whole premise is that the live DOM can be AHEAD of
+// S.messages, and a tail-segment match must not discard the tool card or the
+// earlier segment above it. An unknown node shape fails closed (keep the turn).
+function _liveTurnCarriesUnsettledContent(turn){
+  if(!turn||typeof turn.querySelectorAll!=='function') return true;
+  if(turn.querySelectorAll(
+    '.tool-card-row,.wl-reason,.agent-activity-thinking,.thinking-card-row,.transparent-event-row'
+  ).length) return true;
+  return turn.querySelectorAll('[data-live-assistant="1"]').length>1;
+}
+function _settledTranscriptOwnsLiveTurn(sid, turn){
+  if(!turn) return false;
+  const msgs=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:null;
+  if(!msgs||!msgs.length) return false;
+  // The transcript must END with a settled assistant answer. A trailing user
+  // turn means the live turn IS the current turn — nothing of it is persisted
+  // yet, so it can never be a leftover (this is the case a text comparison gets
+  // wrong when the previous answer happens to read the same), and a live
+  // projection anywhere means the rebuild still owns a live turn of its own.
+  const last=msgs[msgs.length-1];
+  if(!last||last.role!=='assistant') return false;
+  if(msgs.some(_messageHasLiveAssistantProjection)) return false;
+  const inflight=(typeof INFLIGHT!=='undefined'&&INFLIGHT)?INFLIGHT[sid]:null;
+  // Owner of the live DOM: INFLIGHT carries the id of the stream that built it
+  // (attachLiveStream), and S.activeStreamId is that same id until the terminal
+  // event clears it.
+  const liveStreamId=String((inflight&&inflight.streamId)||(typeof S!=='undefined'&&S&&S.activeStreamId)||'');
+  const settledStreamId=_settledAssistantStreamId(last);
+  if(settledStreamId){
+    // Identity recorded on both sides decides — renderer- and text-independent,
+    // so code blocks, lists and tables are handled like plain prose.
+    if(!liveStreamId||settledStreamId!==liveStreamId) return false;
+  }else{
+    // No persisted identity on the tail (a turn whose scene was not worklog
+    // worthy). Compare SOURCE with SOURCE — the markdown this stream produced
+    // (INFLIGHT.lastAssistantText) against the persisted message content —
+    // never two independently rendered DOM trees. Regeneration cannot reach
+    // this branch: startRegeneration() truncates S.messages at the user turn,
+    // so the tail is a user message while a regenerated answer streams.
+    const streamed=String((inflight&&inflight.lastAssistantText)||'').replace(/\s+/g,' ').trim();
+    if(!streamed) return false;
+    const settled=String((typeof msgContent==='function'?msgContent(last):last.content)||'').replace(/\s+/g,' ').trim();
+    if(!settled||streamed!==settled) return false;
+  }
+  return !_liveTurnCarriesUnsettledContent(turn);
+}
+
 function _mergeRestoredLiveAssistantSegment(restored, existing){
   if(!restored||!existing) return;
   const existingLive=existing.querySelector('[data-live-assistant="1"]');
@@ -9774,6 +10094,18 @@ function restoreLiveTurnHtmlForSession(sid){
   const existing=$('liveAssistantTurn');
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
+  // #6948 follow-up (duplicate assistant answer; #2051): only this branch ADDS a
+  // turn — replacing an existing live turn cannot duplicate. When the settled
+  // transcript already owns the stream this snapshot belongs to, appending it
+  // pins a SECOND copy of the same answer under the settled one. Release the
+  // stale snapshot (no other consumer can use it — it would be re-refused on
+  // every later restore) and report "nothing restored", so loadSession takes the
+  // same path it already takes for an INFLIGHT entry that never carried one.
+  else if(typeof _settledTranscriptOwnsLiveTurn==='function'
+          &&_settledTranscriptOwnsLiveTurn(sid, restored)){
+    inflight.liveTurnHtml=null;
+    return false;
+  }
   else inner.appendChild(restored);
   // Transparent Stream: liveTurnHtml is restored via template.innerHTML, which
   // drops the property-bound onclick/onkeydown handlers wired by
@@ -11279,6 +11611,15 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
+  // The caller only consults this predicate once the turn has settled (it gates
+  // on `!S.busy`), so an `_live` marker seen here is a leftover of the
+  // live-snapshot projection, not an ongoing stream. Folding on it hid the turn's
+  // final answer inline and echoed it into the Worklog, leaving the turn with no
+  // visible content until the #3875 blank-turn fail-safe revealed both copies. A
+  // turn-final assistant message with visible text is the answer, so keep it out
+  // of the fold; every other `_live` message folds as before. Kept as a separate
+  // guard so the live rule below keeps its position.
+  if(m._live&&hasVisibleText&&isTurnFinalAssistant) return false;
   if(m._live) return true;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
@@ -12961,6 +13302,17 @@ function _anchorSceneRowsForRendering(scene, opts){
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   const settled=!!(opts&&opts.settled);
   const live=!settled;
+  // #6948 follow-up (duplicate assistant answer; #2051): on a SETTLED turn the
+  // assistant segment owns the final answer, so a process_prose row carrying
+  // that same text must not also be rebuilt into the activity scene. The
+  // transparent-stream renderer suppresses it per row
+  // (_anchorSceneTransparentNodeForRow), but the compact-worklog row builder
+  // (_anchorSceneNodeForRow) has no such guard and renders the row as a second
+  // .assistant-segment above the settled one. Drop it here — the single place
+  // BOTH settled renderers (and the #5839 deferred-rows path) get their rows.
+  // LIVE rendering is untouched: while streaming, the inline live segment is
+  // hidden and the prose row IS the visible answer.
+  const settledFinalAnswer=settled?String((scene&&scene.final_answer)||'').trim():'';
   const out=[];
   const byKey=new Map();
   const liveProseTextKeys=new Map();
@@ -12983,6 +13335,9 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
     if((row.role==='prose'||row.role==='thinking')&&!text) continue;
+    if(settledFinalAnswer&&row.role==='prose'
+       &&typeof _anchorSceneProseDuplicatesFinalAnswer==='function'
+       &&_anchorSceneProseDuplicatesFinalAnswer(text,settledFinalAnswer)) continue; // #6948 follow-up
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -13256,6 +13611,26 @@ function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
   if(!(a.startsWith(b)||b.startsWith(a))) return false;
   const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
   return shorter>=80 && (shorter/longer)>=0.9;
+}
+// #6948 follow-up (duplicate assistant answer; #2051): the same near-equality
+// test as _anchorSceneProseMatchesFinalAnswer, minus its absolute `shorter>=80`
+// floor. That floor makes the matcher a no-op for every SHORT final answer
+// (greetings, "Done.", one-liners), so a prose row that is the answer minus its
+// last streamed token — e.g. "Hey! What can I help you with today" vs
+// "...today?" — was rebuilt as a SECOND assistant-segment beside the settled
+// one. The >=0.9 length ratio is what actually keeps a distinct short
+// intermediate sentence from being swallowed by a long final answer (Codex
+// #4568), so it alone is kept. Deliberately a separate helper: the per-row
+// render-time matcher above, and the tests pinning its exact predicate, stay
+// untouched.
+function _anchorSceneProseDuplicatesFinalAnswer(proseText, finalAnswer){
+  if(_anchorSceneProseMatchesFinalAnswer(proseText,finalAnswer)) return true;
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
+  const a=norm(proseText), b=norm(finalAnswer);
+  if(!a||!b) return false;
+  if(!(a.startsWith(b)||b.startsWith(a))) return false;
+  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
+  return (shorter/longer)>=0.9;
 }
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;
@@ -13792,6 +14167,10 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   return true;
 }
 
+const _TRANSPARENT_FADE_BLOCK_TAGS = new Set([
+  'P','DIV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','LI','UL','OL','PRE','TABLE',
+]);
+
 function _bindTransparentFadeCleanup(body){
   if(!body || body._transparentFadeCleanupBound || typeof body.addEventListener !== 'function') return;
   body._transparentFadeCleanupBound = true;
@@ -13806,6 +14185,20 @@ function _bindTransparentFadeCleanup(body){
     span.classList.remove('is-new');
     if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
+}
+
+// Trailing block element of a live prose body, if any. Live rows are produced
+// by the incremental streaming-markdown path, which keeps an open block (a <p>)
+// as it parses; text appended as a sibling of that block would render on its
+// own line. Inline wrappers (fade spans) are not block boxes and are skipped.
+function _transparentFadeAppendTarget(body){
+  if(!body) return body;
+  const kids = body.childNodes;
+  if(!kids || !kids.length) return body;
+  const last = kids[kids.length - 1];
+  if(!last || last.nodeType !== 1) return body;
+  const tag = String(last.tagName || '').toUpperCase();
+  return _TRANSPARENT_FADE_BLOCK_TAGS.has(tag) ? last : body;
 }
 
 function _appendTransparentFadeText(body, text){
@@ -13833,13 +14226,58 @@ function _appendTransparentFadeText(body, text){
   }
   if(!changed) frag.appendChild(document.createTextNode(value));
   else if(last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
-  body.appendChild(frag);
+  // Append inside the trailing block element (the streaming markdown parser's
+  // open <p>) rather than at the root of .msg-body. A block sibling would start
+  // its own line box, so a continuation of the current sentence — in particular
+  // the tail of a word — must land inside that block to stay on the same line.
+  _transparentFadeAppendTarget(body).appendChild(frag);
 }
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
+  if(!existing || !node) return node || existing;
+  if(existing === node) return existing;
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
   const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
-  const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
+  // Resume strictly from the source-space cursor. `body.textContent` is NOT a
+  // valid substitute: rows built by the incremental streaming-markdown path
+  // render one character behind their source text (the parser holds the last
+  // character pending), so falling back to rendered text yields a delta that
+  // starts mid-word and tears the word in half. With no cursor we cannot know
+  // how much of the source is already rendered, so rebuild the body instead of
+  // guessing a delta.
+  const hasCursor = !!(existing.getAttribute && existing.getAttribute('data-stream-fade-text') !== null);
+  const currentText = hasCursor ? String(existing.getAttribute('data-stream-fade-text') || '') : '';
+  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
+  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
+    ? window.__streamFadeMuteRenderedPrefix
+    : null;
+  if(parserOwned){
+    // Promote the actual parser-owned candidate into the keyed row's DOM
+    // position once. Cloning its children into the old visible row on every
+    // later growth frame cuts off the previous tail word's ~620ms fade
+    // (`.is-new` is stripped from the replacement) and breaks word-node
+    // identity used for scroll-anchor stability. After this swap, later
+    // keyed renders hit `_refreshTransparentLiveRow(existing === node)` and
+    // keep growing the same parser target. Pending and MEDIA tails stay on
+    // the parser until it flushes them.
+    const prevRendered = String((body && body.textContent) || '');
+    if(candidateBody.classList) candidateBody.classList.add('stream-fade-active');
+    _bindTransparentFadeCleanup(candidateBody);
+    if(mute && prevRendered) mute(candidateBody, prevRendered);
+    if(node.removeAttribute) node.removeAttribute('data-stream-fade-text');
+    const parent = existing.parentNode || existing.parentElement || null;
+    if(parent && existing.parentNode === parent){
+      if(typeof parent.replaceChild === 'function'){
+        parent.replaceChild(node, existing);
+      }else if(typeof parent.insertBefore === 'function'){
+        parent.insertBefore(node, existing);
+        if(typeof existing.remove === 'function') existing.remove();
+      }
+    }
+    _rehydrateTransparentLiveRow(node, existing, preservedState);
+    return node;
+  }
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
   for(const pair of pairs){
@@ -13860,14 +14298,42 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.appendChild(body);
   }
   if(body.classList) body.classList.add('stream-fade-active');
-  if(!nextText.startsWith(currentText)){
-    body.textContent = '';
+  if(!hasCursor || !nextText.startsWith(currentText)){
+    // Rebuild branch. Snapshot the rendered text BEFORE clearing (#7082
+    // review should-fix): without it every word re-wraps as `.is-new`, the
+    // whole visible row dips to opacity 0 and fades back (~620ms), and the
+    // wholesale node replacement invites the one-time scroll-anchor bounce
+    // the #6257 comment in `_bindTransparentFadeCleanup` warns about.
+    const prevRendered = String(body.textContent || '');
     existing.setAttribute('data-stream-fade-text', '');
-    _appendTransparentFadeText(body, nextText);
+    // Non-parser candidates may still carry a parsed-looking body (tests and
+    // rewind rebuilds). Clone that DOM when present so we do not flatten it
+    // back to literal source.
+    let resumeCursor = nextText;
+    if(candidateBody && candidateBody !== body &&
+       typeof candidateBody.cloneNode === 'function' &&
+       candidateBody.childNodes && candidateBody.childNodes.length){
+      const clone = candidateBody.cloneNode(true);
+      body.textContent = '';
+      while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
+      _bindTransparentFadeCleanup(body);
+      const renderedNow = String(body.textContent || '');
+      if(renderedNow && nextText.startsWith(renderedNow)) resumeCursor = renderedNow;
+    }else{
+      body.textContent = '';
+      _appendTransparentFadeText(body, nextText);
+    }
+    // messages.js `_streamFadeMuteRenderedPrefix` idiom (exported on window the
+    // same way `__anchorProseIncrementalNode` is): rendered-space compare of the
+    // pre-rebuild snapshot against the rebuilt body, stripping `.is-new` from
+    // spans inside the common prefix so already-visible words do not replay
+    // their fade — only genuinely-new tail words animate.
+    if(mute && prevRendered) mute(body, prevRendered);
+    existing.setAttribute('data-stream-fade-text', resumeCursor);
   }else{
     _appendTransparentFadeText(body, nextText.slice(currentText.length));
+    existing.setAttribute('data-stream-fade-text', nextText);
   }
-  existing.setAttribute('data-stream-fade-text', nextText);
   _rehydrateTransparentLiveRow(existing, node, preservedState);
   return existing;
 }
@@ -15007,6 +15473,22 @@ function _isContextCompactionMessage(m){
 function _isContextCompactionText(text){
   return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
 }
+function _compactionSummarySegment(text){
+  // Mirror of api/compression_anchor.py compaction_summary_segment(). The
+  // replay patch carries this helper so it stays self-contained on upstream.
+  const s=String(text||'').replace(/^\s+/,'');
+  const low=s.toLowerCase();
+  if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return s;
+  if(!low.startsWith('[prior context')) return null;
+  const delim=low.indexOf('[end of prior context');
+  if(delim===-1) return null;
+  const after=s.slice(delim);
+  const close=after.indexOf(']');
+  if(close===-1) return null;
+  const segment=after.slice(close+1).replace(/^\s+/,'');
+  if(segment.toLowerCase().startsWith('[context compaction')) return segment;
+  return null;
+}
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
 }
@@ -15086,9 +15568,91 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
 function _shouldShowSettledCompressionReference(referenceText){
   return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
+// Ultra-compact display (2026-08-18): the compaction marker text starts with a
+// long fixed envelope of handling instructions. The conversation card must
+// preview the DIGEST (goal/state the user cares about), never the envelope.
+function _compactionDigestText(text){
+  const s=String(text||'');
+  // The envelope prose ends right before the first markdown heading on its
+  // own line. Quoted headings inside the envelope (e.g. "from '## Historical
+  // Task Snapshot' or any other section") never sit at line start.
+  const m=s.match(/(^|\n)#{1,3} [^\n]/);
+  if(!m) return s.trim();
+  const start=m.index+(m[1]?1:0);
+  return s.slice(start).trim();
+}
+function _compactionCardPreview(text){
+  const digest=_compactionDigestText(text)
+    .replace(/^#{1,3} /gm,'')
+    .replace(/^Historical Task Snapshot\s*/i,'');
+  return digest.split(/\n+/).map(l=>l.trim()).filter(Boolean).slice(0,2).join(' ').slice(0,220);
+}
+// All compaction markers present in the LOADED transcript, oldest first. Each
+// one renders as its own collapsed card at its real position so the user can
+// see when the context was compacted and reopen the digest inline.
+function _loadedCompactionMarkerRawIdxs(messages){
+  const out=[];
+  if(!Array.isArray(messages)) return out;
+  for(let i=0;i<messages.length;i++){
+    if(_isContextCompactionMessage(messages[i])) out.push(i);
+  }
+  return out;
+}
+// A settled compaction whose marker sits before the server-loaded tail must
+// remain visible at the top of that tail. Anchoring it to an old assistant/tool
+// turn can bury it inside a hidden worklog, which makes compaction look absent.
+// `currentSummaryFallback` is true when the session's current summary matches
+// no loaded marker and therefore renders as its own settled card. That card is
+// the newest compaction the user can see, so it owns the preserved task cards
+// and no marker card may attach them again.
+function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx,currentSummaryFallback=false){
+  const preWindowMarkers=[];
+  const inlineMarkers=[];
+  const boundary=Number.isFinite(firstRenderedRawIdx)?firstRenderedRawIdx:-1;
+  for(const value of Array.isArray(markerRawIdxs)?markerRawIdxs:[]){
+    const rawIdx=Number(value);
+    if(!Number.isInteger(rawIdx)||rawIdx<0) continue;
+    if(rawIdx<boundary) preWindowMarkers.push(rawIdx);
+    else inlineMarkers.push(rawIdx);
+  }
+  const taskOwner=currentSummaryFallback
+    ?{kind:'current-summary',rawIdx:-1}
+    :inlineMarkers.length
+      ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
+      :!preWindowMarkers.length
+        ?null
+        :{kind:'pre-window',rawIdx:preWindowMarkers[preWindowMarkers.length-1]};
+  return {preWindowMarkers,inlineMarkers,taskOwner};
+}
+function _insertCompactionCardNodes(entries,taskOwner,insertNode){
+  const insertedNodes=[];
+  let taskOwnerNode=null;
+  if(!Array.isArray(entries)||typeof insertNode!=='function') return {insertedNodes,taskOwnerNode};
+  for(const entry of entries){
+    if(!entry?.node) continue;
+    const inserted=insertNode(entry.node,entry.rawIdx,entry.kind)!==false;
+    if(!inserted||!entry.node.parentElement) continue;
+    insertedNodes.push(entry.node);
+    if(taskOwner&&entry.kind===taskOwner.kind&&entry.rawIdx===taskOwner.rawIdx) taskOwnerNode=entry.node;
+  }
+  return {insertedNodes,taskOwnerNode};
+}
+function _insertPreservedCompressionTaskFallback(taskOwnerNode,standaloneNode,insertNode){
+  if(taskOwnerNode?.parentElement||!standaloneNode||typeof insertNode!=='function') return false;
+  return insertNode(standaloneNode)!==false&&!!standaloneNode.parentElement;
+}
+function _pinCompactionCardAtTop(inner,node){
+  if(!inner||!node) return false;
+  inner.appendChild(node);
+  return true;
+}
+function _pinSettledCompressionReferenceAtTop(inner,node,referenceMessageRawIdx){
+  if(referenceMessageRawIdx>=0) return false;
+  return _pinCompactionCardAtTop(inner,node);
+}
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
-  const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
+  const preview=_compactionCardPreview(text)||text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
@@ -16543,6 +17107,23 @@ function _processWakeupCardHtml(info, rawText, extras){
   return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
+// #2051: parse into a <template> and move the nodes instead of insertAdjacentHTML —
+// every step is idempotent, so a DOM-API wrapper (e.g. an anti-fingerprinting
+// extension) that executes the call twice cannot duplicate the block.
+function _insertSegmentBlock(seg, html){
+  if(!seg) return;
+  if(typeof document!=='undefined'&&typeof document.createElement==='function'){
+    try{
+      const tpl=document.createElement('template');
+      if('content' in tpl){
+        tpl.innerHTML=html;
+        seg.appendChild(tpl.content);
+        return;
+      }
+    }catch(_){ /* fall through to the string path below */ }
+  }
+  seg.insertAdjacentHTML('beforeend', html);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -16729,13 +17310,60 @@ function renderMessages(options){
     S.messages,
     sessionCompressionSummary
   );
-  const referenceText=referenceMessage
-    ? msgContent(referenceMessage)||String(referenceMessage.content||'')
-    : sessionCompressionSummary;
-  const referenceNode=(!compressionState && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const referenceText=(()=>{
+    if(!referenceMessage) return sessionCompressionSummary;
+    const raw=msgContent(referenceMessage)||String(referenceMessage.content||'');
+    const segment=_compactionSummarySegment(raw);
+    return segment!==null?segment:raw;
+  })();
+  // Ultra-compact display (2026-08-18): every compaction marker loaded in the
+  // transcript renders as its own collapsed card at its real position, so the
+  // user SEES each compaction and can reopen its digest inline. Markers older
+  // than the virtual window are pinned above the rendered rows in transcript
+  // order; markers inside the window stay inline.
+  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const loadedCompactionRawIdxs=(!compressionState)?_loadedCompactionMarkerRawIdxs(S.messages):[];
+  // A loaded marker that matches the current summary already renders as its
+  // own card. When none matches (referenceMessageRawIdx<0) the current summary
+  // is still authoritative and must stay visible even next to stale markers,
+  // so the settled fallback is decided here, before any card node is built,
+  // and takes part in the single preserved-task owner selection.
+  const showCurrentSummaryFallback=!!(!compressionState && referenceMessageRawIdx<0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary));
+  const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx,showCurrentSummaryFallback);
+  const referenceNodeOwnsTasks=!!(showCurrentSummaryFallback
+    && compactionPlacements.taskOwner
+    && compactionPlacements.taskOwner.kind==='current-summary'
+    && preservedCompressionTaskMessages.length);
+  const _compactionCardEntry=(markerRawIdx,kind)=>{
+    const markerMsg=S.messages[markerRawIdx];
+    let raw='';
+    try{
+      raw=String(msgContent(markerMsg)||'');
+    }catch(_){
+      raw=String((markerMsg&&markerMsg.content)||'');
+    }
+    const segment=_compactionSummarySegment(raw);
+    const text=segment!==null?segment:raw;
+    const ownsTasks=!!(compactionPlacements.taskOwner
+      && compactionPlacements.taskOwner.kind===kind
+      && compactionPlacements.taskOwner.rawIdx===markerRawIdx);
+    const row=document.createElement('div');
+    row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text,false)}${ownsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;
+    const node=row.firstElementChild;
+    if(node){
+      node.setAttribute('data-compaction-placement',kind);
+      node.setAttribute('data-compaction-raw-idx',String(markerRawIdx));
+      if(ownsTasks&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');
+    }
+    return {node,rawIdx:markerRawIdx,kind};
+  };
+  const preWindowCompactionCards=compactionPlacements.preWindowMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'pre-window'));
+  const compactionCardNodes=compactionPlacements.inlineMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'inline'));
+  const referenceNode=showCurrentSummaryFallback
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${referenceNodeOwnsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;const node=row.firstElementChild;if(node&&referenceNodeOwnsTasks) node.setAttribute('data-compaction-task-owner','1');return node;})()
     : null;
-  let preservedCompressionTaskCardsAttached=!!referenceNode;
+  let referenceNodePinnedAtTop=false;
+  let preservedCompressionTaskOwnerNode=null;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -16743,7 +17371,6 @@ function renderMessages(options){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     rawIdx++;
   }
-  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   // #6999: the turn-content maps MUST see the FULL visWithIdx, not the
   // virtual render window. _assistantTurnFinalVisibleContentMap /
   // _assistantTurnVisibleContentMap derive the echo-strip context for a
@@ -16773,7 +17400,19 @@ function renderMessages(options){
       : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
+    // Keep the settled compacted-context card immediately visible in a long,
+    // tail-loaded conversation. Put it in flow (not inside an old tool turn).
+    referenceNodePinnedAtTop=_pinSettledCompressionReferenceAtTop(inner,referenceNode,referenceMessageRawIdx);
+    if(referenceNodePinnedAtTop&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
   }
+  const preWindowInsertion=_insertCompactionCardNodes(
+    preWindowCompactionCards,
+    compactionPlacements.taskOwner,
+    node=>_pinCompactionCardAtTop(inner,node)
+  );
+  if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
@@ -17249,7 +17888,7 @@ function renderMessages(options){
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        _insertSegmentBlock(orderedSeg, `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -17309,9 +17948,9 @@ function renderMessages(options){
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
-      if(hasVisibleBody) seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      if(hasVisibleBody) _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(hasVisibleBody){
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
@@ -17320,7 +17959,7 @@ function renderMessages(options){
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){
-    if(!node) return;
+    if(!node) return false;
     const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
     if(anchorIdx!==null && renderVisWithIdx[anchorIdx]){
       const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
@@ -17330,23 +17969,24 @@ function renderMessages(options){
         const blocks=_assistantTurnBlocks(turn);
         if(blocks){
           blocks.appendChild(node);
-          return;
+          return !!node.parentElement;
         }
       }
       const userRow=userRows.get(anchorRawIdx);
       if(userRow && userRow.parentElement){
         userRow.parentElement.insertBefore(node, userRow.nextSibling);
-        return;
+        return !!node.parentElement;
       }
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
-    if(!node) return;
-    if(rawIdx<firstRenderedRawIdx) return;
+    if(!node) return false;
+    if(rawIdx<firstRenderedRawIdx) return false;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     let anchorIdx=null;
     for(let i=0;i<renderVisWithIdx.length;i++){
@@ -17357,7 +17997,7 @@ function renderMessages(options){
     }
     if(anchorIdx===null){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
     const anchorSeg=assistantSegments.get(anchorRawIdx);
@@ -17366,23 +18006,24 @@ function renderMessages(options){
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
         blocks.insertBefore(node, anchorSeg);
-        return;
+        return !!node.parentElement;
       }
       const turnParent=turn && turn.parentElement;
       if(turnParent){
         turnParent.insertBefore(node, turn);
-        return;
+        return !!node.parentElement;
       }
     }
     const userRow=userRows.get(anchorRawIdx);
     if(userRow && userRow.parentElement){
       userRow.parentElement.insertBefore(node, userRow);
-      return;
+      return !!node.parentElement;
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const preservedOnlyNode=preservedCompressionTaskMessages.length
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn" data-compaction-task-fallback="1"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
     ? (()=>{let idx=null;for(let i=0;i<renderVisWithIdx.length;i++){if(renderVisWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
@@ -17390,9 +18031,25 @@ function renderMessages(options){
   const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
-  if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);
-  else _insertCompressionLikeNode(referenceNode);
-  _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
+  const inlineCompactionInsertion=_insertCompactionCardNodes(
+    compactionCardNodes,
+    compactionPlacements.taskOwner,
+    (node,markerRawIdx)=>_insertCompressionLikeNodeByRawIdx(node,markerRawIdx)
+  );
+  if(inlineCompactionInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=inlineCompactionInsertion.taskOwnerNode;
+  if(!referenceNodePinnedAtTop){
+    const referenceInserted=referenceNode&&referenceMessageRawIdx>=0
+      ?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)
+      :_insertCompressionLikeNode(referenceNode);
+    if(referenceInserted&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
+  }
+  _insertPreservedCompressionTaskFallback(
+    preservedCompressionTaskOwnerNode,
+    preservedOnlyNode,
+    node=>_insertCompressionLikeNode(node,preservedOnlyAnchor)
+  );
   _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
   for(const entry of handoffSummaryStates){
     if(!entry||!entry.state) continue;
@@ -17716,12 +18373,15 @@ function renderMessages(options){
         if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
         const anchorTurn=anchorRow.closest('.assistant-turn');
         if(!anchorTurn) continue;
+        // Hoisted out of the `if(!state)` block below (same expression, same
+        // value) so the append path can use the ownership fact the group
+        // construction already uses.
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
         let state=activityByTurn.get(anchorTurn);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
-          const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
           const group=ensureActivityGroup(anchorParent,{
             collapsed:true,
             anchor:anchorRow,
@@ -17741,7 +18401,14 @@ function renderMessages(options){
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
           live:false,
-          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          // Echo an anchor's prose as a `.wl-reason` row only when that anchor was
+          // folded into this Worklog. `assistant-segment-worklog-source` is the
+          // proof, and its `display:none` is the only reason the echo is not a
+          // second visible copy. The group construction above already reasons
+          // that way (`syncAnchorReason`); the append path did not, so an anchor
+          // that escapes the fold (the turn-final answer, an `_error` message)
+          // had its text rendered both inline and inside the Worklog.
+          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml&&!!anchorIsWorklogSource,
           thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
@@ -18030,6 +18697,15 @@ function renderMessages(options){
       const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
       let revealed=false;
       for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
@@ -18148,7 +18824,17 @@ function renderMessages(options){
           // restore the whole preserved turn so nothing the user saw vanishes.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           _rebuilt.replaceWith(_preservedLiveTurn);
-        }else{
+        }else if(!(typeof _settledTranscriptOwnsLiveTurn==='function'
+                   &&_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn))){
+          // #6948 follow-up (duplicate assistant answer; #2051): this is the
+          // only branch that ADDS a turn — the rebuild produced no live turn of
+          // its own. When the settled transcript already ends with THIS stream's
+          // own answer and the preserved node carries nothing unpersisted, the
+          // node is a dead leftover (the row persisted and the turn settled while
+          // INFLIGHT[sid] was not yet cleaned) and appending pins a SECOND copy
+          // that re-preserves itself on every later render until a reload.
+          // Mid-stream the transcript ends with the user turn (or still carries a
+          // live projection), so #3877 preservation is untouched.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           inner.appendChild(_preservedLiveTurn);
         }
@@ -19294,38 +19980,65 @@ function autoResizeTextarea(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
+// #2184 follow-up: submitEdit is re-entrant and destructive, and nothing stopped
+// a second invocation. Its only guard was S.busy, which send() does not set until
+// the LAST line — after two multi-second awaits (_ensureAllMessagesLoaded on a long
+// session, then the truncate round-trip). On a laggy instance that leaves a 10s+
+// window in which every further click on "Send edit" starts another full truncate.
+// Observed in the wild: seven concurrent POST /api/session/truncate, 5.2-8.5s each,
+// from one user clicking repeatedly because the UI had not yet acknowledged the first.
+//
+// That is not merely wasteful, it is a data-loss hazard. `absoluteKeepCount` is
+// deliberately captured BEFORE the awaits (see test_submit_edit_captures_absolute_
+// before_await): at click time `_oldestIdx` is the loaded window's offset and
+// `msgIdx` is window-relative, so their sum is the true absolute index. But the
+// first call's _ensureAllMessagesLoaded() sets `_oldestIdx = 0`, so a SECOND call
+// entering afterwards computes `0 + msgIdx` from a still-window-relative msgIdx —
+// a far smaller keep_count. Truncating a 2000-message session to that would delete
+// most of its history.
+//
+// Guard re-entry at the function itself rather than at the click handler: the edit
+// can also be submitted with Enter (the keydown handler clicks the button), and a
+// future caller would silently reopen the hole. Cleared in a finally so an early
+// return or a throw cannot wedge editing off for the rest of the page's life.
+let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
-  if(!S.session || S.busy) return;
-  const initialSid = S.session.session_id;
-  const absoluteKeepCount = _oldestIdx + msgIdx;
-  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
-  // initialSid — a non-default session model (vs profile default), which is
-  // inference-free and survives the failed send's marker consumption. See
-  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
-  const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  if(typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
-  }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!S.session || S.busy || _submitEditInFlight) return;
+  _submitEditInFlight = true;
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    // #5924 SILENT-race guard: a session switch during the truncate await must not
-    // let this recovery apply session A's intent (truncate/re-arm/send) to the
-    // newly-visible session.
+    const initialSid = S.session.session_id;
+    const absoluteKeepCount = _oldestIdx + msgIdx;
+    // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
+    // initialSid — a non-default session model (vs profile default), which is
+    // inference-free and survives the failed send's marker consumption. See
+    // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+    const _recoveryPick=_deliberateSessionModelPick(initialSid);
+    if(typeof _ensureAllMessagesLoaded==='function'){
+      await _ensureAllMessagesLoaded();
+    }
     if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
-    await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+    try {
+      await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+        session_id: initialSid,
+        keep_count: absoluteKeepCount
+      })});
+      // #5924 SILENT-race guard: a session switch during the truncate await must not
+      // let this recovery apply session A's intent (truncate/re-arm/send) to the
+      // newly-visible session.
+      if(!S.session || S.session.session_id !== initialSid) return;
+      S.messages = S.messages.slice(0, absoluteKeepCount);
+      renderMessages();
+      $('msg').value = newText;
+      // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+      // Re-arm the single-shot explicit-pick marker from the captured non-default
+      // pick — only if still safe at fire time (session unchanged, current model
+      // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+      _reArmRecoveryPick(initialSid, _recoveryPick);
+      await send();
+    } catch(e) { setStatus(t('edit_failed') + e.message); }
+  } finally {
+    _submitEditInFlight = false;
+  }
 }
 
 async function regenerateResponse(btn) {

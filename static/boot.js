@@ -1901,7 +1901,7 @@ window.renderTranscript=function(container, messages, opts){
       fetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch})
+        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge'})
       })
       .then(r => {
         if(!r.ok) throw new Error('TTS request failed: ' + r.status);
@@ -3431,8 +3431,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
+      // #7622 (round 3): the settings payload's `s.language` is
+      // absent (None) for a fresh install, so an explicit non-empty
+      // value is the user's genuine saved choice.  The browser
+      // navigator hint is now read via the guarded
+      // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+      // a throwing `navigator` accessor in some embedded webviews
+      // can no longer abort this branch and reset loaded preferences.
+      // The fallback ternary preserves the pre-#7622 boot behaviour
+      // when neither helper is in scope (defence in depth).
       const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
+        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
         : (s.language || localStorage.getItem('hermes-lang') || 'en');
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
