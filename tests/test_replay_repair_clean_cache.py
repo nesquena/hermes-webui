@@ -17,6 +17,8 @@ These tests pin the three properties that make the cache safe:
 import copy
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -166,6 +168,41 @@ def test_load_path_repairs_dirty_session_then_caches_clean(tmp_path, monkeypatch
     assert loaded is not None
     assert len(loaded.messages) == 4
     assert hashlib.sha256(raw).hexdigest() in models._repair_clean_digests
+
+
+def test_overlapping_cold_loads_both_repair_before_warm_cache(tmp_path, monkeypatch):
+    """Cold joiners are safe, but this cache does not coalesce their work."""
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    sid = "20260101_000000_cold_parallel"
+    path = tmp_path / f"{sid}.json"
+    raw = json.dumps(_clean_session(sid)).encode("utf-8")
+    path.write_bytes(raw)
+
+    both_repairing = threading.Barrier(2, timeout=10)
+    lock = threading.Lock()
+    calls = []
+    repair = models._repair_session_message_projections
+
+    def overlapping_repair(data):
+        with lock:
+            calls.append(data["session_id"])
+        both_repairing.wait()
+        return repair(data)
+
+    monkeypatch.setattr(models, "_repair_session_message_projections", overlapping_repair)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(models._load_session_from_path, path) for _ in range(2)]
+        loaded = [future.result(timeout=15) for future in futures]
+
+    assert calls == [sid, sid]  # Both miss before the first verdict is stored.
+    assert all(
+        session is not None and session.messages == _clean_session(sid)["messages"]
+        for session in loaded
+    )
+    assert hashlib.sha256(raw).hexdigest() in models._repair_clean_digests
+    # Subsequent warm loads do skip the repair pipeline.
+    assert models._load_session_from_path(path) is not None
+    assert len(calls) == 2
 
 
 def test_rewritten_file_invalidates_the_verdict(tmp_path, monkeypatch):
