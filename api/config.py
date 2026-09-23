@@ -5079,6 +5079,12 @@ _cache_build_in_progress = False  # True while a cold path is actively building
 # started before a provider cleanup from republishing a stale catalog that
 # resurrects just-removed providers (#6581).
 _models_cache_generation = 0
+# Generation of the rebuild that currently owns _cache_build_in_progress.
+# Set when a rebuild starts; cleared by invalidations (which reset the flag).
+# Distinguishes "the flag is mine and I was invalidated" (must release it) from
+# "a newer rebuild owns the flag now" (must NOT release it) — the plain
+# generation check cannot tell those apart (#6581 finding 2).
+_cache_build_owner_generation: int | None = None
 
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
@@ -6485,7 +6491,7 @@ def invalidate_models_cache():
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
-    global _models_cache_generation
+    global _models_cache_generation, _cache_build_owner_generation
     with _available_models_cache_lock:
         # Bump the generation/owner token so any in-flight rebuild that
         # captured the previous generation discards its result when it
@@ -6500,15 +6506,22 @@ def invalidate_models_cache():
         _available_models_cache_source_fingerprint = None
         _sync_models_cache_provenance()
         _cache_build_in_progress = False
+        _cache_build_owner_generation = None
         _cache_build_cv.notify_all()
         # Clear the credential pool cache too (all profiles). Without this,
         # tests (and live provider key edits) see a stale CredentialPool from a
         # prior auth_store payload — the test_credential_pool_providers suite was
         # hitting this directly. A full reset is intentionally profile-wide.
         _CREDENTIAL_POOL_CACHE.clear()
-    # Also delete the disk cache so the next cold build starts fresh.
-    # Disk delete is outside the lock — file I/O shouldn't block other readers.
-    _delete_models_cache_on_disk()
+        # Delete the disk cache INSIDE the lock (#6581): the unlink is a single
+        # fast syscall, and holding the lock here closes the republish race —
+        # a reader that loads the disk snapshot must either do so before this
+        # invalidation begins (and then fail the generation check before it
+        # can publish) or after it (file already gone). With the delete
+        # outside the lock, a reader could load the file in the gap between
+        # this lock release and the unlink and republish the stale snapshot
+        # to memory and disk after the invalidation completed.
+        _delete_models_cache_on_disk()
     try:
         from api.plugin_providers import invalidate_plugin_model_provider_cache
 
@@ -6553,13 +6566,25 @@ def invalidate_provider_models_cache(provider_id: str):
     """
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
+    global _models_cache_generation, _cache_build_owner_generation
+    global _cache_build_in_progress
     with _available_models_cache_lock:
+        # Same generation-protocol participation as invalidate_models_cache
+        # (#6581 finding: /api/models/refresh bypassed it). Without the bump,
+        # an over-budget rebuild worker that started BEFORE this provider-
+        # specific refresh would publish its stale catalog — restoring the
+        # just-refreshed/removed provider to memory AND disk after the
+        # invalidation completed.
+        _models_cache_generation += 1
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
         _sync_models_cache_provenance()
         _provider_models_invalidated_ts[provider_id] = time.time()
+        _cache_build_in_progress = False
+        _cache_build_owner_generation = None
+        _cache_build_cv.notify_all()
         # Also evict the credential pool so the next cold path re-loads it.
         # Must evict both the original key and its canonical form (load_pool
         # may be called with either, and both paths cache under their own key),
@@ -6567,7 +6592,10 @@ def invalidate_provider_models_cache(provider_id: str):
         _cp_tag = _credential_pool_profile_tag()
         _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
         _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
-    _delete_models_cache_on_disk()
+        # Delete the disk cache INSIDE the lock, mirroring
+        # invalidate_models_cache() — closes the load-in-the-gap republish
+        # race for provider-specific refreshes too (#6581).
+        _delete_models_cache_on_disk()
 
 
 def _get_label_for_model(model_id: str, existing_groups: list) -> str:
@@ -6773,7 +6801,12 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     return ordered
 
 
-def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = False) -> dict:
+def get_available_models(
+    *,
+    prefer_cache: bool = False,
+    force_refresh: bool = False,
+    _rebuild_reentry: bool = False,
+) -> dict:
     """
     Return available models grouped by provider.
 
@@ -6804,6 +6837,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _cache_build_owner_generation
+    # One-shot guard for the publication-rejection resume (#6581 finding 4):
+    # on re-entry after a rejected publish, the rebuilt result must be
+    # returned as-is instead of recursing again.
+    _resumed_after_rejection = _rebuild_reentry
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -8304,6 +8342,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # so only one thread rebuilds while others wait.
     disk_groups = None
     stale_disk_groups = None
+    # Bind this disk load to the current generation (#6581): an
+    # invalidate_models_cache() that runs after the load but before we acquire
+    # the lock must not let this stale snapshot republish (memory + disk). The
+    # generation is re-checked under the lock before the snapshot is used.
+    _disk_load_generation = _models_cache_generation
     if _available_models_cache is None and not force_refresh:
         disk_groups = _load_models_cache_from_disk()
         if disk_groups is None:
@@ -8402,8 +8445,17 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
-        # Cold path: disk cache hit — use it (fast, no lock contention)
-        if disk_groups is not None and not force_refresh:
+        # Cold path: disk cache hit — use it (fast, no lock contention).
+        # Generation re-check (#6581): the snapshot was loaded outside the
+        # lock; if invalidate_models_cache() ran between the load and this
+        # lock acquisition, the generation has advanced and this snapshot is
+        # stale — it must be discarded (and the rebuild path below run
+        # instead), not published to memory or disk.
+        if (
+            disk_groups is not None
+            and not force_refresh
+            and _disk_load_generation == _models_cache_generation
+        ):
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
@@ -8441,6 +8493,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # built from a config snapshot that may have just had providers
             # removed (#6581).
             _build_generation = _models_cache_generation
+            # Record that THIS generation owns the in-progress flag so
+            # release sites can tell "I was invalidated, release the flag"
+            # from "a newer rebuild owns the flag, leave it alone" (#6581).
+            _cache_build_owner_generation = _build_generation
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -8480,14 +8536,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
                 # Always reset the flag so waiting threads don't block for 60s
-                # — but only if we still own this rebuild's generation: an
-                # invalidation may have cleared the flag already, or a newer
-                # rebuild may own it now.
+                # — but only if we still own this rebuild's flag: an
+                # invalidation may have cleared it already, or a newer
+                # rebuild may own it now (owner-token check, #6581).
                 with _cache_build_cv:
-                    if _build_generation == _models_cache_generation:
+                    if _cache_build_owner_generation == _build_generation:
                         _cache_build_in_progress = False
                         _cache_build_cv.notify_all()
                 raise
+            _published_sync = False
             try:
                 with _cache_build_cv:
                     if _build_generation == _models_cache_generation:
@@ -8504,11 +8561,25 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # deletes the file, or runs first and bumps the
                         # generation so this publish block is skipped.
                         _save_models_cache_to_disk(result)
+                        _published_sync = True
             finally:
                 with _cache_build_cv:
-                    if _build_generation == _models_cache_generation:
+                    # Owner check, not generation check (#6581): an
+                    # invalidation clears the flag AND the owner token, so we
+                    # must not skip the release just because the generation
+                    # advanced — only skip when a NEWER rebuild owns it.
+                    if _cache_build_owner_generation == _build_generation:
                         _cache_build_in_progress = False
                         _cache_build_cv.notify_all()
+            # Finding #6581: a publish that was REJECTED (generation advanced
+            # mid-flight) must not be returned to the caller — re-enter once
+            # to resolve against the post-invalidation state.
+            if not _published_sync and not _resumed_after_rejection:
+                return get_available_models(
+                    prefer_cache=prefer_cache,
+                    force_refresh=force_refresh,
+                    _rebuild_reentry=True,
+                )
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -8540,10 +8611,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         publish_lock = threading.Lock()
         box: dict = {}
 
-        def _publish_models_result(result):
+        def _publish_models_result(result) -> bool:
+            """Publish; return False iff the result was REJECTED (stale
+            generation — an invalidation happened mid-flight, #6581)."""
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
+            global _cache_build_owner_generation
+            rejected = False
             with _cache_build_cv:
                 if _build_generation != _models_cache_generation:
                     # A cache invalidation happened while this rebuild was in
@@ -8552,45 +8627,53 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # (#6581): discard it, skip the disk write, and leave
                     # _cache_build_in_progress alone so a newer rebuild (if
                     # any) keeps its serialization.
-                    return
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = (
-                    _models_cache_source_fingerprint()
-                )
-                _sync_models_cache_provenance()
-            try:
-                # Hold the cv from the re-check through the atomic disk
-                # rename: an invalidation can no longer interleave between
-                # the generation check and the file write (TOCTOU #6581). It
-                # either blocks until the rename lands and then deletes the
-                # file, or runs first and bumps the generation so this
-                # publish block is skipped — the stale catalog cannot survive
-                # a restart and resurrect a just-removed provider.
-                with _cache_build_cv:
-                    if _build_generation != _models_cache_generation:
-                        return
-                    _save_models_cache_to_disk(result)
-            except Exception:
-                logger.debug("models cache disk save failed", exc_info=True)
-            finally:
-                # Only clear the in-progress flag if we still own this
-                # rebuild's generation: an obsolete worker must never clear a
-                # newer rebuild's in-progress state.
-                with _cache_build_cv:
-                    if _build_generation == _models_cache_generation:
-                        _cache_build_in_progress = False
-                        _cache_build_cv.notify_all()
+                    rejected = True
+                else:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = (
+                        _models_cache_source_fingerprint()
+                    )
+                    _sync_models_cache_provenance()
+            if not rejected:
+                try:
+                    # Hold the cv from the re-check through the atomic disk
+                    # rename: an invalidation can no longer interleave between
+                    # the generation check and the file write (TOCTOU #6581).
+                    # It either blocks until the rename lands and then deletes
+                    # the file, or runs first and bumps the generation so this
+                    # publish block is skipped — the stale catalog cannot
+                    # survive a restart and resurrect a just-removed provider.
+                    with _cache_build_cv:
+                        if _build_generation != _models_cache_generation:
+                            rejected = True
+                        else:
+                            _save_models_cache_to_disk(result)
+                except Exception:
+                    logger.debug("models cache disk save failed", exc_info=True)
+            # Only clear the in-progress flag if we still own it: an
+            # obsolete worker must never clear a newer rebuild's
+            # in-progress state. Owner-token check, not generation check
+            # (#6581): after an invalidation the owner token is None, so
+            # the flag this rebuild started is released even though the
+            # generation advanced.
+            with _cache_build_cv:
+                if _cache_build_owner_generation == _build_generation:
+                    _cache_build_in_progress = False
+                    _cache_build_cv.notify_all()
+            return not rejected
 
         def _clear_build_in_progress():
             global _cache_build_in_progress
+            global _cache_build_owner_generation
             with _cache_build_cv:
-                # Same generation guard as _publish_models_result: an
-                # obsolete rebuild (error path) must not clear the in-progress
-                # state of a newer rebuild started after an invalidation.
-                if _build_generation != _models_cache_generation:
+                # Owner-token guard (see _publish_models_result): an obsolete
+                # rebuild (error path) must not clear the in-progress state
+                # of a newer rebuild started after an invalidation, but a
+                # rebuild invalidated mid-flight DOES release its own flag.
+                if _cache_build_owner_generation != _build_generation:
                     return
                 _cache_build_in_progress = False
                 _cache_build_cv.notify_all()
@@ -8607,8 +8690,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # Re-bind the captured per-request profile on THIS worker thread
             # (#3957): the daemon inherits neither the request-profile TLS nor
             # os.environ, so without this it would probe the default profile's
-            # credentials and, over budget, publish the rebuilt catalog to the
-            # DEFAULT profile's disk cache. No-op for the default profile.
+            # credentials and, over budget, publish the rebuilt catalog to
+            # the DEFAULT profile's disk cache. No-op for the default profile.
             _worker_scope = (
                 _prof_scope_worker(_active_profile_name, "models rebuild (worker)")
                 if _prof_scope_worker is not None
@@ -8617,7 +8700,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             with _worker_scope:
                 try:
                     box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
-                except Exception as exc:  # noqa: BLE001 — propagated to caller
+                except BaseException as exc:
+                    # BaseException, not Exception (#6581): a KeyboardInterrupt /
+                    # SystemExit (or any non-Exception BaseException) from the
+                    # builder must still land in box["error"] — with the old
+                    # ``except Exception`` it escaped, build_done was never set
+                    # (over budget) and the foreground's within-budget path hit
+                    # KeyError('result'). Propagated to the caller below either
+                    # way; nothing is swallowed.
                     box["error"] = exc
                 finally:
                     build_done.set()
@@ -8633,12 +8723,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         else:
                             _clear_build_in_progress()
 
-        _worker = threading.Thread(
-            target=_rebuild_worker,
-            name="models-catalog-rebuild",
-            daemon=True,
-        )
-        _worker.start()
+        try:
+            _worker = threading.Thread(
+                target=_rebuild_worker,
+                name="models-catalog-rebuild",
+                daemon=True,
+            )
+            _worker.start()
+        except BaseException:
+            # Thread.start() can fail (RuntimeError: can't start new thread under
+            # resource exhaustion — and a KeyboardInterrupt here too). Without
+            # this cleanup the owner flag stays True forever (#6581): every
+            # later /api/models caller coalesces behind a build that will never
+            # run, stalling or falling back until process restart. Release the
+            # flag and re-raise so the caller gets a real error instead.
+            with _cache_build_cv:
+                if _cache_build_owner_generation == _build_generation:
+                    _cache_build_in_progress = False
+                    _cache_build_owner_generation = None
+                    _cache_build_cv.notify_all()
+            raise
 
         if build_done.wait(timeout=_LIVE_REBUILD_BUDGET_SECONDS):
             # Build finished within budget — foreground publishes
@@ -8647,8 +8751,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _clear_build_in_progress()
                 raise box["error"]
             if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+                _published = _publish_models_result(box["result"])
+                # Finding #6581: if publication was REJECTED (an invalidation
+                # advanced the generation mid-flight), returning the result
+                # would hand the caller a catalog built from a
+                # pre-invalidation config snapshot — the removed provider
+                # stays visible in this response. Recurse once: re-enter with
+                # the same force_refresh/prefer_cache contract against the
+                # post-invalidation state (memory miss, disk deleted,
+                # generation advanced). Recursion is safe: the next call is
+                # memory-cold, and an in-flight newer rebuild is coalesced
+                # behind, not duplicated. The once-guard prevents unbounded
+                # recursion if a pathological test invalidates on every
+                # entry.
+                if not _published and not _resumed_after_rejection:
+                    return get_available_models(
+                        prefer_cache=prefer_cache,
+                        force_refresh=force_refresh,
+                        _rebuild_reentry=True,
+                    )
+                return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
         # publication. Handle the tiny race where the build completed between
@@ -8657,7 +8779,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         budget_exceeded.set()
         if build_done.is_set() and "error" not in box and "result" in box:
             if _claim_publish():
-                _publish_models_result(box["result"])
+                _published = _publish_models_result(box["result"])
+                # Same publication-rejection resume as the within-budget path
+                # (#6581 finding 4): never return a result the publish step
+                # rejected as stale.
+                if not _published and not _resumed_after_rejection:
+                    return get_available_models(
+                        prefer_cache=prefer_cache,
+                        force_refresh=force_refresh,
+                        _rebuild_reentry=True,
+                    )
             return copy.deepcopy(box["result"])
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
@@ -8740,6 +8871,11 @@ def warm_models_catalog_provenance_if_cold() -> None:
 
     if _provenance_is_current():
         return  # already warm for THIS profile — one global read, no work
+    # Snapshot the generation BEFORE the non-blocking lock acquisition
+    # (#6581): the disk load below must be bound to this token so an
+    # invalidation that lands between the load and the publish discards the
+    # stale snapshot instead of republishing it.
+    _disk_load_generation = _models_cache_generation
     got = _available_models_cache_lock.acquire(blocking=False)
     if not got:
         return  # a concurrent build/publish holds the lock; it will publish
@@ -8752,6 +8888,13 @@ def warm_models_catalog_provenance_if_cold() -> None:
             disk_groups = None
         if disk_groups is None:
             return  # no durable cache for this profile → stay cold, preserve verbatim
+        # Generation re-check (#6581): the disk snapshot was loaded without
+        # generation ownership. If invalidate_models_cache() ran between the
+        # load and this lock acquisition, the snapshot was built from a
+        # pre-invalidation config snapshot — republishing it (even as
+        # "provenance") would restore just-removed providers.
+        if _disk_load_generation != _models_cache_generation:
+            return
         _available_models_cache = disk_groups
         _available_models_cache_ts = time.monotonic()
         try:
@@ -8795,6 +8938,11 @@ def get_available_models_for_session_visit() -> dict:
             _slow_threshold_ms = 0.0
 
     global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint
+    # Bind the disk loads below to the current generation (#6581): if
+    # invalidate_models_cache() runs while this function is between the disk
+    # read and the (memory publish | stale fallback | force-refresh), the
+    # stale snapshot must not republish a just-removed provider.
+    _disk_load_generation = _models_cache_generation
     cache_path = _get_models_cache_path()
     cache_age = _models_cache_file_age_seconds(cache_path, time.time())
     _mark(f"disk_age_check:{cache_age}")
@@ -8812,21 +8960,35 @@ def get_available_models_for_session_visit() -> dict:
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
             with _available_models_cache_lock:
-                cached = _get_fresh_memory_models_cache(time.monotonic())
-                if cached is not None:
-                    _mark("disk_then_memory_cache_hit")
-                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                    return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            _mark("disk_cache_returned")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(disk_cached)
+                # Generation re-check (#6581): the disk snapshot was loaded
+                # without generation ownership; an invalidation that ran
+                # between the load and this lock acquisition makes the
+                # snapshot stale (its provider set may be pre-removal).
+                # Discard it and let the force_refresh path rebuild fresh.
+                if _disk_load_generation != _models_cache_generation:
+                    disk_cached = None
+                    _mark("disk_cache_discarded_stale_generation")
+                else:
+                    cached = _get_fresh_memory_models_cache(time.monotonic())
+                    if cached is not None:
+                        _mark("disk_then_memory_cache_hit")
+                        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                        return cached
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+            if disk_cached is not None:
+                _mark("disk_cache_returned")
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()
+    # A stale snapshot must never be the fallback after an invalidation
+    # (#6581): it would resurrect the just-removed provider.
+    if stale_cached is not None and _disk_load_generation != _models_cache_generation:
+        stale_cached = None
     _mark(f"stale_cached_loaded:{bool(stale_cached)}")
     try:
         _mark("force_refresh_start")

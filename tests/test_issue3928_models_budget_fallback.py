@@ -788,3 +788,257 @@ def test_disk_save_atomic_with_invalidation_real_disk(
     ):
         time.sleep(0.01)
     assert len(_rebuild_worker_threads()) == baseline_workers
+
+
+def _make_single_provider_result(provider_id: str, model_id: str) -> dict:
+    return {
+        "active_provider": provider_id,
+        "default_model": model_id,
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": provider_id,
+                "provider_id": provider_id,
+                "models": [{"id": model_id, "label": model_id}],
+            }
+        ],
+        "aliases": {},
+    }
+
+
+def test_stale_disk_snapshot_does_not_republish_after_invalidation(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 finding 1: a disk snapshot loaded OUTSIDE the lock
+    before an invalidation must never republish (memory or disk) after the
+    invalidation completed."""
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    stale_result = _make_single_provider_result("openai-api", "gpt-5.5")
+
+    loads = {"count": 0}
+    load_lock = threading.Lock()
+    invalidation_started = threading.Event()
+    release_load = threading.Event()
+
+    def _paused_load():
+        with load_lock:
+            loads["count"] += 1
+            if loads["count"] == 1:
+                # First load happens inside get_available_models, outside the
+                # lock. Pause here; the test invalidates in that window.
+                invalidation_started.set()
+                assert release_load.wait(5)
+        return copy.deepcopy(stale_result)
+
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", _paused_load)
+
+    # The fresh rebuild that runs after the invalidation discards the stale
+    # snapshot (stubbed: network-free, post-removal catalog).
+    fresh_result = _make_single_provider_result("anthropic", "claude-sonnet-4.6")
+    monkeypatch.setattr(
+        cfg, "_invoke_models_rebuild", lambda _b: copy.deepcopy(fresh_result)
+    )
+
+    disk_writes = []
+    monkeypatch.setattr(
+        cfg,
+        "_save_models_cache_to_disk",
+        lambda cache: disk_writes.append(copy.deepcopy(cache)),
+    )
+
+    result_holder = {}
+
+    def _caller():
+        result_holder["result"] = cfg.get_available_models()
+
+    caller = threading.Thread(target=_caller, name="test-caller", daemon=True)
+    caller.start()
+    # Wait until the caller is parked in the disk load (outside the lock).
+    assert invalidation_started.wait(5)
+
+    # Invalidate while the stale snapshot is loaded but not yet published.
+    cfg.invalidate_models_cache()
+    release_load.set()
+    caller.join(5)
+    assert not caller.is_alive()
+
+    # The stale snapshot must NOT be in memory...
+    assert cfg._available_models_cache != stale_result
+    # ...nor written to disk: the only disk write allowed is the FRESH
+    # post-invalidation rebuild (never the pre-invalidation snapshot).
+    assert disk_writes in ([], [fresh_result]), disk_writes
+    assert stale_result not in disk_writes
+    # ...and the caller must not have received it: the response was rebuilt
+    # against the post-invalidation state (or served the static fallback),
+    # never the pre-invalidation snapshot.
+    assert result_holder["result"] is not None
+    provider_ids = [g["provider_id"] for g in result_holder["result"]["groups"]]
+    assert provider_ids  # a real catalog, not the stale passthrough
+
+
+def test_base_exception_from_worker_does_not_strand_single_flight(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 finding 2: a BaseException (e.g. SystemExit) from
+    the rebuild worker must not strand _cache_build_in_progress=True (the
+    foreground used to hit KeyError('result'))."""
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 5.0, raising=False)
+
+    def _boom(_builder):
+        raise SystemExit("simulated interpreter shutdown")
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _boom)
+
+    with pytest.raises(SystemExit):
+        cfg.get_available_models()
+
+    # The owner flag must be released so later callers don't stall/fallback.
+    assert cfg._cache_build_in_progress is False
+
+    # A later /api/models call must be able to run a fresh rebuild.
+    fresh = _make_single_provider_result("anthropic", "claude-sonnet-4.6")
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", lambda _b: copy.deepcopy(fresh))
+    result = cfg.get_available_models()
+    assert result == fresh
+
+
+def test_thread_start_failure_does_not_strand_single_flight(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 finding 2 (Thread.start failure): a RuntimeError
+    from threading.Thread.start() must release _cache_build_in_progress."""
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+
+    real_thread = threading.Thread
+
+    class _FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(cfg.threading, "Thread", _FailingThread)
+
+    with pytest.raises(RuntimeError):
+        cfg.get_available_models()
+
+    assert cfg._cache_build_in_progress is False
+
+    # The next caller can rebuild normally.
+    fresh = _make_single_provider_result("anthropic", "claude-sonnet-4.6")
+    monkeypatch.setattr(cfg.threading, "Thread", real_thread)
+    monkeypatch.setattr(
+        cfg, "_invoke_models_rebuild", lambda _b: copy.deepcopy(fresh)
+    )
+    assert cfg.get_available_models() == fresh
+
+
+def test_rejected_result_not_returned_at_budget_boundary(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 finding 4: when publication is rejected at the
+    budget boundary (invalidation advanced the generation), the caller must
+    not receive the rejected stale result."""
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+
+    stale_result = _make_single_provider_result("openai-api", "gpt-5.5")
+
+    rebuild_started = threading.Event()
+    release_rebuild = threading.Event()
+
+    def _controlled_rebuild(_builder):
+        rebuild_started.set()
+        assert release_rebuild.wait(5)
+        return copy.deepcopy(stale_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _controlled_rebuild)
+
+    def _caller():
+        # Runs in a thread; the budget elapses while the rebuild is paused.
+        # Genuinely over budget → foreground serves fallback, worker publishes
+        # out-of-band AFTER we invalidate in the boundary window.
+        cfg.get_available_models()
+
+    caller = threading.Thread(target=_caller, daemon=True)
+    caller.start()
+    assert rebuild_started.wait(5)
+    # Let the foreground's budget elapse and the worker pause past the
+    # boundary, then invalidate so the worker's publication is rejected.
+    time.sleep(0.15)  # > _LIVE_REBUILD_BUDGET_SECONDS
+    cfg.invalidate_models_cache()
+    release_rebuild.set()
+    caller.join(5)
+    assert not caller.is_alive()
+
+    # The rejected result must not be in memory.
+    assert cfg._available_models_cache != stale_result
+    assert cfg._cache_build_in_progress is False
+
+
+def test_provider_specific_refresh_participates_in_generation_protocol(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    """Regression for #6581 finding 3: /api/models/refresh
+    (invalidate_provider_models_cache) must bump the generation so an
+    over-budget worker that started BEFORE the refresh cannot restore the
+    provider to memory AND disk afterwards."""
+    _configure_local_sources(
+        monkeypatch,
+        isolate_models_catalog_state["auth_store_path"],
+    )
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+
+    stale_result = _make_single_provider_result("openai-api", "gpt-5.5")
+
+    rebuild_started = threading.Event()
+    release_rebuild = threading.Event()
+
+    def _controlled_rebuild(_builder):
+        rebuild_started.set()
+        assert release_rebuild.wait(5)
+        return copy.deepcopy(stale_result)
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _controlled_rebuild)
+
+    disk_writes = []
+    monkeypatch.setattr(
+        cfg,
+        "_save_models_cache_to_disk",
+        lambda cache: disk_writes.append(copy.deepcopy(cache)),
+    )
+
+    cfg.get_available_models()
+    assert rebuild_started.wait(5)
+
+    # The provider-specific refresh invalidates mid-flight.
+    cfg.invalidate_provider_models_cache("openai-api")
+    release_rebuild.set()
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and cfg._cache_build_in_progress:
+        time.sleep(0.01)
+    assert cfg._cache_build_in_progress is False
+    # The over-budget worker's stale result must not be published...
+    assert cfg._available_models_cache != stale_result
+    # ...and must not reach disk either.
+    assert stale_result not in disk_writes
