@@ -880,7 +880,20 @@ def retire_session_sidecar(
                 raise OSError(f"Failed to persist deletion marker for {sid}")
         path.unlink(missing_ok=True)
         if remove_backup:
-            path.with_suffix(".json.bak").unlink(missing_ok=True)
+            try:
+                path.with_suffix(".json.bak").unlink(missing_ok=True)
+            except OSError:
+                # The live generation is already retired (and its durable
+                # marker verified above), so the delete has committed. A
+                # leftover backup of a tombstoned session is classified by
+                # recovery as deleted, never restored; do not report the
+                # committed retirement as failed.
+                logger.warning(
+                    "Retired session %s but could not remove its backup %s",
+                    sid,
+                    path.with_suffix(".json.bak"),
+                    exc_info=True,
+                )
         return not path.exists()
 
 
@@ -1579,6 +1592,20 @@ class Session:
                         self.squash_projection_cutoff = float(raw_cutoff)
                     except (TypeError, ValueError):
                         self.squash_projection_cutoff = _last_message_timestamp(self.messages)
+                # A legacy squash sidecar may be claimed only after an ordinary
+                # turn already advanced the watermark. The summary row carries
+                # the squash point, so never freeze a cutoff past it.
+                try:
+                    summary_ts = float(self.messages[0].get('timestamp'))
+                except (TypeError, ValueError):
+                    summary_ts = None
+                if (
+                    summary_ts is not None
+                    and -float('inf') < summary_ts < float('inf')
+                    and isinstance(self.squash_projection_cutoff, (int, float))
+                    and summary_ts < self.squash_projection_cutoff
+                ):
+                    self.squash_projection_cutoff = summary_ts
         # Freeze every persisted/indexed field, not only messages.  The sidecar
         # and compact row below are projections of this one immutable generation.
         generation = copy.copy(self)

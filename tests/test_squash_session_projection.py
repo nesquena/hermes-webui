@@ -203,7 +203,14 @@ def test_squash_projection_preserves_distinct_state_only_rows_after_watermark():
 
 @pytest.mark.parametrize(
     ("generation", "cutoff"),
-    [("", 200.0), ("not-a-uuid", 200.0), ("0123456789ab4cde8f0123456789abcd", 199.0)],
+    [
+        ("", 200.0),
+        ("not-a-uuid", 200.0),
+        # Cutoff before the squash summary row would re-admit replaced rows.
+        ("0123456789ab4cde8f0123456789abcd", 199.0),
+        # Cutoff beyond the current watermark is incoherent authority.
+        ("0123456789ab4cde8f0123456789abcd", 201.0),
+    ],
 )
 def test_malformed_squash_projection_authority_fails_closed(generation, cutoff):
     sidecar_messages, cli_messages = _production_squash_projection()
@@ -351,3 +358,168 @@ def test_branch_after_post_squash_truncate_uses_superseded_coordinates(
     assert [message["content"] for message in branch.messages] == [
         "# Session compactée\n\nRésumé opérationnel vérifié."
     ]
+
+
+# ── #6600 review blocker 2: a valid squash projection must survive the next
+# ordinary WebUI turn on every production display/branch path, without the
+# messaging-classification mock. ─────────────────────────────────────────────
+
+_SUMMARY_TEXT = "# Session compactée\n\nRésumé opérationnel vérifié."
+_STATE_ONLY_TEXT = "state-only row after the squash"
+
+
+def _webui_squash_after_normal_turn(monkeypatch, tmp_path, sid):
+    """Save a real squash projection, then advance it through a normal turn."""
+    from api import config, models
+    from api.streaming import _advance_truncation_watermark_after_commit
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    for module in (models, routes, config):
+        monkeypatch.setattr(module, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_write_session_index", lambda *_args, **_kwargs: None)
+
+    sidecar_messages, _cli = _production_squash_projection()
+    session = Session(
+        session_id=sid,
+        title="Squashed WebUI chat",
+        workspace=str(tmp_path),
+        messages=sidecar_messages,
+        context_messages=list(sidecar_messages),
+        session_source="webui",
+        truncation_watermark=200.0,
+        truncation_boundary=200.0,
+        compression_anchor_mode="manual",
+    )
+    session.save(skip_index=True, touch_updated_at=False)
+    assert session.squash_projection_cutoff == 200.0
+
+    # Ordinary follow-up turn: commit the user row, advance the watermark
+    # exactly like the streaming commit path, then persist the reply.
+    session.messages.append(_message("user", "tour suivant", 400.0, message_id=5))
+    _advance_truncation_watermark_after_commit(session)
+    session.messages.append(_message("assistant", "réponse suivante", 410.0, message_id=6))
+    session.save(skip_index=True, touch_updated_at=False)
+
+    reloaded = Session.load(sid)
+    assert reloaded is not None
+    assert reloaded.truncation_watermark == 400.0
+    assert reloaded.squash_projection_cutoff == 200.0
+    assert reloaded.squash_projection_superseded_by is None
+
+    state_db_messages = [
+        _message("user", "ancien prompt", 100.0, message_id=1),
+        _message("assistant", "ancienne réponse", 110.0, message_id=2),
+        _message("assistant", _STATE_ONLY_TEXT, 250.0, message_id=7),
+        _message("user", "nouvelle demande", 300.0, message_id=3),
+        _message("assistant", "nouvelle réponse", 310.0, message_id=4),
+        _message("user", "tour suivant", 400.0, message_id=5),
+        _message("assistant", "réponse suivante", 410.0, message_id=6),
+    ]
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda _sid, **_kwargs: [dict(m) for m in state_db_messages],
+    )
+    monkeypatch.setattr(routes, "_state_db_session_signature", lambda *_args, **_kwargs: None)
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache.pop(sid, None)
+    with routes._lineage_display_cache_lock:
+        routes._lineage_display_cache.pop(sid, None)
+    return reloaded
+
+
+_EXPECTED_AFTER_TURN = [
+    _SUMMARY_TEXT,
+    _STATE_ONLY_TEXT,
+    "nouvelle demande",
+    "nouvelle réponse",
+    "tour suivant",
+    "réponse suivante",
+]
+
+
+@pytest.mark.parametrize("query_suffix", ["", "&msg_limit=50"])
+def test_webui_squash_projection_keeps_state_only_rows_after_normal_turn(
+    query_suffix, monkeypatch, tmp_path
+):
+    from urllib.parse import urlparse
+
+    sid = "webui-squash-normal-turn" + ("-limited" if query_suffix else "-full")
+    session = _webui_squash_after_normal_turn(monkeypatch, tmp_path, sid)
+    assert routes._is_messaging_session_record(session) is False
+
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
+    monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+
+    response = routes.handle_get(
+        object(),
+        urlparse(
+            f"/api/session?session_id={sid}&messages=1&resolve_model=0{query_suffix}"
+        ),
+    )
+
+    contents = [m["content"] for m in response["session"]["messages"]]
+    assert contents == _EXPECTED_AFTER_TURN
+    assert "ancien prompt" not in contents
+
+
+def test_webui_squash_branch_after_normal_turn_keeps_state_only_rows(
+    monkeypatch, tmp_path
+):
+    source = _webui_squash_after_normal_turn(
+        monkeypatch, tmp_path, "webui-squash-branch-normal-turn"
+    )
+    branch_store = OrderedDict()
+    response = {}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {"session_id": source.session_id, "keep_count": 3},
+    )
+    monkeypatch.setattr(routes, "_load_branch_source_or_refuse", lambda *_args: source)
+    monkeypatch.setattr(Session, "save", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(routes, "SESSIONS", branch_store)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+
+    def capture_json(_handler, payload, status=200, **_kwargs):
+        response.update({"payload": payload, "status": status})
+        return True
+
+    monkeypatch.setattr(routes, "j", capture_json)
+
+    handled = routes.handle_post(
+        SimpleNamespace(),
+        SimpleNamespace(path="/api/session/branch", query=""),
+    )
+
+    assert handled is True
+    assert response["status"] == 200
+    branch = branch_store[response["payload"]["session_id"]]
+    assert [message["content"] for message in branch.messages] == _EXPECTED_AFTER_TURN[:3]
+
+
+def test_superseded_squash_projection_stays_retired_after_normal_turn(
+    monkeypatch, tmp_path
+):
+    """The fix must not revive a projection that an intentional shrink retired."""
+    session = _webui_squash_after_normal_turn(
+        monkeypatch, tmp_path, "webui-squash-superseded-turn"
+    )
+    session.squash_projection_superseded_by = "0123456789abcdef0123456789abcdef"
+
+    merged = routes._merged_session_messages_for_display(
+        session,
+        routes.get_state_db_session_messages(session.session_id),
+    )
+
+    assert _STATE_ONLY_TEXT not in [m["content"] for m in merged]

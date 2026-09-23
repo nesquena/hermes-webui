@@ -382,10 +382,14 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
       "recommend": "restore" | "manual_review" | "no_action" | "no_backup",
     }
 
-    A strictly larger normalized backup retains the established restore
-    authority. When normalized counts are equal but both files own unique rows,
-    neither count is authoritative; recovery fails closed for manual review and
-    leaves both files untouched.
+    A larger normalized backup is restore-eligible only when its normalized
+    message multiset is a strict superset of the normalized live multiset.
+    Normalization collapses duplicate incomplete rows, so a live transcript can
+    normalize *below* a divergent backup; a count comparison alone would then
+    authorize replacing live-only rows. Any live-only message therefore fails
+    closed as ``manual_review`` and leaves both files untouched, whatever the
+    relative counts. An unreadable live file keeps the established restore
+    authority because there is no live membership to lose.
     """
     bak_path = session_path.with_suffix('.json.bak')
     # Keep count reads on the established helper: startup recovery deliberately
@@ -402,14 +406,20 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     live_only = 0
     backup_only = 0
     membership_conflict = False
-    if live_count >= 0 and bak_count == live_count:
-        # Membership is needed only for the ambiguous equal-count case. Avoid
-        # the extra parse on the established strict-excess restore path.
+    if live_count >= 0 and bak_count >= live_count:
+        # Membership decides every case where the backup could win: equal
+        # counts are ambiguous, and a larger normalized backup may still miss
+        # rows that only the live file owns (#6600 review: duplicate
+        # incomplete rows can normalize the live count below a divergent
+        # backup).
         live_messages = _effective_messages(session_path)
         backup_messages = _effective_messages(bak_path)
         if live_messages is not None and backup_messages is not None:
             live_only, backup_only = _membership_delta(live_messages, backup_messages)
-            membership_conflict = live_only > 0 and backup_only > 0
+            if bak_count == live_count:
+                membership_conflict = live_only > 0 and backup_only > 0
+            else:
+                membership_conflict = live_only > 0
     if bak_count > live_count:
         if (
             _session_records_clear_sentinel(session_path, bak_path)
@@ -441,13 +451,14 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
                 "recommend": "no_action",
                 "intentional_message_shrink": True,
             }
-        return {
-            "session_id": session_path.stem,
-            "live_messages": live_count,
-            "bak_messages": bak_count,
-            "recommend": "restore",
-        }
-    if bak_count == live_count and membership_conflict:
+        if not membership_conflict:
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "restore",
+            }
+    if membership_conflict:
         return {
             "session_id": session_path.stem,
             "live_messages": live_count,
@@ -1183,12 +1194,12 @@ def recover_all_sessions_on_startup(
             restored += 1
             details.append(result)
         elif result.get("recommend") == "manual_review":
-            # Preserve both files and surface the conflict instead of silently
-            # treating equal normalized counts as a healthy backup pair.
+            # Preserve both files and surface the conflict instead of letting a
+            # normalized count comparison discard live-only messages.
             details.append(result)
             logger.warning(
-                "recover_all_sessions_on_startup: left %s untouched because live and backup "
-                "both contain unique messages; manual review required",
+                "recover_all_sessions_on_startup: left %s untouched because the live "
+                "file contains messages missing from its backup; manual review required",
                 path.name,
             )
     if restored:
