@@ -397,18 +397,29 @@ def ensure_agent_runtime_current() -> None:
     """Reject a known Git checkout change instead of mixing Python modules."""
     if _AGENT_REVISION is None:
         return
-    if (
-        _read_agent_revision(_AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH)
-        != _AGENT_REVISION
-    ):
-        # Automatic restart needs an Agent-owned success receipt bound to this
-        # transaction, final revision and healthy environment, plus an atomic
-        # handoff excluding mutations across replacement. Marker polling and a
-        # final revision read supply neither contract. Keep this path manual.
-        raise AgentRuntimeChangedError(
-            _RESTART_REQUIRED_MESSAGE,
-            agent_update_state=_agent_update_transaction_state(),
+    fresh_revision = None
+    try:
+        fresh_revision = _read_agent_revision(
+            _AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH
         )
+    except Exception:
+        # An unreadable revision is indistinguishable from a changed one, so a
+        # failed read must fail CLOSED like every other identity-loss shape
+        # (deleted, permission-denied, empty, corrupt, removed directory).
+        # Letting the raw exception escape would surface as an HTTP 500 instead
+        # of the typed stale-runtime response the barrier is meant to produce.
+        fresh_revision = None
+    if fresh_revision == _AGENT_REVISION:
+        return
+
+    # Automatic restart needs an Agent-owned success receipt bound to this
+    # transaction, final revision and healthy environment, plus an atomic
+    # handoff excluding mutations across replacement. Marker polling and a
+    # final revision read supply neither contract. Keep this path manual.
+    raise AgentRuntimeChangedError(
+        _RESTART_REQUIRED_MESSAGE,
+        agent_update_state=_agent_update_transaction_state(),
+    )
 
 
 def require_ai_agent_class():

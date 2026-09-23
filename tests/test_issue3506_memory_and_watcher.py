@@ -534,6 +534,7 @@ def test_poll_loop_skips_projection_when_unchanged(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gw, "_get_agent_sessions_from_db", fake_projection)
     w = gw.GatewayWatcher(state_db_path=db)
+    w.subscribe()  # Idle watchers deliberately do not poll without observers.
 
     assert w._poll_once(now=1.0) is True
     assert projected == [True]
