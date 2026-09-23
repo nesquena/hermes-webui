@@ -3634,7 +3634,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // scope authoritative (Greptile P1, round 15) — both rules live in the single
   // writer in sessions.js, which loads before this script, so boot cannot drift
   // from the switch and revalidation paths.
-  _applyActiveProfileRootScope(activeProfileState);
+  // Guarded for the same reason as the switch call site: a partial context must not
+  // throw, and an absent writer leaves the scope cleared (the fail-closed side).
+  if (typeof _applyActiveProfileRootScope === 'function') _applyActiveProfileRootScope(activeProfileState);
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

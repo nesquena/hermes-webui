@@ -2183,14 +2183,48 @@ def test_a_failed_listing_fails_closed_and_never_publishes_the_stale_cache():
     assert cold["names"] == ["default"] and cold["authoritative"] is False, cold
 
 
-def test_a_successful_listing_is_authoritative():
-    """Positive control for the fail-closed path above."""
+def test_a_successful_fresh_read_is_authoritative():
+    """Positive control for the fail-closed path above.
+
+    The fresh read is driven EXPLICITLY. Relying on the ambient `hermes_cli` install
+    made this pass locally and fail on a runner without it (the round-17 CI failure):
+    the code's answer there — non-authoritative, keep reconciling — was correct, and
+    the test was the thing asserting an environment instead of a contract.
+    """
     import api.profiles as p
-    scope_names, authoritative = p._root_profile_scope()
-    assert scope_names and scope_names[0] == "default", scope_names
+    original = p._build_profile_rows_fast
+    p._build_profile_rows_fast = lambda: [
+        {"name": "default", "is_default": True},
+        {"name": "kinni", "is_default": True},
+    ]
+    try:
+        scope_names, authoritative = p._root_profile_scope()
+    finally:
+        p._build_profile_rows_fast = original
+    assert scope_names == ["default", "kinni"], (
+        f"a confirmed fresh read must report the renamed root: {scope_names!r}"
+    )
     assert authoritative is True, (
-        f"a successful listing must be authoritative, otherwise the client revalidates "
-        f"forever: {scope_names!r}"
+        f"a CONFIRMED fresh read must be authoritative, otherwise the client "
+        f"revalidates forever: {scope_names!r}"
+    )
+
+
+def test_an_environment_without_a_fresh_read_stays_non_authoritative():
+    """The same contract from the other side, and the state CI actually runs in:
+    no fresh read available means the set cannot be confirmed current, so the client
+    must keep reconciling rather than treat it as final."""
+    import api.profiles as p
+    original = p._build_profile_rows_fast
+    p._build_profile_rows_fast = lambda: None
+    try:
+        scope_names, authoritative = p._root_profile_scope()
+    finally:
+        p._build_profile_rows_fast = original
+    assert scope_names and scope_names[0] == "default", scope_names
+    assert authoritative is False, (
+        f"without a fresh read the freshness of the set is unconfirmed, so publishing "
+        f"it as authoritative would stop the client reconciling: {scope_names!r}"
     )
 
 

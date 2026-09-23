@@ -7185,7 +7185,11 @@ async function switchToProfile(name) {
     // missing must not leave the previous profile's canonical scope in place, and
     // must not mark that missing scope authoritative. Both rules live in the single
     // writer in sessions.js (Greptile P1, round 15).
-    _applyActiveProfileRootScope(data);
+    // Guarded like every other cross-file dependency in this function: a harness (or
+    // any context) that loads this file WITHOUT sessions.js must not throw here, or
+    // the whole switch aborts and the caller sees a failed transition that never
+    // happened. Absent writer => scope stays cleared, which is the fail-closed side.
+    if (typeof _applyActiveProfileRootScope === 'function') _applyActiveProfileRootScope(data);
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
