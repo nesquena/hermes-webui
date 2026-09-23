@@ -253,22 +253,5 @@ def test_read_only_handle_rejects_writes(tmp_path):
             raise AssertionError("read-only handle unexpectedly allowed a write")
         except sqlite3.OperationalError:
             pass
-
-
-def test_delete_cli_session_still_opens_writable_connection():
-    """The lone write path (a DELETE) must keep a writable connection — a
-    read-only downgrade would make the delete silently no-op."""
-    import inspect
-
-    src = "\n".join(
-        (
-            inspect.getsource(models.delete_cli_session),
-            inspect.getsource(models._delete_cli_session_locked),
-        )
-    )
-    assert "sqlite3.connect(str(db_path))" in src, (
-        "delete_cli_session must keep its writable connection"
-    )
-    assert "open_state_db_readonly" not in src, (
-        "delete_cli_session must not be downgraded to the read-only helper"
-    )
+# The delete path's writable-connection contract is covered behaviorally by
+# tests/test_issue1494_state_db_fd_leak.py::test_delete_cli_session_closes_connection.

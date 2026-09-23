@@ -536,7 +536,7 @@ def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     remember_source_fn = _extract_function(src, "_rememberSessionListSource")
     remember_streaming_fn = _extract_function(src, "_rememberRenderedStreamingState")
     remember_snapshot_fn = _extract_function(src, "_rememberRenderedSessionSnapshot")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     mark_fn = _extract_function(src, "_markPollingCompletionUnreadTransitions")
     script = f"""
 global._allSessions = [{{
@@ -654,7 +654,7 @@ def test_session_list_response_omits_bucket_counts_when_missing(monkeypatch):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_scope_mismatch_error_path_respects_sidebar_source():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")

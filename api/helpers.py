@@ -9,6 +9,7 @@ import logging
 import os
 import re as _re
 import ssl
+import sys
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -199,6 +200,248 @@ def _security_headers(handler):
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
     )
+
+
+def arm_connection_close(handler) -> None:
+    """Mark the connection dead BEFORE a reject-before-read response is written.
+
+    A rejection that answers without consuming the request body leaves those
+    bytes queued in ``rfile``; reusing the connection makes the next HTTP/1.1
+    request parse mid-body (the classic ``{}GET ... -> 501``). Arming must
+    happen before the response is flushed so ``advertise_connection_close()``
+    can serialize it into the response headers.
+
+    Best-effort: handler stubs and read-only doubles may reject the attribute,
+    and a failure here must never turn a 4xx into a 500.
+    """
+    try:
+        handler.close_connection = True
+    except Exception:
+        pass
+
+
+# What ``unsupported_transfer_encoding()`` reports for a header that declares no
+# coding at all (``Transfer-Encoding:``). A placeholder rather than the raw '' so
+# the return value is never a falsy non-``None`` — callers test ``is not None``,
+# and an empty string would also render as a hole in the rejection message.
+_BLANK_TRANSFER_CODING = '(blank)'
+
+# The only whitespace a field value may be padded with: RFC 9110 OWS is SP/HTAB
+# and nothing else. ``str.strip()`` would also erase U+00A0 and U+0085 -- both
+# reachable over the wire, because request lines decode as latin-1 -- and
+# ``Content-Length: \xa00`` would then read back as a genuine ``0`` while its
+# payload sat unread on the socket. Padding a value with a character the grammar
+# does not allow makes it unreadable, not zero.
+_FIELD_VALUE_OWS = ' \t'
+
+
+def _framing_header_values(handler, name: str) -> list[str]:
+    """Every value the wire carried for one framing header, tolerating stubs.
+
+    ALL values, not just the first: ``Message.get()`` returns only the first
+    occurrence, so a request carrying ``Content-Length: 0`` followed by
+    ``Content-Length: 42`` reads back as length zero. Its 42 body bytes are then
+    never consumed and get parsed as the next request line -- the same poisoning
+    this module exists to prevent, reached by duplicating a header rather than by
+    omitting one. Conflicting framing is only visible if every value is.
+
+    A real handler carries an ``email.message.Message`` (case-insensitive
+    ``get_all()``, like the wire); the suite's ``SimpleNamespace(headers={...})``
+    doubles are plain dicts, which are not, so fall back to a case-insensitive
+    scan for those. A missing or odd ``headers`` must never raise: every caller
+    is on a rejection path where an exception becomes a spurious 500.
+    """
+    headers = getattr(handler, 'headers', None)
+    if headers is None:
+        return []
+    try:
+        get_all = getattr(headers, 'get_all', None)
+        if callable(get_all):
+            values = get_all(name)
+            return [] if values is None else [str(v) for v in values if v is not None]
+        if isinstance(headers, dict):
+            lowered = name.lower()
+            return [
+                str(v) for k, v in headers.items()
+                if str(k).lower() == lowered and v is not None
+            ]
+        value = headers.get(name)
+        return [] if value is None else [str(value)]
+    except Exception:
+        return []
+
+
+def _declared_content_lengths(handler) -> set[int] | None:
+    """Distinct declared ``Content-Length`` values, or ``None`` if any is unreadable.
+
+    ``None`` means the framing cannot be trusted at all (a value that will not
+    parse); an empty set means no length was declared.
+
+    A BLANK or whitespace-only value is unreadable, NOT absent. ``Content-Length:``
+    with payload bytes behind it declares a body whose size the header refuses to
+    state; skipping the empty value reported "no length declared", so the
+    rejection kept the connection alive and those bytes were parsed as the next
+    request line (403 then ``400 Bad request syntax ('{...}GET /api/... HTTP/1.1')``).
+    Absence is something only the wire can say, and ``_framing_header_values()``
+    already reports a header the request never carried as no value at all -- so
+    anything that *is* here and does not parse has to be treated as pending bytes,
+    exactly like ``banana`` or two lengths that disagree. Note ``Message`` collapses
+    ``Content-Length:`` and ``Content-Length:   `` to the same ``''``.
+
+    "Parses" means RFC 9110's ``Content-Length = 1*DIGIT``: an unsigned run of
+    ASCII digits, nothing else. ``int()`` is far more generous than the grammar --
+    it accepts a leading sign, PEP 515 underscores and non-ASCII digits -- and
+    every such spelling of ZERO used to read back as an honest ``0`` and take the
+    keep-alive branch below with its payload still queued: ``Content-Length: +0``
+    (also ``-0``, ``0_0``, ``+00``, ``\\xa00``) answered 403 with no
+    ``Connection: close``, then ``400 Bad request syntax ('{...}GET /api/...')``
+    -- the same trace as a blank value. A sign is only invisible on a NON-zero
+    value, where the wrong parse happens to close anyway. Anything the grammar
+    rejects is unreadable framing, which means a body may be pending.
+
+    The ``int()`` guard stays even though ``isdigit()`` has already vetted every
+    character: a digit run longer than ``sys.get_int_max_str_digits()`` (4300)
+    raises ``ValueError`` too, and this runs on rejection paths where an
+    exception becomes a spurious 500.
+    """
+    parsed: set[int] = set()
+    for raw in _framing_header_values(handler, 'Content-Length'):
+        # RFC 9110 §5.3: a list-valued field may arrive as repeated lines OR as
+        # one comma-combined line, and the two spellings mean the same thing.
+        # So "0, 0" is the same bodyless request as two "Content-Length: 0"
+        # headers and must keep its keep-alive; only a DISAGREEING list (caught
+        # below by len(parsed) > 1) is unframeable. Without the split the comma
+        # fails isdigit() and every agreeing list over-closed a healthy socket.
+        for member in raw.split(','):
+            stripped = member.strip(_FIELD_VALUE_OWS)
+            if not (stripped.isascii() and stripped.isdigit()):
+                return None
+            try:
+                parsed.add(int(stripped))
+            except ValueError:
+                return None
+    return parsed
+
+
+def unreadable_content_length(handler) -> bool:
+    """True when ``Content-Length`` cannot be trusted to frame the body.
+
+    Either a value that will not parse (``banana``, ``0x5``, or a BLANK one), or
+    two or more values that disagree. None of them can tell a reader how many
+    bytes to drain, so such a request can only be rejected -- with the connection
+    armed for close, since bytes may still be queued behind it.
+    """
+    parsed = _declared_content_lengths(handler)
+    return parsed is None or len(parsed) > 1
+
+
+def request_declares_body(handler) -> bool:
+    """True when the request's framing declares a body that is still queued.
+
+    Keyed on the wire, not on the method: ``Transfer-Encoding`` present (chunked
+    framing hides the length until the terminating chunk is read) or
+    ``Content-Length`` present and non-zero. The method proves nothing in either
+    direction -- a GET may carry a declared body and a POST/PUT/DELETE may carry
+    none -- and a static per-method flag therefore both misses body-bearing
+    "read" requests (whose unread bytes poison the next pooled request) and
+    kills healthy keep-alive on body-less writes.
+
+    A blank, unparseable or self-contradicting ``Content-Length`` counts as a
+    declared body, as does ANY ``Transfer-Encoding`` -- ``identity`` and a blank
+    value included: a value we cannot interpret does not prove the body's absence,
+    and the safe assumption for connection reuse is that bytes are pending. Only
+    framing that positively says "no body" -- no framing header at all, or every
+    declared length agreeing on zero -- keeps the connection alive.
+    """
+    if unsupported_transfer_encoding(handler) is not None:
+        return True
+    parsed = _declared_content_lengths(handler)
+    if parsed is None:
+        return True
+    return any(length != 0 for length in parsed)
+
+
+def unsupported_transfer_encoding(handler) -> str | None:
+    """Return the transfer coding this server cannot decode, or ``None``.
+
+    EVERY present value counts, with no exemption for any coding.
+    ``BaseHTTPRequestHandler`` decodes none of them: it hands every reader a raw
+    ``rfile``, so a chunked body reads back as its literal chunk framing while a
+    ``Content-Length``-based reader sees length 0 and consumes nothing at all.
+    RFC 9112 section 6.3 says the same thing normatively -- a request whose final
+    transfer coding is not ``chunked`` has a body length the recipient cannot
+    determine, so it must be refused and the connection closed. Such a request
+    can therefore only be rejected, and only with the connection armed for close,
+    because its payload bytes are still queued on the socket.
+
+    ``identity`` used to be exempt as a coding that "frames nothing". It is not:
+    it names no framing either, and RFC 7230 removed it from the transfer codings
+    altogether. A sidecar rejection then answered 403 with keep-alive and the
+    payload was parsed as the next request line
+    (``400 Bad request syntax ('{...}GET /api/health/agent HTTP/1.1')``), and all
+    four upload handlers fell through to a length-0 read, answered 400 "No file
+    field in request" and left the multipart bytes on the socket
+    (``400 Bad request syntax ('--x')``). Nothing legitimate is lost: no client
+    sends a transfer coding this server could have honoured.
+
+    A header present but EMPTY (``Transfer-Encoding:``) is reported through
+    ``_BLANK_TRANSFER_CODING`` rather than as ``''``, so callers testing
+    ``is not None`` and the 411 message both read right. Only an ABSENT header
+    yields no values at all -- absence is something only the wire can say.
+
+    The first value is enough precisely because no value is acceptable; it is
+    reported as-is (SP/HTAB trimmed, the one padding RFC 9110 allows) purely so
+    the rejection message names what arrived.
+    """
+    values = _framing_header_values(handler, 'Transfer-Encoding')
+    if not values:
+        return None
+    return values[0].strip(_FIELD_VALUE_OWS) or _BLANK_TRANSFER_CODING
+
+
+def arm_connection_close_if_body_pending(handler) -> bool:
+    """Arm close for a reject-before-read, but only if a body was really declared.
+
+    Returns whether the connection was armed. Use this instead of
+    ``arm_connection_close()`` wherever the rejection can also fire on a request
+    with no body: closing then would drop a pooled client's healthy connection
+    for no framing reason.
+    """
+    if not request_declares_body(handler):
+        return False
+    arm_connection_close(handler)
+    return True
+
+
+def advertise_connection_close(handler) -> None:
+    """Serialize ``close_connection`` into exactly one ``Connection: close`` header.
+
+    ``BaseHTTPRequestHandler`` tracks ``close_connection`` internally but never
+    writes it to the wire, so a server-side close is invisible to the client: a
+    pooled client reuses the socket and fails with BrokenPipeError instead of
+    opening a fresh connection. Call this from ``end_headers()``, before the
+    header buffer is flushed.
+
+    Dedup is derived from the pending header buffer rather than a private flag,
+    because the SSE endpoints send their own ``Connection: close`` (and
+    ``send_header`` itself flips ``close_connection`` when they do) — keying off
+    a flag we set ourselves would emit the header twice on every stream.
+
+    Both attribute reads are defensive: partially-built handler stubs in the
+    test suite carry neither ``close_connection`` nor ``_headers_buffer``, and
+    header emission must not depend on their presence. The buffer is also
+    type-checked before it is scanned -- a stub whose ``_headers_buffer`` is a
+    truthy non-iterable (a bare ``Mock``) would otherwise raise ``TypeError``
+    from inside ``end_headers()``, which ``_handle_write`` would swallow into a
+    spurious 500.
+    """
+    if not getattr(handler, 'close_connection', False):
+        return
+    buffered = getattr(handler, '_headers_buffer', None)
+    for raw in buffered if isinstance(buffered, (list, tuple)) else ():
+        if raw[:11].lower() == b'connection:':
+            return
+    handler.send_header('Connection', 'close')
 
 
 def flush_pending_auth_cookies(handler) -> None:
@@ -472,6 +715,22 @@ _redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
 # thousands of small recurring strings that actually benefit, or balloon RSS.
 _REDACT_CACHE_MAX_TEXT_LEN = 16384
 
+# Strings above that threshold deliberately stay UNCACHED and re-run the full
+# redactor on every request, even though they dominate the recurring cost of a
+# large session (measured: 59 large strings, 29 unique, 1.68s per request on a
+# real 22MB session). Memoizing them by input text alone is not safe:
+# ``agent.redact.register_redaction_patterns()`` lets a plugin extend the
+# secret matcher at runtime, and the installed registry exposes neither a
+# policy generation the cache key could include nor a hook that could clear
+# it. A large blob primed before such a registration would keep being served
+# with the newly-registered secret intact through session, SSE and
+# public-share projections. Until the agent registry exposes a generation,
+# large strings fail closed.
+#
+# tests/test_redact_large_string_cache.py pins this against the real agent
+# registry: prime a large string, register a pattern, the next response must
+# be redacted.
+
 
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
@@ -559,7 +818,37 @@ _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
 
-def _might_contain_sensitive_text(text: str) -> bool:
+# The prefilter runs on every string of every API response — ~74k strings /
+# ~19MB on a real large session — and cProfile showed it costing 2.98s of the
+# 3.7s redaction pass once the redactor's own caches are warm. The work is
+# pure and deterministic (fixed marker tuples, fixed patterns), so identical
+# text always yields the same verdict and is safe to memoize without
+# invalidation, exactly like `_redact_fn_cached` above.
+#
+# Note on what was NOT done: replacing the 71 `in` scans with one compiled
+# alternation looks like the obvious fix, but measured 38% SLOWER on the real
+# payload (2.60s vs 1.88s). CPython's substring search is already a tuned
+# C-level algorithm, and a large regex alternation has to try each branch at
+# each position. Memoizing the verdict avoids the scan entirely instead.
+#
+# Bounds: the cache retains the raw text as its key, so what matters for RSS
+# is the object's byte size, not its character count -- a 16k-character
+# string of 4-byte code points is ~64 KiB, and 8192 of them would pin ~512 MiB
+# for the process lifetime. Each entry is therefore gated on
+# ``sys.getsizeof(text)`` (O(1), counts the actual allocation, width-aware),
+# and the entry count is capped, which gives a hard ceiling on retained key
+# bytes of _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+# (16 MiB) plus lru_cache's fixed per-entry link overhead. Values are the two
+# bool singletons and cost nothing. Strings above the byte gate -- clean or
+# sensitive -- simply run the scan uncached and are never retained.
+_SENSITIVE_PREFILTER_CACHE_SIZE = 8192
+_SENSITIVE_PREFILTER_MAX_ENTRY_BYTES = 2048
+_SENSITIVE_PREFILTER_MAX_RETAINED_KEY_BYTES = (
+    _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+)
+
+
+def _might_contain_sensitive_text_uncached(text: str) -> bool:
     """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
@@ -575,6 +864,25 @@ def _might_contain_sensitive_text(text: str) -> bool:
     if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
         return True
     return False
+
+
+_might_contain_sensitive_text_lru = functools.lru_cache(
+    maxsize=_SENSITIVE_PREFILTER_CACHE_SIZE
+)(_might_contain_sensitive_text_uncached)
+
+
+def _might_contain_sensitive_text(text: str) -> bool:
+    """Memoized wrapper around the prefilter.
+
+    Falls back to the uncached scan for non-strings and for any string whose
+    object size exceeds the per-entry byte gate, so the cache can never be
+    poisoned by an unhashable value and its retained bytes stay hard-bounded.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    if sys.getsizeof(text) > _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES:
+        return _might_contain_sensitive_text_uncached(text)
+    return _might_contain_sensitive_text_lru(text)
 
 
 def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
@@ -724,12 +1032,59 @@ _JPEG_SOF_MARKERS = {
 }
 
 
-def _is_complete_jpeg(raw: bytes) -> bool:
+def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
+    """Read an MP Index TIFF inside APP2; offsets are relative to its header.
+
+    Only the declared JPEG extents are trusted, not a decoder's willingness to
+    ignore trailing bytes. The caller checks contiguous coverage and each JPEG.
+    """
+    if len(data) < 8 or data[:4] not in {b"II\x2a\x00", b"MM\x00\x2a"}:
+        return None
+    order = "little" if data[:2] == b"II" else "big"
+
+    def uint(pos: int, size: int = 4) -> int:
+        return int.from_bytes(data[pos:pos + size], order)
+
+    ifd = uint(4)
+    if ifd < 8 or ifd + 2 > len(data):
+        return None
+    count = uint(ifd, 2)
+    table_end = ifd + 2 + 12 * count
+    if table_end + 4 > len(data):
+        return None
+    tags = {}
+    for pos in range(ifd + 2, table_end, 12):
+        tag = uint(pos, 2)
+        if tag in tags:
+            return None
+        tags[tag] = (uint(pos + 2, 2), uint(pos + 4), uint(pos + 8))
+    if tags.get(0xB001, ())[:2] != (4, 1):
+        return None
+    images = tags[0xB001][2]
+    entry = tags.get(0xB002)
+    if not entry or images < 2 or entry[:2] != (7, 16 * images):
+        return None
+    offset = entry[2]
+    if offset < table_end + 4 or offset + 16 * images > len(data):
+        return None
+    ranges = []
+    for index in range(images):
+        pos = offset + index * 16
+        attributes, size, relative = uint(pos), uint(pos + 4), uint(pos + 8)
+        if attributes & 0x07000000 or size < 4 or (index == 0 and relative != 0):
+            return None
+        start = 0 if index == 0 else base + relative
+        ranges.append((start, start + size))
+    return ranges
+
+
+def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
     pos = 2
     saw_sof = False
     saw_scan = False
+    mpf_ranges = None
     while pos < len(raw):
         marker_start = pos
         if raw[pos] != 0xFF:
@@ -741,7 +1096,20 @@ def _is_complete_jpeg(raw: bytes) -> bool:
         marker = raw[pos]
         pos += 1
         if marker == 0xD9:
-            return saw_sof and saw_scan and pos == len(raw)
+            if not saw_sof or not saw_scan:
+                return False
+            if mpf_ranges is None:
+                return pos == len(raw)
+            if mpf_ranges[0] != (0, pos):
+                return False
+            # No gaps, overlaps, undeclared pictures or post-EOI payloads.
+            for start, end in mpf_ranges[1:]:
+                if start != pos or end > len(raw):
+                    return False
+                if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
+                    return False
+                pos = end
+            return pos == len(raw)
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
             return False
         if pos + 2 > len(raw):
@@ -752,6 +1120,12 @@ def _is_complete_jpeg(raw: bytes) -> bool:
         segment_end = pos + segment_length
         if segment_end > len(raw):
             return False
+        if _allow_mpf and marker == 0xE2 and raw[pos + 2:pos + 6] == b"MPF\x00":
+            if mpf_ranges is not None:
+                return False
+            mpf_ranges = _mpf_image_ranges(raw[pos + 6:segment_end], pos + 6)
+            if mpf_ranges is None:
+                return False
         if marker in _JPEG_SOF_MARKERS:
             if segment_length < 8:
                 return False
@@ -956,13 +1330,45 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
     ``_enabled`` is threaded through so a single response-level redact pass
     only reads settings.json once. (Opus pre-release perf fix.)
+
+    Containers are rebuilt only when a descendant actually changed. The
+    overwhelming majority of a transcript carries no credential marker, so the
+    previous unconditional dict/list comprehension deep-copied the entire
+    payload — tens of MB per response — to reproduce an identical structure.
+    That copy is pure CPU under the GIL (allocation and refcounting never
+    release it), which serialized concurrent tab loads on a threaded server.
+
+    Returning the original object when nothing changed is safe because callers
+    treat redacted output as read-only: ``_public_message_projection`` builds a
+    fresh ``item`` dict per message, and ``redact_session_data`` builds a fresh
+    ``result``. Nothing mutates a value returned from here in place, so sharing
+    an unmodified subtree cannot leak a later mutation back into session state.
+    The redacting path is unchanged: as soon as one string is masked, every
+    container on the path to it is rebuilt and the caller's original is left
+    untouched.
     """
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {key: _redact_value(value, _enabled=_enabled) for key, value in v.items()}
+        out = None
+        for key, value in v.items():
+            redacted = _redact_value(value, _enabled=_enabled)
+            if redacted is value:
+                continue
+            if out is None:
+                out = dict(v)
+            out[key] = redacted
+        return v if out is None else out
     if isinstance(v, list):
-        return [_redact_value(item, _enabled=_enabled) for item in v]
+        out = None
+        for index, item in enumerate(v):
+            redacted = _redact_value(item, _enabled=_enabled)
+            if redacted is item:
+                continue
+            if out is None:
+                out = list(v)
+            out[index] = redacted
+        return v if out is None else out
     return v
 
 
@@ -1268,10 +1674,18 @@ def read_body(handler) -> dict:
             pass
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
-    try:
-        return _json.loads(raw)
-    except Exception:
+    # A body-optional endpoint (e.g. DELETE /api/mcp/servers/{name}) may send a
+    # whitespace-only body; treat it like an empty body ({}) rather than a 400,
+    # matching the pre-#7336 lenient behavior for that shape (see gate finding).
+    if not raw.strip():
         return {}
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        raise ValueError('Invalid JSON body') from None
+    if not isinstance(parsed, dict):
+        raise ValueError('JSON body must be an object')
+    return parsed
 
 
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────
