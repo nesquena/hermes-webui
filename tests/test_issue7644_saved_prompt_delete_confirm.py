@@ -17,6 +17,10 @@ Two invariants this pins:
    (temp file + fsync + os.replace) and the previous generation is copied to
    `saved_prompts.json.bak` *before* the rewrite, so a deleted prompt is
    recoverable from disk.
+3. Backend durability of that backup (#7647 CR): if the backup cannot be
+   committed the DELETE aborts with an error and the live store is untouched,
+   and a repeat DELETE of an already-deleted id rewrites nothing — the first
+   (oldest) backup is never rotated away by a retry.
 """
 from __future__ import annotations
 
@@ -192,6 +196,98 @@ def test_deleted_prompt_stays_recoverable_in_backup(prompt_store, monkeypatch):
 
     assert list(prompt_store.parent.glob("*.tmp")) == [], "atomic write left a temp file behind"
     assert captured.get("payload") == {"ok": True}, "the DELETE response shape must not change"
+
+
+def _wire_delete(monkeypatch, captured: dict, prompt_id: str) -> None:
+    """Stub the DELETE pipeline; whatever the handler answers lands in *captured*.
+
+    `bad` fills `captured["bad"] = (msg, status)` and `j` fills
+    `captured["payload"]`, so a test can tell "aborted" from "succeeded".
+    """
+
+    def _bad(_handler, msg, status: int = 400, *_args, **_kwargs):
+        captured["bad"] = (msg, status)
+        return True
+
+    def _j(_handler, obj, *_args, **_kwargs):
+        captured["payload"] = obj
+        return True
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *a, **k: False)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"id": prompt_id})
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *a, **k: True)
+    monkeypatch.setattr(routes, "bad", _bad)
+    monkeypatch.setattr(routes, "j", _j)
+
+
+def test_delete_aborts_when_the_backup_cannot_be_written(prompt_store, monkeypatch):
+    """No committed backup → the DELETE must fail with the store untouched (#7647).
+
+    The backup write is simulated as failing (no space left). Swallowing that
+    failure — the old behaviour — deleted the prompt with no recovery copy
+    anywhere while still answering `{"ok": True}`.
+    """
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+
+    real_write = routes._write_text_atomic
+
+    def _fail_backup_write(path, text):
+        if path.name.endswith(".bak"):
+            raise OSError("simulated: no space left on device")
+        real_write(path, text)
+
+    monkeypatch.setattr(routes, "_write_text_atomic", _fail_backup_write)
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+
+    assert "payload" not in captured, (
+        "the delete reported success although the recovery backup was never written — "
+        "the prompt is now deleted with no copy anywhere (#7644)"
+    )
+    assert captured.get("bad", (None, None))[1] == 500, (
+        "an uncommittable backup must abort the delete with a server error"
+    )
+
+    remaining = json.loads(prompt_store.read_text(encoding="utf-8"))
+    assert [p["id"] for p in remaining] == ["keepme", "gone"], (
+        "the live store must not be modified when the backup cannot be committed"
+    )
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert not backup.exists(), "a failed backup write must not leave a partial .bak behind"
+    assert list(prompt_store.parent.glob("*.tmp")) == [], "the aborted write left a temp file behind"
+
+
+def test_repeat_delete_never_rotates_the_first_backup(prompt_store, monkeypatch):
+    """A second DELETE of the same id must preserve the first (oldest) backup (#7647).
+
+    Old behaviour: the repeat found nothing to delete but rewrote the store
+    anyway, rotating `.bak` onto a generation that no longer contains the
+    deleted prompt — the recovery path eating itself on a stale retry.
+    """
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "gone")
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert captured.get("payload") == {"ok": True}
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert backup.exists(), "the first delete must leave a backup"
+    first_backup = backup.read_text(encoding="utf-8")
+    assert [p["id"] for p in json.loads(first_backup)] == ["keepme", "gone"]
+
+    captured.clear()
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert "bad" not in captured, "a repeat delete of an already-deleted id is not an error"
+    assert captured.get("payload") == {"ok": True}, "DELETE stays idempotent for the client"
+
+    assert backup.read_text(encoding="utf-8") == first_backup, (
+        "the repeat DELETE rotated .bak onto a generation without the deleted prompt — "
+        "the recovery copy ate itself"
+    )
+    remaining = json.loads(prompt_store.read_text(encoding="utf-8"))
+    assert [p["id"] for p in remaining] == ["keepme"], "the store keeps only the surviving prompt"
+    assert list(prompt_store.parent.glob("*.tmp")) == [], "atomic write left a temp file behind"
 
 
 def test_store_write_is_atomic_and_backs_up_before_replacing(prompt_store):

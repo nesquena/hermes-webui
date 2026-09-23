@@ -13100,7 +13100,7 @@ def _write_text_atomic(path: "Path", text: str) -> None:
             pass
 
 
-def _save_saved_prompts(prompts: list) -> None:
+def _save_saved_prompts(prompts: list, *, backup_required: bool = False) -> None:
     """Persist the saved-prompt list, atomically and with one backup generation.
 
     Two durability guarantees, both added for #7644:
@@ -13110,6 +13110,13 @@ def _save_saved_prompts(prompts: list) -> None:
     * the previous generation is copied to `saved_prompts.json.bak` *before* the
       rewrite, so a DELETE — which used to be total and silent — can be undone
       by copying the backup back over the store.
+
+    With ``backup_required=True`` (the DELETE path, #7647) a backup failure is
+    raised instead of logged: the caller must abort the destructive operation
+    and leave the live store untouched, because proceeding would delete the
+    prompt with no recovery copy anywhere. Non-destructive writers (POST)
+    keep the best-effort behaviour: they log and continue, since the live
+    store still holds every prompt.
     """
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -13122,8 +13129,12 @@ def _save_saved_prompts(prompts: list) -> None:
         try:
             _write_text_atomic(backup, previous)
         except OSError as exc:
+            if backup_required:
+                # Abort before the store is rewritten: the recovery backup is
+                # the whole point of letting a prompt be deleted (#7644).
+                raise
             # Never let a backup failure block the write itself; the caller
-            # (POST/PUT/DELETE) still succeeds, but the loss of recovery is loud.
+            # (POST) still succeeds, but the loss of recovery is loud.
             logger.warning("saved prompts: could not write backup %s: %s", backup, exc)
     _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
@@ -18071,15 +18082,37 @@ def handle_delete(handler, parsed) -> bool:
             return bad(handler, "id is required")
         before = _load_saved_prompts()
         prompts = [p for p in before if p.get("id") != pid]
-        if len(prompts) != len(before):
-            # #7644: deletions used to be total and silent. The store keeps the
-            # previous generation in .bak and the log records what went away.
+        if len(prompts) == len(before):
+            # #7647: repeat DELETE for an id that is already gone. Rewriting
+            # the store here would rotate .bak onto a generation that no
+            # longer contains the deleted prompt, destroying the only
+            # recovery copy (a stale retry or double-submit is enough).
+            # Return without saving: neither store nor backup is touched, so
+            # the first (oldest) backup for this key is preserved.
             logger.info(
-                "saved prompt deleted: id=%s (previous generation kept at %s)",
+                "saved prompt delete repeated: id=%s already gone, backup preserved",
                 pid,
-                _saved_prompts_backup_path().name,
             )
-        _save_saved_prompts(prompts)
+            return j(handler, {"ok": True})
+        try:
+            # The recovery backup is committed atomically (tmp + fsync +
+            # rename) BEFORE the store is rewritten; if it cannot be written
+            # the delete aborts here with the live store untouched (#7647).
+            _save_saved_prompts(prompts, backup_required=True)
+        except OSError as exc:
+            logger.error("saved prompt delete aborted: recovery backup failed: %s", exc)
+            return bad(
+                handler,
+                "could not write the recovery backup; nothing was deleted",
+                status=500,
+            )
+        # #7644: deletions used to be total and silent. The store keeps the
+        # previous generation in .bak and the log records what went away.
+        logger.info(
+            "saved prompt deleted: id=%s (previous generation kept at %s)",
+            pid,
+            _saved_prompts_backup_path().name,
+        )
         return j(handler, {"ok": True})
 
     if parsed.path.startswith("/api/kanban/"):
