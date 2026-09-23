@@ -4,6 +4,7 @@ from email.message import Message
 import json
 from pathlib import Path
 import re
+import threading
 import time
 import urllib.error
 
@@ -856,6 +857,104 @@ def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path,
     assert goal_continue_event[1]["message_key"] == "goal_continuing"
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_goal_eval_keeps_runtime_active_after_success_writeback_before_done(
+    tmp_path, monkeypatch
+):
+    """Persisted idle flags can precede terminal emission while STREAMS is still active."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"goal reply"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse()
+    )
+
+    from api import goals as webui_goals
+
+    goal_entered = threading.Event()
+    release_goal = threading.Event()
+    observed = {}
+
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *args, **kwargs: True)
+
+    def blocked_goal_eval(*args, **kwargs):
+        saved = models.get_session(s.session_id)
+        observed["active_stream_id"] = saved.active_stream_id
+        observed["pending_user_message"] = saved.pending_user_message
+        observed["stream_registered"] = stream_id in STREAMS
+        goal_entered.set()
+        assert release_goal.wait(timeout=10)
+        return {"should_continue": False, "message": "Goal checked"}
+
+    monkeypatch.setattr(webui_goals, "evaluate_goal_after_turn", blocked_goal_eval)
+
+    s = new_session()
+    stream_id = "stream-gateway-goal-runtime-window"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "finish it"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    worker = threading.Thread(
+        target=gateway_chat._run_gateway_chat_streaming,
+        args=(
+            s.session_id,
+            "finish it",
+            "test-model",
+            str(tmp_path),
+            stream_id,
+            [],
+        ),
+        kwargs={"goal_related": True},
+        daemon=True,
+    )
+    worker.start()
+    assert goal_entered.wait(timeout=10), "worker did not reach post-writeback goal evaluation"
+
+    # This is the exact authority split the browser recovery must respect:
+    # persisted session metadata already looks idle, while the runtime stream
+    # (and therefore /api/chat/stream/status) is still active and can emit
+    # goal / goal_continue / done / stream_end.
+    assert observed == {
+        "active_stream_id": None,
+        "pending_user_message": None,
+        "stream_registered": True,
+    }
+    assert stream_id in STREAMS
+    assert worker.is_alive()
+    assert not any(item[0] == "done" for item in list(subscriber.queue))
+
+    release_goal.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    names = [item[0] for item in events]
+    assert "goal" in names
+    assert "done" in names
+    assert "stream_end" in names
+    assert names.index("goal") < names.index("done") < names.index("stream_end")
 
 
 def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):

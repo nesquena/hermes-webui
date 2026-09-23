@@ -852,6 +852,14 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
   if (!_isServerIdleSessionRow(serverRow)) return false;
+  // Sidebar idle metadata can beat the terminal frame on the independent chat
+  // SSE. Let its exact OPEN transport finish the Anchor handoff; orphaned or
+  // disconnected streams still use the existing idle recovery below.
+  if (_hasOwnedOpenLiveStream(sid)) {
+    const live=LIVE_STREAMS[sid];
+    if(typeof live.recoverFromSidebarIdle==='function') live.recoverFromSidebarIdle();
+    return false;
+  }
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
@@ -940,6 +948,8 @@ function _purgeStaleInflightEntries() {
     if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
       continue;
     }
+    // The sidebar render must not purge what the idle reconciler preserved.
+    if (_hasOwnedOpenLiveStream(sid)) continue;
     if (!sessionsById.has(sid)) {
       const knownSource = sourceById ? sourceById.get(sid) : null;
       if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
@@ -959,6 +969,14 @@ function _purgeStaleInflightEntries() {
     }
     // Sessions that exist and are still streaming are preserved.
   }
+}
+
+function _hasOwnedOpenLiveStream(sid) {
+  if (typeof S === 'undefined' || !S || !S.session || S.session.session_id !== sid || !S.activeStreamId) return false;
+  const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS[sid] : null;
+  // readyState 1 is EventSource.OPEN. A cached stream ID or busy flag alone
+  // is not ownership and must never disable recovery for a stuck indicator.
+  return Boolean(live && live.streamId === S.activeStreamId && live.source && live.source.readyState === 1);
 }
 
 function _rememberSessionListSource(s, sid = null, allowScopeFallback = true) {
@@ -1660,6 +1678,10 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
+    // #7509: mirror the canonical switch in panels.js — the slash-skill caches still
+    // hold the previous profile's /api/skills payload, so drop them (and any reply
+    // still in flight) once the switch has succeeded.
+    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     if(data.default_model) window._defaultModel=data.default_model;
@@ -2165,6 +2187,12 @@ async function loadSession(sid){
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
+      // The journal-backed Anchor scene is authoritative through its resume
+      // cursor; newer rows arrive through the reattached SSE stream. Replaying
+      // the older INFLIGHT tool cache after a successful scene restore would
+      // redraw all N rows N times. Keep the #3707 replay only for legacy HTML
+      // restoration or a failed/unavailable scene render.
+      if(restoredAnchorScene) return;
       const liveToolCalls=Array.isArray(S.toolCalls)
         ? S.toolCalls
         : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
@@ -2424,7 +2452,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2434,6 +2462,7 @@ const _MESSAGING_SOURCE_LABELS = {
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
   matrix: 'Matrix',
+  signal: 'Signal',
 };
 
 function _isMessagingSession(session) {
@@ -2569,7 +2598,7 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  return filter === 'cli' ? t('sessions_source_cli', n) : t('sessions_source_webui', n);
 }
 
 function _clearSessionSourceTabCounts() {
@@ -5281,7 +5310,8 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
 function _dropStaleOptimisticSessionRow(sid){
   if(!sid) return;
   if(typeof _rememberSessionListSource==='function') _rememberSessionListSource(null, sid, false);
-  if(INFLIGHT&&INFLIGHT[sid]){
+  // Retiring sidebar optimism must not retire the independent chat owner.
+  if(INFLIGHT&&INFLIGHT[sid]&&!_hasOwnedOpenLiveStream(sid)){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
@@ -7147,6 +7177,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    const childRawRole=[
+      child&&child.raw_source,
+      child&&child.source_tag,
+      child&&child.source,
+    ].map(source=>String(source||'').trim().toLowerCase()).find(Boolean)||'';
+    const childIsDelegatedSubagent=_isChildSession(child)&&childRawRole==='subagent';
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
@@ -7171,11 +7207,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       hiddenArchivedChildTree.add(child.session_id);
       continue;
     }
-    // Cross-surface rows (for example a WebUI continuation from a Telegram
-    // conversation) should remain top-level when there is no WebUI-owned parent
-    // row to stack under.  But if the parent is visible in this same sidebar
-    // render, attach normally — delegated subagent rows are also cross-source
-    // relative to their WebUI parent and should not be forced into orphans.
+    // Independent cross-surface rows (for example a WebUI continuation from a
+    // Telegram conversation) remain top-level instead of nesting under an
+    // external parent. Delegated subagents are also cross-source, but they are
+    // parent-owned work and should still attach to the visible parent row.
     const parentSourceMarker=String(parentRow&&(
       parentRow.session_source||parentRow.raw_source||parentRow.source_tag||parentRow.source
     )||'').toLowerCase();
@@ -7186,7 +7221,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentRow.session_source==='messaging'||
       (parentSourceMarker&&parentSourceMarker!=='webui'&&parentSourceMarker!=='subagent'&&parentSourceMarker!=='other'&&parentSourceMarker!=='fork')
     );
-    if(parentRow&&child._cross_surface_child_session&&parentIsExternal){
+    if(parentRow&&child._cross_surface_child_session&&parentIsExternal&&!childIsDelegatedSubagent){
       if(childRenderable) orphans.push({...child,_orphan_child_session:true});
       continue;
     }

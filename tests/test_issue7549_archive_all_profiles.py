@@ -99,7 +99,6 @@ def _install_foreign_row(monkeypatch, session_id, lookups, reads):
         ]
 
     monkeypatch.setattr(routes, "get_cli_session_messages", fake_messages)
-    monkeypatch.setattr(routes, "get_session", _missing_session)
     monkeypatch.setattr(routes, "_is_subagent_child_session_id", lambda sid: False)
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda meta: False)
 
@@ -310,3 +309,58 @@ def test_sidebar_archive_requests_carry_the_row_profile():
     # no archive call site may build the payload by hand again
     assert "JSON.stringify({session_id:session.session_id,archived" not in SESSIONS_JS
     assert "JSON.stringify({session_id:sid,archived:true})" not in SESSIONS_JS
+
+
+def test_archive_then_restore_materialized_sidecar_round_trip(tmp_path, monkeypatch):
+    """#7549 round-trip: archive materializes the sidecar, and restore finds it
+    and unarchives it (does not 404)."""
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    session_id = "foreign_archive_restore_roundtrip"
+    lookups, reads = [], []
+    _install_foreign_row(monkeypatch, session_id, lookups, reads)
+
+    # 1. Archive foreign CLI row
+    handled, captured, published = _archive(
+        monkeypatch,
+        {
+            "session_id": session_id,
+            "archived": True,
+            "profile": FOREIGN_PROFILE,
+            "all_profiles": 1,
+        },
+    )
+    assert handled is True
+    assert captured.get("status") == 200, captured
+    sidecar = _sidecar(session_dir, session_id)
+    assert sidecar is not None
+    assert sidecar["archived"] is True
+    assert sidecar["profile"] == FOREIGN_PROFILE
+
+    # 2. Restore that same session using all_profiles + profile
+    handled_restore, captured_restore, published_restore = _archive(
+        monkeypatch,
+        {
+            "session_id": session_id,
+            "archived": False,
+            "profile": FOREIGN_PROFILE,
+            "all_profiles": 1,
+        },
+    )
+    assert handled_restore is True
+    assert captured_restore.get("status") == 200, captured_restore
+    sidecar_restored = _sidecar(session_dir, session_id)
+    assert sidecar_restored is not None
+    assert sidecar_restored["archived"] is False
+    assert sidecar_restored["profile"] == FOREIGN_PROFILE
+
+    # 3. An ordinary request (no all_profiles / active profile mismatch) cannot touch the foreign sidecar
+    handled_unauthorized, captured_unauthorized, _ = _archive(
+        monkeypatch,
+        {
+            "session_id": session_id,
+            "archived": True,
+        },
+    )
+    assert handled_unauthorized is True
+    assert captured_unauthorized.get("status") in (404, 409), captured_unauthorized
+
