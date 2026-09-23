@@ -56,6 +56,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
     api/
       __init__.py          Package marker
+      agent_compat.py      Resolver for Hermes Agent names moved to sibling modules (compatibility-only)
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
@@ -235,6 +236,29 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
+
+#### Session transcript reconciliation with `state.db`
+
+`reconciled_state_db_messages_for_session()` uses
+`merge_session_messages_append_only()` to combine a WebUI sidecar or context
+projection with active Agent `state.db` rows. Its explicit
+`incoming_provenance="state_db"` fence permits a state-only row whose timestamp
+predates the sidecar tail to use a safe chronological slot. Paginated
+`msg_limit` consumers rely on this merged order directly rather than applying a
+later timestamp sort.
+
+The same merge helper also stitches ordered child sidecars onto archived
+compression parents. Those calls leave incoming provenance unverified, so their
+stable message sequence remains append-only even when parent rows carry later,
+restamped timestamps. Timestamp alone is never authority to move a continuation
+inside its parent transcript.
+
+If an older row could only be placed before the first surviving sidecar/context
+row, the insertion helper declines it to avoid resurrecting compacted history.
+Reconciliation then appends that row instead of dropping it; rows without a
+usable timestamp and rows at or after the sidecar tail also append normally.
+The fallback therefore preserves an accepted state-only row when exact ordering
+is ambiguous, while safely placeable recovery rows remain chronological.
 
 #### Imported `state.db` sidebar projection
 
@@ -417,6 +441,39 @@ Older Hermes Agent versions that lack either capability continue through
 whose default `SessionDB()` path remains frozen at module import. Keep this fallback
 compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
 than a second WebUI implementation.
+
+### 4.9 Hermes Agent Moved-Name Compatibility
+
+Hermes Agent owns its module layout. Its September 2026 decomposition moved names the
+WebUI uses (for example `tools.approval.set_current_session_key` to
+`tools.approval_context`) into `<stem>_<topic>` sibling modules. The old paths resolve
+only through temporary PLUGIN-COMPAT `__getattr__` pointers that emit
+`HermesPluginCompatWarning` and are removed on schedule. The Agent's
+`compat_manifest.json` is the authoritative map of what moved where.
+
+WebUI code reaches a moved name only through
+`api.agent_compat.agent_attr(owner, name, home, default=...)`, which resolves in this
+order:
+
+1. the owner module's own namespace: pre-split Agents, and tests that stub the original
+   module in `sys.modules` or patch the name onto it;
+2. the `home` module: split Agents, with or without the old-path pointer (no warning);
+3. plain attribute access on the owner: non-module test doubles.
+
+It raises like the import it replaces (or returns `default`), so each call site keeps its
+existing fallback. Current users: approval session identity and MCP discovery
+(`streaming.py`), `/reload-mcp` (`commands.py`), MCP runtime status (`routes.py`), Claude
+Code credential linking (`oauth.py`), LM Studio reasoning options (`config.py`), and
+kanban connections and dispatch (`kanban_bridge.py`).
+
+Import names that are still native to their module directly. Never
+`from <old module> import <moved name>`, and never feature-detect a moved name with
+`hasattr`/`getattr` on the old module: once the pointers are removed those silently turn
+"moved" into "missing" behind the call sites' broad `except` blocks. When a later Agent
+split moves another name, route it through `agent_attr` and add pre-split and
+pointer-removed cases to `tests/test_agent_compat.py`. The resolver is
+compatibility-only: delete it, and import directly from the new homes, once the WebUI
+stops supporting Agents that predate the split.
 
 ---
 

@@ -89,7 +89,9 @@ def test_hidden_poll_hits_session_status_and_attaches_as_replay():
     """
     start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
     assert start != -1
-    body = MESSAGES_JS[start:start + 2400]
+    # #7299 added a 404/410 terminal-stop branch to the response handler.
+    # The window must cover the original fetch chain + the new branch.
+    body = MESSAGES_JS[start:start + 8000]
     assert "api/session/status?session_id=" in body
     assert "d.active_stream_id" in body
     # attaches as replay (recovered=true) — turn is already mid-flight
@@ -174,7 +176,7 @@ def test_poll_stops_only_when_attach_succeeds():
     assert start != -1, "_startHiddenActiveStreamPoll signature not found"
     # Window 2400: the multi-pane follow-up adds an explanatory comment block
     # before the attach call, pushing it past a narrower slice.
-    body = MESSAGES_JS[start:start + 3200]
+    body = MESSAGES_JS[start:start + 8000]
     assert "const attached = _attachServerInitiatedStream(sid, streamId, true)" in body
     # Stop the poll only on a true attach (the false branch keeps polling within
     # the bounded-retry budget rather than stopping).

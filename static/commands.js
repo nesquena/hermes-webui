@@ -1,3 +1,7 @@
+const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
+  'reload-mcp','reload-skills','codex-runtime','credits',
+  'moa','sessions','resume','pet'
+]);
 // ── Slash commands ──────────────────────────────────────────────────────────
 // Built-in commands intercepted before send(). Each command runs locally
 // (no round-trip to the agent) and shows feedback via toast or local message.
@@ -182,6 +186,31 @@ function executeCommand(text){
   return {noEcho:!!cmd.noEcho};
 }
 
+// Agent-registry slash commands that the WebUI actually dispatches when
+// submitted. The autocomplete must not advertise anything outside this set:
+// a non-dispatchable registry command (e.g. /agents) would otherwise fall
+// through send() to the ordinary chat path and trigger an unintended
+// model/API request.
+//
+// This set holds canonical registry names only. getMatchingCommands() matches
+// cmd.name (the canonical metadata name), so alias/underscore forms such as
+// /reload_mcp are covered implicitly: typing one resolves through
+// getAgentCommandMetadata() at dispatch time and the canonical name is what
+// gets tested against the dispatcher allowlist (#6951).
+//
+// Keep this in sync with _AGENT_COMMANDS_RUN_ON_WEBUI in messages.js and
+// _ALLOWED_AGENT_COMMANDS in api/commands.py -- the announced list is a
+// subset of the dispatched list (fail-closed), never a superset.
+// Plugin-category commands are always dispatchable via the plugin exec
+// transport. #6951.
+
+function _isWebuiDispatchableAgentCommand(cmd){
+  const name=String(cmd&&cmd.name||'').trim().toLowerCase();
+  if(_WEBUI_DISPATCHABLE_AGENT_COMMANDS.has(name))return true;
+  // Plugin-registered commands execute via the /api/commands/exec plugin transport.
+  return String(cmd&&cmd.category||'').trim()==='Plugin';
+}
+
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
@@ -214,9 +243,14 @@ function getMatchingCommands(prefix){
     const name=String(cmd&&cmd.name||'').toLowerCase();
     if(!name.startsWith(q)||seen.has(name))continue;
     if(cmd.cli_only&&name!=='pet')continue;
+    // #6951: only announce commands send() actually dispatches -- anything
+    // else would silently fall through to the normal chat path as plain text.
+    if(!_isWebuiDispatchableAgentCommand(cmd))continue;
     matches.push({
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
+      // Surface the registry's argument hint on the autocomplete row (#6951).
+      arg:String(cmd&&cmd.args_hint||'').trim()||undefined,
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
@@ -250,8 +284,15 @@ let _slashPersonalityCachePromise=null;
 let _bundleCommandCache=[];
 let _bundleCommandLoadPromise=null;
 let _bundleCommandCacheReady=false;
+// Bumped by invalidateSlashSkillCaches(). The two skill-cache loaders below capture
+// it when they issue /api/skills and refuse to commit when it moved while their
+// response was in flight: a reply generated for the previous profile would otherwise
+// land after a profile switch and repopulate the caches with that profile's
+// disabled-filtered payload, keeping a skill that is enabled in the new profile
+// hidden (#7509).
 let _slashSkillCache=null;
 let _slashSkillCachePromise=null;
+let _slashSkillCacheGen=0;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
@@ -351,31 +392,47 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+// Disabled skills are excluded from the backend skill-command map, so the slash
+// picker surfaces must agree. Single gate for every place that turns /api/skills
+// entries into selectable completions.
+function _isSkillDisabled(skill){
+  return !!(skill&&skill.disabled);
+}
+
 async function _loadSlashSkillSubArgs(force=false){
   if(_slashSkillCache&&!force) return _slashSkillCache;
   if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  const gen=_slashSkillCacheGen;
   _slashSkillCachePromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const values=[];
       for(const skill of (data&&data.skills)||[]){
+        if(_isSkillDisabled(skill)) continue;
         const name=_normalizeSlashSubArg(skill&&skill.name);
         if(name) values.push(name);
       }
       const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      // A profile switch during the request bumped the generation: this payload
+      // belongs to the previous profile, so leave the cache empty for the fresh
+      // read instead of publishing stale names (#7509).
+      if(gen!==_slashSkillCacheGen) return _slashSkillCache||[];
       _slashSkillCache=deduped;
       return deduped;
     }catch(_){
-      _slashSkillCache=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCache=null;
       return [];
     }finally{
-      _slashSkillCachePromise=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCachePromise=null;
     }
   })();
   return _slashSkillCachePromise;
 }
 
 function invalidateSlashSkillCaches(){
+  // Bump before dropping the caches: an /api/skills response still in flight was
+  // generated for the previous profile and must not commit once it lands (#7509).
+  _slashSkillCacheGen++;
   _slashSkillCache=null;
   _slashSkillCachePromise=null;
   _skillCommandCache=[];
@@ -934,6 +991,12 @@ async function resumeManualCompressionForSession(sid){
     // No active compression job or transient server error — not a real failure.
     // 404: route missed or session gone; 5xx: backend exception during status check.
     if(e&&(!e.status||e.status===404||e.status>=500)) return;
+    // #7710: a cross-profile refusal now arrives as 409
+    // (``session_profile_mismatch``) where it used to be a 404 that hit the
+    // benign early-return above. It is not a compression failure, so do not
+    // render the error state or locally settle the compression UI.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)) return;
     if(S.session&&S.session.session_id===sid&&typeof setCompressionUi==='function'){
       const visibleMessages=_manualCompressionVisibleMessages();
       setCompressionUi({
@@ -1101,47 +1164,59 @@ async function cmdTheme(args){
   showToast(t('theme_usage')+themes.join('|')+' | '+skins.join('|')+' | legacy:'+legacyThemes.join('|'));
 }
 
-async function cmdSkills(args){
-  try{
-    const data = await api('/api/skills');
-    let skills = data.skills || [];
-    if(args){
-      const q = args.toLowerCase();
-      skills = skills.filter(s =>
-        (s.name||'').toLowerCase().includes(q) ||
-        (s.description||'').toLowerCase().includes(q) ||
-        (s.category||'').toLowerCase().includes(q)
-      );
-    }
-    if(!skills.length){
-      const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
-      S.messages.push(msg); renderMessages(); return;
-    }
-    // Group by category
-    const byCategory = {};
-    skills.forEach(s => {
-      const cat = s.category || 'General';
-      if(!byCategory[cat]) byCategory[cat] = [];
-      byCategory[cat].push(s);
-    });
-    const lines = [];
-    for(const [cat, items] of Object.entries(byCategory).sort()){
-      lines.push(`**${cat}**`);
-      items.forEach(s => {
-        const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
-        lines.push(`  \`${s.name}\`${desc}`);
+// Subcommands owned by the agent's own /skills write-approval handler
+// (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
+// fall through to the normal send path rather than be swallowed by the local search below.
+// Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
+// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
+
+function cmdSkills(args){
+  const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
+  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)) return false;
+  (async()=>{
+    try{
+      const data = await api('/api/skills');
+      let skills = data.skills || [];
+      if(args){
+        const q = args.toLowerCase();
+        skills = skills.filter(s =>
+          (s.name||'').toLowerCase().includes(q) ||
+          (s.description||'').toLowerCase().includes(q) ||
+          (s.category||'').toLowerCase().includes(q)
+        );
+      }
+      if(!skills.length){
+        const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
+        S.messages.push(msg); renderMessages(); return;
+      }
+      // Group by category
+      const byCategory = {};
+      skills.forEach(s => {
+        const cat = s.category || 'General';
+        if(!byCategory[cat]) byCategory[cat] = [];
+        byCategory[cat].push(s);
       });
-      lines.push('');
+      const lines = [];
+      for(const [cat, items] of Object.entries(byCategory).sort()){
+        lines.push(`**${cat}**`);
+        items.forEach(s => {
+          const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
+          lines.push(`  \`${s.name}\`${desc}`);
+        });
+        lines.push('');
+      }
+      const header = args
+        ? `Skills matching "${args}" (${skills.length}):\n\n`
+        : `Available skills (${skills.length}):\n\n`;
+      S.messages.push({role:'assistant', content: header + lines.join('\n')});
+      renderMessages();
+      showToast(t('type_slash'));
+    }catch(e){
+      showToast('Failed to load skills: '+e.message);
     }
-    const header = args
-      ? `Skills matching "${args}" (${skills.length}):\n\n`
-      : `Available skills (${skills.length}):\n\n`;
-    S.messages.push({role:'assistant', content: header + lines.join('\n')});
-    renderMessages();
-    showToast(t('type_slash'));
-  }catch(e){
-    showToast('Failed to load skills: '+e.message);
-  }
+  })();
+  return true;
 }
 
 async function cmdUse(args){
@@ -2096,6 +2171,7 @@ function _getReservedSlashCommandSlugs(){
   return reserved;
 }
 function _buildSkillCommandEntry(skill){
+  if(_isSkillDisabled(skill))return null;
   const skillName=String(skill&&skill.name||'').trim();
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
@@ -2117,14 +2193,32 @@ function _buildBundleCommandEntry(bundle){
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
+  const gen=_slashSkillCacheGen;
+  let _committed=false;
   _skillCommandLoadPromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      // Bumped by a profile switch while we were awaiting: keep the cache empty
+      // (and not "ready") so the composer's next pass loads the new profile (#7509).
+      if(gen!==_slashSkillCacheGen) return _skillCommandCache;
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_skillCommandCache=[];}
-    finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+      _committed=true;
+    }catch(_){
+      if(gen===_slashSkillCacheGen)_skillCommandCache=[];
+    }
+    finally{
+      // Only publish the cache as "ready" after a SUCCESSFUL current-generation
+      // commit. Marking it ready in the failure path (what master does
+      // unconditionally) permanently wedges the picker: a single transient
+      // /api/skills rejection leaves ready=true + cache=[], and
+      // ensureSkillCommandsLoadedForAutocomplete() only retries when
+      // !ready && !promise — so skill commands stay missing until a page
+      // reload even after the API recovers. Clear the promise either way so the
+      // next picker pass can retry.
+      if(gen===_slashSkillCacheGen){_skillCommandCacheReady=_committed;_skillCommandLoadPromise=null;}
+    }
     return _skillCommandCache;
   })();
   return _skillCommandLoadPromise;

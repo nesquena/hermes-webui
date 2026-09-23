@@ -606,7 +606,9 @@ def test_session_compact_includes_parent():
     # the top of compact() which pushed the parent_session_id field beyond a
     # 1500-char window — widen the scan to 3000 chars to cover the full
     # return-dict body without re-tightening every time compact() grows.
-    compact_def_match = re.search(r"def compact\(self", src)
+    # compact() accepts optional projection flags on separate lines; match the
+    # method name and first parameter without pinning formatting.
+    compact_def_match = re.search(r"def compact\(\s*self", src)
     assert compact_def_match, "Could not find compact() method"
     snippet = src[compact_def_match.start():compact_def_match.start() + 3000]
     assert "'parent_session_id'" in snippet, \

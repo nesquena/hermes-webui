@@ -322,6 +322,7 @@ def test_stale_runtime_handoff_summary_returns_typed_409_without_persisting(monk
             "error": "restart required",
             "type": "agent_runtime_stale",
             "retryable": True,
+            "restart_scheduled": False,
         },
     }
 
@@ -619,6 +620,25 @@ def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
     import api.models as models
     import api.routes as routes
 
+    if provider.startswith("custom:"):
+        # A named ``custom:<slug>`` route is identity-owned: the endpoint comes
+        # from the record that names the slug, and a route no record owns fails
+        # closed (#1806). ``resolve_model_provider`` only ever returns this
+        # provider/base_url pair BECAUSE such a row exists, so the fixture must
+        # carry it — otherwise the handler is handed a connection with no
+        # authority behind it and falls back before reaching the Codex path.
+        monkeypatch.setitem(
+            cfg.cfg,
+            "custom_providers",
+            [
+                {
+                    "name": provider.split(":", 1)[1],
+                    "base_url": base_url,
+                    "api_key": "handoff-summary-key",
+                }
+            ],
+        )
+
     if expects_normalized_base_url:
         real_urlsplit = routes.urlsplit
 
@@ -669,11 +689,20 @@ def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
             request_kwargs.append(kwargs)
             return object()
 
-        def _normalize_codex_response(self, response):
-            return types.SimpleNamespace(content="- You should complete the remaining review."), "stop"
+        def _get_transport(self, mode=None):
+            # hermes-agent v0.21 contract: normalization goes through the
+            # provider transport (CodexTransport.normalize_response returns
+            # NormalizedResponse with .content); the old
+            # AIAgent._normalize_codex_response method no longer exists.
+            assert mode == "codex_responses"
+            return _CodexTransport()
 
         def release_clients(self):
             return None
+
+    class _CodexTransport:
+        def normalize_response(self, response, **kwargs):
+            return types.SimpleNamespace(content="- You should complete the remaining review.")
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = _CodexAgent

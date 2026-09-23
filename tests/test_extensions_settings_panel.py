@@ -166,7 +166,10 @@ def test_extensions_panel_renders_sanitized_status_payload():
     assert "const code=esc(rawCode)" in warning_block
     assert "esc((item&&item.source)||'unknown')" in warning_block
     assert "extension_state_unknown_ids" in warning_block
-    assert "Some saved disabled-extension overrides no longer match the current manifest" in warning_block
+    # #7581: the hint text is now routed through t(); the raw English must live
+    # only in the locale bundle, not inline in the JS.
+    assert "Some saved disabled-extension overrides no longer match the current manifest" not in warning_block
+    assert "ext_state_unknown_ids_hint" in warning_block
     assert "Rejected" not in render_block  # rejected values must never be rendered directly
 
 
@@ -179,8 +182,8 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     load_block = _between("async function loadExtensionsPanel", "async function copyExtensionsDiagnostics")
     load_catch_block = load_block[load_block.index("}catch(e){"):]
 
-    assert "Loopback sidecars" in sidecar_block
-    assert "No loopback sidecars declared." in sidecar_block
+    assert "ext_sidecars_title" in sidecar_block
+    assert "ext_sidecars_none" in sidecar_block
     assert "esc(title)" in sidecar_block
     assert "esc(meta)" in sidecar_block
     assert "esc(origin)" in sidecar_block
@@ -191,7 +194,7 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "proxy.consented===true" in sidecar_block
     assert "proxy.consent_required===true" in sidecar_block
     assert "proxy.origin_changed===true" in sidecar_block
-    assert "Proxy path" in sidecar_block
+    assert "ext_sidecar_proxy_path" in sidecar_block
     assert "data-extension-sidecar-proxy-id" in sidecar_block
     assert "data-extension-sidecar-proxy-approved" in sidecar_block
     assert 'data-sidecar-runtime-index="${index}"' in sidecar_block
@@ -251,8 +254,8 @@ def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_ins
 
     assert "data-extension-toggle-id" in installed_block
     assert "data-extension-next-enabled" in installed_block
-    assert "No extension directory is configured." in installed_block
-    assert "No manifest extensions are installed in the configured bundle." in installed_block
+    assert "settings_extensions_no_dir" in installed_block
+    assert "settings_extensions_installed_empty" in installed_block
     assert "extensionDirConfigured" in installed_block
     assert "Manifest-disabled entries cannot be enabled from WebUI." in installed_block
     assert "api('/api/extensions/toggle',{method:'POST',body:JSON.stringify({id,enabled})})" in toggle_block
