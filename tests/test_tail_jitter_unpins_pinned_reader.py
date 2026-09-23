@@ -113,6 +113,7 @@ def _run_drag_probe(steps: list[dict]) -> dict:
         _function_source(name)
         for name in (
             "_markScrollbarDragIntent",
+            "_clearScrollbarDragIntent",
             "_consumeScrollbarDragIntent",
             "_releaseScrollbarDragIntent",
         )
@@ -227,6 +228,11 @@ for(const step of payload.steps){
     if(step.name==='_resetScrollDirectionTracker') _resetScrollDirectionTracker();
     else if(step.name==='_resetStreamScrollFollow') _resetStreamScrollFollow();
     else throw new Error('unknown reset '+step.name);
+  }
+  else if(step.op==='blur'){ windowHandlers.blur(); }
+  else if(step.op==='hidden'){
+    document.visibilityState='hidden';
+    documentHandlers.visibilitychange();
   }
   else if(step.op==='pointerup'){ windowHandlers.pointerup(); }
   else if(step.op==='pointercancel'){ windowHandlers.pointercancel(); }
@@ -532,6 +538,35 @@ def test_scroll_ownership_resets_prevent_drag_intent_leaking(reset, pending_inte
             {"op": "scrollTop", "value": 6500},
             {"op": "seed"},
             # Browser-only 8px layout nudge: no scrollbar input in this owner.
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    result = _run_drag_probe(steps)
+    assert result["state"]["_scrollPinned"] is True
+    assert result["state"]["_messageUserUnpinned"] is False
+
+
+@pytest.mark.parametrize("abort", ["blur", "hidden"])
+@pytest.mark.parametrize("pending_intent", ["stamp", "queued_frame"])
+def test_focus_loss_discards_drag_intent_before_later_tail_nudge(abort, pending_intent):
+    """Losing focus aborts scrollbar ownership, including an undelivered stamp
+    or drag intent already queued for rAF classification. A later no-input tail
+    nudge must stay pinned rather than inheriting the abandoned drag."""
+    steps = [{"op": "pointerdown", "offsetX": 800}]
+    if pending_intent == "queued_frame":
+        steps.extend(
+            [
+                {"op": "scrollTop", "value": 6492},
+                {"op": "scroll"},
+            ]
+        )
+    steps.extend(
+        [
+            {"op": abort},
+            {"op": "scrollTop", "value": 6500},
+            {"op": "seed"},
             {"op": "scrollTop", "value": 6492},
             {"op": "scroll"},
             {"op": "flush"},
