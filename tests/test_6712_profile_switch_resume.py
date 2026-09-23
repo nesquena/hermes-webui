@@ -1609,3 +1609,419 @@ def test_the_profile_guards_still_reject_a_genuinely_different_profile():
                             active_is_default=True,
                             profiles=[{"name": "kinni", "is_default": True}])
     assert fwd["pane"] is True and fwd["rearm"] == ["pane"], fwd
+
+
+# ── Gate round 12 (23 Sep): three blockers ────────────────────────────────────
+#
+# G1 malformed truthy bodies still reported a successful resume; G2 several stale
+# exits stranded `_loadingSessionId`; G3 profile-scope authority depended on the UI
+# roster, which is empty at cold boot and can be stale in the other direction.
+
+_ENSURE_BODY_HARNESS = r"""
+const params = __PARAMS__;
+
+let S = { session: { session_id: 'A-sid', messages: [], last_usage: {} },
+          messages: [], toolCalls: [], lastUsage: {} };
+const INFLIGHT = {};
+let _loadingSessionId = 'A-sid';
+let _loadSessionGeneration = 7;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _msgLimitMax = 500;
+const _MSG_LIMIT_MAX = 500;
+let _pendingCarryForwardSnapshot = null;
+let _profileSwitchGeneration = 1;
+
+function api(){ return Promise.resolve(params.response); }
+function _clearSameSessionForceReloadHint(){}
+function _messageReloadLimitForSession(){ return 2; }
+function _syncToolCallsForLoadedMessages(){}
+function clearLiveToolCards(){}
+function clearVisibleMessageRowCache(){}
+function _hydrateTodosFromSession(){}
+function scheduleTodosRefresh(){}
+function syncTopbar(){}
+function _setSessionViewedCount(){}
+function _isSessionActivelyViewedForList(){ return true; }
+var window = {};
+
+// The ownership rule the body consults (verbatim from sessions.js).
+__OWNERSHIP_BODY__
+
+__ENSURE_BODY__
+
+(async () => {
+  const result = await _ensureMessagesLoaded('A-sid', {
+    force: false, loadGeneration: 7, switchGen: 1,
+  });
+  console.log(JSON.stringify({
+    result: (result === undefined ? 'undefined' : result),
+    messages: Array.isArray(S.messages) ? S.messages.length : null,
+    truncated: _messagesTruncated,
+    oldestIdx: _oldestIdx,
+  }));
+})();
+"""
+
+
+def _run_message_body(response):
+    """Drive the real `_ensureMessagesLoaded()` against a chosen response envelope."""
+    body = _top_level_function_body(_read(SESSIONS_JS_PATH), "async function _ensureMessagesLoaded(")
+    ownership = _read(SESSIONS_JS_PATH)
+    ownership = ownership[ownership.index("function _profileSwitchOwnsLoad("):]
+    ownership = ownership[: ownership.index("\n}\n") + 3]
+    js = _ENSURE_BODY_HARNESS.replace("__OWNERSHIP_BODY__", ownership).replace(
+        "__ENSURE_BODY__", body).replace("__PARAMS__", json.dumps({"response": response}))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_malformed_truthy_message_bodies_are_rejected_before_any_mutation():
+    """G1: `{session:{}}`, `{session:"x"}`, a wrong id and non-array messages must all
+    fail — not install an empty transcript and report a successful resume."""
+    bad = [
+        {"session": {}},                        # no session_id
+        {"session": "x"},                       # primitive
+        {"session": ["A-sid"]},                 # array
+        {"session": {"session_id": "OTHER", "messages": []}},   # wrong id
+        {"session": {"session_id": "A-sid", "messages": "nope"}},  # wrong-typed messages
+    ]
+    for response in bad:
+        out = _run_message_body(response)
+        assert out["result"] is False, (
+            f"a malformed truthy body was accepted as a successful resume: "
+            f"response={response!r} -> {out}"
+        )
+        # Nothing may be installed on a rejected envelope.
+        assert out["messages"] == 0 and out["truncated"] is False and out["oldestIdx"] == 0, (
+            f"a rejected envelope still mutated state: {response!r} -> {out}"
+        )
+
+
+def test_an_empty_messages_array_is_still_a_successful_body():
+    """Positive control: a well-formed envelope with zero messages is a valid resume,
+    so the new validation tightens the envelope without rejecting empty sessions."""
+    out = _run_message_body({"session": {"session_id": "A-sid", "messages": []}})
+    assert out["result"] is True, f"a valid empty transcript must still succeed: {out}"
+
+
+# ── G3: profile-scope authority must not depend on the UI roster ──────────────
+
+_AUTHORITY_HARNESS = r"""
+const params = __PARAMS__;
+
+// Deliberately NO _profilesCache: the gate's cold-boot schedule, where the roster
+// has not been fetched yet. Authority must still resolve.
+const S = { session: params.session, activeProfile: params.activeProfile,
+            activeProfileIsDefault: !!params.activeProfileIsDefault,
+            activeProfileRootNames: params.rootNames };
+let _loadingSessionId = null;
+let started = [];
+function startSessionStream(sid){ started.push(sid); }
+
+function _profileMatchesActiveProfile(profile, activeProfile){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+// The roster-backed resolver: unavailable at cold boot (cache null), and the only
+// remaining input if the server-provided set is missing.
+function _cronProfileNameIsRootAlias(name) {
+  if (name === 'default') return true;
+  if (typeof _profilesCache !== 'undefined' && _profilesCache
+    && Array.isArray(_profilesCache.profiles)) {
+    const entry = _profilesCache.profiles.find((p) => p && p.name === name);
+    if (entry && entry.is_default) return true;
+  }
+  return false;
+}
+
+__HELPER_BODY__
+
+__REARM_BODY__
+
+const rearm = (() => { _rearmActiveSessionStream(); return started.slice(); })();
+console.log(JSON.stringify({ pane: _isSessionCurrentPane('pane'), rearm: rearm }));
+"""
+
+
+def _run_authority(*, pane_profile, active_profile, active_is_default, root_names):
+    src_js = _read(SESSIONS_JS_PATH)
+    for name in ("_activeProfileRootNamesSet", "_cronProfileNameIsRootAlias",
+                 "_paneProfileMatchesActiveProfile"):
+        helper = src_js[src_js.index("function %s(" % name):]
+        if name == "_cronProfileNameIsRootAlias":
+            helper = helper[: helper.index("\n}\n") + 3]
+        elif name == "_activeProfileRootNamesSet":
+            helper = helper[: helper.index("\n}\n") + 3]
+        else:
+            helper = helper[: helper.index("\n}\n") + 3]
+        globals()["_h_" + name] = helper
+    helpers = "\n".join(globals()["_h_" + n] for n in
+                        ("_activeProfileRootNamesSet", "_cronProfileNameIsRootAlias",
+                         "_paneProfileMatchesActiveProfile"))
+    rearm = src_js[src_js.index("function _rearmActiveSessionStream("):]
+    rearm = rearm[: rearm.index("\n}\n") + 3]
+    pane = _read(MESSAGES_JS_PATH)
+    pane_body = pane[pane.index("function _isSessionCurrentPane("):]
+    pane_body = pane_body[: pane_body.index("\n}\n") + 3]
+    js = _AUTHORITY_HARNESS.replace("__HELPER_BODY__", helpers + "\n" + pane_body).replace(
+        "__REARM_BODY__", rearm).replace("__PARAMS__", json.dumps({
+            "session": {"session_id": "pane", "profile": pane_profile},
+            "activeProfile": active_profile,
+            "activeProfileIsDefault": active_is_default,
+            "rootNames": root_names,
+        }))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_profile_authority_resolves_on_cold_boot_without_the_roster():
+    """G3: with no `_profilesCache` at all (the cold boot this PR is meant to fix), the
+    server-provided root set must still authorise the renamed-root pane."""
+    out = _run_authority(pane_profile="kinni", active_profile="default",
+                         active_is_default=True, root_names=["default", "kinni"])
+    assert out["pane"] is True, (
+        f"profile authority failed at cold boot because it depended on the UI roster: "
+        f"{out} (gate G3)"
+    )
+    assert out["rearm"] == ["pane"], f"the stream was not reopened at cold boot: {out}"
+
+
+def test_profile_authority_ignores_a_stale_roster_in_the_other_direction():
+    """G3: a roster that no longer lists the pane's name must not override the
+    server-provided root set (the stale-cache case the gate called out)."""
+    out = _run_authority(pane_profile="kinni", active_profile="default",
+                         active_is_default=True, root_names=["default", "kinni"])
+    assert out["pane"] is True, (
+        f"authority disagreed with the server-provided root set: {out} (gate G3)"
+    )
+    # Control: a name the server does NOT list as a root is still rejected, so the
+    # rule is driven by the server set rather than by is_default alone.
+    ctl = _run_authority(pane_profile="other-profile", active_profile="default",
+                         active_is_default=True, root_names=["default", "kinni"])
+    assert ctl["pane"] is False and ctl["rearm"] == [], (
+        f"a non-root profile was authorised: {ctl}"
+    )
+
+
+# ── G2: the draft-save and 409 abandonment exits, with the replacement switch
+#        deliberately NOT starting another loadSession() ─────────────────────────
+#
+# Both exits returned without retiring a marker they still owned, so a superseded
+# switch that took a no-load fallback left the old id installed and
+# `_isSessionCurrentPane()` then rejected the current pane's frames.
+
+_ABANDON_HARNESS = r"""
+const params = __PARAMS__;
+
+var S = { session: params.seedSession, messages: [{ role: 'assistant', content: 'seed' }],
+          toolCalls: [], pendingFiles: [], busy: false, activeStreamId: null,
+          _pendingSessionToolsets: null, lastUsage: {} };
+const INFLIGHT = {};
+let _loadingSessionId = null;
+let _loadingOlder = false;
+let _loadSessionGeneration = 0;
+let _loadMessagesFailedSids = new Set();
+function _loadMessagesFailedForSid(sid){ return _loadMessagesFailedSids.has(sid); }
+let _pendingCarryForwardSnapshot = null;
+let _messagesTruncated = false;
+let _oldestIdx = 0;
+let _messageRenderWindowSize = 0;
+let _msgLimitMax = 500;
+const _MSG_LIMIT_MAX = 500;
+let _messageUserUnpinned = false;
+let _scrollPinned = true;
+let _profileSwitchGeneration = 1;
+const _switchGen = 1;
+
+const calls = { draftSaves: 0, rearm: 0, switchProfileCalls: 0, metaCalls: 0 };
+
+// The metadata request is held open so the driver owns the interleaving, and is
+// REJECTED with a profile-mismatch body to reach the 409 recovery path.
+let _metaReject = null;
+const metaGate = new Promise((_res, rej) => { _metaReject = rej; });
+function api(path){
+  if (String(path).includes('messages=0')) { calls.metaCalls += 1; return metaGate; }
+  return Promise.resolve({});
+}
+function rejectMetaWithProfileMismatch(){
+  const err = new Error('profile mismatch');
+  err.status = 409;
+  err.body = JSON.stringify({ code: 'session_profile_mismatch',
+                              profile: 'other-profile', session_id: 'target-sid' });
+  _metaReject(err);
+}
+const wait = () => new Promise(r => setImmediate(r));
+
+// The awaited draft save: yields the event loop exactly like the shipped one.
+function _saveComposerDraftNow(){ calls.draftSaves += 1; return Promise.resolve(); }
+// The 409 recovery's profile switch: another await boundary the load can lose at.
+// HELD open by the driver so ownership can be moved while it is genuinely in flight —
+// otherwise the continuation's own retry would run first and the scenario would model
+// the wrong interleaving.
+let _switchRelease = null;
+const switchGate = new Promise(res => { _switchRelease = res; });
+let _holdSwitch = false;
+function _switchProfileForSessionLoad(){
+  calls.switchProfileCalls += 1;
+  return _holdSwitch ? switchGate : Promise.resolve();
+}
+function _sessionProfileMismatchFromError(e){
+  return (e && e.body && JSON.parse(e.body).profile) ? JSON.parse(e.body) : null;
+}
+function _profileMatchesActiveProfile(p, a){ return String(p||'default').trim() === String(a||'default').trim(); }
+function _cronProfileNameIsRootAlias(){ return false; }
+function _activeProfileRootNamesSet(){ return null; }
+function _rearmActiveSessionStream(){ calls.rearm += 1; }
+function _setActiveSessionUrl(){}
+function startSessionStream(){}
+function _appRootPath(){ return '/'; }
+function $(){ return null; }
+var window = {}; var history = { replaceState(){} };
+var localStorage = { setItem(){}, removeItem(){}, getItem(){ return null; } };
+function _clearSameSessionForceReloadHint(){}
+function _clearStuckSessionOnBoot(){}
+function _sessionVisitHasUnreadState(){ return false; }
+function _acknowledgeSessionVisit(){}
+function _setSessionViewedCount(){}
+function scheduleTodosRefresh(){}
+function syncTopbar(){}
+function _captureSameSessionForceReloadHint(){}
+function _resolveSessionModelForDisplaySoon(){}
+function _deferWorkspaceRefreshForSession(){}
+function _applyPendingSessionModelForSession(){}
+function _hydrateTodosFromSession(){}
+function _syncCtxIndicator(){}
+function _renderPendingPromptsForActiveSession(){}
+function _restoreComposerDraft(){}
+function _checkAndShowHandoffHint(){}
+function _hideHandoffHint(){}
+function _isMessagingSession(){ return false; }
+function _clearDeferredActiveSessionExternalRefresh(){}
+function setStatus(){}
+function setComposerStatus(){}
+function setBusy(){}
+function updateSendBtn(){}
+function updateQueueBadge(){}
+function startApprovalPolling(){}
+function startClarifyPolling(){}
+function _fetchYoloState(){}
+function stopApprovalPolling(){}
+function hideApprovalCard(){}
+function stopSessionStream(){}
+function stopClarifyPolling(){}
+function hideClarifyCard(){}
+let _yoloEnabled = false;
+function _updateYoloPill(){}
+function clearCompressionUi(){}
+function _clearPendingSelections(){}
+function _clearQueueCardDisplay(){}
+function loadInflightState(){ return null; }
+function _messageReloadLimitForSession(){ return 2; }
+function _uploadPendingFilesSyncProgressForSession(){}
+function autoResize(){}
+function showToast(){}
+function closeOtherLiveStreams(){}
+function _isSessionActivelyViewedForList(){ return true; }
+function _syncToolCallsForLoadedMessages(){}
+function clearVisibleMessageRowCache(){}
+function clearLiveToolCards(){}
+function _ensureMessagesLoaded(){ return Promise.resolve(true); }
+function _selectLiveRecoveryInflight(){ return null; }
+function _inflightHasVisibleLiveState(){ return false; }
+
+__OWNERSHIP_BODY__
+
+__LOAD_BODY__
+
+(async () => {
+  const out = {};
+
+  // ── Scenario 1: lose ownership during the awaited draft save ───────────────
+  S.messages = [{ role: 'assistant', content: 'seed' }];
+  const p1 = loadSession(params.targetSid, { switchGen: 1, profileSwitchOwned: true });
+  for(let i = 0; i < 200 && calls.draftSaves === 0; i++){ await wait(); }
+  out.draftSaveStarted = calls.draftSaves === 1;
+  // A newer switch takes over WITHOUT starting another loadSession.
+  _profileSwitchGeneration = 2;
+  await p1;
+  for(let i = 0; i < 20; i++){ await wait(); }
+  out.markerAfterDraftSave = (_loadingSessionId === undefined ? 'undefined' : _loadingSessionId);
+
+  // ── Scenario 2: lose ownership during the 409 recovery's profile switch ────
+  _loadingSessionId = null;
+  _profileSwitchGeneration = 1;
+  calls.switchProfileCalls = 0;
+  S.session = params.seedSession;
+  const p2 = loadSession(params.targetSid, { switchGen: 1, profileSwitchOwned: true,
+                                             skipProfileResolve: false, force: true });
+  // Wait until the metadata request is genuinely in flight, then fail it with the
+  // 409 mismatch the recovery path is keyed on.
+  for(let i = 0; i < 200 && calls.metaCalls === 0; i++){ await wait(); }
+  out.metaRequestStarted = calls.metaCalls === 1;
+  _holdSwitch = true;
+  rejectMetaWithProfileMismatch();
+  for(let i = 0; i < 200 && calls.switchProfileCalls === 0; i++){ await wait(); }
+  out.switchRecoveryStarted = calls.switchProfileCalls === 1;
+  // Ownership moves while the recovery switch is genuinely in flight.
+  _profileSwitchGeneration = 2;
+  _switchRelease();
+  await p2;
+  for(let i = 0; i < 20; i++){ await wait(); }
+  out.markerAfterSwitchRecovery = (_loadingSessionId === undefined ? 'undefined' : _loadingSessionId);
+
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def _run_abandonment_scenarios():
+    """Drive the real `loadSession()` through both abandonment exits with no successor load."""
+    src_js = _read(SESSIONS_JS_PATH)
+    body = _top_level_function_body(src_js, "async function loadSession(")
+    ownership = src_js[src_js.index("function _profileSwitchOwnsLoad("):]
+    ownership = ownership[: ownership.index("\n}\n") + 3]
+    js = _ABANDON_HARNESS.replace("__OWNERSHIP_BODY__", ownership).replace(
+        "__LOAD_BODY__", body).replace("__PARAMS__", json.dumps({
+            "targetSid": "target-sid",
+            "seedSession": {"session_id": "seed-pane", "messages": []},
+        }))
+    # The 409 path needs the metadata request to reject with a profile-mismatch body,
+    # and any later metadata call must be a well-formed body for the target session so a
+    # (buggy) retry cannot crash the harness and hide the marker assertion.
+    js = js.replace(
+        "return calls.metaCalls === 1 ? metaGate : Promise.resolve({});",
+        "return calls.metaCalls === 1 ? metaGate : Promise.resolve("
+        "{ session: { session_id: 'target-sid', message_count: 0, "
+        "active_stream_id: null, messages: [] } });")
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_marker_is_retired_when_ownership_is_lost_at_each_abandonment_exit():
+    """G2: the draft-save exit and the 409 recovery exit must each retire the marker
+    they still own, even when the replacement switch starts no other loadSession()."""
+    out = _run_abandonment_scenarios()
+    assert out["draftSaveStarted"] is True, (
+        f"precondition: the awaited draft save must actually run, otherwise the "
+        f"scenario is never exercised: {out}"
+    )
+    assert out["markerAfterDraftSave"] is None, (
+        f"the draft-save abandonment left _loadingSessionId={out['markerAfterDraftSave']!r} "
+        f"installed with no successor load to overwrite it, so the current pane's frames "
+        f"stay rejected (gate G2): {out}"
+    )
+    assert out["metaRequestStarted"] is True and out["switchRecoveryStarted"] is True, (
+        f"precondition: the metadata request must be in flight and the 409 recovery's "
+        f"profile switch must actually run, otherwise the scenario is never "
+        f"exercised: {out}"
+    )
+    assert out["markerAfterSwitchRecovery"] is None, (
+        f"the 409 recovery abandonment left _loadingSessionId="
+        f"{out['markerAfterSwitchRecovery']!r} installed (gate G2): {out}"
+    )

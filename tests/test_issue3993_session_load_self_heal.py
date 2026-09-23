@@ -113,7 +113,9 @@ def test_stale_load_guard_present_before_self_heal():
     else:
         raise AssertionError("stale-load guard braces did not balance")
     assert "_rearmActiveSessionStream()" in guard_tail
-    assert "if (_ownsLoadMarker()) _loadingSessionId = null;" in guard_tail, (
-        "a stale exit must release the in-flight marker it still owns, otherwise the "
-        "abandoned session stays marked as loading (Greptile P1, round 9)"
+    # Gate round 12 (G2): every marker retirement goes through ONE owner-checked
+    # helper, so no exit can silently omit it again.
+    assert "_retireLoadMarkerIfOwned();" in guard_tail, (
+        "a stale exit must retire the in-flight marker it still owns, otherwise the "
+        "abandoned session stays marked as loading (Greptile P1, round 9; gate G2)"
     )

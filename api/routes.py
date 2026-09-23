@@ -14959,6 +14959,10 @@ def handle_get(handler, parsed) -> bool:
                 "name": active_profile_name,
                 "path": str(profiles_api.get_active_hermes_home()),
                 "is_default": profiles_api._is_root_profile(active_profile_name),
+                # Canonical root-alias set, carried atomically with the active-profile
+                # state so the WebUI can resolve profile-scope authority during a cold
+                # boot - its own profile roster is empty/stale at that point.
+                "root_names": profiles_api._root_profile_names(),
                 "default_workspace": _profile_default_workspace,
             },
         )

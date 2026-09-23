@@ -3586,7 +3586,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {
+          status: 'resolved',
+          profile: p.name || 'default',
+          isDefault: !!p.is_default,
+          rootNames: Array.isArray(p.root_names) ? p.root_names : null,
+        };
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -3615,6 +3620,15 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  // Canonical root-profile alias set, delivered by the same /api/profile/active
+  // response as the name/is_default pair above — so it is available on the cold
+  // boot that profile-scope authority must handle (Greptile gate, round 12). The
+  // UI roster (_profilesCache) is NOT an acceptable authority input: it starts
+  // empty, can be five minutes stale from localStorage, and is warmed only after
+  // the window-load timer.
+  if(Array.isArray(activeProfileState.rootNames) && activeProfileState.rootNames.length){
+    S.activeProfileRootNames = activeProfileState.rootNames.slice();
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

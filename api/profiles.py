@@ -449,6 +449,30 @@ def _is_root_profile(name: str) -> bool:
         return name in _root_profile_name_cache
 
 
+def _root_profile_names() -> list[str]:
+    """Canonical root-profile alias set, resolved server-side.
+
+    Same source of truth as `_is_root_profile` (the legacy 'default' alias plus
+    every name `list_profiles_api()` reports with is_default=True), exposed so the
+    WebUI can decide profile-scope authority WITHOUT consulting its own eventually
+    consistent profile roster. The frontend cache starts empty, may be up to five
+    minutes stale from localStorage, and is warmed only after the window-load
+    timer - so it cannot answer during a cold boot.
+    Fail-open: never raise on a boot-critical path.
+    """
+    names = {'default'}
+    try:
+        for p in list_profiles_api():
+            try:
+                if p.get('is_default') and p.get('name'):
+                    names.add(p['name'])
+            except (AttributeError, TypeError):
+                continue
+    except Exception:
+        logger.debug("Failed to list profiles for root-name lookup", exc_info=True)
+    return sorted(names)
+
+
 def _profiles_match(row_profile, active_profile) -> bool:
     """Return True if a session/project row's profile matches the active profile.
 
@@ -1770,6 +1794,10 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         'profiles': list_profiles_api(),
         'active': name,
         'is_default': _is_root_profile(name),
+        # Canonical root-alias set for profile-scope authority in the WebUI, carried
+        # with the switch result so it is atomic with the new active profile — the
+        # client's own roster is not an authority input (Greptile gate, round 12).
+        'root_names': _root_profile_names(),
         'default_model': default_model,
         'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,

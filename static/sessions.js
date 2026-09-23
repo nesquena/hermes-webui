@@ -643,8 +643,28 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
 // A profile name provably resolving to the root profile: the literal
 // 'default' alias, or a roster entry flagged is_default (renamed root).
 // Unknown names fail closed — exact-name matching still applies to them.
+// Root-alias resolution for profile-scope AUTHORITY. Prefers the canonical set the
+// server delivers atomically with the active-profile state (`S.activeProfileRootNames`,
+// from /api/profile/active and /api/profile/switch). The roster fallback below is only
+// for surfaces that were never authority inputs - the roster starts empty, can be five
+// minutes stale from localStorage, and is warmed only after the window-load timer, so it
+// cannot answer during a cold boot (Greptile gate, round 12).
+function _activeProfileRootNamesSet(){
+  if(typeof S !== 'undefined' && S && Array.isArray(S.activeProfileRootNames)
+     && S.activeProfileRootNames.length){
+    return new Set(S.activeProfileRootNames);
+  }
+  return null;
+}
+
 function _cronProfileNameIsRootAlias(name) {
   if (name === 'default') return true;
+  // Tolerant by design: harnesses and partial loads may not define the server-set
+  // reader, in which case the roster fallback below still answers.
+  const serverRoots = (typeof _activeProfileRootNamesSet === 'function')
+    ? _activeProfileRootNamesSet()
+    : null;
+  if (serverRoots) return serverRoots.has(name);
   if (typeof _profilesCache !== 'undefined' && _profilesCache
     && Array.isArray(_profilesCache.profiles)) {
     const entry = _profilesCache.profiles.find((p) => p && p.name === name);
@@ -1908,6 +1928,13 @@ async function loadSession(sid){
   // another navigation overwrote it (Greptile P1 on #6712, round 9).
   const _ownsLoadMarker = () => _loadingSessionId === sid
     && _loadSessionGeneration === _loadGeneration;
+  // Gate round 12 (G2): ONE owner-checked marker retirement for every stale
+  // abandonment. Two exits still returned without it — the bail after the awaited
+  // composer-draft save, and the 409 pre/post-recovery exits — so a superseded
+  // switch that took a no-load fallback could leave the old id installed, and
+  // `_isSessionCurrentPane()` would then reject the CURRENT pane's frames. The
+  // guard means an older load can never retire a newer load's marker.
+  const _retireLoadMarkerIfOwned = () => { if (_ownsLoadMarker()) _loadingSessionId = null; };
   const _isCurrentLoad = () => _ownsLoadMarker() && _profileSwitchOwnsLoad(_loadSwitchGen);
   // The same ownership token, forwarded to _ensureMessagesLoaded() so a stale
   // message response cannot write the transcript either. Keeps the load's opts
@@ -1954,7 +1981,9 @@ async function loadSession(sid){
     // continuation can't wipe S.messages / write the loading placeholder /
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
+    // Gate round 12 (G2): the awaited draft save above is an abandonment point —
+    // retire the marker we still own before bailing.
+    if (!_isCurrentLoad()) { _retireLoadMarkerIfOwned(); return; }
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -2047,11 +2076,13 @@ async function loadSession(sid){
         // recovery cannot drag the browser back to a profile a newer switch has
         // already left.
         if(!_isCurrentLoad()){
+          _retireLoadMarkerIfOwned();
           _rearmActiveSessionStream();
           return false;
         }
       }
       if (!_isCurrentLoad()) {
+        _retireLoadMarkerIfOwned();
         _rearmActiveSessionStream();
         return false;
       }
@@ -2064,6 +2095,7 @@ async function loadSession(sid){
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
+          _retireLoadMarkerIfOwned();
           _rearmActiveSessionStream();
           return false;
         }
@@ -2076,7 +2108,7 @@ async function loadSession(sid){
            && opts.switchGen !== _profileSwitchGeneration){
           return false;
         }
-        if (_ownsLoadMarker()) _loadingSessionId = null;
+        _retireLoadMarkerIfOwned();
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
@@ -2095,7 +2127,7 @@ async function loadSession(sid){
       // a superseded switch is not a superseded LOAD, so this exit is the last
       // writer the marker has. Release it, or the abandoned session stays marked
       // as loading and readers reject the current pane.
-      if (_ownsLoadMarker()) _loadingSessionId = null;
+      _retireLoadMarkerIfOwned();
       _rearmActiveSessionStream();
       return;
     }
@@ -2116,7 +2148,7 @@ async function loadSession(sid){
         if(!currentSid || currentSid===sid){
           try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_ownsLoadMarker()) _loadingSessionId = null;
+          _retireLoadMarkerIfOwned();
           if(!currentSid){
             throw e;
           }
@@ -2140,7 +2172,7 @@ async function loadSession(sid){
     // NOT restart — doing so would spin the SSE reconnect loop against a dead
     // session_id.
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
-    if (_ownsLoadMarker()) _loadingSessionId = null;
+    _retireLoadMarkerIfOwned();
     // The session stream was stopped unconditionally at the top of this load
     // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
     // lines below, but this failure exit never reaches that point — leaving
@@ -2169,7 +2201,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
-    if (_ownsLoadMarker()) _loadingSessionId = null;
+    _retireLoadMarkerIfOwned();
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
     _rearmActiveSessionStream();
@@ -2183,7 +2215,7 @@ async function loadSession(sid){
     // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
     // newer load arms its own sid).
     _rearmActiveSessionStream();
-    if (_ownsLoadMarker()) _loadingSessionId = null;
+    _retireLoadMarkerIfOwned();
     return;
   }
   // #2980: if this (current) load resolved a hidden pre-compression snapshot,
@@ -2349,7 +2381,7 @@ async function loadSession(sid){
       _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch(e) {
       if (!_isCurrentLoad()) {
-        if (_ownsLoadMarker()) _loadingSessionId = null;
+        _retireLoadMarkerIfOwned();
         _rearmActiveSessionStream();
         return;
       }
@@ -2357,7 +2389,7 @@ async function loadSession(sid){
       if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
     }
     if (!_isCurrentLoad()) {
-      if (_ownsLoadMarker()) _loadingSessionId = null;
+      _retireLoadMarkerIfOwned();
       _rearmActiveSessionStream();
       return;
     }
@@ -2470,7 +2502,7 @@ async function loadSession(sid){
       _messagesLoaded = await _ensureMessagesLoaded(sid, _loadOwnerOpts(_keepStaleUntilLoaded));
     } catch (e) {
       if (!_isCurrentLoad()) {
-        if (_ownsLoadMarker()) _loadingSessionId = null;
+        _retireLoadMarkerIfOwned();
         _rearmActiveSessionStream();
         return;
       }
@@ -2484,12 +2516,12 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if(typeof _loadMessagesFailedSids!=='undefined') _loadMessagesFailedSids.add(sid);
-      if (_ownsLoadMarker()) _loadingSessionId = null;
+      _retireLoadMarkerIfOwned();
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
     if (!_isCurrentLoad()) {
-      if (_ownsLoadMarker()) _loadingSessionId = null;
+      _retireLoadMarkerIfOwned();
       return;
     }
     // #6712 (gate round 8): the body was not accepted (lost ownership, or a
@@ -2615,7 +2647,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  if (_ownsLoadMarker()) _loadingSessionId = null;
+  _retireLoadMarkerIfOwned();
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in
@@ -3439,10 +3471,17 @@ async function _ensureMessagesLoaded(sid, opts) {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
   if (!_ownsLoad()) return false;
-  // Guard: api() may have redirected (401) and returned undefined — and #6712
-  // (gate round 8): a malformed body (no `session`) is a FAILED load, not a
-  // silent no-op that the caller then reads as success.
+  // Gate round 12 (G1): reject a malformed envelope BEFORE any mutation. Rejecting
+  // only a MISSING `session` was not enough — truthy junk (`{session:{}}`,
+  // `{session:"x"}`, a wrong `session_id`, non-array `messages`) passed through
+  // `(data.session.messages || [])`, installed an empty transcript and still
+  // reported a successful resume. `session` must be a plain object naming THIS
+  // session, and `messages`, when present, must be an array.
   if (!data || !data.session) return false;
+  if (typeof data.session !== 'object' || Array.isArray(data.session)) return false;
+  if (String(data.session.session_id || '') !== String(sid)) return false;
+  if (data.session.messages !== undefined && data.session.messages !== null
+      && !Array.isArray(data.session.messages)) return false;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
