@@ -354,7 +354,10 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
+            delete_end = text.find("\n    if parsed.path == ", delete_idx + 1)
+            delete_block = text[delete_idx:delete_end if delete_end >= 0 else None]
+            assert "retire_session_sidecar(" in delete_block, \
+                f"{label} session/delete must retire its sidecar generation"
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -364,14 +367,24 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
 def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
     """session/delete must remove sidecar backups so deleted sessions stay deleted."""
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
+    models_src = (REPO_ROOT / "api" / "models.py").read_text()
     delete_idx = max(
         routes_src.find("if parsed.path == '/api/session/delete':"),
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    delete_end = routes_src.find("\n    if parsed.path == ", delete_idx + 1)
+    delete_block = routes_src[delete_idx:delete_end if delete_end >= 0 else None]
+    helper_idx = models_src.index("def retire_session_sidecar(")
+    helper_end = models_src.find("\ndef ", helper_idx + 1)
+    helper_block = models_src[helper_idx:helper_end if helper_end >= 0 else None]
+    assert "retire_session_sidecar(" in delete_block
+    assert "remove_backup=True" in delete_block
+    assert "if remove_backup:" in helper_block
+    assert (
+        "with_suffix('.json.bak').unlink" in helper_block
+        or 'with_suffix(".json.bak").unlink' in helper_block
+    ), "retire_session_sidecar must unlink <sid>.json.bak when requested"
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

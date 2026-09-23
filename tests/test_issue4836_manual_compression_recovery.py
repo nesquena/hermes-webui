@@ -316,7 +316,11 @@ def test_startup_recovery_fires_when_loss_shrinks_both_messages_and_context(monk
     # Healthy post-compression backup: MORE messages AND a LARGER compressed
     # context (still carries the compaction marker) — must be recovered.
     bak = dict(live)
-    bak["messages"] = [_msg("user", f"m{i}", float(i)) for i in range(130)]
+    # The healthy backup is a strict superset of the clobbered live rows:
+    # recovery never authorizes discarding a live-only message (#6600).
+    bak["messages"] = list(live["messages"]) + [
+        _msg("user", f"m{i}", float(i)) for i in range(2, 130)
+    ]
     bak["context_messages"] = [marker] + [_msg("assistant", f"c{i}", float(i)) for i in range(49)]
     live_path.write_text(json.dumps(live), encoding="utf-8")
     bak_path.write_text(json.dumps(bak), encoding="utf-8")
