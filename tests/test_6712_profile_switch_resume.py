@@ -545,6 +545,10 @@ function showToast(m){ calls.toasts.push(String(m)); }
 function t(k){ return k; }
 async function _profileSwitchPanelLoad(){}
 function _refreshProfileSwitchBackground(){}
+// The shipped switch path now ingests the server root scope through the ONE writer
+// in sessions.js (script order: sessions.js before panels.js). Ship it verbatim so
+// this harness exercises the real ingestion rule rather than a stand-in.
+__ROOT_SCOPE_WRITER__
 
 // Minimal stand-ins for the function's DOM touch points.
 const _chipLabel = { textContent: '' };
@@ -576,7 +580,10 @@ switchToProfile('target').then(function(result){
   console.log(JSON.stringify({ error: String(e && e.message || e) }));
 });
 """
-    js = js.replace("__PARAMS__", json.dumps(payload))
+    src_js = _read(SESSIONS_JS_PATH)
+    writer = src_js[src_js.index("function _applyActiveProfileRootScope("):]
+    writer = writer[: writer.index("\n}\n") + 3]
+    js = js.replace("__PARAMS__", json.dumps(payload)).replace("__ROOT_SCOPE_WRITER__", writer)
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -2227,4 +2234,118 @@ def test_a_rejected_pane_requests_scope_revalidation():
     assert out["revalidated"] is True, (
         f"a rejected pane went silent without requesting a fresh root scope, so a renamed "
         f"root would stop receiving live updates permanently (Greptile P1, round 14): {out}"
+    )
+
+# ── Greptile round 15: a MISSING scope must not become authoritative ──────────
+#
+# The boot fallback carries no root scope at all. Marking that absence
+# authoritative (`rootNamesAuthoritative !== false` on an undefined field) left
+# authority rejecting a renamed-root pane it could not verify while revalidation
+# refused to refresh a scope it considered resolved — so the restored conversation
+# stopped receiving live updates until the next navigation or reload. The ingestion
+# rule now lives in ONE writer, and a payload without a scope clears the scope and
+# stays non-authoritative.
+
+_SCOPE_INGEST_HARNESS = r"""
+const S = {
+  session: { session_id: 'pane', profile: 'kinni' },
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  // Post-boot-fallback state: no scope was delivered at all.
+  activeProfileRootNames: null,
+  activeProfileRootNamesAuthoritative: false,
+};
+let _loadingSessionId = null;
+let started = [];
+function startSessionStream(sid){ started.push(sid); }
+let revalidated = 0;
+function _revalidateActiveProfileRootScope(){ revalidated += 1; }
+function _profileMatchesActiveProfile(profile, active){
+  const e = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const a = (typeof active === 'string' && active.trim()) ? active.trim() : 'default';
+  if (e === a) return true;
+  return e === 'default' && !!S.activeProfileIsDefault;
+}
+__HELPERS__
+
+// 1. Ingest the boot/switch payload the gate named: no scope, no flag.
+_applyActiveProfileRootScope({ name: 'default', is_default: true });
+const afterMissing = {
+  names: S.activeProfileRootNames,
+  authoritative: S.activeProfileRootNamesAuthoritative,
+  resolved: _activeProfileRootNamesResolved(),
+  alias: _canonicalProfileRootAlias('kinni'),
+  pane: _isSessionCurrentPane('pane'),
+  revalidated: revalidated,
+};
+
+// 2. Now a real payload arrives: the renamed root is back and revalidated.
+_applyActiveProfileRootScope({ root_names: ['default', 'kinni'], root_names_authoritative: true });
+const afterResolved = {
+  names: S.activeProfileRootNames,
+  resolved: _activeProfileRootNamesResolved(),
+  alias: _canonicalProfileRootAlias('kinni'),
+  pane: _isSessionCurrentPane('pane'),
+  revalidated: revalidated,
+};
+
+// 3. A partial listing (server says non-authoritative) must NOT count as resolved.
+_applyActiveProfileRootScope({ root_names: ['default'], root_names_authoritative: false });
+const afterPartial = {
+  resolved: _activeProfileRootNamesResolved(),
+  alias: _canonicalProfileRootAlias('kinni'),
+};
+console.log(JSON.stringify({ afterMissing: afterMissing, afterResolved: afterResolved,
+                             afterPartial: afterPartial }));
+"""
+
+
+def _run_scope_ingest():
+    """Drive the REAL writer + resolved predicate + authority chain."""
+    src_js = _read(SESSIONS_JS_PATH)
+    helpers = ""
+    for name in ("_activeProfileRootNamesSet", "_applyActiveProfileRootScope",
+                 "_activeProfileRootNamesResolved", "_canonicalProfileRootAlias",
+                 "_paneProfileMatchesActiveProfile"):
+        seg = src_js[src_js.index("function %s(" % name):]
+        helpers += seg[: seg.index("\n}\n") + 3] + "\n"
+    pane = _read(MESSAGES_JS_PATH)
+    pane_body = pane[pane.index("function _isSessionCurrentPane("):]
+    pane_body = pane_body[: pane_body.index("\n}\n") + 3]
+    js = _SCOPE_INGEST_HARNESS.replace("__HELPERS__", helpers + pane_body)
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_missing_scope_is_never_authoritative_and_keeps_revalidating():
+    """Greptile round 15: a boot fallback with no scope must fail closed AND reconcile."""
+    out = _run_scope_ingest()
+    missing = out["afterMissing"]
+    assert missing["names"] is None, (
+        f"a payload without a scope must CLEAR the canonical scope, not inherit one: {missing}"
+    )
+    assert missing["authoritative"] is not True, (
+        f"a missing scope was marked authoritative, so revalidation would refuse to "
+        f"refresh and a renamed-root pane would go silent until a reload: {missing}"
+    )
+    assert missing["resolved"] is False, (
+        f"a missing scope must not count as resolved (Greptile P1, round 15): {missing}"
+    )
+    assert missing["alias"] is False and missing["pane"] is False, (
+        f"authority must fail closed while the scope is unknown: {missing}"
+    )
+    assert missing["revalidated"] >= 1, (
+        f"a rejected pane with an unknown scope must request a refresh instead of going "
+        f"silent: {missing}"
+    )
+    # And once a real payload lands, the renamed root is admitted again.
+    resolved = out["afterResolved"]
+    assert resolved["resolved"] is True and resolved["pane"] is True and resolved["alias"] is True, (
+        f"a resolved scope must re-admit the renamed root: {resolved}"
+    )
+    # A partial listing still must not count as resolved.
+    partial = out["afterPartial"]
+    assert partial["resolved"] is False and partial["alias"] is False, (
+        f"a non-authoritative listing must not be treated as resolved: {partial}"
     )

@@ -657,12 +657,41 @@ function _activeProfileRootNamesSet(){
   return null;
 }
 
-// False when the last payload's root scope was the fail-closed default rather than a
-// resolved listing (server `root_names_authoritative === false`). Authority fails
-// closed either way; this only decides whether we REVALIDATE so a renamed root is not
-// silently rejected for the life of the page (Greptile P1, round 14).
+// THE one place that ingests a server active-profile payload's root scope (boot,
+// profile switch, and the revalidation refresh all come through here). One writer
+// means the ingestion rule cannot drift between its three callers — duplicated
+// predicates are what let rounds 13-14 disagree about authority.
+//
+// A payload that carries NO scope (a boot fallback, a failed listing) leaves the
+// scope CLEARED and NOT authoritative. Marking a missing scope authoritative is the
+// round-15 regression: authority then rejects a renamed-root pane it cannot verify
+// while `_revalidateActiveProfileRootScope()` refuses to refresh, so the restored
+// conversation stops receiving live updates until the next navigation or reload.
+//
+// Accepts either key shape: the server JSON (`root_names` / `root_names_authoritative`)
+// or the boot-state object (`rootNames` / `rootNamesAuthoritative`).
+function _applyActiveProfileRootScope(payload){
+  if(typeof S === 'undefined' || !S) return;
+  const p = (payload && typeof payload === 'object') ? payload : {};
+  const names = Array.isArray(p.root_names) ? p.root_names
+    : (Array.isArray(p.rootNames) ? p.rootNames : null);
+  S.activeProfileRootNames = names ? names.slice() : null;
+  // Authoritative only when a real set arrived AND the server did not flag it
+  // partial. No set => the fail-closed default, which must keep revalidating.
+  const flag = (p.root_names_authoritative !== undefined)
+    ? p.root_names_authoritative
+    : p.rootNamesAuthoritative;
+  S.activeProfileRootNamesAuthoritative = !!names && flag !== false;
+}
+
+// True only when we hold a resolved, non-empty server scope. Anything else — a
+// cleared scope, a partial one, or an unset flag — must keep revalidating so a
+// renamed root is never silently rejected for the life of the page.
 function _activeProfileRootNamesResolved(){
-  return !(typeof S !== 'undefined' && S && S.activeProfileRootNamesAuthoritative === false);
+  if(typeof S === 'undefined' || !S) return false;
+  return S.activeProfileRootNamesAuthoritative === true
+    && Array.isArray(S.activeProfileRootNames)
+    && S.activeProfileRootNames.length > 0;
 }
 
 // Canonical-scope root admission for AUTHORITY (pane/frame/stream). Deliberately
@@ -1832,15 +1861,24 @@ function _rearmActiveSessionStream(){
 // root metadata changes" requires — a renamed root that was absent from the stale
 // scope no longer silently stops receiving live updates (Greptile P1, round 14).
 let _profileRootScopeRefresh = null;
+// A refresh that cannot resolve the scope must not be retried on every rejected
+// frame, or a persistently failing listing would turn each frame into a request.
+// The floor is short, so recovery never requires a reload.
+let _profileRootScopeNextRefreshAt = 0;
+const _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS = 15000;
 function _revalidateActiveProfileRootScope(){
   if(typeof _activeProfileRootNamesResolved === 'function' && _activeProfileRootNamesResolved()) return;
   if(_profileRootScopeRefresh) return;
+  if(typeof Date !== 'undefined' && Date.now() < _profileRootScopeNextRefreshAt) return;
   if(typeof api !== 'function') return;
+  _profileRootScopeNextRefreshAt = (typeof Date !== 'undefined' ? Date.now() : 0)
+    + _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS;
   _profileRootScopeRefresh = api('/api/profile/active', {redirect401: false})
     .then((d) => {
       if(!d || typeof d !== 'object') return;
-      if(Array.isArray(d.root_names) && typeof S !== 'undefined' && S) S.activeProfileRootNames = d.root_names.slice();
-      if(typeof S !== 'undefined' && S) S.activeProfileRootNamesAuthoritative = d.root_names_authoritative !== false;
+      // Same writer as boot/switch: a payload WITHOUT a scope clears it and stays
+      // non-authoritative, so this cannot mistake a missing scope for a resolved one.
+      if(typeof _applyActiveProfileRootScope === 'function') _applyActiveProfileRootScope(d);
       _rearmActiveSessionStream();
     })
     .catch(() => { /* stale scope: authority stays fail-closed until a later snapshot */ })

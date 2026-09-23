@@ -3630,14 +3630,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // UI roster (_profilesCache) is NOT an acceptable authority input: it starts
   // empty, can be five minutes stale from localStorage, and is warmed only after
   // the window-load timer.
-  // Replace or CLEAR on every transition: keeping a previous profile's canonical
-  // scope when the new one could not be resolved would let stream authority keep
-  // answering from stale state (gate round 13). A resolved server set is the only
-  // canonical source; its absence leaves authority failing closed.
-  S.activeProfileRootNames = Array.isArray(activeProfileState.rootNames)
-    ? activeProfileState.rootNames.slice()
-    : null;
-  S.activeProfileRootNamesAuthoritative = activeProfileState.rootNamesAuthoritative !== false;
+  // Replace or CLEAR on every transition (gate round 13), and never mark a MISSING
+  // scope authoritative (Greptile P1, round 15) — both rules live in the single
+  // writer in sessions.js, which loads before this script, so boot cannot drift
+  // from the switch and revalidation paths.
+  _applyActiveProfileRootScope(activeProfileState);
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

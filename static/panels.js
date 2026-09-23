@@ -7182,11 +7182,10 @@ async function switchToProfile(name) {
     // Same authority rule as boot: root-alias scope comes from the SERVER payload
     // delivered with the active-profile state, never from the UI roster cache.
     // Replace or clear, exactly like boot: a switch whose server metadata is
-    // missing must not leave the previous profile's canonical scope in place.
-    S.activeProfileRootNames = Array.isArray(data.root_names)
-      ? data.root_names.slice()
-      : null;
-    S.activeProfileRootNamesAuthoritative = data.root_names_authoritative !== false;
+    // missing must not leave the previous profile's canonical scope in place, and
+    // must not mark that missing scope authoritative. Both rules live in the single
+    // writer in sessions.js (Greptile P1, round 15).
+    _applyActiveProfileRootScope(data);
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
