@@ -5631,6 +5631,31 @@ const _liveModelCache={};
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
 
+/**
+ * #7507: drop the browser-side live-model cache and force the picker to
+ * rebuild against the latest server catalog. Called from
+ * panels.js:saveSettings() when the server returns
+ * ``_invalidate_models: true`` after a ``picker_excludes`` save, and
+ * directly by any future edit surface that touches the policy. Cheap
+ * when the picker is already in sync (the rebuild is a single
+ * /api/models call). Mirrors the server-side invalidation in
+ * api/routes.py:/api/settings which clears the /api/models and
+ * /api/models/live caches in lockstep.
+ */
+function _invalidateLiveModelCache(opts){
+  try{
+    for(const k of Object.keys(_liveModelCache)) delete _liveModelCache[k];
+  }catch(_e){}
+  try{
+    _liveModelFetchPending.clear();
+  }catch(_e){}
+  try{
+    if(typeof populateModelDropdown==='function'){
+      populateModelDropdown({freshness:(opts&&opts.freshness)||'session_visit'}).catch(()=>{});
+    }
+  }catch(_e){}
+}
+
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
   const currentVal=sel.value;

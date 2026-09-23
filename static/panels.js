@@ -13710,6 +13710,17 @@ async function saveSettings(andClose){
         }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    // #7507: when the server signals the picker exclude policy changed,
+    // drop the browser-side live-model cache and refetch the picker.
+    // The server already cleared its memory + disk catalog cache and
+    // the /api/models/live cache; without this, a stale
+    // _liveModelCache would re-introduce just-excluded ids via the
+    // background _fetchLiveModels() pass.
+    try{
+      if(saved && saved._invalidate_models && typeof _invalidateLiveModelCache==='function'){
+        _invalidateLiveModelCache({freshness:'session_visit'});
+      }
+    }catch(_e){}
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

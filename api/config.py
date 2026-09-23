@@ -2551,6 +2551,152 @@ def _split_picker_overflow_models(
     return visible, extras
 
 
+# ── Per-provider picker exclude list (#7507) ────────────────────────────────
+#
+# Display-only filter applied to ALL three catalog producers
+# (network-free /api/models fallback, normal catalog builder, and
+# /api/models/live incremental response). The user's existing
+# ``providers.<id>.models`` allowlist is the stronger override — it picks
+# the candidate universe first; this list subtracts from that universe.
+# New upstream models still appear automatically unless explicitly
+# excluded.
+#
+# Exact-ID match, case-preserving. The exclusion is evaluated on the
+# RAW UNPREFIXED model id (``gpt-5.6-luna``, not
+# ``@openrouter:gpt-5.6-luna``) so the user lists the bare id once and
+# it covers both the active-provider and cross-provider renderings.
+
+
+def get_picker_excludes(provider_id: str | None = None) -> set[str]:
+    """Return the per-provider picker exclude set for *provider_id*.
+
+    Reads from the WebUI-owned settings store (``settings.json``) under
+    ``picker_excludes`` — a map of canonical provider id to a list of
+    exact case-preserving model ids. Tolerant parsing: missing keys,
+    non-dict values, non-list per-provider values, and non-string
+    entries are all ignored so a partial / malformed save never blocks
+    the picker.
+
+    With ``provider_id=None`` returns the union across every provider
+    (used by tests asserting global absence).
+    """
+    try:
+        raw = load_settings().get("picker_excludes")
+    except Exception:
+        return set()
+    if not isinstance(raw, dict):
+        return set()
+
+    def _clean_ids(value: object) -> set[str]:
+        if not isinstance(value, list):
+            return set()
+        out: set[str] = set()
+        for entry in value:
+            if not isinstance(entry, str):
+                continue
+            stripped = entry.strip()
+            if stripped:
+                out.add(stripped)
+        return out
+
+    if provider_id is None:
+        result: set[str] = set()
+        for _ids in raw.values():
+            result |= _clean_ids(_ids)
+        return result
+
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return set()
+    # Resolve alias → canonical (e.g. ``z.ai`` → ``zai``). Settings
+    # stored under either key still apply; the canonical form is what
+    # the picker uses.
+    canonical = pid
+    try:
+        canonical = _resolve_provider_alias(pid) or pid
+    except Exception:
+        pass
+    # First try the direct keys (canonical, then the user's input
+    # form which may itself be an alias like ``z.ai``).
+    for key in (canonical, pid):
+        if key in raw:
+            return _clean_ids(raw.get(key))
+    # Second, scan every stored key and pick the first whose alias
+    # resolution matches the requested canonical. Catches cases where
+    # the user stored under an alias that resolves to the same
+    # canonical (e.g. stored=``{"z.ai": [...]}``, requested=``"zai"``).
+    # Always run this scan — even when ``canonical == pid`` the user
+    # may have stored under an alternative alias of the same canonical
+    # (e.g. ``z.ai`` when both the request and the table are already
+    # canonical). Skip only on direct-key hit (handled above).
+    for stored_key in raw:
+        if not isinstance(stored_key, str):
+            continue
+        if stored_key in (canonical, pid):
+            continue  # already covered by the direct-key loop above
+        try:
+            if _resolve_provider_alias(stored_key) == canonical:
+                return _clean_ids(raw.get(stored_key))
+        except Exception:
+            continue
+    return set()
+
+
+def _is_model_id_excluded(model_id: object, exclude_set: set[str]) -> bool:
+    """True when *model_id* matches any entry in *exclude_set*.
+
+    Matches both the bare form (``gpt-5.6-luna``) and the
+    ``@provider:``-prefixed form (``@openrouter:gpt-5.6-luna``), so the
+    same exclude entry filters the model out regardless of whether it
+    is rendered as the active-provider option or a cross-provider
+    option. Case-preserving.
+    """
+    if not exclude_set or not model_id:
+        return False
+    raw = str(model_id or "").strip()
+    if not raw:
+        return False
+    if raw in exclude_set:
+        return True
+    if raw.startswith("@") and ":" in raw:
+        bare = raw.split(":", 1)[1].strip()
+        if bare and bare in exclude_set:
+            return True
+    return False
+
+
+def _filter_picker_excludes(
+    models: object,
+    provider_id: str | None,
+) -> list[dict]:
+    """Return *models* with any exact-id picker excludes removed.
+
+    Shared exclusion step called by all three catalog producers
+    (static /api/models fallback, normal catalog builder, and
+    /api/models/live). Invoked BEFORE ``_apply_provider_prefix`` and
+    BEFORE every visible/overflow slice so an excluded model is
+    removed from the universe the picker is built from, not just
+    from the visible slice. A missing or empty exclude list returns
+    the input list unchanged.
+    """
+    if not models:
+        return []
+    # Coerce to a list; tolerate a non-iterable input (None/str) so a
+    # malformed upstream payload does not raise inside the catalog build.
+    try:
+        models_list = list(models)  # type: ignore[arg-type]
+    except TypeError:
+        return []
+    excludes = get_picker_excludes(provider_id)
+    if not excludes:
+        return [m for m in models_list if isinstance(m, dict)]
+    return [
+        m for m in models_list
+        if isinstance(m, dict)
+        and not _is_model_id_excluded(m.get("id", ""), excludes)
+    ]
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -7683,7 +7829,14 @@ def _static_models_catalog_without_live_probes() -> dict:
         for pid in sorted(detected_providers):
             if pid.startswith("custom:"):
                 custom_group = named_custom_groups.get(pid, {})
-                group_models = copy.deepcopy(custom_group.get("models", []))
+                # #7507: per-provider picker excludes are subtracted from the
+                # candidate universe BEFORE _apply_provider_prefix, so the
+                # bare ``gpt-5.6-luna`` exclude entry removes both the
+                # active-provider rendering and the cross-provider rendering.
+                group_models = _filter_picker_excludes(
+                    copy.deepcopy(custom_group.get("models", [])),
+                    pid,
+                )
                 if group_models or pid == active_provider:
                     groups.append(
                         {
@@ -7699,7 +7852,12 @@ def _static_models_catalog_without_live_probes() -> dict:
                 continue
 
             if pid == "custom":
-                group_models = copy.deepcopy(custom_group_models)
+                # #7507: same per-provider exclude step as above, applied
+                # before prefixing so the bare id in the user's settings
+                # covers both renderings.
+                group_models = _filter_picker_excludes(
+                    copy.deepcopy(custom_group_models), pid,
+                )
                 for model_id in configured_model_ids.get(pid, []):
                     if not any(m.get("id") == model_id for m in group_models):
                         group_models.append(
@@ -7751,6 +7909,12 @@ def _static_models_catalog_without_live_probes() -> dict:
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
+            # #7507: subtract per-provider picker excludes BEFORE
+            # _apply_provider_prefix. The configured-model-id append above
+            # is also gated by the same filter so a configured id the user
+            # has explicitly excluded does not reappear via the
+            # configured_model_ids path.
+            raw_models = _filter_picker_excludes(raw_models, pid)
             # Plugin-only providers (e.g. 9router) must enter `groups` even
             # when `raw_models` is empty so the post-loop filter sees them.
             # Without this, the earlier plugin-fallback pass only seeds
@@ -7766,27 +7930,61 @@ def _static_models_catalog_without_live_probes() -> dict:
                 )
 
         if default_model:
-            all_model_ids = {
-                str(model.get("id") or "")
-                for group in groups
-                for model in group.get("models", [])
-            }
-            if default_model not in all_model_ids and f"@{active_provider}:{default_model}" not in all_model_ids:
-                label = _get_label_for_model(default_model, groups)
-                target_group = next(
-                    (group for group in groups if group.get("provider_id") == active_provider),
-                    None,
-                )
-                if target_group is not None:
-                    target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
-                elif groups:
-                    groups.append(
-                        {
-                            "provider": "Default",
-                            "provider_id": active_provider or "default",
-                            "models": [{"id": default_model, "label": label}],
-                        }
+            # #7507: re-injection guard. The user has explicitly excluded
+            # this model from the picker; do not silently re-add it via
+            # the default-model injection path. Treats the exclusion as
+            # the source of truth and lets the picker fall back to
+            # whatever is in the active group rather than contradicting
+            # the user's policy.
+            _active_excludes = get_picker_excludes(active_provider)
+            if _is_model_id_excluded(default_model, _active_excludes):
+                pass  # honor the exclusion; do not re-inject.
+            else:
+                all_model_ids = {
+                    str(model.get("id") or "")
+                    for group in groups
+                    for model in group.get("models", [])
+                }
+                if default_model not in all_model_ids and f"@{active_provider}:{default_model}" not in all_model_ids:
+                    label = _get_label_for_model(default_model, groups)
+                    target_group = next(
+                        (group for group in groups if group.get("provider_id") == active_provider),
+                        None,
                     )
+                    if target_group is not None:
+                        target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
+                    elif groups:
+                        groups.append(
+                            {
+                                "provider": "Default",
+                                "provider_id": active_provider or "default",
+                                "models": [{"id": default_model, "label": label}],
+                            }
+                        )
+
+        # #7507: defensive final-pass scan. The re-injection block above is
+        # the primary guard, but a provider whose excludes are set AFTER
+        # the active provider (e.g. excludes=``{"other": [...]}`` while
+        # default_model points at an "other" model) could still slip
+        # through. Walk both ``models`` and ``extra_models`` and drop any
+        # id that belongs to the per-provider exclude set, preserving the
+        # remainder of each group untouched.
+        if groups:
+            for _g in groups:
+                _pid = _g.get("provider_id")
+                if not _pid:
+                    continue
+                _g_excludes = get_picker_excludes(_pid)
+                if not _g_excludes:
+                    continue
+                for _bucket in ("models", "extra_models"):
+                    _rows = _g.get(_bucket)
+                    if not _rows:
+                        continue
+                    _g[_bucket] = [
+                        m for m in _rows
+                        if not _is_model_id_excluded(m.get("id", ""), _g_excludes)
+                    ]
 
         _deduplicate_model_ids(groups)
         groups = [
@@ -10689,6 +10887,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 allow_empty: bool = False,
             ) -> None:
                 picker_models = copy.deepcopy(raw_models or [])
+                # #7507: subtract per-provider picker excludes BEFORE the
+                # fast-tier annotation, BEFORE ``_apply_provider_prefix``,
+                # and BEFORE the visible/overflow split. The bare id the
+                # user lists in settings covers both the active-provider
+                # rendering and the cross-provider ``@provider:``-prefixed
+                # rendering because the matcher strips the prefix before
+                # comparison.
+                picker_models = _filter_picker_excludes(picker_models, provider_id)
                 if _is_openai_family_provider(provider_id):
                     for _model in picker_models:
                         if not isinstance(_model, dict):
@@ -11211,10 +11417,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
         else:
             if default_model:
-                label = _get_label_for_model(default_model, groups)
-                groups.append(
-                    {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
-                )
+                # #7507: re-injection guard. The user has explicitly
+                # excluded this model from the picker; do not silently
+                # create a phantom "Default" group for it.
+                if not _is_model_id_excluded(default_model, get_picker_excludes(active_provider)):
+                    label = _get_label_for_model(default_model, groups)
+                    groups.append(
+                        {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
+                    )
 
         if default_model:
             # Guard against provider-id values mistakenly stored in
@@ -11229,11 +11439,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 str(default_model).strip().lower().replace("_", "-") in _PROVIDER_DISPLAY
                 or _canonicalise_provider_id(default_model) in _PROVIDER_DISPLAY
             )
+            # #7507: also skip injection when the model id is on the
+            # per-provider picker exclude list. The exclusion is the
+            # source of truth; the picker must not contradict it.
+            _excluded_by_policy = _is_model_id_excluded(
+                default_model, get_picker_excludes(active_provider),
+            )
             if _looks_like_provider_id:
                 logger.warning(
                     "Suspicious model.default value %r — looks like a provider id, "
                     "not a model id. Skipping picker injection. Check `model.default` "
                     "in config.yaml.",
+                    default_model,
+                )
+            elif _excluded_by_policy:
+                # Honor the user's picker-exclude policy. Log at debug
+                # rather than warning because the policy is intentional
+                # and the user already saw the same exclusion on
+                # /api/models.
+                logger.debug(
+                    "model.default %r is in the per-provider picker exclude "
+                    "list; skipping picker re-injection (#7507).",
                     default_model,
                 )
             else:
@@ -11270,6 +11496,29 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 "models": [{"id": default_model, "label": label}],
                             }
                         )
+
+        # #7507: defensive final-pass scan. Mirrors the static catalog
+        # builder: walk both ``models`` and ``extra_models`` for every
+        # group and drop any id that belongs to the per-provider exclude
+        # set. Catches the case where the user has excluded ids under a
+        # non-active provider that surface via the normal builder's
+        # union/merge logic.
+        if groups:
+            for _g in groups:
+                _pid = _g.get("provider_id")
+                if not _pid:
+                    continue
+                _g_excludes = get_picker_excludes(_pid)
+                if not _g_excludes:
+                    continue
+                for _bucket in ("models", "extra_models"):
+                    _rows = _g.get(_bucket)
+                    if not _rows:
+                        continue
+                    _g[_bucket] = [
+                        m for m in _rows
+                        if not _is_model_id_excluded(m.get("id", ""), _g_excludes)
+                    ]
 
         # Post-process: ensure model IDs are globally unique across groups.
         # When multiple providers expose the same bare model ID, prefix
@@ -13360,6 +13609,14 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
+    # #7507: per-provider picker exclude list. Map of canonical
+    # provider id → list of exact case-preserving model ids to hide
+    # from the model picker dropdown. Display-only policy; the
+    # catalog still contains the ids so non-picker paths (slash
+    # commands, server-side resolution) can reference them. Read
+    # tolerantly by ``api.config.get_picker_excludes`` so a malformed
+    # value never breaks the picker.
+    "picker_excludes": {},
 }
 _SETTINGS_SPEECH_KEYS = {
     "tts_enabled",
@@ -13591,6 +13848,33 @@ def load_settings() -> dict:
     # values (including a legacy English pick written before this change)
     # win via the merge above and are never touched here.
     settings.setdefault("language", None)
+    # #7507: tolerant parser for the per-provider picker exclude list.
+    # Mirrors the language pattern: tolerate any malformed payload so a
+    # partial save never breaks the picker. We require the stored value
+    # to be a dict-of-lists; non-dict / non-list / non-string entries
+    # are silently dropped. Always emit at least an empty dict so the
+    # client sees a stable shape.
+    _raw_picker_excludes = stored.get("picker_excludes") if isinstance(stored, dict) else None
+    if isinstance(_raw_picker_excludes, dict):
+        _clean: dict = {}
+        for _pid, _ids in _raw_picker_excludes.items():
+            if not isinstance(_pid, str):
+                continue
+            _pid_clean = _pid.strip()
+            if not _pid_clean or not isinstance(_ids, list):
+                continue
+            _clean_ids: list[str] = []
+            for _entry in _ids:
+                if not isinstance(_entry, str):
+                    continue
+                _entry_clean = _entry.strip()
+                if _entry_clean and _entry_clean not in _clean_ids:
+                    _clean_ids.append(_entry_clean)
+            if _clean_ids:
+                _clean[_pid_clean] = _clean_ids
+        settings["picker_excludes"] = _clean
+    else:
+        settings.setdefault("picker_excludes", {})
     return settings
 
 
@@ -13607,6 +13891,11 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     # so we add it back to the explicit allow-list here.  The
     # existing BCP-47 validation at save-time still applies.
     "language",
+    # #7507: per-provider picker exclude list. The key lives outside
+    # the simple-key defaults because it's a per-provider map (not a
+    # scalar) and we want a dedicated tolerant parser rather than
+    # letting the generic scalar pass-through silently mangle it.
+    "picker_excludes",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
