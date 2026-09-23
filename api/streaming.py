@@ -10388,7 +10388,7 @@ def _live_tool_calls_by_tid(live_tool_calls):
     return by_tid
 
 
-def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
+def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback.
 
     #7358 round-3 (reviewer Finding 2, SILENT): the live ``is_error``
@@ -10401,6 +10401,17 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     Round 2 only covered the cancellation path
     (``_build_partial_message`` -> ``_partial_tool_calls``); normal
     settlement is the common case.
+
+    #7358 round 6 (re-gate 9/23): ``prior_tool_calls`` carries the
+    pre-settlement ``s.tool_calls`` so a historical failure classification
+    survives a subsequent turn's settlement. The verified two-turn
+    regression went from ``[("t1", True)]`` to ``[("t1", False),
+    ("t2", False)]`` because the new turn's live mirror no longer
+    contained the previous turn's tool call — the ``is_error`` from
+    the live fallback defaulted to ``False`` and overwrote the prior
+    verdict. We now merge by stable ``tid`` so the prior verdict wins
+    when the new turn's live mirror lacks the call but the prior
+    summary had classified it.
     """
     tool_calls = []
     pending_names = {}
@@ -10408,6 +10419,16 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     pending_asst_idx = {}
     tool_msg_sequence = []
     live_by_tid = _live_tool_calls_by_tid(live_tool_calls)
+    # #7358 round 6: index prior verdicts by tid so the merge step
+    # below can fall back to them when the new turn's live mirror
+    # has lost the call (the cause of the two-turn regression).
+    prior_by_tid = {}
+    for _ptc in (prior_tool_calls or []):
+        if not isinstance(_ptc, dict):
+            continue
+        _ptid = _ptc.get('tid') or ''
+        if _ptid:
+            prior_by_tid.setdefault(_ptid, _ptc)
 
     for msg_idx, m in enumerate(messages or []):
         if not isinstance(m, dict):
@@ -10445,6 +10466,17 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
                     live_tc = live_by_tid.get(tid)
+                    # #7358 round 6: prefer live classification; fall
+                    # back to the prior turn's verdict when the live
+                    # mirror no longer carries this call (the two-turn
+                    # regression case).
+                    _is_error = bool(live_tc.get('is_error', False)) if live_tc else None
+                    if _is_error is None:
+                        _prior_tc = prior_by_tid.get(tid)
+                        if _prior_tc is not None:
+                            _is_error = bool(_prior_tc.get('is_error', False))
+                        else:
+                            _is_error = False
                     tool_calls.append({
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
@@ -10454,7 +10486,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                         # Carry the live classification into the settled
                         # summary so a failed tool stays failed after
                         # settlement + reload (Finding 2).
-                        'is_error': bool(live_tc.get('is_error', False)) if live_tc else False,
+                        'is_error': _is_error,
                     })
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
@@ -10467,6 +10499,10 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if seq_idx >= len(live):
                 break
             live_tc = live[seq_idx]
+            # #7358 round 6: the live-fallback row's identity comes
+            # from the live mirror, so the live classification wins.
+            # Prior-turn verdicts only apply when the live mirror is
+            # absent, which the main path above already handles.
             tool_calls.append({
                 'name': live_tc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
@@ -13250,42 +13286,86 @@ def _run_agent_streaming(
                     # takes over the completion path, but the Agent's
                     # authoritative ``is_error`` was passed via the legacy
                     # tool_progress_callback's cb_kwargs and is about to be
-                    # dropped. Capture it here, key it by ``tid`` (looked up
-                    # by name in the most recent live entry stamped by
-                    # on_tool_start), so on_tool_complete can pass it as
-                    # ``is_error_override`` and the helper skips the
-                    # text-inference fallback for this tool.
+                    # dropped. Capture it here, key it by ``tid``, so
+                    # on_tool_complete can pass it as ``is_error_override``
+                    # and the helper skips the text-inference fallback for
+                    # this tool.
                     _cb_is_error = cb_kwargs.get('is_error')
                     if _cb_is_error is not None:
-                        for _live_tc in reversed(_live_tool_calls):
-                            if _live_tc.get('done'):
-                                continue
-                            if not name or _live_tc.get('name') == name:
-                                _tid = _live_tc.get('tid') or ''
-                                if _tid:
-                                    _authoritative_is_error_by_tid[_tid] = bool(_cb_is_error)
-                                break
+                        # #7358 round 6 (re-gate 9/23): prefer the per-call
+                        # tool_call_id when the Agent passes it through
+                        # cb_kwargs. The name-based fallback below matches
+                        # the most recent not-done live entry, which is
+                        # wrong for two concurrent same-name tools (the
+                        # second completion steals the first's verdict).
+                        # The full fix lives in hermes-agent's
+                        # ``tool_executor.py`` (which must thread
+                        # ``tool_call_id`` into the cb_kwargs for the
+                        # legacy ``tool_progress_callback``); until that
+                        # lands, mark the fallback entry ``done`` so the
+                        # second completion walks past it.
+                        _cb_tid = cb_kwargs.get('tool_call_id') or ''
+                        if _cb_tid:
+                            _authoritative_is_error_by_tid[_cb_tid] = bool(_cb_is_error)
+                        else:
+                            for _live_tc in reversed(_live_tool_calls):
+                                if _live_tc.get('done'):
+                                    continue
+                                if not name or _live_tc.get('name') == name:
+                                    _tid = _live_tc.get('tid') or ''
+                                    if _tid:
+                                        _authoritative_is_error_by_tid[_tid] = bool(_cb_is_error)
+                                    # #7358 round 6: claim the entry so a
+                                    # second same-name completion walks
+                                    # past it instead of overwriting the
+                                    # first call's verdict.
+                                    _live_tc['done'] = True
+                                    break
                     return
 
                 if event_type == 'tool.completed':
-                    for live_tc in reversed(_live_tool_calls):
-                        if live_tc.get('done'):
-                            continue
-                        if not name or live_tc.get('name') == name:
-                            live_tc['done'] = True
-                            live_tc['duration'] = cb_kwargs.get('duration')
-                            live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
-                            break
+                    # #7358 round 6 (re-gate 9/23): when the Agent passes
+                    # ``tool_call_id`` through cb_kwargs (hermes-agent
+                    # fix pending in ``tool_executor.py``), use it as the
+                    # authoritative key. Otherwise fall back to the
+                    # name-based reverse walk and claim the matched
+                    # entry ``done`` so two concurrent same-name tool
+                    # completions do not swap verdicts.
+                    _cb_tid = cb_kwargs.get('tool_call_id') or ''
+                    if _cb_tid:
+                        for live_tc in reversed(_live_tool_calls):
+                            if live_tc.get('tid') == _cb_tid:
+                                live_tc['done'] = True
+                                live_tc['duration'] = cb_kwargs.get('duration')
+                                live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                break
+                    else:
+                        for live_tc in reversed(_live_tool_calls):
+                            if live_tc.get('done'):
+                                continue
+                            if not name or live_tc.get('name') == name:
+                                live_tc['done'] = True
+                                live_tc['duration'] = cb_kwargs.get('duration')
+                                live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                break
                     # Mirror done state to shared dict (#1361 §B)
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
-                        for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                            if shared_tc.get('done'):
-                                continue
-                            if not name or shared_tc.get('name') == name:
-                                shared_tc['done'] = True
-                                shared_tc['duration'] = cb_kwargs.get('duration')
-                                shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
-                                break
+                        if _cb_tid:
+                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                if shared_tc.get('tid') == _cb_tid:
+                                    shared_tc['done'] = True
+                                    shared_tc['duration'] = cb_kwargs.get('duration')
+                                    shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                    break
+                        else:
+                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                if shared_tc.get('done'):
+                                    continue
+                                if not name or shared_tc.get('name') == name:
+                                    shared_tc['done'] = True
+                                    shared_tc['duration'] = cb_kwargs.get('duration')
+                                    shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                    break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
@@ -15187,9 +15267,14 @@ def _run_agent_streaming(
                     s.cache_write_tokens = cache_write_tokens
                 # Persist tool-call summaries even when the final message history only
                 # kept bare tool rows and omitted explicit assistant tool_call IDs.
+                # #7358 round 6 (re-gate 9/23): carry the prior
+                # ``s.tool_calls`` so a historical failure classification
+                # survives a subsequent turn's settlement (Finding 2).
+                _prior_s_tool_calls = list(s.tool_calls or []) if s.tool_calls else []
                 tool_calls = _extract_tool_calls_from_messages(
                     s.messages,
                     live_tool_calls=_live_tool_calls,
+                    prior_tool_calls=_prior_s_tool_calls,
                 )
                 s.tool_calls = tool_calls
                 s.active_stream_id = None
@@ -16303,9 +16388,15 @@ def _run_agent_streaming(
                                     # ``finally`` cannot re-materialize this user
                                     # turn and append a spurious "Response
                                     # interrupted" marker after the settled answer.
+                                    # #7358 round 6 (re-gate 9/23): carry the prior
+                                    # ``s.tool_calls`` so a historical failure
+                                    # classification survives a subsequent turn's
+                                    # settlement (Finding 2).
+                                    _prior_s_tool_calls = list(s.tool_calls or []) if s.tool_calls else []
                                     s.tool_calls = _extract_tool_calls_from_messages(
                                         s.messages,
                                         live_tool_calls=_live_tool_calls,
+                                        prior_tool_calls=_prior_s_tool_calls,
                                     )
                                     s.active_stream_id = None
                                     s.pending_user_message = None
