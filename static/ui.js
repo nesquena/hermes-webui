@@ -9567,9 +9567,11 @@ function autoReadLastAssistant(){
 // sequence: those operations are not a transaction. Instead, every new
 // JavaScript document mints a fresh cryptographic id and never adopts the id
 // copied in sessionStorage by Duplicate Tab or session restore. Scoped state is
-// mirrored in this browsing context's sessionStorage, then restored under the
-// fresh id on reload. Two documents therefore never need to arbitrate a shared
-// identity, and no localStorage operation is treated as atomic.
+// not transferable across documents: Duplicate Tab can copy sessionStorage
+// before the original closes, making a reload successor indistinguishable from
+// a duplicate whose first script runs after the original's pagehide. A new
+// document must select its own conversation; URL/sidebar selection remains
+// available, but automatic in-flight transcript recovery across reload is not.
 const TAB_ID_KEY = 'hermes-webui-tab-id';
 const TAB_ID_RELEASED_BASE = 'hermes-webui-tab-released';
 const _TAB_RELEASED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -9617,73 +9619,7 @@ function _mirrorTabValue(key,value){
     else sessionStorage.setItem(key,String(value));
   }catch(_){}
 }
-// A reload keeps the browsing context's sessionStorage, so the new document
-// inherits its predecessor's TAB_ID_KEY. When that predecessor wrote a valid
-// release marker (non-persisted pagehide), this document is provably its
-// successor and the predecessor's scoped copies are dead duplicates of the
-// mirror about to be restored under the fresh id. Reclaim them BEFORE the
-// restore so ordinary reloads never accumulate snapshots until quota runs out;
-// the reclaimed values are handed to the restore as a fallback so a missing
-// mirror entry still migrates. A live original (Duplicate Tab copies
-// sessionStorage but never releases) has no marker and is left untouched;
-// malformed markers fail closed.
-function _reclaimReleasedPredecessor(id,predecessorId){
-  if(!id||!predecessorId||predecessorId===id) return null;
-  let releasedRaw=null;
-  try{ releasedRaw=localStorage.getItem(TAB_ID_RELEASED_BASE+'::'+predecessorId); }catch(_){ return null; }
-  if(releasedRaw==null||!Number.isFinite(Number(releasedRaw))) return null;
-  const reclaimed={};
-  for(const base of [ACTIVE_SESSION_KEY_LEGACY,ACTIVE_SESSION_TOMBSTONE_BASE,INFLIGHT_KEY_BASE,INFLIGHT_STATE_KEY_BASE]){
-    const key=base+'::'+predecessorId;
-    try{ reclaimed[base]=localStorage.getItem(key); }catch(_){ reclaimed[base]=null; }
-    try{ localStorage.removeItem(key); }catch(_){}
-  }
-  try{ localStorage.removeItem(TAB_ID_RELEASED_BASE+'::'+predecessorId); }catch(_){}
-  return reclaimed;
-}
-function _restoreDocumentScopedState(id,reclaimed){
-  if(!id) return;
-  const fallback=reclaimed||{};
-  const mirrored=(mirrorKey,base)=>{
-    const value=sessionStorage.getItem(mirrorKey);
-    return value!=null?value:(fallback[base]!=null?fallback[base]:null);
-  };
-  try{
-    const active=mirrored(TAB_ACTIVE_SESSION_MIRROR_KEY,ACTIVE_SESSION_KEY_LEGACY);
-    const tombstone=mirrored(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,ACTIVE_SESSION_TOMBSTONE_BASE);
-    if(active){
-      window.__hermesActiveSession=active;
-      window.__hermesActiveSessionKnown=true;
-      localStorage.setItem(_scopedTabKey(ACTIVE_SESSION_KEY_LEGACY,id),active);
-      localStorage.removeItem(_scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE,id));
-    }else if(tombstone){
-      window.__hermesActiveSession=null;
-      window.__hermesActiveSessionKnown=true;
-      localStorage.setItem(_scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE,id),tombstone);
-      localStorage.removeItem(_scopedTabKey(ACTIVE_SESSION_KEY_LEGACY,id));
-    }
-  }catch(_){}
-  try{
-    const marker=mirrored(TAB_INFLIGHT_MIRROR_KEY,INFLIGHT_KEY_BASE);
-    if(marker!=null) localStorage.setItem(_scopedTabKey(INFLIGHT_KEY_BASE,id),marker);
-  }catch(_){}
-  try{
-    const raw=mirrored(TAB_INFLIGHT_STATE_MIRROR_KEY,INFLIGHT_STATE_KEY_BASE);
-    if(raw!=null){
-      const parsed=JSON.parse(raw);
-      if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
-        const restamped={};
-        for(const [sid,entry] of Object.entries(parsed)){
-          if(sid&&entry&&typeof entry==='object'&&!Array.isArray(entry)){
-            restamped[sid]={...entry,tabId:id};
-          }
-        }
-        localStorage.setItem(_scopedTabKey(INFLIGHT_STATE_KEY_BASE,id),JSON.stringify(restamped));
-        sessionStorage.setItem(TAB_INFLIGHT_STATE_MIRROR_KEY,JSON.stringify(restamped));
-      }
-    }
-  }catch(_){}
-}
+
 // GC is based on an explicit, per-id pagehide record, plus an age backstop for
 // scoped inflight marker/state that no reader can accept any more. Each
 // release marker has its own key, so concurrent documents never perform a
@@ -9797,15 +9733,22 @@ function _hermesTabId(){
     window.__hermesTabAuthorityUnavailable=true;
     return null;
   }
-  // Deliberately overwrite (never adopt) any id inherited through copied
-  // sessionStorage. Recovery values are mirrored separately and are re-stamped
-  // under this document's fresh identity before scoped access begins. The
-  // inherited id is only used to reclaim a *released* predecessor's copies.
+  // Deliberately overwrite (never adopt) any inherited id. A release marker
+  // cannot tell a reload from a duplicate initialized after the source closed.
+  // Neither copied mirrors nor the shared legacy session may authorize this
+  // document's selection; leave the predecessor's scoped keys untouched.
   let predecessorId=null;
-  try{ predecessorId=sessionStorage.getItem(TAB_ID_KEY); }catch(_){}
+  let predecessorUnknown=false;
+  try{ predecessorId=sessionStorage.getItem(TAB_ID_KEY); }catch(_){ predecessorUnknown=true; }
   window.__hermesTabId=id;
   try{ sessionStorage.setItem(TAB_ID_KEY,id); }catch(_){}
-  _restoreDocumentScopedState(id,_reclaimReleasedPredecessor(id,predecessorId));
+  if(predecessorId||predecessorUnknown){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    for(const key of [TAB_ACTIVE_SESSION_MIRROR_KEY,TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,TAB_INFLIGHT_MIRROR_KEY,TAB_INFLIGHT_STATE_MIRROR_KEY]){
+      try{ sessionStorage.removeItem(key); }catch(_){}
+    }
+  }
   _gcOrphanTabKeys();
   try{
     if(!window.__hermesTabReleaseBound){

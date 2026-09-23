@@ -120,6 +120,20 @@ Transparent Stream, or Final answer only; `S.messages`, `INFLIGHT`, renderer
 caches, and DOM remain projections or recovery caches rather than independent
 semantic owners.
 
+**Browser-tab recovery boundary:** a new JavaScript document gets a fresh tab
+identity. A reload and a duplicated tab whose original closes before its first
+script executes both inherit the same `sessionStorage` bytes; a finite pagehide
+release marker does not distinguish them. Consequently neither copied mirrors
+nor released predecessor-scoped `localStorage` entries authorize automatic
+active-session or in-flight transcript transfer. When no explicit URL route
+names the session, a reload may open without its previous selection and the
+user must select the durable conversation from the sidebar. In-flight browser
+cache recovery is unavailable across that ambiguous boundary; durable session
+transcript and run-journal replay remain the recovery sources when a session is
+explicitly reopened. Old scoped caches remain for bounded garbage collection,
+not for adoption by a new document. This deliberately sacrifices seamless
+reload recovery rather than granting a duplicated tab another tab's authority.
+
 This RFC remains `Proposed` because its broader cross-layer contract also covers
 model-context reconstruction, compression handoff, session metadata, and future
 runtime-adapter migration. Shipped Anchor coverage strengthens invariants 2, 3,

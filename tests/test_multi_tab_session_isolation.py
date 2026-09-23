@@ -67,8 +67,6 @@ _HELPER_FUNCS = (
     "function _newTabId",
     "function _scopedTabKey",
     "function _mirrorTabValue",
-    "function _reclaimReleasedPredecessor",
-    "function _restoreDocumentScopedState",
     "function _expiredInflightOwners",
     "function _gcOrphanTabKeys",
     "function _releaseTabId",
@@ -228,9 +226,57 @@ console.log(JSON.stringify({{idOriginal, idClone}}));
     assert out["idOriginal"] != out["idClone"], "a duplicated tab must re-mint its id"
 
 
-def test_plain_reload_remints_and_restores_recovery_under_the_new_id():
-    """A reload receives a fresh document id, but its sessionStorage recovery
-    mirror must be restored and re-stamped before scoped state is read."""
+def test_duplicate_waiting_for_first_init_cannot_claim_closed_original():
+    """Barrier: copy all browser storage, close the source, then initialize clone.
+
+    A release marker and copied mirrors do not authenticate a reload successor.
+    Neither the predecessor's scoped state nor its mirrored transcript may be
+    transferred; the shared legacy session must not silently re-adopt it either.
+    """
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const original = makeTab();
+useTab(original); const owner = _hermesTabId();
+_rememberActiveSession('private-original');
+const snapshot = JSON.stringify({{'private-original':{{streamId:'stream', updated_at:__now, tabId:owner}}}});
+localStorage.setItem(_inflightStateKey(), snapshot);
+_mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY, snapshot);
+const marker = JSON.stringify({{sid:'private-original', streamId:'stream', ts:__now}});
+localStorage.setItem(_inflightKey(), marker);
+_mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY, marker);
+// Duplicate Tab copied sessionStorage, but its new document has not run JS.
+const duplicate = makeTab();
+for(const key of original.store._keys()) duplicate.store.setItem(key, original.store.getItem(key));
+// Barrier: source closes before the duplicate's first script runs.
+useTab(original); _releaseTabId();
+useTab(duplicate); const claimant = _hermesTabId();
+const selected = _rememberedActiveSession();
+const claimed = loadInflightState('private-original', 'stream');
+console.log(JSON.stringify({{
+  owner, claimant, selected, claimed,
+  predecessorSession:localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY+'::'+owner),
+  predecessorState:localStorage.getItem(INFLIGHT_STATE_KEY_BASE+'::'+owner),
+  claimantSession:localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY+'::'+claimant),
+  claimantState:localStorage.getItem(INFLIGHT_STATE_KEY_BASE+'::'+claimant),
+}}));
+"""
+    out = _run(script)
+    assert out["claimant"] != out["owner"]
+    assert out["selected"] is None
+    assert out["claimed"] is None
+    assert out["claimantSession"] is None
+    assert out["claimantState"] is None
+    assert out["predecessorSession"] == "private-original"
+    assert out["predecessorState"] is not None
+
+
+def test_plain_reload_remints_without_ambiguous_recovery_transfer():
+    """Without a browser-backed continuity proof even a reload must degrade.
+
+    The old document's recovery remains untouched; manual selection can load
+    the durable session without transplanting the cached live transcript.
+    """
     script = f"""
 {_HARNESS}
 {_helpers()}
@@ -250,20 +296,24 @@ const reloaded = {{ store: tab.store, win: freshDocument.win }};
 useTab(reloaded); const after = _hermesTabId();
 const restoredSession = _rememberedActiveSession();
 const restoredState = loadInflightState('session-reload', 'stream-reload');
-const restoredMarker = JSON.parse(localStorage.getItem(_inflightKey()));
+const restoredMarker = localStorage.getItem(_inflightKey());
 console.log(JSON.stringify({{
   before,
   after,
   restoredSession,
   restoredOwner:restoredState&&restoredState.tabId,
   restoredMarkerSid:restoredMarker&&restoredMarker.sid,
+  previousState:localStorage.getItem(INFLIGHT_STATE_KEY_BASE+'::'+before),
+  previousMarker:localStorage.getItem(INFLIGHT_KEY_BASE+'::'+before),
 }}));
 """
     out = _run(script)
     assert out["before"] != out["after"], "every new document must receive a fresh id"
-    assert out["restoredSession"] == "session-reload"
-    assert out["restoredOwner"] == out["after"], "recovery must be re-stamped"
-    assert out["restoredMarkerSid"] == "session-reload"
+    assert out["restoredSession"] is None
+    assert out["restoredOwner"] is None
+    assert out["restoredMarkerSid"] is None
+    assert out["previousState"] is not None
+    assert out["previousMarker"] is not None
 
 
 def test_orphan_tab_keys_are_reclaimed():
@@ -320,15 +370,11 @@ useTab({tab}); _hermesTabId();
 TAB_ID_RELEASED_BASE_VALUE = "hermes-webui-tab-released"
 
 
-def test_repeated_reloads_reclaim_the_released_predecessor_under_quota():
-    """Defect 1: every reload used to leave the predecessor's full snapshot
-    behind for 24 h while restoring a fresh copy, so a handful of ordinary
-    reloads exhausted localStorage and recovery silently returned null.
+def test_repeated_reloads_do_not_multiply_snapshots_under_quota():
+    """Untrusted predecessor copies remain untouched and are never multiplied.
 
-    A quota-bounded localStorage (room for ~2 snapshots) runs 12 reloads:
-    every restore must succeed and the scoped copy count must stay bounded,
-    while a concurrent live tab and an unrelated recently-released document
-    keep their keys.
+    Recovery is deliberately unavailable until the user selects a durable
+    session. The age backstop eventually collects expired inflight snapshots.
     """
     script = f"""
 {_HARNESS}
@@ -389,26 +435,21 @@ const releaseMarkers = localStorage._keys().filter(k => k.indexOf(TAB_ID_RELEASE
 console.log(JSON.stringify({{restores, copies, quotaErrors, session, markerSid: markerAfter && markerAfter.sid, otherSession, otherOwner: otherState && otherState.tabId, otherId, unrelatedKept, releaseMarkers}}));
 """
     out = _run(script)
-    assert all(out["restores"]), f"every reload must restore recovery state: {out['restores']}"
-    # other live tab + unrelated released document + this tab: never a 4th copy.
-    assert max(out["copies"]) <= 3, f"scoped copies must stay bounded: {out['copies']}"
+    assert not any(out["restores"]), "unknown successor must not inherit cached recovery"
+    # other live tab + unrelated released document + original: no further copies.
+    assert out["copies"] == [3] * 12
     assert out["quotaErrors"] == 0, "bounded reloads must never hit the storage quota"
-    assert out["session"] == "session-reload"
-    assert out["markerSid"] == "session-reload"
+    assert out["session"] is None
+    assert out["markerSid"] is None
     assert out["otherSession"] == "other-session", "a live tab's active session must survive"
     assert out["otherOwner"] == out["otherId"], "a live tab's snapshot must survive"
     assert out["unrelatedKept"], "an unrelated recently-released document keeps its 24 h grace"
-    assert out["releaseMarkers"] == [TAB_ID_RELEASED_BASE_VALUE + "::unrelated"], (
-        "the reclaimed predecessor's release marker must be removed; unrelated ones kept"
-    )
+    assert TAB_ID_RELEASED_BASE_VALUE + "::" + out["otherId"] not in out["releaseMarkers"]
+    assert TAB_ID_RELEASED_BASE_VALUE + "::unrelated" in out["releaseMarkers"]
 
 
-def test_predecessor_is_reclaimed_only_with_a_valid_release_marker():
-    """The inherited TAB_ID_KEY alone proves nothing: a duplicated tab copies
-    sessionStorage while the original is still alive (no release marker), and
-    a malformed marker fails closed. Only a valid marker makes this document
-    the successor; a missing mirror entry is then migrated from the reclaimed
-    keys instead of being lost."""
+def test_predecessor_never_transfers_with_any_release_marker():
+    """Copied storage and a finite release marker cannot prove document succession."""
     script = f"""
 {_HARNESS}
 {_helpers()}
@@ -428,8 +469,7 @@ localStorage.setItem(TAB_ID_RELEASED_BASE + '::' + idWeird, 'not-a-number');
 const weirdNext = {{ store: weird.store, win: makeTab().win }};
 useTab(weirdNext); _hermesTabId();
 const weirdKept = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY + '::' + idWeird);
-// (c) Valid marker but the sessionStorage mirror lost its inflight entries
-//     (e.g. a quota-constrained mirror write): migrate from the predecessor.
+// (c) Even a valid marker and missing mirror never transfer predecessor data.
 const tab = makeTab();
 useTab(tab); const idBefore = _hermesTabId();
 _rememberActiveSession('session-migrate');
@@ -452,9 +492,9 @@ console.log(JSON.stringify({{idOriginal, idClone, originalKept, weirdKept, idBef
     assert out["originalKept"] == "session-original", "a live original's keys must not be reclaimed by its clone"
     assert out["weirdKept"] == "session-weird", "a malformed release marker must fail closed"
     assert out["idAfter"] != out["idBefore"]
-    assert out["migratedOwner"] == out["idAfter"], "reclaimed state must be migrated and re-stamped"
-    assert out["predecessorState"] is None and out["predecessorMarker"] is None
-    assert out["markerSid"] == "session-migrate"
+    assert out["migratedOwner"] is None
+    assert out["predecessorState"] is not None and out["predecessorMarker"] is not None
+    assert out["markerSid"] is None
 
 
 def test_crash_orphans_past_the_reader_window_are_collected_without_pagehide():
