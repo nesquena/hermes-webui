@@ -72,6 +72,17 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+// #7359: renderMd() captures MEDIA refs with the shared MEDIA_REF_CLASS
+// constant (ui.js top-level). Extract the real constant alongside the function
+// so the eval'd body resolves it — keeps the single source of truth instead of
+// re-deriving the char class here. `var` (not const/let) so the binding leaks
+// out of this eval into the enclosing function scope the renderMd eval shares.
+const _mediaRefConst = /const\s+MEDIA_REF_CLASS\s*=\s*(['"`])(?:(?!\1).|\\.)*\1/.exec(src);
+if (_mediaRefConst) {
+  eval('var MEDIA_REF_CLASS = ' + _mediaRefConst[0].replace(/^const\s+MEDIA_REF_CLASS\s*=\s*/, '') + ';');
+} else {
+  throw new Error('MEDIA_REF_CLASS const not found in ui.js');
+}
 eval(extractFunc('renderMd'));
 
 let buf = '';
