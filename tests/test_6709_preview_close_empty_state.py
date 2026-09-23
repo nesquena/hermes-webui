@@ -957,7 +957,12 @@ renderFileTree();
 const before = _state();
 __CLOSE__
 const afterClose = _state();
-openWorkspacePanel('browse');         // every reopen path funnels through here
+// #6709 (gate certification): this comment used to claim "every reopen path funnels
+// through here", which is FALSE — resize/reflow and session-load syncs reopen through
+// syncWorkspacePanelState(). openWorkspacePanel() is the funnel only for the explicit
+// toggles (composer, Settings, mobile); syncWorkspacePanelState() is covered by its own
+// test below, which drives the real production entry.
+openWorkspacePanel('browse');
 const afterReopen = _state();
 console.log('DIRTY ' + JSON.stringify({before, afterClose, afterReopen}));
 """.replace("__ENTRIES__", entries_json).replace("__CLOSE__", close_js)
@@ -1557,3 +1562,241 @@ def test_browser_composer_files_toggle_keeps_browse_ownership(width, height, lab
     assert final["preview"] is False, (label, steps)
     assert final["tree"] != "none", (label, steps)
     assert not any(s["blank"] for s in steps), (label, steps)
+
+# ── Gate certification (23 Sep): the three findings at head 9bddce71 ─────────
+#
+# B1 — a stale `_workspacePanelRetainedMode` leaked into a later preview: the value is
+# written only by closeWorkspacePanel() and read only by openWorkspacePanel(), so a
+# preview torn down by ANOTHER path (clearPreview() during a directory refresh or
+# session load, or a new preview starting while the panel is closed) left `browse`
+# behind, and the next X revealed the tree instead of closing the drawer.
+# B2/B3 — a bare scroll offset was restored onto a different directory/session.
+# Test-honesty — the preview-owned cases ran through ensureWorkspacePreviewVisible(),
+# which has no production callers, and the reopen comment claimed a nonexistent funnel.
+
+_GATE_PRELUDE = r"""
+const store = {};
+const fileTreeBox = {
+  id:'fileTree', style:{}, _html:'', _scrollTop:0,
+  // #5657, verified against Chromium: wiping innerHTML detaches every row, collapsing
+  // scrollHeight so the browser CLAMPS scrollTop to 0. Modelling that here is what makes
+  // the scroll assertions below meaningful — without it a hidden render would leave a
+  // stale offset installed and every reader would look correct.
+  get innerHTML(){ return this._html; },
+  set innerHTML(v){ this._html=v; this._scrollTop=0; },
+  get scrollTop(){ return this.style.display==='none' ? 0 : this._scrollTop; },
+  set scrollTop(v){ if(this.style.display!=='none'){ this._scrollTop=Math.max(0,Number(v)||0); } },
+  appendChild(){}, remove(){}, setAttribute(){}, getAttribute(){return null;}, querySelector(){return null;},
+  classList:{add(){}, remove(){}, toggle(){}, contains(){return false;}},
+};
+store.fileTree = fileTreeBox;
+function $id(id){
+  if(id==='fileTree') return fileTreeBox;
+  if(store[id]) return store[id];
+  const el = { id, style:{}, classList:{add(){}, remove(){}, toggle(){}, contains(){return false;}},
+    innerHTML:'', textContent:'', scrollTop:0, appendChild(){}, remove(){},
+    setAttribute(){}, getAttribute(){return null;}, querySelector(){return null;} };
+  store[id]=el; return el;
+}
+const $ = $id;
+const S = {session:{session_id:'s1', workspace:'/ws'}, entries:null, currentDir:'.', _dirCache:{}};
+let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
+let _workspacePanelMode='closed';
+let _workspacePanelRetainedMode=null;
+function t(k){ return k; }
+function _workspaceEntriesForRender(entries){ return Array.isArray(entries)?entries:[]; }
+function _noteWorkspaceBirthtimeSupport(){}
+function _syncWorkspaceBirthtimeSupportScope(){}
+function _renderTreeItems(box, items){ box.innerHTML='items:'+items.length; }
+function syncWorkspacePanelUI(){}
+function _hasWorkspacePreviewVisible(){ return !!_previewCurrentPath; }
+// Real `_setWorkspacePanelMode()` reads the DOM through this seam; a null layout makes
+// it return early, so the harness supplies minimal elements to let the real body run.
+function _workspacePanelEls(){ return {layout: $id('wsLayout'), panel: $id('wsPanel')}; }
+function _isCompactWorkspaceViewport(){ return false; }
+const localStorage = {setItem(){}, getItem(){ return null; }};
+const document = { documentElement: { dataset: {} } };
+"""
+
+
+def _gate_harness(driver: str) -> str:
+    ui = _read("static/ui.js")
+    boot = _read("static/boot.js")
+    parts = [
+        _GATE_PRELUDE,
+        _extract_render_file_tree(),
+        # real closePreview / openWorkspacePanel / closeWorkspacePanel / syncWorkspacePanelState
+        _extract_fn(boot, "function clearPreview(opts={}){"),
+        _extract_fn(boot, "function openWorkspacePanel(mode='browse'){"),
+        _extract_fn(boot, "function closeWorkspacePanel(){"),
+        _extract_fn(boot, "function _setWorkspacePanelMode(mode){"),
+        _extract_fn(boot, "function syncWorkspacePanelState(){"),
+        _extract_fn(boot, "function toggleWorkspacePanel(force){"),
+        # the reader helper lives in ui.js (openFile writes the scope inline) + openFile
+        _extract_fn(ui, "function _wsBrowseScrollScopeMatchesLiveModel(){"),
+        _OPEN_FILE_STUBS,
+        _extract_open_file(),
+        driver,
+    ]
+    return "\n".join(parts)
+
+
+def _extract_fn(src: str, marker: str) -> str:
+    start = src.find(marker)
+    assert start >= 0, f"not found: {marker}"
+    # The body brace is the FIRST `{` after the parameter list CLOSES — not the first
+    # one after the marker, because a default param like `opts={}` (see clearPreview)
+    # carries a brace pair of its own and would truncate the body to `opts={}`.
+    params_close = src.find(")", start)
+    assert params_close > start, f"no parameter list for {marker}"
+    depth = 0
+    i = src.find("{", params_close)
+    assert i > start, f"no body brace for {marker}"
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+        i += 1
+    raise AssertionError(f"no closing brace for {marker}")
+
+
+_B1_DRIVER = r"""
+(async () => {
+  // (a) browse-owned collapse, then a plain reopen through the REAL composer toggle:
+  // the recorded owner must still be honoured (the round-7 contract).
+  _previewCurrentPath='A.txt'; _workspacePanelMode='browse';
+  closeWorkspacePanel();
+  const recorded = _workspacePanelRetainedMode;
+  toggleWorkspacePanel(true);
+  const modeOnPlainReopen = _workspacePanelMode;
+
+  // (b) browse-owned collapse, then a directory refresh tears the preview down while
+  // the panel is closed (loadDir('.')), then a DIFFERENT preview starts (chat
+  // `#workspace=` link → openArtifactPath → openFile) and the user reopens.
+  _workspacePanelMode='browse'; _previewCurrentPath='A.txt';
+  closeWorkspacePanel();
+  clearPreview({keepPanelOpen:true});
+  const retainedAfterTeardown = _workspacePanelRetainedMode;
+  await openFile('B.txt');
+  toggleWorkspacePanel(true);
+  const modeOnReopen = _workspacePanelMode;
+  console.log(JSON.stringify({ recorded, modeOnPlainReopen, retainedAfterTeardown, modeOnReopen }));
+})();
+"""
+
+
+def test_a_stale_retained_owner_cannot_leak_into_a_later_preview():
+    """B1: after a preview is torn down outside closeWorkspacePanel(), the next reopen
+    must be an ordinary browse — not the stale `browse` owner of a dead preview."""
+    proc = _run_node(_gate_harness(_B1_DRIVER))
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["recorded"] == "browse", f"precondition: a collapse with a preview retains its owner: {out}"
+    assert out["modeOnPlainReopen"] == "browse", (
+        f"precondition: the round-7 contract must still hold — a plain reopen honours the "
+        f"browse owner: {out}"
+    )
+    assert out["retainedAfterTeardown"] is None, (
+        f"a teardown outside closeWorkspacePanel() left the owner installed, so the next "
+        f"preview would reopen as `browse` and its X would reveal the tree instead of "
+        f"closing the drawer (gate B1): {out}"
+    )
+    assert out["modeOnReopen"] == "preview", (
+        f"the reopen must restore the NEW preview's own ownership (`preview`), whose X "
+        f"closes the drawer (gate B1): {out}"
+    )
+
+
+_B23_DRIVER = r"""
+(async () => {
+  // scroll a 120-entry tree to 600, then open a file (snapshot taken while visible)
+  S.entries = Array.from({length:120}, (_,i)=>({name:'f'+i+'.txt', type:'file', path:'/ws/f'+i+'.txt'}));
+  S.currentDir='.';
+  renderFileTree();
+  fileTreeBox._scrollTop = 600;
+  await openFile('f1.txt');
+  const snapped = { top:S._wsBrowseScrollTop, scope:S._wsBrowseScrollScope };
+  // B2: the tree is now a DIFFERENT directory. Render while still hidden (what a
+  // directory refresh does), then reveal — the position the reader sees is the live one.
+  S.currentDir='sub';
+  renderFileTree();
+  const snapClearedOnDirChange = S._wsBrowseScrollTop==null;
+  _previewCurrentPath='';            // preview closed → tree becomes visible again
+  fileTreeBox.style.display='';
+  renderFileTree();
+  const afterDir = { live:fileTreeBox.scrollTop, snapCleared:snapClearedOnDirChange };
+  // B3: same for a different session/workspace
+  S.currentDir='.';
+  S._wsBrowseScrollTop = snapped.top;
+  S._wsBrowseScrollScope = snapped.scope;
+  fileTreeBox._scrollTop = 600;
+  S.session = {session_id:'s2', workspace:'/other'};
+  renderFileTree();
+  fileTreeBox.style.display='';
+  renderFileTree();
+  const afterSession = { live:fileTreeBox.scrollTop, snapCleared:S._wsBrowseScrollTop==null };
+  console.log(JSON.stringify({ snapped, afterDir, afterSession }));
+})();
+"""
+
+
+def test_a_scroll_snapshot_is_never_restored_onto_another_directory_or_session():
+    """B2/B3: the snapshot is scoped by session + workspace + directory."""
+    proc = _run_node(_gate_harness(_B23_DRIVER))
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    snap = out["snapped"]
+    assert snap["top"] == 600, f"precondition: a visible tree lends its offset: {out}"
+    assert snap["scope"] == {"sessionId": "s1", "workspace": "/ws", "dir": "."}, (
+        f"precondition: the snapshot must carry the browse identity: {out}"
+    )
+    assert out["afterDir"]["snapCleared"] is True, (
+        f"a snapshot from another directory survived the directory change (gate B2): {out}"
+    )
+    # B2: a different directory must not inherit the offset
+    assert out["afterDir"]["live"] == 0, (
+        f"the new directory's tree was revealed at the old directory's scroll position, "
+        f"so its top entries start out of view (gate B2): {out}"
+    )
+    # B3: a different session must not inherit it either
+    assert out["afterSession"]["snapCleared"] is True, (
+        f"a snapshot from another session/workspace survived into this render (gate "
+        f"B3): {out}"
+    )
+
+
+_SYNC_DRIVER = r"""
+(() => {
+  // browse-owned collapse, then a sync-based reopen (resize / reflow / session load)
+  _previewCurrentPath='A.txt'; _workspacePanelMode='browse';
+  closeWorkspacePanel();
+  syncWorkspacePanelState();
+  const afterBrowse = _workspacePanelMode;
+  // and the ordinary preview-owned case still reopens as preview
+  _workspacePanelMode='closed'; _workspacePanelRetainedMode='preview';
+  syncWorkspacePanelState();
+  const afterPreview = _workspacePanelMode;
+  // with no recorded owner the historical default applies
+  _workspacePanelMode='closed'; _workspacePanelRetainedMode=null;
+  syncWorkspacePanelState();
+  const afterNone = _workspacePanelMode;
+  console.log(JSON.stringify({ afterBrowse, afterPreview, afterNone }));
+})();
+"""
+
+
+def test_sync_reopen_honours_the_recorded_owner():
+    """Test-honesty finding: syncWorkspacePanelState() is a real reopen entry point
+    (resize, mobile reflow, session-load sync) and must consult the recorded owner."""
+    proc = _run_node(_gate_harness(_SYNC_DRIVER))
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["afterBrowse"] == "browse", (
+        f"a sync reopen ignored the recorded browse owner, so a resize/reflow would "
+        f"reopen as `preview` and the X would close the drawer (gate): {out}"
+    )
+    assert out["afterPreview"] == "preview", out
+    assert out["afterNone"] == "preview", f"no recorded owner keeps the default: {out}"

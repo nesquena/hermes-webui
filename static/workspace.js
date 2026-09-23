@@ -1114,6 +1114,17 @@ async function openFile(path, opts={}){
   _previewOfficeFormat = '';
   _previewPreviewKind = '';
 
+  // #6709 (gate certification B1): a new preview starting while the panel is CLOSED
+  // supersedes whatever a previous collapse retained — that recorded owner describes the
+  // old preview, and the next open must not restore `browse` for a preview nobody
+  // reached from the tree (its X would reveal the tree instead of closing the drawer).
+  // Retiring here is scoped to this exact situation: while the panel is OPEN the owner
+  // is still the live collapse record (openWorkspacePanel() reads it on reopen), and a
+  // file-to-file switch inside an open panel must not clear it.
+  if(typeof _workspacePanelMode!=='undefined' && _workspacePanelMode==='closed'){
+    _workspacePanelRetainedMode=null;
+  }
+
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
   // #6709: snapshot the tree's reading position before hiding it — a hidden
@@ -1121,8 +1132,27 @@ async function openFile(path, opts={}){
   // and the preview-close render) must restore from this snapshot instead of
   // re-reading the DOM. Only a visible tree can lend its position: a file-to-file
   // preview switch re-enters with the tree already hidden and must not clobber it.
+  //
+  // Gate certification (B2/B3): the snapshot is scoped by the FULL browse identity —
+  // session, workspace and directory. A bare offset describes one directory's tree;
+  // restoring it onto another directory, workspace or session reveals that tree at a
+  // position its reader never chose (the top entries start out of view). Identity is
+  // read from the live model here, and renderFileTree() only honours a snapshot whose
+  // identity still matches; anything else is dropped.
   const _browseTree=$('fileTree');
-  if(_browseTree&&_browseTree.style.display!=='none') S._wsBrowseScrollTop=_browseTree.scrollTop;
+  if(_browseTree&&_browseTree.style.display!=='none'){
+    S._wsBrowseScrollTop=_browseTree.scrollTop;
+    // The identity this offset belongs to (B2/B3). Written inline rather than through a
+    // helper so a harness that extracts openFile() alone cannot break on an undefined
+    // reference — the round-16 lesson, applied here before it could bite a third time.
+    S._wsBrowseScrollScope={
+      sessionId: (typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?S.session.session_id:null,
+      workspace: (typeof S!=='undefined'&&S&&S.session&&S.session.workspace)?String(S.session.workspace):null,
+      dir: (typeof S!=='undefined'&&S&&S.currentDir!=null)?String(S.currentDir):null,
+    };
+  } else {
+    S._wsBrowseScrollScope=null;
+  }
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;

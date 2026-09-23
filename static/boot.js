@@ -278,7 +278,15 @@ function _setWorkspacePanelMode(mode){
 function syncWorkspacePanelState(){
   const hasPreview=_hasWorkspacePreviewVisible();
   if(hasPreview){
-    if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+    // #6709 (gate certification): this is a reopen entry point like any other, so it
+    // must honour the RECORDED OWNER instead of assuming `preview`. A resize, mobile
+    // keyboard/URL-bar reflow or session-load sync between a browse-owned collapse and
+    // the X would otherwise reopen as `preview`, and the X would close the drawer
+    // instead of returning the reader to the still-open tree — the very symptom the
+    // owner value exists to prevent. With no recorded owner the historical default
+    // (`preview`) still applies.
+    if(_workspacePanelMode==='closed'&&_workspacePanelRetainedMode==='browse') _setWorkspacePanelMode('browse');
+    else if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
     else syncWorkspacePanelUI();
     return;
   }
@@ -2278,6 +2286,13 @@ $('importFileInput').onchange=async(e)=>{
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(opts={}){
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
+  // #6709 (gate certification B1): drop the retained owner. It records WHO owned the
+  // preview a collapse kept, and must not outlive that preview — a teardown that runs
+  // outside closeWorkspacePanel() (a directory refresh, a session load) would otherwise
+  // leave `browse` behind, and the next preview's X would reveal the tree instead of
+  // closing the drawer. Written inline (no helper seam) so a harness that extracts this
+  // function alone cannot break on an undefined reference.
+  _workspacePanelRetainedMode=null;
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview'&&!keepPanelOpen;

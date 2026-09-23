@@ -21703,6 +21703,12 @@ if(!S._dirCache) S._dirCache={};
 // snapshot while the container is hidden, and the snapshot is dropped once a
 // render has restored the visible browse tree (live reads rule again).
 if(!('_wsBrowseScrollTop' in S)) S._wsBrowseScrollTop=null;
+// #6709 (gate certification B2/B3): the identity that snapshot belongs to (session,
+// workspace, directory). A snapshot may only be restored while all three still match
+// the live model — a bare offset restored onto a different directory or session shows
+// that tree at a position its reader never chose. Set by openFile() next to the
+// offset; dropped whenever the snapshot itself is dropped.
+if(!('_wsBrowseScrollScope' in S)) S._wsBrowseScrollScope=null;
 
 function renderFileTree(){
   const box=$('fileTree');
@@ -21720,6 +21726,12 @@ function renderFileTree(){
   // close-path render reveals the tree before restoring) and closing a preview would
   // reset a long tree to the top.
   const treeVisible=!!(box&&box.style.display!=='none');
+  // #6709 (B2/B3): a snapshot is only admissible when it belongs to the browse surface
+  // being rendered right now. Identity comparison runs BEFORE the snapshot can be used,
+  // so a mismatch falls back to the live DOM read (visible tree) or the top (hidden).
+  const _scrollScopeMatches=(typeof _wsBrowseScrollScopeMatchesLiveModel==='function')
+    ? _wsBrowseScrollScopeMatchesLiveModel() : true;
+  if(!_scrollScopeMatches){ S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null; }
   const prevScrollTop=box?(treeVisible?box.scrollTop:(S._wsBrowseScrollTop!=null?S._wsBrowseScrollTop:0)):0;
   box.innerHTML='';
   // Cache current dir entries
@@ -21734,7 +21746,7 @@ function renderFileTree(){
     // #6709: no workspace means no browse position to restore — drop the
     // preview-lifecycle snapshot so it can't resurface against a later
     // workspace whose tree the reader has never scrolled.
-    S._wsBrowseScrollTop=null;
+    S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null;
     return;
   }
   _noteWorkspaceBirthtimeSupport(S.entries);
@@ -21752,7 +21764,7 @@ function renderFileTree(){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display=previewOpen?'none':'flex';}
     // #6709: an empty browse tree has nothing to scroll — drop the snapshot so it
     // cannot resurface against a later directory the reader never scrolled.
-    if(!previewOpen) S._wsBrowseScrollTop=null;
+    if(!previewOpen){ S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null; }
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
@@ -21760,7 +21772,18 @@ function renderFileTree(){
   if(box) box.scrollTop=prevScrollTop;
   // #6709: the visible browse tree has been restored — drop the snapshot and let
   // live reads drive subsequent renders.
-  if(!previewOpen) S._wsBrowseScrollTop=null;
+  if(!previewOpen){ S._wsBrowseScrollTop=null; S._wsBrowseScrollScope=null; }
+}
+
+// #6709 (gate certification B2/B3): does the stored snapshot belong to the browse
+// surface the live model describes? Compares session id, workspace and directory.
+function _wsBrowseScrollScopeMatchesLiveModel(){
+  const snap=S._wsBrowseScrollScope;
+  if(!snap||typeof snap!=='object') return false;
+  const sessionId=(S&&S.session&&S.session.session_id)?S.session.session_id:null;
+  const workspace=(S&&S.session&&S.session.workspace)?String(S.session.workspace):null;
+  const dir=(S&&S.currentDir!=null)?String(S.currentDir):null;
+  return snap.sessionId===sessionId && snap.workspace===workspace && snap.dir===dir;
 }
 
 let _wsActiveDragPath=null;
