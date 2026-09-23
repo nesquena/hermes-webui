@@ -229,6 +229,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
+- **Show background wakeups** in Settings → Appearance controls whether process-completion prompts appear in the transcript. It is on by default; turning it off hides these prompts without deleting them from session history or stopping background work. See [wakeup routing and recovery](docs/troubleshooting.md#background-completion-targets-an-archived-session) when a completion cannot resume a compressed session.
 
 ### Workspace file browser
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
