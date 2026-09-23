@@ -1742,7 +1742,18 @@ function _clearStuckSessionOnBoot(sid, currentSid){
 function _rearmActiveSessionStream(){
   if(typeof startSessionStream!=='function') return;
   const activeSid = S.session ? S.session.session_id : null;
-  if(activeSid) startSessionStream(activeSid);
+  if(!activeSid) return;
+  // #6712 P1 (Greptile round 10): a profile switch moves the cookie, so the
+  // session still on screen belongs to the profile we are LEAVING. Re-arming a
+  // stream for it would subscribe under the NEW profile for the old profile's
+  // session — and /api/session/stream is keyed by session id alone, with frames
+  // carrying no profile, so that profile's turns could attach to this pane. The
+  // switch owns arming its own session, so leave arming to it.
+  const sessionProfile = (S.session && typeof S.session.profile === 'string' && S.session.profile.trim())
+    ? S.session.profile.trim()
+    : 'default';
+  if(!_profileMatchesActiveProfile(sessionProfile, S.activeProfile || 'default')) return;
+  startSessionStream(activeSid);
 }
 
 function _sessionProfileMismatchFromError(e){

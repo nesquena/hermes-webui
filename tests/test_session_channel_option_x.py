@@ -951,7 +951,21 @@ def test_load_session_rearms_stream_on_every_early_return():
         "expected a dedicated idempotent re-arm helper"
     )
     helper_ix = js.index("function _rearmActiveSessionStream(")
-    helper_src = js[helper_ix:helper_ix + 400]
+    # Brace-match the helper body instead of slicing a fixed 400-char window — the
+    # #6712 round-10 profile guard (plus its comment) pushed `startSessionStream(`
+    # past the window, so the assertion stopped reaching the code it names.
+    _depth, _pos = 0, js.index("{", helper_ix)
+    helper_src = ""
+    for _i in range(_pos, len(js)):
+        if js[_i] == "{":
+            _depth += 1
+        elif js[_i] == "}":
+            _depth -= 1
+            if _depth == 0:
+                helper_src = js[helper_ix:_i + 1]
+                break
+    else:
+        raise AssertionError("_rearmActiveSessionStream braces did not balance")
     assert "S.session" in helper_src and "startSessionStream(" in helper_src, (
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )

@@ -89,6 +89,19 @@ function _isSessionCurrentPane(sid) {
   // the next metadata request resolves. Do not let a just-finished old stream
   // update the chat pane while the user is moving to another session.
   if(typeof _loadingSessionId!=='undefined' && _loadingSessionId && _loadingSessionId!==sid) return false;
+  // #6712 P1 (Greptile round 10): during a profile switch the cookie has already
+  // moved while S.session still names the previous profile's session. Its frames
+  // arrive on a per-session stream that carries no profile (see
+  // routes.py server_turn_started), so the only place to reject them is here —
+  // otherwise the old profile's live turn attaches to this pane.
+  if(typeof _profileMatchesActiveProfile === 'function'
+     && typeof S.activeProfile !== 'undefined'
+     && S.activeProfile){
+    const paneProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
+      ? S.session.profile.trim()
+      : 'default';
+    if(!_profileMatchesActiveProfile(paneProfile, S.activeProfile)) return false;
+  }
   return true;
 }
 

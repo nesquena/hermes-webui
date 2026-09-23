@@ -1347,3 +1347,133 @@ def test_the_slot_is_cleared_only_while_it_still_belongs_to_this_run():
     assert "_newSessionInFlightGen===callerGen" in finally_block, (
         "the owner generation must be part of the clear condition"
     )
+
+
+# ── Gate round 10 (23 Sep): a profile switch must not adopt the old profile's
+#    live stream, and the per-session stream carries no profile to filter on ────
+#
+# `/api/session/stream` subscribes by session id alone and its
+# `server_turn_started` frame carries no profile (api/routes.py), while the SSE
+# list channel DOES filter by profile (`_sessionEventProfilesMatch`). So during a
+# profile switch — cookie moved, S.session still naming the old profile's session —
+# the only place that can reject the old profile's live turn is the frontend.
+# Measured before the fix: with the marker retained the old pane's frame was
+# REJECTED (so the pre-round-9 shape was load-bearing), and clearing the marker at
+# the stale exit let it through.
+
+MESSAGES_JS_PATH = REPO_ROOT / "static" / "messages.js"
+UNREAD_JS_PATH = REPO_ROOT / "static" / "sessions.js"
+
+_REARM_HARNESS = r"""
+const params = __PARAMS__;
+
+const S = { session: params.session, activeProfile: params.activeProfile };
+let started = [];
+function startSessionStream(sid){ started.push(sid); }
+let _loadingSessionId = null;
+
+// The production ownership helper, injected verbatim.
+__OWNERSHIP_BODY__
+
+// The profile comparison the re-arm guard consults (verbatim from sessions.js).
+function _profileMatchesActiveProfile(profile, activeProfile){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+
+__REARM_BODY__
+
+_rearmActiveSessionStream();
+console.log(JSON.stringify({ started: started }));
+"""
+
+
+def _run_rearm(*, session_profile, active_profile):
+    """Drive the real `_rearmActiveSessionStream()` with the pane still on the old profile."""
+    src_js = _read(SESSIONS_JS_PATH)
+    rearm = src_js[src_js.index("function _rearmActiveSessionStream("):]
+    rearm = rearm[: rearm.index("\n}\n") + 3]
+    ownership = src_js[src_js.index("function _profileSwitchOwnsLoad("):]
+    ownership = ownership[: ownership.index("\n}\n") + 3]
+    js = _REARM_HARNESS.replace("__OWNERSHIP_BODY__", ownership).replace(
+        "__REARM_BODY__", rearm).replace("__PARAMS__", json.dumps({
+            "session": {"session_id": "old-pane", "profile": session_profile},
+            "activeProfile": active_profile,
+        }))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_profile_switch_does_not_re_arm_the_old_profiles_stream():
+    """Round 10: arming a stream for the pane we are leaving subscribes under the
+    NEW cookie for the OLD profile's session, whose frames can attach here."""
+    out = _run_rearm(session_profile="old-profile", active_profile="target-profile")
+    assert out["started"] == [], (
+        f"re-arming armed a stream for the previous profile's session under the new "
+        f"profile's cookie; /api/session/stream is keyed by session id alone and its "
+        f"frames carry no profile, so that profile's live turn can attach to this "
+        f"pane (Greptile P1, round 10): {out}"
+    )
+    # Control: a pane that DOES belong to the active profile still gets its stream.
+    ok = _run_rearm(session_profile="target-profile", active_profile="target-profile")
+    assert ok["started"] == ["old-pane"], (
+        f"the guard must not block arming for a session the active profile owns: {ok}"
+    )
+
+
+_PANE_HARNESS = r"""
+const params = __PARAMS__;
+
+const S = { session: params.session, activeProfile: params.activeProfile,
+            activeProfileIsDefault: false };
+let _loadingSessionId = params.marker;
+
+function _profileMatchesActiveProfile(profile, activeProfile){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+
+__PANE_BODY__
+
+console.log(JSON.stringify({ current: _isSessionCurrentPane('old-pane') }));
+"""
+
+
+def _run_pane_guard(*, pane_profile, active_profile, marker=None):
+    """Drive the real `_isSessionCurrentPane()` (messages.js) for the pane on screen."""
+    src_js = _read(MESSAGES_JS_PATH)
+    pane = src_js[src_js.index("function _isSessionCurrentPane("):]
+    pane = pane[: pane.index("\n}\n") + 3]
+    js = _PANE_HARNESS.replace("__PANE_BODY__", pane).replace("__PARAMS__", json.dumps({
+        "session": {"session_id": "old-pane", "profile": pane_profile},
+        "activeProfile": active_profile,
+        "marker": marker,
+    }))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_frames_for_a_pane_from_another_profile_are_rejected():
+    """Round 10: once the marker no longer covers the old pane (the round-9 fix),
+    the profile is the last thing that can reject the old profile's frames."""
+    stale = _run_pane_guard(pane_profile="old-profile", active_profile="target-profile")
+    assert stale["current"] is False, (
+        f"a frame for the previous profile's pane was accepted after the profile "
+        f"switched; the turn would attach to the wrong profile's pane: {stale}"
+    )
+    # With the marker still set the pre-existing guard already rejected it — that is
+    # why the old shape was load-bearing, and why the profile check must carry it now.
+    marked = _run_pane_guard(pane_profile="old-profile", active_profile="target-profile",
+                             marker="A-sid")
+    assert marked["current"] is False, marked
+    # Control: the pane's own profile is unaffected.
+    ok = _run_pane_guard(pane_profile="target-profile", active_profile="target-profile")
+    assert ok["current"] is True, (
+        f"the guard must not reject a pane that belongs to the active profile: {ok}"
+    )
