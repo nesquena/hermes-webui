@@ -268,3 +268,47 @@ def test_wakeup_target_keeps_live_origin(monkeypatch):
     _snapshot(monkeypatch, snapshot=False)
 
     assert background_process._canonical_wakeup_session_id("live-origin") == "live-origin"
+
+
+def test_wakeup_target_rejects_unknown_origin_when_both_loaders_fail(monkeypatch):
+    """A missing origin cannot be treated as an unsealed live session."""
+    import api.background_process as background_process
+    import api.models as models
+    import api.routes as routes
+
+    def unavailable(*args, **kwargs):
+        raise LookupError("origin unavailable")
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", unavailable)
+    monkeypatch.setattr(models, "get_session", unavailable)
+    assert background_process._canonical_wakeup_session_id("unknown-origin") == ""
+
+
+def test_wakeup_target_rejects_uncertain_lineage(monkeypatch):
+    """A resolver exception does not prove the origin is still writable."""
+    import api.background_process as background_process
+    import api.compression_continuation as continuation
+
+    _snapshot(monkeypatch, snapshot=False)
+
+    def failed_lookup(session):
+        raise OSError("lineage unavailable")
+
+    monkeypatch.setattr(continuation, "durable_compression_continuation", failed_lookup)
+    assert background_process._canonical_wakeup_session_id("sealed-parent") == ""
+
+
+def test_wakeup_target_fallback_loader_still_checks_lineage(monkeypatch):
+    """Read-only materialization fallback must not bypass durable authority."""
+    import api.background_process as background_process
+    import api.compression_continuation as continuation
+    import api.models as models
+    import api.routes as routes
+
+    def unavailable(*args, **kwargs):
+        raise LookupError("read-only materialization")
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", unavailable)
+    monkeypatch.setattr(models, "get_session", lambda sid: SimpleNamespace(session_id=sid, profile="default"))
+    monkeypatch.setattr(continuation, "durable_compression_continuation", lambda s: (True, "live-tip"))
+    assert background_process._canonical_wakeup_session_id("sealed-parent") == "live-tip"

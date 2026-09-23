@@ -1276,9 +1276,9 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
     profile (``None``/empty -> explicit ``default``, never the TLS or
     process-global profile), follows ``get_compression_tip()`` and excludes
     branch, delegate/subagent and tool children.  A sealed origin without a
-    resumable tip, or a sidecar-only snapshot that SQLite cannot confirm, fails
-    closed so the caller's drop/retry path runs instead of writing into the
-    sealed parent.
+    resumable tip, a sidecar-only snapshot that SQLite cannot confirm, an
+    origin that cannot be loaded, or a lineage lookup error fails closed so the
+    caller's drop/retry path runs instead of writing into the sealed parent.
     """
     target = str(session_id or "")
     if not target:
@@ -1289,10 +1289,21 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
 
         session = _get_or_materialize_session(target, refresh_cli_messages=False)
     except Exception:
-        # Without a snapshot there is no profile owner to authorize a lineage
-        # lookup: retain the historical exact-ID path.
-        logger.debug("process wakeup keeps exact origin %s (no snapshot)", target, exc_info=True)
-        return target
+        # The materializer also refuses read-only/imported sessions.  Fall back
+        # to the exact loader start_session_turn() uses; if that cannot load
+        # the origin either, the turn cannot start there, so fail closed
+        # instead of passing an unverified (possibly sealed) id through.
+        try:
+            from api.models import get_session
+
+            session = get_session(target)
+        except Exception:
+            logger.warning(
+                "process wakeup cannot load origin session %s for lineage check",
+                target,
+                exc_info=True,
+            )
+            return ""
 
     resolved_session_id = str(getattr(session, "session_id", "") or "")
     if resolved_session_id != target:
@@ -1309,12 +1320,13 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
 
         sealed, tip = durable_compression_continuation(session)
     except Exception:
+        # Unknown lineage is not proof the origin is live: fail closed.
         logger.warning(
             "process wakeup compression-lineage resolution failed for session %s",
             target,
             exc_info=True,
         )
-        sealed, tip = False, None
+        return ""
 
     if sealed:
         tip = str(tip or "")
