@@ -313,23 +313,214 @@ def test_actual_metadata_ladder_retains_max(monkeypatch):
     ) == "max"
 
 
-def test_metadata_confirmed_deepinfra_ladder_retains_max(monkeypatch):
-    """Installed canonical providers may prove max support via model metadata."""
-    monkeypatch.setattr(
-        cfg,
-        "_models_dev_reasoning_efforts",
-        lambda *args, **kwargs: ["minimal", "low", "medium", "high", "xhigh", "max"],
-    )
+def _install_models_dev_miss(monkeypatch, seen=None):
+    """Production shape for providers the Agent's models.dev table does not map.
 
-    efforts = cfg.resolve_model_reasoning_efforts(
-        "DeepSeek-V4-Flash", provider_id="deepinfra"
-    )
+    ``agent.models_dev.PROVIDER_TO_MODELS_DEV`` has no ``deepinfra`` /
+    ``ollama-cloud`` / ``meta-ai`` entry, so ``get_model_capabilities`` returns
+    ``None`` for every model id on those lanes. The real
+    ``_models_dev_reasoning_efforts`` lookup runs unpatched against it.
+    """
+    import sys
+    import types
 
-    assert "max" in efforts
-    assert "ultra" not in efforts
+    agent_pkg = types.ModuleType("agent")
+    agent_pkg.__path__ = []
+    models_dev = types.ModuleType("agent.models_dev")
+
+    def get_model_capabilities(provider, model):
+        if seen is not None:
+            seen.append((provider, model))
+        return None
+
+    models_dev.get_model_capabilities = get_model_capabilities
+    agent_pkg.models_dev = models_dev
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.models_dev", models_dev)
+
+
+def _hide_agent_provider_registry(monkeypatch):
+    """Standalone WebUI install: no Agent provider registry or effort module."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "providers", None)
+    monkeypatch.setitem(sys.modules, "agent.reasoning_effort", None)
+
+
+def test_deepinfra_max_survives_real_models_dev_miss(monkeypatch):
+    """#6018 gate 2026-09-23 F1: the Agent's DeepInfra plugin clamps onto the
+    OpenAI-compatible wire ladder (tops out at ``max``) while models.dev has
+    no DeepInfra mapping. ``max`` must survive without mocking the WebUI
+    capability lookup; ``ultra`` keeps its model-scoped default-deny."""
+    seen = []
+    _install_models_dev_miss(monkeypatch, seen)
+    _hide_agent_provider_registry(monkeypatch)
+
+    for model in ("DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Flash"):
+        seen.clear()
+        assert cfg._models_dev_reasoning_efforts(model, "deepinfra") is None
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id="deepinfra")
+        assert seen, "the real metadata lookup must run (and miss)"
+        assert "max" in efforts
+        assert "ultra" not in efforts
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", model, provider_id="deepinfra"
+        ) == "max"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", model, provider_id="deepinfra"
+        ) == "max"
+    # Agent plugin aliases resolve to the same lane.
     assert cfg.coerce_reasoning_effort_for_model(
-        "max", "DeepSeek-V4-Flash", provider_id="deepinfra"
+        "max", "DeepSeek-V4-Flash", provider_id="deep-infra"
     ) == "max"
+    # Unknown/custom lanes keep the default-deny on the identical model.
+    assert "max" not in cfg.resolve_model_reasoning_efforts(
+        "DeepSeek-V4-Flash", provider_id="custom:my-relay"
+    )
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "DeepSeek-V4-Flash", provider_id="custom:my-relay"
+    ) != "max"
+
+
+def test_agent_plugin_ladders_are_ceilings_when_metadata_misses(monkeypatch):
+    """Ollama Cloud's plugin ladder tops out at ``max``; Meta AI's at ``xhigh``
+    (gate F3): a stored top tier lands on the plugin's real ceiling."""
+    _install_models_dev_miss(monkeypatch)
+    _hide_agent_provider_registry(monkeypatch)
+
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "deepseek-v4-flash", provider_id="ollama-cloud"
+    ) == "max"
+    for model in ("muse-spark-1", "muse-spark-next"):
+        for effort in ("max", "ultra"):
+            assert cfg.coerce_reasoning_effort_for_model(
+                effort, model, provider_id="meta-ai"
+            ) == "xhigh"
+
+
+def test_agent_provider_registry_ladder_is_authoritative(monkeypatch):
+    """With the Agent importable, recognition derives from its provider
+    registry (alias canonicalization + declared ``supported_reasoning_efforts``)
+    and the live ``agent.reasoning_effort`` wire constant."""
+    import sys
+    import types
+
+    _install_models_dev_miss(monkeypatch)
+
+    class _Profile:
+        def __init__(self, name, declared=None):
+            self.name = name
+            self._declared = declared
+
+        def supported_reasoning_efforts(self, model):
+            return self._declared
+
+    registry = {
+        "deepinfra": _Profile("deepinfra"),
+        "deepinfra-alias": _Profile("deepinfra"),
+        "relay-lab": _Profile("relay-lab", ("none", "low", "medium", "high", "max")),
+        "narrow-lab": _Profile("narrow-lab", ("low", "medium", "high")),
+        "custom": _Profile("custom"),
+    }
+    providers_mod = types.ModuleType("providers")
+
+    def get_provider_profile(name):
+        if isinstance(name, str) and name.startswith("custom:"):
+            return registry["custom"]
+        return registry.get(name)
+
+    providers_mod.get_provider_profile = get_provider_profile
+    effort_mod = types.ModuleType("agent.reasoning_effort")
+    effort_mod.OPENAI_COMPAT_WIRE_EFFORTS = (
+        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    )
+    monkeypatch.setitem(sys.modules, "providers", providers_mod)
+    monkeypatch.setitem(sys.modules, "agent.reasoning_effort", effort_mod)
+
+    for provider in ("deepinfra", "deepinfra-alias", "relay-lab"):
+        assert cfg.coerce_reasoning_effort_for_model(
+            "max", "some-model", provider_id=provider
+        ) == "max", provider
+        assert "ultra" not in cfg.resolve_model_reasoning_efforts(
+            "some-model", provider_id=provider
+        )
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "some-model", provider_id="narrow-lab"
+    ) == "high"
+    # The generic custom profile accepts anything, which proves nothing.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "some-model", provider_id="custom:relay"
+    ) != "max"
+
+
+def test_installed_agent_deepinfra_max_matches_agent_clamp():
+    """Against a real installed Hermes Agent (skipped when absent): WebUI must
+    keep exactly what the Agent's DeepInfra route and plugin clamp keep."""
+    import json
+    import os
+    import pathlib
+    import subprocess
+
+    import pytest
+
+    candidates = [
+        os.getenv("HERMES_WEBUI_AGENT_DIR", ""),
+        str(pathlib.Path.home() / ".hermes" / "hermes-agent"),
+        str(pathlib.Path(__file__).resolve().parents[1].parent / "hermes-agent"),
+    ]
+    agent_dir = next(
+        (
+            pathlib.Path(c)
+            for c in candidates
+            if c and (pathlib.Path(c) / "agent" / "reasoning_effort.py").exists()
+            and (pathlib.Path(c) / "plugins" / "model-providers" / "deepinfra").exists()
+        ),
+        None,
+    )
+    if agent_dir is None:
+        pytest.skip("installed Hermes Agent with the DeepInfra plugin not found")
+    python = next(
+        (
+            str(agent_dir / venv / "bin" / "python")
+            for venv in ("venv", ".venv")
+            if (agent_dir / venv / "bin" / "python").exists()
+        ),
+        None,
+    )
+    if python is None:
+        pytest.skip("installed Hermes Agent venv not found")
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    script = (
+        "import json\n"
+        "from agent.models_dev import get_model_capabilities\n"
+        "from agent.reasoning_effort import route_supported_efforts\n"
+        "from providers import get_provider_profile\n"
+        "from api import config as cfg\n"
+        "m = 'DeepSeek-V4-Flash'\n"
+        "p = get_provider_profile('deepinfra')\n"
+        "_, top = p.build_api_kwargs_extras(reasoning_config={'enabled': True, 'effort': 'max'})\n"
+        "print(json.dumps({\n"
+        "  'caps_none': get_model_capabilities(provider='deepinfra', model=m) is None,\n"
+        "  'route': list(route_supported_efforts('deepinfra', m)),\n"
+        "  'plugin': top.get('reasoning_effort'),\n"
+        "  'efforts': cfg.resolve_model_reasoning_efforts(m, provider_id='deepinfra'),\n"
+        "  'coerced': cfg.coerce_reasoning_effort_for_model('max', m, provider_id='deepinfra'),\n"
+        "}))\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(agent_dir), str(repo)])
+    proc = subprocess.run(
+        [python, "-c", script], cwd=str(repo), env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"installed Agent not importable here: {proc.stderr[-400:]}")
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["plugin"] == "max"
+    assert "max" in result["route"]
+    assert "max" in result["efforts"]
+    assert "ultra" not in result["efforts"]
+    assert result["coerced"] == "max"
 
 
 def test_named_profile_snapshot_owns_reasoning_allowlists(monkeypatch, tmp_path):
