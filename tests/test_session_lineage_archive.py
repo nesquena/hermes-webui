@@ -21,13 +21,15 @@ def test_lineage_ids_enumerates_complete_continuation_tree_only(tmp_path):
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT, started_at REAL, ended_at REAL, source TEXT, session_source TEXT)")
     rows = [
-        ("root", None, "compression", 1, 2, "cli", None),
-        ("tip-a", "root", None, 3, None, "cli", None),
-        ("mid-b", "root", "compression", 3, 4, "cli", None),
-        ("tip-b", "mid-b", None, 5, None, "cli", None),
-        ("fork", "root", None, 3, None, "cli", "fork"),
-        ("child", "root", None, 1, None, "cli", None),
-        ("cross-source", "root", None, 3, None, "tui", None),
+        ("root", None, "compression", 1, 20, "cli", None),
+        ("tip-a", "root", None, 21, None, "cli", None),
+        ("mid-b", "root", "compression", 21, 22, "cli", None),
+        ("tip-b", "mid-b", None, 23, None, "cli", None),
+        ("fork", "root", None, 21, None, "cli", "fork"),
+        # Started well outside the continuation handoff tolerance (#6931):
+        # a genuinely concurrent child session, not a continuation.
+        ("child", "root", None, 5, None, "cli", None),
+        ("cross-source", "root", None, 21, None, "tui", None),
     ]
     conn.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)", rows)
     conn.commit()
