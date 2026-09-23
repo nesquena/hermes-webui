@@ -1088,9 +1088,11 @@ def test_two_process_writers_have_exactly_one_cas_winner(tmp_path, monkeypatch):
 
 
 def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
-    from api import session_recovery
+    from api import models, session_recovery
 
-    session_path = tmp_path / "absent.json"
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    session_path = session_dir / "absent.json"
     backup_path = session_path.with_suffix(".json.bak")
     backup_path.write_text(
         json.dumps(
@@ -1102,8 +1104,13 @@ def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     competing = {
+        "session_id": "absent",
+        "_sidecar_generation_v1": 1,
         "messages": [{"role": "user", "content": "competing"}]
     }
+    alias = models.Session(session_id="absent", workspace=str(tmp_path))
+    with models.LOCK:
+        models.SESSIONS[alias.session_id] = alias
     real_link = session_recovery.os.link
 
     def competing_link(src, dst):
@@ -1115,6 +1122,10 @@ def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
     assert result["restored"] is False
     assert result["stale_generation"] is True
     assert json.loads(session_path.read_text(encoding="utf-8")) == competing
+    with models.LOCK:
+        assert alias.session_id not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        alias.save(skip_index=True)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication")
@@ -2129,6 +2140,67 @@ def test_state_db_materialization_fsync_failure_invalidates_absent_owner(tmp_pat
     assert reloaded is not None
     reloaded.save(skip_index=True)
     assert json.loads(reloaded.path.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 2
+
+
+def test_state_db_materialization_create_conflict_invalidates_absent_owner(
+    tmp_path, monkeypatch
+):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "state-db-create-conflict"
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, "
+            "model TEXT, started_at REAL, message_count INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+            "role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, 'webui', 'recovered', 'model', 1, 1)",
+            (sid,),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (1, ?, 'user', 'canonical turn', 1)",
+            (sid,),
+        )
+    alias = models.Session(session_id=sid, workspace=str(tmp_path))
+    with models.LOCK:
+        models.SESSIONS[sid] = alias
+    competing = {
+        "session_id": sid,
+        "_sidecar_generation_v1": 1,
+        "messages": [{"role": "user", "content": "competing turn"}],
+    }
+    target = session_dir / f"{sid}.json"
+    real_link = models.os.link
+
+    def competing_link(src, dst):
+        target.write_text(json.dumps(competing), encoding="utf-8")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(models.os, "link", competing_link)
+    result = session_recovery.recover_missing_sidecars_from_state_db(
+        session_dir, db_path
+    )
+
+    assert result["materialized"] == 0
+    assert result["details"] == [
+        {
+            "session_id": sid,
+            "materialized": False,
+            "skipped": "sidecar_appeared_during_reconcile",
+        }
+    ]
+    assert json.loads(target.read_text(encoding="utf-8")) == competing
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        alias.save(skip_index=True)
 
 
 def test_state_db_materialization_rechecks_delete_inside_authority(
