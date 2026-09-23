@@ -89,6 +89,23 @@ contributor guidance; it does not change runtime behavior or CI gates.
   `models_cache.json` refresh timestamps), the stat-identity fallbacks, and the
   schema/version stamps. Start here before changing model-catalog caching, the
   `/api/models` cache keys, or the Codex catalog dependency (#2443, #7540).
+- [`docs/architecture/live-models-allowlist.md`](architecture/live-models-allowlist.md):
+  current contract for how `/api/models/live` filters a custom provider's
+  upstream catalog: the four signals in evaluation order (discovered catalog
+  defers to the live probe, explicit plural `models:` allowlist filters,
+  singular `model:` never gates, no allowlist shows the full catalog), the
+  serialized-list shapes `hermes config set` persists, the deliberate
+  empty-allowlist-is-not-configured rule, and the probe-failure fallback.
+  Start here before changing custom-provider model filtering or
+  discovery-vs-allowlist semantics (#7165, #7404).
+- [`docs/architecture/profile-home-resolve-cache.md`](architecture/profile-home-resolve-cache.md):
+  current contract for the call-scoped memoization around
+  `_resolve_profile_home_param()` in `api/workspace.py`: what it caches, the
+  one-hot-loop scope (`_load_cli_sessions_uncached`) versus every other call
+  site getting fresh resolution, and the freshness guarantee that a symlink
+  retarget or transient resolve fallback is always observed on the next call.
+  Start here before widening this cache's scope or adding a similar
+  call-scoped cache elsewhere (#7636).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

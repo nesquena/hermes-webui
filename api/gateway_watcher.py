@@ -204,6 +204,8 @@ class GatewayWatcher:
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
         self._stop_event = threading.Event()
+        # Wakes a poll loop parked because nobody is subscribed (subscribe/stop).
+        self._idle_wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._hermes_home = Path(hermes_home).expanduser().resolve() if hermes_home else None
         self._state_db_path = (
@@ -244,6 +246,7 @@ class GatewayWatcher:
     def stop(self):
         """Stop the watcher thread."""
         self._stop_event.set()
+        self._idle_wake.set()  # unpark if waiting for the first subscriber
         # Wake up any subscribers
         with self._sub_lock:
             for q in self._subscribers:
@@ -254,6 +257,11 @@ class GatewayWatcher:
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
+
+    def _has_subscribers(self) -> bool:
+        """Return True when at least one SSE client is attached."""
+        with self._sub_lock:
+            return bool(self._subscribers)
 
     def subscribe(self) -> queue.Queue:
         """Subscribe to change events. Returns a queue.Queue.
@@ -273,6 +281,9 @@ class GatewayWatcher:
                     q.put_nowait(None)
                 except Exception:
                     logger.debug("Failed to send stop sentinel to late subscriber")
+        # Wake a poll loop parked with zero subscribers so the first SSE client
+        # gets a prompt initial projection instead of waiting out POLL_INTERVAL.
+        self._idle_wake.set()
         return q
 
     def unsubscribe(self, q: queue.Queue):
@@ -317,6 +328,12 @@ class GatewayWatcher:
         protects projection fields (notably role-derived CLI visibility) that
         the agent's existing index cannot see.
         """
+        with self._sub_lock:
+            has_subscribers = bool(self._subscribers)
+        if not has_subscribers:
+            # Force fresh projection on the next subscription, without touching DB.
+            self._last_full_projection_at = None
+            return False
         db_path = self._state_db_path
         # A watcher may start before the agent has created state.db. Publishing an
         # empty first snapshot would make an already-rendered sidebar disappear;
@@ -355,18 +372,31 @@ class GatewayWatcher:
         return True
 
     def _poll_loop(self):
-        """Main polling loop. Runs in a daemon thread."""
+        """Main polling loop. Runs in a daemon thread.
+
+        With no SSE subscribers there is nobody to notify, so the loop parks on
+        ``_idle_wake`` instead of re-fingerprinting ``state.db`` every few
+        seconds (maint #3035). While subscribed it blocks once on
+        ``_stop_event.wait(POLL_INTERVAL)`` — a single timer sleep that returns
+        immediately when ``stop()`` sets the event, replacing the previous
+        10 wakeups/sec ``time.sleep(0.1)`` spin.
+        """
         while not self._stop_event.is_set():
+            if not self._has_subscribers():
+                self._idle_wake.clear()
+                # subscribe() may have raced between the check and clear; if so
+                # the flag is already set again and we must not park.
+                if self._has_subscribers() or self._stop_event.is_set():
+                    continue
+                self._idle_wake.wait()
+                continue
+
             try:
                 self._poll_once()
             except Exception:
                 logger.debug("Error in gateway watcher poll loop", exc_info=True)
 
-            # Sleep in small increments so we can stop promptly
-            for _ in range(self.POLL_INTERVAL * 10):
-                if self._stop_event.is_set():
-                    return
-                time.sleep(0.1)
+            self._stop_event.wait(self.POLL_INTERVAL)
 
 
 # ── Module-level watcher registry ──────────────────────────────────────────

@@ -508,6 +508,16 @@ async function startCompressionRecovery(btn){
     const composer=$('msg');
     if(composer&&typeof composer.focus==='function') composer.focus();
   }catch(e){
+    // #7710: a cross-profile refusal now also arrives as 409
+    // (``session_profile_mismatch``). That is NOT a stale recovery action —
+    // the card is still valid, the request was simply refused because the
+    // session belongs to another profile. Retiring it would hide a live card
+    // and show a false "conversation already moved on" note.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)){
+      if(typeof setStatus==='function') setStatus('Session belongs to a different profile');
+      return;
+    }
     // A 409 means this session no longer has an active recovery action (the
     // session already moved on — e.g. a substantive prompt cleared it). The
     // persisted card in the transcript is stale, so retire it and show a neutral
@@ -3939,6 +3949,27 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
   const rawId=String(modelId||'');
+  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
+  // key must not become a second picker row. configured_model_badges holds every
+  // spelling of a configured model and renderModelDropdown() synthesises a row
+  // for each key this predicate does not recognise. The provider-qualified
+  // spelling was missed because _normalizeConfiguredModelKey() strips only one
+  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
+  // so `acme/example-model` and `custom/acme/example-model` normalise to
+  // different keys and the picker lists one model twice.
+  // Match it the way the `@provider:` rule below does: the badge declares a
+  // provider, the key starts with that provider's `<provider>/` prefix, and an
+  // existing row from the same provider normalises equal to the remainder. Two
+  // different models never satisfy the last clause, so this can only drop a
+  // duplicate of a row the catalog already produced.
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const slashRoutedId=rawId.slice(slashPrefix.length);
+    if(slashRoutedId&&(entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
+    )) return true;
+  }
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
@@ -7386,18 +7417,51 @@ function _stripDottedModelPrefix(bare){
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
-  // Preserve custom gateway model IDs exactly as configured.
+  // The catalog is the authority on model identity: the backend knows the real
+  // provider/model split and ships an exact `m.label` per routing id, so a
+  // catalogued id — including a plain-lane `@custom:` id whose model contains
+  // colons (`@custom:ollamacloud/qwen3.5:397b`) — renders verbatim. The
+  // string parsing below is only a legacy fallback for ids the catalog has
+  // never seen (pre-hydration, stale sessions, removed providers), where a
+  // first-colon split alone cannot tell a `@custom:<slug>:<model>` from a
+  // plain-lane `@custom:<model-with-colon>` (#7240).
+  if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
+  // Preserve custom gateway model IDs exactly as configured. A custom id is
+  // `@custom:<model>` in the plain custom lane or `@custom:<slug>:<model>` for
+  // a named custom provider; the provider slug may itself be an endpoint
+  // authority (e.g. `custom:10.8.71.41:8080`). The model portion may contain
+  // colons (tag/variant suffixes like `:free`, `:31b`, `:397b`) and vendor
+  // slashes, so only the leading provider segment is peeled (#7240).
   // Examples:
-  //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
-  //   @custom:qwen397b-64k               -> qwen397b-64k
+  //   @custom:ai_gateway:Qwen3.6-35B-A3B            -> Qwen3.6-35B-A3B
+  //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
+  //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
     const rest=rawId.slice('@custom:'.length);
-    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
-    return rest||rawId;
+    const sep=rest.indexOf(':');
+    if(sep<0) return rest||rawId;
+    // A provider slug is a config key or a host:port authority — it never
+    // contains a `/`. A slash-bearing first segment is therefore the model
+    // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
+    // must render the whole remainder, not just `397b`), mirroring the
+    // `/`-means-routable rule api/config.py applies when building ids.
+    if(rest.slice(0,sep).includes('/')) return rest||rawId;
+    let model=rest.slice(sep+1);
+    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
+    // to the provider segment, mirroring the host:port slug check in
+    // api/config.py, so it is consumed before the model label starts.
+    const portMatch=/^(\d{1,5}):/.exec(model);
+    if(portMatch){
+      const port=Number(portMatch[1]);
+      if(port>=1&&port<=65535){
+        const host=rest.slice(0,sep).toLowerCase();
+        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
+          model=model.slice(portMatch[0].length);
+        }
+      }
+    }
+    return model||rawId;
   }
-  // Check dynamic labels first, then fall back to splitting the ID
-  if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
@@ -7659,6 +7723,16 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
+  // #7680 re-gate (9/22): two-pass scan.
+  //   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
+  //      the wrapping backticks so the bare-token pass below sees a
+  //      plain ``MEDIA:path`` and the closing backtick is not consumed
+  //      as part of the path.
+  //   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
+  //      class) so a filename that legally contains a backtick
+  //      (``report`final.png``) is captured in full instead of being
+  //      truncated at the first backtick.
+  s=s.replace(/`MEDIA:([^`\s]+)`/g,'MEDIA:$1');
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
@@ -7774,10 +7848,43 @@ function renderMd(raw){
   });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
-  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
-  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
+  // Keep boundary whitespace OUTSIDE the generated *...* delimiters: the inline
+  // emphasis regex below deliberately rejects a leading/trailing space (so
+  // `a * b * c` is not italicised), and `<em> x </em>` would otherwise degrade
+  // into literal asterisks (or a bullet list at line start).
+  const _emphasis=(t)=>{
+    const m=String(t).match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return (m && m[2]) ? m[1]+'*'+m[2]+'*'+m[3] : t;
+  };
+  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>_emphasis(t));
+  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
-  s=s.replace(/<br\s*\/?>/gi,'\n');
+  // Convert <br> to a newline, EXCEPT inside genuine markdown table rows — there a
+  // newline would split the row and destroy the table. No sentinel token is used on
+  // purpose: any fixed placeholder is attacker-suppliable in message text and would be
+  // rewritten on the way out.
+  // The "is this a table row" test must match the DOWNSTREAM table parser's grammar
+  // exactly (a run of pipe-lines whose SECOND line is a separator). A looser per-line
+  // test would treat pipe-wrapped prose like `| note<br># heading |` as a table row and
+  // silently strip its heading/list rendering.
+  {
+    const _rowRe=/^ {0,3}\|.+\|[ \t]*$/;
+    const _sepRe=/^\|[\s|:-]+\|$/;
+    const _lines=s.split('\n');
+    const _isTableRow=new Array(_lines.length).fill(false);
+    for(let i=0;i<_lines.length;){
+      if(!_rowRe.test(_lines[i])){ i++; continue; }
+      let j=i;
+      while(j<_lines.length && _rowRe.test(_lines[j])) j++;
+      // A block qualifies only if the parser would accept it: >=2 rows and a separator
+      // in the second position.
+      if(j-i>=2 && _sepRe.test(_lines[i+1].trim())){
+        for(let k=i;k<j;k++) _isTableRow[k]=true;
+      }
+      i=j;
+    }
+    s=_lines.map((line,i)=>_isTableRow[i]?line:line.replace(/<br\s*\/?>/gi,'\n')).join('\n');
+  }
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:
@@ -7815,7 +7922,7 @@ function renderMd(raw){
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
-    t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     // Strikethrough: ~~text~~ → <del>text</del>
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
@@ -7835,7 +7942,7 @@ function renderMd(raw){
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
-    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
+    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
@@ -7845,7 +7952,7 @@ function renderMd(raw){
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
-  s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
@@ -9073,6 +9180,12 @@ function _stripForTTS(text){
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
+  // #7680 re-gate (9/22): TTS does not need the backtick-aware
+  // terminator. Inline code was already stripped at the top of this
+  // function (`:9137`), so a bare ``MEDIA:[^\s]+`` is correct and
+  // round-trips the original filename including a backtick in the
+  // path — the only thing the TTS ever does with the captured
+  // substring is throw it away.
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
@@ -9168,7 +9281,7 @@ function _playEdgeTtsChunked(text, btn){
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge'})
     })
     .then(function(r){
       if(!r.ok){
@@ -9852,6 +9965,99 @@ function _liveAssistantSegmentTextLength(seg){
   return String(body.textContent||'').trim().length;
 }
 
+// ── #6948 follow-up: settled-transcript ownership of a live-turn node ──────
+// (duplicate assistant answer; upstream symptom report #2051)
+//
+// Both live-turn insertion paths — the renderMessages() re-attach and
+// restoreLiveTurnHtmlForSession() — have one branch that ADDS a turn the
+// settled rebuild did not produce. The assistant row is persisted a few ms
+// BEFORE the stream's terminal event clears S.activeStreamId, so a dead live
+// node left behind by an INFLIGHT entry that outlived its stream is re-attached
+// on top of the settled transcript: the same answer twice, self-sustaining
+// across later renders (the node keeps id=liveAssistantTurn and is re-preserved
+// by the #6948 guard), healed only by a reload.
+//
+// Dropping a live node must be an OWNERSHIP proof, never "the rendered text
+// looks the same":
+//   * the live body is built by the streaming smd parser and the settled body
+//     by renderMd + post-processing, so their textContent differs for anything
+//     past single-paragraph plain text (lists, fenced code with its language
+//     label, tables, `_underscore_` emphasis, the injected copy button) — a
+//     text comparison would miss most real answers; and
+//   * an identical answer earlier in the history (a repeated "Done.", a
+//     greeting, a same-prompt resend) would delete a GENUINELY LIVE turn: while
+//     the current turn is unpersisted, the last settled assistant message IS the
+//     previous turn's answer.
+// So ownership is proved from state: the transcript must END with a settled
+// assistant message that THIS stream produced, and the node must carry nothing
+// the settled rebuild could not have produced.
+
+// Stream identity persisted on a settled assistant message. The server stamps
+// _anchor_stream_id from the anchor-scene sidecar record (api/routes.py); the
+// client stamps _anchor_stream_id and scene.identity.stream_id at stream end
+// (_attachProjectedAnchorSceneToLastAssistant, static/messages.js).
+function _settledAssistantStreamId(message){
+  if(!message) return '';
+  const scene=message._anchor_activity_scene||null;
+  const identity=(scene&&scene.identity)||null;
+  return String(message._anchor_stream_id||(scene&&scene.stream_id)||(identity&&identity.stream_id)||'');
+}
+// The live-projection markers the #6948 preserve guard already treats as proof
+// of a live owner. A message the client still considers live is never evidence
+// that the turn has settled.
+function _messageHasLiveAssistantProjection(m){
+  return !!(m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined));
+}
+// True when the live turn holds something the settled rebuild cannot have
+// produced from S.messages — an unpersisted tool card, reasoning/thinking row,
+// transparent-stream row, or a second live segment. Such a node is never
+// dropped: #3714's whole premise is that the live DOM can be AHEAD of
+// S.messages, and a tail-segment match must not discard the tool card or the
+// earlier segment above it. An unknown node shape fails closed (keep the turn).
+function _liveTurnCarriesUnsettledContent(turn){
+  if(!turn||typeof turn.querySelectorAll!=='function') return true;
+  if(turn.querySelectorAll(
+    '.tool-card-row,.wl-reason,.agent-activity-thinking,.thinking-card-row,.transparent-event-row'
+  ).length) return true;
+  return turn.querySelectorAll('[data-live-assistant="1"]').length>1;
+}
+function _settledTranscriptOwnsLiveTurn(sid, turn){
+  if(!turn) return false;
+  const msgs=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:null;
+  if(!msgs||!msgs.length) return false;
+  // The transcript must END with a settled assistant answer. A trailing user
+  // turn means the live turn IS the current turn — nothing of it is persisted
+  // yet, so it can never be a leftover (this is the case a text comparison gets
+  // wrong when the previous answer happens to read the same), and a live
+  // projection anywhere means the rebuild still owns a live turn of its own.
+  const last=msgs[msgs.length-1];
+  if(!last||last.role!=='assistant') return false;
+  if(msgs.some(_messageHasLiveAssistantProjection)) return false;
+  const inflight=(typeof INFLIGHT!=='undefined'&&INFLIGHT)?INFLIGHT[sid]:null;
+  // Owner of the live DOM: INFLIGHT carries the id of the stream that built it
+  // (attachLiveStream), and S.activeStreamId is that same id until the terminal
+  // event clears it.
+  const liveStreamId=String((inflight&&inflight.streamId)||(typeof S!=='undefined'&&S&&S.activeStreamId)||'');
+  const settledStreamId=_settledAssistantStreamId(last);
+  if(settledStreamId){
+    // Identity recorded on both sides decides — renderer- and text-independent,
+    // so code blocks, lists and tables are handled like plain prose.
+    if(!liveStreamId||settledStreamId!==liveStreamId) return false;
+  }else{
+    // No persisted identity on the tail (a turn whose scene was not worklog
+    // worthy). Compare SOURCE with SOURCE — the markdown this stream produced
+    // (INFLIGHT.lastAssistantText) against the persisted message content —
+    // never two independently rendered DOM trees. Regeneration cannot reach
+    // this branch: startRegeneration() truncates S.messages at the user turn,
+    // so the tail is a user message while a regenerated answer streams.
+    const streamed=String((inflight&&inflight.lastAssistantText)||'').replace(/\s+/g,' ').trim();
+    if(!streamed) return false;
+    const settled=String((typeof msgContent==='function'?msgContent(last):last.content)||'').replace(/\s+/g,' ').trim();
+    if(!settled||streamed!==settled) return false;
+  }
+  return !_liveTurnCarriesUnsettledContent(turn);
+}
+
 function _mergeRestoredLiveAssistantSegment(restored, existing){
   if(!restored||!existing) return;
   const existingLive=existing.querySelector('[data-live-assistant="1"]');
@@ -9888,6 +10094,18 @@ function restoreLiveTurnHtmlForSession(sid){
   const existing=$('liveAssistantTurn');
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
+  // #6948 follow-up (duplicate assistant answer; #2051): only this branch ADDS a
+  // turn — replacing an existing live turn cannot duplicate. When the settled
+  // transcript already owns the stream this snapshot belongs to, appending it
+  // pins a SECOND copy of the same answer under the settled one. Release the
+  // stale snapshot (no other consumer can use it — it would be re-refused on
+  // every later restore) and report "nothing restored", so loadSession takes the
+  // same path it already takes for an INFLIGHT entry that never carried one.
+  else if(typeof _settledTranscriptOwnsLiveTurn==='function'
+          &&_settledTranscriptOwnsLiveTurn(sid, restored)){
+    inflight.liveTurnHtml=null;
+    return false;
+  }
   else inner.appendChild(restored);
   // Transparent Stream: liveTurnHtml is restored via template.innerHTML, which
   // drops the property-bound onclick/onkeydown handlers wired by
@@ -11393,6 +11611,15 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
+  // The caller only consults this predicate once the turn has settled (it gates
+  // on `!S.busy`), so an `_live` marker seen here is a leftover of the
+  // live-snapshot projection, not an ongoing stream. Folding on it hid the turn's
+  // final answer inline and echoed it into the Worklog, leaving the turn with no
+  // visible content until the #3875 blank-turn fail-safe revealed both copies. A
+  // turn-final assistant message with visible text is the answer, so keep it out
+  // of the fold; every other `_live` message folds as before. Kept as a separate
+  // guard so the live rule below keeps its position.
+  if(m._live&&hasVisibleText&&isTurnFinalAssistant) return false;
   if(m._live) return true;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
@@ -13075,6 +13302,17 @@ function _anchorSceneRowsForRendering(scene, opts){
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   const settled=!!(opts&&opts.settled);
   const live=!settled;
+  // #6948 follow-up (duplicate assistant answer; #2051): on a SETTLED turn the
+  // assistant segment owns the final answer, so a process_prose row carrying
+  // that same text must not also be rebuilt into the activity scene. The
+  // transparent-stream renderer suppresses it per row
+  // (_anchorSceneTransparentNodeForRow), but the compact-worklog row builder
+  // (_anchorSceneNodeForRow) has no such guard and renders the row as a second
+  // .assistant-segment above the settled one. Drop it here — the single place
+  // BOTH settled renderers (and the #5839 deferred-rows path) get their rows.
+  // LIVE rendering is untouched: while streaming, the inline live segment is
+  // hidden and the prose row IS the visible answer.
+  const settledFinalAnswer=settled?String((scene&&scene.final_answer)||'').trim():'';
   const out=[];
   const byKey=new Map();
   const liveProseTextKeys=new Map();
@@ -13097,6 +13335,9 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
     if((row.role==='prose'||row.role==='thinking')&&!text) continue;
+    if(settledFinalAnswer&&row.role==='prose'
+       &&typeof _anchorSceneProseDuplicatesFinalAnswer==='function'
+       &&_anchorSceneProseDuplicatesFinalAnswer(text,settledFinalAnswer)) continue; // #6948 follow-up
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -13370,6 +13611,26 @@ function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
   if(!(a.startsWith(b)||b.startsWith(a))) return false;
   const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
   return shorter>=80 && (shorter/longer)>=0.9;
+}
+// #6948 follow-up (duplicate assistant answer; #2051): the same near-equality
+// test as _anchorSceneProseMatchesFinalAnswer, minus its absolute `shorter>=80`
+// floor. That floor makes the matcher a no-op for every SHORT final answer
+// (greetings, "Done.", one-liners), so a prose row that is the answer minus its
+// last streamed token — e.g. "Hey! What can I help you with today" vs
+// "...today?" — was rebuilt as a SECOND assistant-segment beside the settled
+// one. The >=0.9 length ratio is what actually keeps a distinct short
+// intermediate sentence from being swallowed by a long final answer (Codex
+// #4568), so it alone is kept. Deliberately a separate helper: the per-row
+// render-time matcher above, and the tests pinning its exact predicate, stay
+// untouched.
+function _anchorSceneProseDuplicatesFinalAnswer(proseText, finalAnswer){
+  if(_anchorSceneProseMatchesFinalAnswer(proseText,finalAnswer)) return true;
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
+  const a=norm(proseText), b=norm(finalAnswer);
+  if(!a||!b) return false;
+  if(!(a.startsWith(b)||b.startsWith(a))) return false;
+  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
+  return (shorter/longer)>=0.9;
 }
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;
@@ -15212,6 +15473,22 @@ function _isContextCompactionMessage(m){
 function _isContextCompactionText(text){
   return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
 }
+function _compactionSummarySegment(text){
+  // Mirror of api/compression_anchor.py compaction_summary_segment(). The
+  // replay patch carries this helper so it stays self-contained on upstream.
+  const s=String(text||'').replace(/^\s+/,'');
+  const low=s.toLowerCase();
+  if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return s;
+  if(!low.startsWith('[prior context')) return null;
+  const delim=low.indexOf('[end of prior context');
+  if(delim===-1) return null;
+  const after=s.slice(delim);
+  const close=after.indexOf(']');
+  if(close===-1) return null;
+  const segment=after.slice(close+1).replace(/^\s+/,'');
+  if(segment.toLowerCase().startsWith('[context compaction')) return segment;
+  return null;
+}
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
 }
@@ -15291,9 +15568,91 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
 function _shouldShowSettledCompressionReference(referenceText){
   return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
+// Ultra-compact display (2026-08-18): the compaction marker text starts with a
+// long fixed envelope of handling instructions. The conversation card must
+// preview the DIGEST (goal/state the user cares about), never the envelope.
+function _compactionDigestText(text){
+  const s=String(text||'');
+  // The envelope prose ends right before the first markdown heading on its
+  // own line. Quoted headings inside the envelope (e.g. "from '## Historical
+  // Task Snapshot' or any other section") never sit at line start.
+  const m=s.match(/(^|\n)#{1,3} [^\n]/);
+  if(!m) return s.trim();
+  const start=m.index+(m[1]?1:0);
+  return s.slice(start).trim();
+}
+function _compactionCardPreview(text){
+  const digest=_compactionDigestText(text)
+    .replace(/^#{1,3} /gm,'')
+    .replace(/^Historical Task Snapshot\s*/i,'');
+  return digest.split(/\n+/).map(l=>l.trim()).filter(Boolean).slice(0,2).join(' ').slice(0,220);
+}
+// All compaction markers present in the LOADED transcript, oldest first. Each
+// one renders as its own collapsed card at its real position so the user can
+// see when the context was compacted and reopen the digest inline.
+function _loadedCompactionMarkerRawIdxs(messages){
+  const out=[];
+  if(!Array.isArray(messages)) return out;
+  for(let i=0;i<messages.length;i++){
+    if(_isContextCompactionMessage(messages[i])) out.push(i);
+  }
+  return out;
+}
+// A settled compaction whose marker sits before the server-loaded tail must
+// remain visible at the top of that tail. Anchoring it to an old assistant/tool
+// turn can bury it inside a hidden worklog, which makes compaction look absent.
+// `currentSummaryFallback` is true when the session's current summary matches
+// no loaded marker and therefore renders as its own settled card. That card is
+// the newest compaction the user can see, so it owns the preserved task cards
+// and no marker card may attach them again.
+function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx,currentSummaryFallback=false){
+  const preWindowMarkers=[];
+  const inlineMarkers=[];
+  const boundary=Number.isFinite(firstRenderedRawIdx)?firstRenderedRawIdx:-1;
+  for(const value of Array.isArray(markerRawIdxs)?markerRawIdxs:[]){
+    const rawIdx=Number(value);
+    if(!Number.isInteger(rawIdx)||rawIdx<0) continue;
+    if(rawIdx<boundary) preWindowMarkers.push(rawIdx);
+    else inlineMarkers.push(rawIdx);
+  }
+  const taskOwner=currentSummaryFallback
+    ?{kind:'current-summary',rawIdx:-1}
+    :inlineMarkers.length
+      ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
+      :!preWindowMarkers.length
+        ?null
+        :{kind:'pre-window',rawIdx:preWindowMarkers[preWindowMarkers.length-1]};
+  return {preWindowMarkers,inlineMarkers,taskOwner};
+}
+function _insertCompactionCardNodes(entries,taskOwner,insertNode){
+  const insertedNodes=[];
+  let taskOwnerNode=null;
+  if(!Array.isArray(entries)||typeof insertNode!=='function') return {insertedNodes,taskOwnerNode};
+  for(const entry of entries){
+    if(!entry?.node) continue;
+    const inserted=insertNode(entry.node,entry.rawIdx,entry.kind)!==false;
+    if(!inserted||!entry.node.parentElement) continue;
+    insertedNodes.push(entry.node);
+    if(taskOwner&&entry.kind===taskOwner.kind&&entry.rawIdx===taskOwner.rawIdx) taskOwnerNode=entry.node;
+  }
+  return {insertedNodes,taskOwnerNode};
+}
+function _insertPreservedCompressionTaskFallback(taskOwnerNode,standaloneNode,insertNode){
+  if(taskOwnerNode?.parentElement||!standaloneNode||typeof insertNode!=='function') return false;
+  return insertNode(standaloneNode)!==false&&!!standaloneNode.parentElement;
+}
+function _pinCompactionCardAtTop(inner,node){
+  if(!inner||!node) return false;
+  inner.appendChild(node);
+  return true;
+}
+function _pinSettledCompressionReferenceAtTop(inner,node,referenceMessageRawIdx){
+  if(referenceMessageRawIdx>=0) return false;
+  return _pinCompactionCardAtTop(inner,node);
+}
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
-  const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
+  const preview=_compactionCardPreview(text)||text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
@@ -16748,6 +17107,23 @@ function _processWakeupCardHtml(info, rawText, extras){
   return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
+// #2051: parse into a <template> and move the nodes instead of insertAdjacentHTML —
+// every step is idempotent, so a DOM-API wrapper (e.g. an anti-fingerprinting
+// extension) that executes the call twice cannot duplicate the block.
+function _insertSegmentBlock(seg, html){
+  if(!seg) return;
+  if(typeof document!=='undefined'&&typeof document.createElement==='function'){
+    try{
+      const tpl=document.createElement('template');
+      if('content' in tpl){
+        tpl.innerHTML=html;
+        seg.appendChild(tpl.content);
+        return;
+      }
+    }catch(_){ /* fall through to the string path below */ }
+  }
+  seg.insertAdjacentHTML('beforeend', html);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
@@ -16934,13 +17310,60 @@ function renderMessages(options){
     S.messages,
     sessionCompressionSummary
   );
-  const referenceText=referenceMessage
-    ? msgContent(referenceMessage)||String(referenceMessage.content||'')
-    : sessionCompressionSummary;
-  const referenceNode=(!compressionState && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const referenceText=(()=>{
+    if(!referenceMessage) return sessionCompressionSummary;
+    const raw=msgContent(referenceMessage)||String(referenceMessage.content||'');
+    const segment=_compactionSummarySegment(raw);
+    return segment!==null?segment:raw;
+  })();
+  // Ultra-compact display (2026-08-18): every compaction marker loaded in the
+  // transcript renders as its own collapsed card at its real position, so the
+  // user SEES each compaction and can reopen its digest inline. Markers older
+  // than the virtual window are pinned above the rendered rows in transcript
+  // order; markers inside the window stay inline.
+  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const loadedCompactionRawIdxs=(!compressionState)?_loadedCompactionMarkerRawIdxs(S.messages):[];
+  // A loaded marker that matches the current summary already renders as its
+  // own card. When none matches (referenceMessageRawIdx<0) the current summary
+  // is still authoritative and must stay visible even next to stale markers,
+  // so the settled fallback is decided here, before any card node is built,
+  // and takes part in the single preserved-task owner selection.
+  const showCurrentSummaryFallback=!!(!compressionState && referenceMessageRawIdx<0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary));
+  const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx,showCurrentSummaryFallback);
+  const referenceNodeOwnsTasks=!!(showCurrentSummaryFallback
+    && compactionPlacements.taskOwner
+    && compactionPlacements.taskOwner.kind==='current-summary'
+    && preservedCompressionTaskMessages.length);
+  const _compactionCardEntry=(markerRawIdx,kind)=>{
+    const markerMsg=S.messages[markerRawIdx];
+    let raw='';
+    try{
+      raw=String(msgContent(markerMsg)||'');
+    }catch(_){
+      raw=String((markerMsg&&markerMsg.content)||'');
+    }
+    const segment=_compactionSummarySegment(raw);
+    const text=segment!==null?segment:raw;
+    const ownsTasks=!!(compactionPlacements.taskOwner
+      && compactionPlacements.taskOwner.kind===kind
+      && compactionPlacements.taskOwner.rawIdx===markerRawIdx);
+    const row=document.createElement('div');
+    row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text,false)}${ownsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;
+    const node=row.firstElementChild;
+    if(node){
+      node.setAttribute('data-compaction-placement',kind);
+      node.setAttribute('data-compaction-raw-idx',String(markerRawIdx));
+      if(ownsTasks&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');
+    }
+    return {node,rawIdx:markerRawIdx,kind};
+  };
+  const preWindowCompactionCards=compactionPlacements.preWindowMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'pre-window'));
+  const compactionCardNodes=compactionPlacements.inlineMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'inline'));
+  const referenceNode=showCurrentSummaryFallback
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${referenceNodeOwnsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;const node=row.firstElementChild;if(node&&referenceNodeOwnsTasks) node.setAttribute('data-compaction-task-owner','1');return node;})()
     : null;
-  let preservedCompressionTaskCardsAttached=!!referenceNode;
+  let referenceNodePinnedAtTop=false;
+  let preservedCompressionTaskOwnerNode=null;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -16948,7 +17371,6 @@ function renderMessages(options){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     rawIdx++;
   }
-  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   // #6999: the turn-content maps MUST see the FULL visWithIdx, not the
   // virtual render window. _assistantTurnFinalVisibleContentMap /
   // _assistantTurnVisibleContentMap derive the echo-strip context for a
@@ -16978,7 +17400,19 @@ function renderMessages(options){
       : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
+    // Keep the settled compacted-context card immediately visible in a long,
+    // tail-loaded conversation. Put it in flow (not inside an old tool turn).
+    referenceNodePinnedAtTop=_pinSettledCompressionReferenceAtTop(inner,referenceNode,referenceMessageRawIdx);
+    if(referenceNodePinnedAtTop&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
   }
+  const preWindowInsertion=_insertCompactionCardNodes(
+    preWindowCompactionCards,
+    compactionPlacements.taskOwner,
+    node=>_pinCompactionCardAtTop(inner,node)
+  );
+  if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
@@ -17454,7 +17888,7 @@ function renderMessages(options){
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        _insertSegmentBlock(orderedSeg, `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -17514,9 +17948,9 @@ function renderMessages(options){
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
-      if(hasVisibleBody) seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      if(hasVisibleBody) _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(hasVisibleBody){
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
@@ -17525,7 +17959,7 @@ function renderMessages(options){
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){
-    if(!node) return;
+    if(!node) return false;
     const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
     if(anchorIdx!==null && renderVisWithIdx[anchorIdx]){
       const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
@@ -17535,23 +17969,24 @@ function renderMessages(options){
         const blocks=_assistantTurnBlocks(turn);
         if(blocks){
           blocks.appendChild(node);
-          return;
+          return !!node.parentElement;
         }
       }
       const userRow=userRows.get(anchorRawIdx);
       if(userRow && userRow.parentElement){
         userRow.parentElement.insertBefore(node, userRow.nextSibling);
-        return;
+        return !!node.parentElement;
       }
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
-    if(!node) return;
-    if(rawIdx<firstRenderedRawIdx) return;
+    if(!node) return false;
+    if(rawIdx<firstRenderedRawIdx) return false;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     let anchorIdx=null;
     for(let i=0;i<renderVisWithIdx.length;i++){
@@ -17562,7 +17997,7 @@ function renderMessages(options){
     }
     if(anchorIdx===null){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
     const anchorSeg=assistantSegments.get(anchorRawIdx);
@@ -17571,23 +18006,24 @@ function renderMessages(options){
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
         blocks.insertBefore(node, anchorSeg);
-        return;
+        return !!node.parentElement;
       }
       const turnParent=turn && turn.parentElement;
       if(turnParent){
         turnParent.insertBefore(node, turn);
-        return;
+        return !!node.parentElement;
       }
     }
     const userRow=userRows.get(anchorRawIdx);
     if(userRow && userRow.parentElement){
       userRow.parentElement.insertBefore(node, userRow);
-      return;
+      return !!node.parentElement;
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const preservedOnlyNode=preservedCompressionTaskMessages.length
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn" data-compaction-task-fallback="1"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
     ? (()=>{let idx=null;for(let i=0;i<renderVisWithIdx.length;i++){if(renderVisWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
@@ -17595,9 +18031,25 @@ function renderMessages(options){
   const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
-  if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);
-  else _insertCompressionLikeNode(referenceNode);
-  _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
+  const inlineCompactionInsertion=_insertCompactionCardNodes(
+    compactionCardNodes,
+    compactionPlacements.taskOwner,
+    (node,markerRawIdx)=>_insertCompressionLikeNodeByRawIdx(node,markerRawIdx)
+  );
+  if(inlineCompactionInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=inlineCompactionInsertion.taskOwnerNode;
+  if(!referenceNodePinnedAtTop){
+    const referenceInserted=referenceNode&&referenceMessageRawIdx>=0
+      ?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)
+      :_insertCompressionLikeNode(referenceNode);
+    if(referenceInserted&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
+  }
+  _insertPreservedCompressionTaskFallback(
+    preservedCompressionTaskOwnerNode,
+    preservedOnlyNode,
+    node=>_insertCompressionLikeNode(node,preservedOnlyAnchor)
+  );
   _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
   for(const entry of handoffSummaryStates){
     if(!entry||!entry.state) continue;
@@ -17921,12 +18373,15 @@ function renderMessages(options){
         if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
         const anchorTurn=anchorRow.closest('.assistant-turn');
         if(!anchorTurn) continue;
+        // Hoisted out of the `if(!state)` block below (same expression, same
+        // value) so the append path can use the ownership fact the group
+        // construction already uses.
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
         let state=activityByTurn.get(anchorTurn);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
-          const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
           const group=ensureActivityGroup(anchorParent,{
             collapsed:true,
             anchor:anchorRow,
@@ -17946,7 +18401,14 @@ function renderMessages(options){
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
           live:false,
-          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          // Echo an anchor's prose as a `.wl-reason` row only when that anchor was
+          // folded into this Worklog. `assistant-segment-worklog-source` is the
+          // proof, and its `display:none` is the only reason the echo is not a
+          // second visible copy. The group construction above already reasons
+          // that way (`syncAnchorReason`); the append path did not, so an anchor
+          // that escapes the fold (the turn-final answer, an `_error` message)
+          // had its text rendered both inline and inside the Worklog.
+          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml&&!!anchorIsWorklogSource,
           thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
@@ -18235,6 +18697,15 @@ function renderMessages(options){
       const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
       let revealed=false;
       for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
@@ -18353,7 +18824,17 @@ function renderMessages(options){
           // restore the whole preserved turn so nothing the user saw vanishes.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           _rebuilt.replaceWith(_preservedLiveTurn);
-        }else{
+        }else if(!(typeof _settledTranscriptOwnsLiveTurn==='function'
+                   &&_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn))){
+          // #6948 follow-up (duplicate assistant answer; #2051): this is the
+          // only branch that ADDS a turn — the rebuild produced no live turn of
+          // its own. When the settled transcript already ends with THIS stream's
+          // own answer and the preserved node carries nothing unpersisted, the
+          // node is a dead leftover (the row persisted and the turn settled while
+          // INFLIGHT[sid] was not yet cleaned) and appending pins a SECOND copy
+          // that re-preserves itself on every later render until a reload.
+          // Mid-stream the transcript ends with the user turn (or still carries a
+          // live projection), so #3877 preservation is untouched.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           inner.appendChild(_preservedLiveTurn);
         }

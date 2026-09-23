@@ -35,7 +35,7 @@ from api.config import (
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
     get_effective_default_model, _get_session_agent_lock,
 )
-from api.workspace import get_last_workspace, _resolve_path
+from api.workspace import get_last_workspace, _resolve_path, profile_home_resolve_cache_scope
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
@@ -48,7 +48,11 @@ from api.agent_sessions import (
 from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
-CLI_VISIBLE_SESSION_LIMIT = 20
+# Size of the interactive sidebar recency window. Also bounds how many
+# delegated subagent children can be rendered at once, since a child only
+# nests when it wins a slot in this window. Resolved in api.config before
+# profile init; override with HERMES_WEBUI_VISIBLE_SESSION_LIMIT (clamped 1–200).
+CLI_VISIBLE_SESSION_LIMIT = _cfg.CLI_VISIBLE_SESSION_LIMIT
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -4784,7 +4788,41 @@ class _FullSessionResolveRequired(RuntimeError):
     """Internal signal that a full sidecar load must enter the bounded path."""
 
 
-_FULL_SESSION_RESOLVE_MAX_CONCURRENT = 2
+def _read_max_session_resolve_concurrent() -> int:
+    """#7421: env override for the heavy session-resolve cap. The
+    hardcoded literal 2 is too low for high-concurrency
+    deployments where several parallel active sessions all need
+    a full-transcript resolve; operators can set
+    ``HERMES_WEBUI_MAX_SESSION_RESOLVE`` to a positive int to
+    raise the cap without code changes. A bad or missing value
+    falls back to the previous default of 2, so an operator who
+    sets ``HERMES_WEBUI_MAX_SESSION_RESOLVE=0`` or a non-numeric
+    value does not regress to a blocked or unbounded state.
+
+    The cap is a *safety bound* (per-resolve cost tracked in
+    #7310), not a user preference — a typo like ``=999999``
+    must fall back to the safe default, never to the permissive
+    extreme. Every other bad input in this function falls back
+    to ``2``; out-of-range values do too. The previously
+    accepted upper bound (64) is reachable only via an explicit
+    in-range operator value; a profile's ``.env`` cannot reach
+    it at all (see ``_PROTECTED_ENV_KEYS``).
+    """
+    raw = (os.getenv("HERMES_WEBUI_MAX_SESSION_RESOLVE") or "").strip()
+    if not raw:
+        return 2
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    if n < 1:
+        return 2
+    if n > 64:
+        return 2  # #7656 round-3: typo-safe fallback, not clamp-up-to-64
+    return n
+
+
+_FULL_SESSION_RESOLVE_MAX_CONCURRENT = _read_max_session_resolve_concurrent()
 _FULL_SESSION_RESOLVE_SLOTS = threading.BoundedSemaphore(
     _FULL_SESSION_RESOLVE_MAX_CONCURRENT
 )
@@ -6712,7 +6750,7 @@ CRON_PROJECT_NAME = 'Cron Jobs'
 _CRON_PROJECT_LOCK = threading.Lock()
 
 
-def ensure_cron_project(create: bool = True) -> str | None:
+def ensure_cron_project(create: bool = True, profile: str | None = None) -> str | None:
     """Return the project_id of the system "Cron Jobs" project for the active profile.
 
     Each profile gets its own "Cron Jobs" project so cron-spawned sessions in
@@ -6734,7 +6772,10 @@ def ensure_cron_project(create: bool = True) -> str | None:
     """
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    # `profile` is the owner of the state.db being projected; the active
+    # profile is only a fallback so a cross-profile scan never tags another
+    # profile's system project onto the one currently selected.
+    active = profile or get_active_profile_name() or 'default'
     with _CRON_PROJECT_LOCK:
         projects = load_projects()
         # Look for an existing per-profile cron project. Match either an exact
@@ -6774,11 +6815,12 @@ WEBHOOK_PROJECT_NAME = 'Webhooks'
 _WEBHOOK_PROJECT_LOCK = threading.Lock()
 
 
-def ensure_webhook_project() -> str:
-    """Return the project_id of the system "Webhooks" project for the active profile."""
+def ensure_webhook_project(profile: str | None = None) -> str:
+    """Return the project_id of the system "Webhooks" project for `profile` (default: active)."""
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    # Owner of the scanned state.db wins over the selected profile (see ensure_cron_project).
+    active = profile or get_active_profile_name() or 'default'
     with _WEBHOOK_PROJECT_LOCK:
         projects = load_projects()
         for p in projects:
@@ -6806,7 +6848,7 @@ def ensure_webhook_project() -> str:
         return project_id
 
 
-def _profile_has_user_projects() -> bool:
+def _profile_has_user_projects(profile: str | None = None) -> bool:
     """True if the active profile already has at least one real (non-system) project.
 
     "Opted into project organization" means `load_projects()` contains a
@@ -6819,7 +6861,7 @@ def _profile_has_user_projects() -> bool:
     """
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    active = profile or get_active_profile_name() or 'default'
     reserved = {CRON_PROJECT_NAME, WEBHOOK_PROJECT_NAME}
     for p in load_projects():
         if p.get('name') in reserved:
@@ -7708,6 +7750,7 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     return dict(metadata)
 
 
+@profile_home_resolve_cache_scope()
 def _load_cli_sessions_uncached(
     hermes_home: Path,
     db_path: Path,
@@ -7746,7 +7789,9 @@ def _load_cli_sessions_uncached(
     def _cron_pid():
         if not _cron_pid_cache[0]:
             _cron_pid_cache[0] = True
-            _cron_pid_cache[1] = ensure_cron_project(create=_profile_has_user_projects())
+            _cron_pid_cache[1] = ensure_cron_project(
+                create=_profile_has_user_projects(_cli_profile), profile=_cli_profile,
+            )
         return _cron_pid_cache[1]
 
     # Memoize the cron jobs.json job_id -> name map for this scan. The two row
@@ -7797,7 +7842,7 @@ def _load_cli_sessions_uncached(
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
         if _webhook_pid_cache[0] is None:
-            _webhook_pid_cache[0] = ensure_webhook_project()
+            _webhook_pid_cache[0] = ensure_webhook_project(profile=_cli_profile)
         return _webhook_pid_cache[0]
 
     def _state_row_project_id(sid: str, source: str | None) -> str | None:
@@ -8005,7 +8050,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': str(get_last_workspace(profile=_cli_profile)),
+                    'workspace': _cli_workspace(),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
@@ -8574,9 +8619,26 @@ def get_state_db_session_messages(
                 cur.execute("PRAGMA table_info(sessions)")
                 session_cols = {str(row['name']) for row in cur.fetchall()}
                 if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    # session_source/model_config carry the fork/delegate boundary
+                    # identity consumed by _is_continuation_session (#6931/#7021).
+                    # Select them when present so the branch-marker guard applies
+                    # to the stitch path too; older schemas degrade to NULL.
+                    identity_cols = []
+                    if 'session_source' in session_cols:
+                        identity_cols.append('session_source')
+                    else:
+                        identity_cols.append('NULL AS session_source')
+                    if 'model_config' in session_cols:
+                        identity_cols.append('model_config')
+                    else:
+                        identity_cols.append('NULL AS model_config')
+                    lineage_select = (
+                        "id, source, started_at, parent_session_id, ended_at, end_reason"
+                        + ", " + ", ".join(identity_cols)
+                    )
                     cur.execute(
-                        """
-                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        f"""
+                        SELECT {lineage_select}
                         FROM sessions
                         WHERE id = ?
                         """,
@@ -8594,8 +8656,8 @@ def get_state_db_session_messages(
                             if not parent_id or parent_id in seen:
                                 break
                             cur.execute(
-                                """
-                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                f"""
+                                SELECT {lineage_select}
                                 FROM sessions
                                 WHERE id = ?
                                 """,
@@ -10375,16 +10437,22 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
             # preceding assistant's tool_calls, not just the first — a multi-tool
             # turn has several adjacent tool results, and inserting between any of
             # them splits the block (assistant, tool, <insert>, tool).
-            if (
-                idx < len(messages)
-                and messages[idx].get("role") == "tool"
-                and idx > 0
-                and messages[idx - 1].get("role") == "assistant"
-                and messages[idx - 1].get("tool_calls")
-            ):
-                while idx < len(messages) and messages[idx].get("role") == "tool":
-                    idx += 1
-                    advanced = True
+            if idx < len(messages) and messages[idx].get("role") == "tool":
+                # Walk back over any contiguous tool rows already emitted for
+                # this block, so the owning assistant is found even when idx
+                # lands on the SECOND result of a multi-tool turn (where
+                # messages[idx - 1] is another tool row, not the assistant).
+                owner = idx - 1
+                while owner >= 0 and messages[owner].get("role") == "tool":
+                    owner -= 1
+                if (
+                    owner >= 0
+                    and messages[owner].get("role") == "assistant"
+                    and messages[owner].get("tool_calls")
+                ):
+                    while idx < len(messages) and messages[idx].get("role") == "tool":
+                        idx += 1
+                        advanced = True
             # (b) Skip past an equal-timestamp run whose left neighbour shares
             # this message's role — inserting there would re-order an
             # already-matched same-role turn (user, <inserted user>, assistant).
@@ -10413,6 +10481,7 @@ def merge_session_messages_append_only(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance: Literal["unverified", "state_db"] = "unverified",
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10426,6 +10495,7 @@ def merge_session_messages_append_only(
             state_messages,
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
+            incoming_provenance=incoming_provenance,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -10437,6 +10507,7 @@ def _merge_session_messages_append_only_impl(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance=None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -11031,7 +11102,21 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
         seen_visible_keys.add(visible_key)
-        merged_messages.append(msg)
+        # This terminal path is shared by state.db reconciliation and by ordered
+        # sidecar stitching (notably compression continuations). Only the caller
+        # that read state.db may authorize timestamp-based recovery placement;
+        # stable child-sidecar sequence remains authoritative even when an
+        # archived parent was restamped later.
+        if (
+            incoming_provenance == "state_db"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp < max_sidecar_timestamp
+        ):
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+        else:
+            merged_messages.append(msg)
         _remember_merged_message(msg, source="state")
     return merged_messages
 
@@ -11151,6 +11236,7 @@ def reconciled_state_db_messages_for_session(
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
     )
     return _state_db_session_messages_result(
         reconciled_messages,

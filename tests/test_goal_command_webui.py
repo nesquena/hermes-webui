@@ -671,7 +671,14 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
+    # #6962 added 'stop' to this busy-command passthrough list so a busy /stop
+    # cancels immediately. Assert /goal's membership rather than the exact list
+    # literal, so adding another passthrough command does not fail this test.
+    _passthrough = re.search(
+        r"if\(_pc&&\[([^\]]*)\]\.includes\(_pc\.name\)\)", MESSAGES_JS
+    )
+    assert _passthrough, "busy-command passthrough list not found in messages.js"
+    assert "'goal'" in _passthrough.group(1)
     assert "queueSessionMessage" in MESSAGES_JS
 
 

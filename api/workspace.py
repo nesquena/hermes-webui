@@ -19,6 +19,8 @@ import stat
 import subprocess
 import sys
 import concurrent.futures
+import contextlib
+import contextvars
 import threading
 import time
 from collections.abc import Callable
@@ -207,6 +209,80 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
+# Call-scoped cache for `_resolve_profile_home_param`'s filesystem
+# `.resolve()` call. The webui's session list builds one `Session` per CLI
+# session row (`_load_cli_sessions_uncached`), and `Session.__init__` calls
+# `_resolve_profile_home_param(profile)` once per row -- with only one
+# profile in play (the common case) that is the SAME path resolved hundreds
+# of times per request. Individually a resolve() is ~1ms, but at a few
+# hundred sessions this compounded into multi-second sidebar hangs under
+# host load (confirmed via repeated "Slow WebUI request still running"
+# warnings pinned to this call site).
+#
+# IMPORTANT: this is deliberately NOT a process-lifetime cache. An earlier
+# revision of this fix cached forever, on the premise that a profile
+# argument always resolves to the same path for the life of the process --
+# but `Path.resolve()` is a filesystem call, not a pure function of
+# startup constants: a profile-home symlink can be retargeted while the
+# webui process keeps running for days/weeks, and `_safe_resolve()` below
+# deliberately falls back to returning the UNRESOLVED input after a
+# transient `OSError`/`RuntimeError`/`ValueError`, which a process-lifetime
+# cache would then serve forever. Both are real correctness bugs (caught in
+# PR #7636 review), not style nitpicks.
+#
+# Instead the cache is scoped to exactly ONE invocation of the hot loop
+# (`_load_cli_sessions_uncached`, wrapped below in `profile_home_resolve_cache_scope`)
+# via a `ContextVar` that holds a fresh dict only while that single
+# sidebar-list build is running, and is `None` everywhere else. Every other
+# call site -- and every request that isn't actively inside that one
+# build -- resolves fresh every time, exactly like pre-PR behavior, so a
+# symlink retarget or a transient resolve error is never masked past the
+# single call that would have paid for the redundant resolves anyway.
+_PROFILE_HOME_RESOLVE_SCOPE: "contextvars.ContextVar[dict[Path, Path] | None]" = (
+    contextvars.ContextVar("_PROFILE_HOME_RESOLVE_SCOPE", default=None)
+)
+
+
+@contextlib.contextmanager
+def profile_home_resolve_cache_scope():
+    """Enable memoization of `_resolve_profile_home_param` for one call.
+
+    Use as a decorator (or a `with` block) around the single hot-path
+    operation that resolves the SAME profile argument hundreds of times in a
+    tight loop -- currently `_load_cli_sessions_uncached` building the
+    CLI/cron session list. While active, repeated resolves of the same
+    profile argument are served from a dict that lives ONLY for the
+    duration of the call. Outside of it -- including before/after, and any
+    call site other than the one wrapped -- `_resolve_profile_home_param`
+    resolves fresh every time, with no caching, matching pre-PR behavior
+    exactly. Nested/reentrant use restores the previous (outer) value on
+    exit rather than clobbering it, so this is safe to nest.
+    """
+    token = _PROFILE_HOME_RESOLVE_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _PROFILE_HOME_RESOLVE_SCOPE.reset(token)
+
+
+def _cached_safe_resolve_profile_home(pre_resolve: Path) -> Path:
+    """`_safe_resolve()` for profile-home paths.
+
+    Memoized only while a `profile_home_resolve_cache_scope()` is active
+    (see module doc above); otherwise resolves fresh every call, matching
+    pre-PR behavior.
+    """
+    cache = _PROFILE_HOME_RESOLVE_SCOPE.get()
+    if cache is None:
+        return _safe_resolve(pre_resolve)
+    cached = cache.get(pre_resolve)
+    if cached is not None:
+        return cached
+    resolved = _safe_resolve(pre_resolve)
+    cache[pre_resolve] = resolved
+    return resolved
+
+
 def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     """Resolve a profile parameter (name string, directory path string, or Path) to a profile home Path.
 
@@ -244,14 +320,14 @@ def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     raw = str(profile).strip()
 
     if isinstance(profile, Path):
-        return _safe_resolve(profile.expanduser())
+        return _cached_safe_resolve_profile_home(profile.expanduser())
 
     # Strings are LOGICAL PROFILE IDS ONLY — no path-shaped strings, ever.
     if not _PROFILE_NAME_RE.fullmatch(raw):
         raise ValueError(f"invalid profile name: {raw!r}")
 
     from api.profiles import get_hermes_home_for_profile
-    return _safe_resolve(get_hermes_home_for_profile(raw))
+    return _cached_safe_resolve_profile_home(get_hermes_home_for_profile(raw))
 
 
 def _is_default_profile_home(profile_home: Path) -> bool:

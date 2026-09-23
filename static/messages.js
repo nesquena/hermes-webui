@@ -1,3 +1,13 @@
+const _AGENT_COMMAND_ALIASES = {
+  'reload_mcp': 'reload-mcp',
+  'reload_skills': 'reload-skills',
+  'codex_runtime': 'codex-runtime',
+  'credits': 'credits'
+};
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
+  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload_mcp','reload_skills','codex_runtime','credits'
+]);
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -1220,7 +1230,6 @@ const _sessionTitleProvisionalBySid = new Map();
 // their canonical command is registered on the backend (for example
 // /reload-mcp). Keep this intentionally narrow and include underscore variants
 // observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -1323,6 +1332,31 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
+async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPromise){
+  let payload;
+  try{ payload=JSON.parse(error&&error.body||'{}'); }catch(_){ return false; }
+  const target=payload&&payload.continuation_session_id;
+  if(!error||error.status!==409||!payload||payload.code!=='session_rotated'||typeof target!=='string'||!target||target===sid) return false;
+  // A failed POST has not admitted a turn. Never resend automatically: the
+  // continuation may already be busy, and attachments must remain a draft.
+  if(!S.session||S.session.session_id!==sid) return false;
+  delete INFLIGHT[sid];
+  if(typeof clearInflightState==='function') clearInflightState(sid);
+  if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(sid);
+  stopApprovalPolling();stopClarifyPolling();removeThinking();setBusy(false);
+  try{
+    await loadSession(target);
+    if(!S.session||S.session.session_id===sid) return false;
+    // loadSession can lose its navigation race to another tab selection. Never
+    // place the rejected message into that unrelated session's composer.
+    _restoreComposerDraftAfterFailedSend(draftText,filesSnapshot,target,clearPromise);
+    if(S.session.session_id!==target) return true;
+    setComposerStatus('Session resumed. Your message is preserved; send it when ready.');
+    showToast('Session resumed after compression. Your draft is preserved.',4000);
+    return true;
+  }catch(_){ return false; }
+}
+
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
@@ -1370,7 +1404,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          _saveComposerDraftNow(sid, restore, files);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1445,14 +1479,16 @@ async function send(){
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
-      // /queue, /terminal, /goal, or /yolo while the agent is running and have
+      // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
       // them execute immediately.
       // Without this intercept they fall through to the queue and execute after
       // the current turn ends — by which point there is no active stream and
       // cmdSteer / cmdInterrupt say "No active task to stop."
+      // /stop must cancel the active run immediately instead of being steered
+      // or queued as the literal text "/stop" (#6951).
       if(text.startsWith('/')&&!literalSlash){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
-        if(_pc&&['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)){
+        if(_pc&&['steer','interrupt','queue','terminal','goal','yolo','stop'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
             $('msg').value='';autoResize();
@@ -1875,6 +1911,7 @@ async function send(){
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
+    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
@@ -2088,6 +2125,7 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
   // SSE events, so switching away during a quiet window (mid tool-exec, silent
@@ -4844,7 +4882,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    // #7680 re-gate (9/22): strip backtick wrappers so the bare-token
+    // match below sees a plain ``MEDIA:path`` and the bare class
+    // (no backtick in the exclusion set) captures the full filename
+    // even when the path itself contains a backtick.
+    const normalized = String(chunk).replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(normalized);
     const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
     if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
@@ -4892,23 +4935,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
+    // #7680 re-gate (9/22): strip backtick wrappers first so the bare
+    // class (no backtick in the exclusion set) captures the full
+    // filename even when the path itself contains a backtick.
+    // The pre-pass replaces `` `MEDIA:path` `` with ``MEDIA:path``
+    // so the wrapped form is consumed before the bare scan.
+    const normalized = combined.replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
-    while((m=re.exec(combined))){
+    while((m=re.exec(normalized))){
       const matchEnd = m.index + m[0].length;
       if(m.index>last){
-        const slice = combined.slice(last, m.index);
+        const slice = normalized.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
-        const candidate = combined.slice(m.index);
+      if(matchEnd===normalized.length && !_smdMediaRefHasReliableBoundary(m[1])){
+        const candidate = normalized.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
         } else {
           writeCurrent(candidate);
         }
-        last = combined.length;
+        last = normalized.length;
         break;
       }
       if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
@@ -4916,7 +4965,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
-    const rest = combined.slice(last);
+    const rest = normalized.slice(last);
     if(rest){
       const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
@@ -5744,12 +5793,82 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return true;
   }
 
+  function _bindSidebarIdleRecovery(live){
+    let pending=null;
+    live.cancelIdleRecovery=()=>{
+      if(pending&&pending.timer) clearTimeout(pending.timer);
+      pending=null;
+    };
+    live.recoverFromSidebarIdle=()=>{
+      if(pending||_streamFinalized||_terminalStateReached||_pendingStreamEndRecovery) return;
+      const request={inflight:INFLIGHT[activeSid],timer:null};
+      const isCurrent=()=>pending===request&&!_streamFinalized&&!_terminalStateReached&&
+        LIVE_STREAMS[activeSid]===live&&live.source.readyState===1&&
+        S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&
+        INFLIGHT[activeSid]===request.inflight&&
+        !(typeof _sendInProgress!=='undefined'&&_sendInProgress&&activeSid===_sendInProgressSid);
+      pending=request;
+      // Give the independently delivered terminal frame a short handoff window,
+      // then use canonical session recovery even if the transport stays OPEN.
+      // One ticket spans both timer and request; list refreshes cannot extend it.
+      request.timer=setTimeout(async()=>{
+        request.timer=null;
+        if(!isCurrent()){
+          if(pending===request) live.cancelIdleRecovery();
+          return;
+        }
+        try{
+          let runtimeStatus=null;
+          try{
+            runtimeStatus=await api(
+              `/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`,
+              {timeoutMs:8000,retries:0,timeoutToast:false}
+            );
+          }catch(_){
+            // Runtime ownership is authoritative here.  If the probe itself
+            // fails, do not infer completion from already-cleared session
+            // fields; surface the existing interrupted-stream path instead.
+            if(isCurrent()) _handleStreamError(live.source);
+            return;
+          }
+          if(!isCurrent()) return;
+          if(!runtimeStatus||typeof runtimeStatus.active!=='boolean'){
+            _handleStreamError(live.source);
+            return;
+          }
+          // Gateway success writeback clears persisted active/pending fields
+          // before post-turn goal evaluation and terminal event emission.
+          // STREAMS-backed status therefore owns this decision: an exact active
+          // runtime must keep its OPEN browser handoff even if the sidebar row
+          // already looks idle.
+          if(runtimeStatus.active) return;
+          const status=await _restoreSettledSession(live.source,{
+            status:true,
+            isCurrent,
+            requestOptions:{timeoutMs:8000,retries:0,timeoutToast:false},
+            preserveVisibleOnShorterTerminalSnapshot:true,
+          });
+          // A stale sidebar response is not permission to terminate a worker
+          // which the authoritative session snapshot still reports as active.
+          if(isCurrent()&&status!=='restored'&&status!=='active') _handleStreamError(live.source);
+        }finally{
+          if(pending===request) live.cancelIdleRecovery();
+        }
+      },1500);
+    };
+    for(const event of ['done','cancel','apperror','stream_end','error']){
+      live.source.addEventListener(event,live.cancelIdleRecovery);
+    }
+  }
+
   function _wireSSE(source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
+      if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+    _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -7023,13 +7142,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
+    const isCurrent=options&&typeof options.isCurrent==='function'?options.isCurrent:null;
+    if(isCurrent&&!isCurrent()) return returnStatus?'stale':false;
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`,options&&options.requestOptions||{});
+      if(isCurrent&&!isCurrent()) return returnStatus?'stale':false;
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -8127,7 +8249,22 @@ function _startHiddenActiveStreamPoll(sid) {
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
-        .then(r => r.ok ? r.json() : null)
+        .then(r => {
+          // #7299: 404 Not Found / 410 Gone are TERMINAL for this
+          // session-owned poll. The session has been deleted or no
+          // longer exists in the active state directory, so further
+          // polls are guaranteed to fail. Stop the poll immediately
+          // to avoid the infinite 404 loop on stale background tabs
+          // (one tab could fire ~10 such requests per minute; multiple
+          // tabs multiply the noise). Transient failures (5xx, rate
+          // limit, network error) keep polling — only the missing
+          // session itself is terminal.
+          if ((r.status === 404 || r.status === 410) && _sessionStreamHiddenPollSid === sid) {
+            _stopHiddenActiveStreamPoll();
+            return null;
+          }
+          return r.ok ? r.json() : null;
+        })
         .then(d => {
           if (!d || _sessionStreamHiddenPollSid !== sid) return;
           const streamId = d.active_stream_id;
@@ -8987,6 +9124,19 @@ async function respondClarify(response) {
     // not tear B down on A's late 409. The SSE/poll path will re-render the
     // next prompt's card from scratch via ``showClarifyCard`` either way.
     if (e && e.status === 409) {
+      // #7710: a cross-profile refusal now also arrives as 409
+      // (``session_profile_mismatch``). The prompt is NOT expired — the write
+      // was refused because the session belongs to another profile. Treating
+      // it as expired would hide a live clarification card and mislabel the
+      // cause, so leave the card standing and report the real reason.
+      if (typeof _sessionProfileMismatchFromError === 'function'
+          && _sessionProfileMismatchFromError(e)) {
+        _clarifySetControlsDisabled(false, false);
+        if (typeof setStatus === "function") {
+          setStatus("Clarify: session belongs to a different profile");
+        }
+        return;
+      }
       if (_clarifyId === clarifyId) {
         // Same card still showing — dismiss it and rescue the typed draft.
         // Order matters: ``_stashClarifyDraft`` (called from
