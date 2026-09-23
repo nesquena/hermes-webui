@@ -6271,9 +6271,12 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         pass
 
     # Fallback: try to materialize from CLI/agent session metadata.
-    # #7549: try active profile first, then all profiles when the all-profiles
-    # sidebar view is enabled — matches the archive handler pattern.
-    cli_meta = _resolve_cli_import_metadata(sid, allow_all_profiles=True)
+    # Active-profile-only: this helper is the shared chokepoint for rename,
+    # regenerate, update, move, prompts, chat-start and anchor scenes.
+    # Opening all-profiles here would let profile A materialize and mutate
+    # profile B's sessions.  The archive handler has its own request-scoped
+    # all-profiles path (#7549, #7731).
+    cli_meta = _resolve_cli_import_metadata(sid)
 
     # Delegated subagent children (#5307) are view-only: their transcript lives
     # in state.db and ownership belongs to the delegate runner, not WebUI. They
@@ -19849,12 +19852,30 @@ def handle_post(handler, parsed) -> bool:
                     SESSIONS[sid] = s
         except KeyError:
             # #7776: reuse the CLI identity captured before the lock — the
-            # lock-held reload can drop it. #7549: when the capture found
-            # nothing, resolve across all profiles — a session owned by a
-            # non-active profile is still archivable from the merged sidebar.
-            cli_meta = _archive_cli_meta or _resolve_cli_import_metadata(sid, allow_all_profiles=True)
+            # lock-held reload can drop it. #7549/#7731: cross-profile archive
+            # is only allowed when the request explicitly carries
+            # all_profiles=true AND a validated profile that matches the
+            # session's owning profile, so the materializer shared chokepoint
+            # cannot leak profile isolation.
+            _arch_allow_all = _request_wants_all_profiles_import(body)
+            _arch_profile = _normalize_import_profile_value((body or {}).get("profile"))
+            if _arch_allow_all and _is_isolated_profile_mode():
+                return bad(handler, "all_profiles archive is not allowed in isolated profile mode", 403)
+            cli_meta = _archive_cli_meta or _resolve_cli_import_metadata(
+                sid,
+                requested_profile=_arch_profile,
+                allow_all_profiles=_arch_allow_all,
+            )
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
+            # When the request carries an explicit profile but the resolved
+            # session belongs to a different one, return the #7710 contract
+            # (409 session_profile_mismatch) so the frontend can surface the
+            # conflict rather than silently mutating a foreign session.
+            if _arch_allow_all and _arch_profile:
+                _resolved_profile = cli_meta.get("profile")
+                if _resolved_profile and not _profiles_match(_resolved_profile, _arch_profile):
+                    return j(handler, {"error": "Session belongs to another profile", "code": "session_profile_mismatch"}, 409)
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
