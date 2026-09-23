@@ -561,6 +561,56 @@ class TestFrontendStatic:
         src = open("api/config.py").read()
         assert '"context_brief_auto": False' in src
 
+    def test_auto_refresh_poller_follows_server_auto_flag(self):
+        """Auto-regeneration is off by default: no browser poller at load.
+
+        The poller starts only when the server reports ``brief.auto.enabled``
+        and stops again when it is reported disabled; the manual refresh
+        button stays the default path.
+        """
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node is required for the auto-refresh gating harness")
+        src = open("static/panels.js").read()
+        start = src.index("// Refresh visible brief panels when the background worker")
+        end = src.index("\n// Banner shown", start)
+        block = src[start:end]
+        assert "_startContextBriefAutoRefresh();\n" not in block.replace(
+            "if (auto && auto.enabled === true) _startContextBriefAutoRefresh();", ""
+        )
+        script = """
+const vm = require('vm');
+const calls = {set: 0, clear: 0};
+const ctx = {
+  setInterval: () => { calls.set += 1; return 7; },
+  clearInterval: () => { calls.clear += 1; },
+  document: {querySelectorAll: () => []},
+};
+vm.createContext(ctx);
+vm.runInContext(BLOCK + "\\nthis.sync = _syncContextBriefAutoRefresh;", ctx);
+const out = [];
+out.push(calls.set);
+ctx.sync(undefined);
+ctx.sync({enabled: false});
+out.push(calls.set);
+ctx.sync({enabled: true});
+ctx.sync({enabled: true});
+out.push(calls.set);
+ctx.sync({enabled: false});
+out.push(calls.clear);
+ctx.sync({enabled: true});
+out.push(calls.set);
+console.log(JSON.stringify(out));
+""".replace("BLOCK", json.dumps(block))
+        proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+        # load: 0 timers; disabled: still 0; enabled twice: 1; disable: 1 clear; re-enable: 2
+        assert json.loads(proc.stdout.strip()) == [0, 0, 1, 1, 2]
+
     def test_switch_static_wiring(self):
         index = open("static/index.html").read()
         assert 'id="settingsContextBriefAuto"' in index
