@@ -6330,6 +6330,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                 if(S.session&&Array.isArray(S.session.gateway_routing_history))S.session.gateway_routing_history.push(d.usage.gateway_routing);
                 else if(S.session)S.session.gateway_routing_history=[d.usage.gateway_routing];
               }
+              if(typeof d.usage.used_model==='string'&&d.usage.used_model){
+                lastAsst._usedModel=d.usage.used_model;
+              }
+              if(typeof d.usage.used_provider==='string'&&d.usage.used_provider){
+                lastAsst._usedProvider=d.usage.used_provider;
+              }
+              // requested_model / requested_provider are only sent when the
+              // Agent reported a LOCAL fallback AND the normalized (provider,
+              // model) identity changed — the backend owns that verdict — so
+              // the footer can surface it live rather than after a reload.
+              if(typeof d.usage.requested_model==='string'&&d.usage.requested_model){
+                lastAsst._requestedModel=d.usage.requested_model;
+                if(typeof d.usage.requested_provider==='string'&&d.usage.requested_provider){
+                  lastAsst._requestedProvider=d.usage.requested_provider;
+                }
+              }
             }
           }
           _attachProjectedAnchorSceneToLastAssistant(S.messages);

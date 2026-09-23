@@ -9291,6 +9291,15 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_turnUsage",
     "_firstTokenMs",
     "_usedModel",
+    # Provider that actually served the turn (post-run agent.provider), the
+    # provider half of the _usedModel identity.
+    "_usedProvider",
+    # Requested (provider, model) identity, stamped only when the Agent reports
+    # a LOCAL fallback AND the normalized identity differs from the served one.
+    # Display-only, like the keys around it: must survive the sidecar/state.db
+    # merge or the footer notice would vanish on reload.
+    "_requestedModel",
+    "_requestedProvider",
     "_gatewayRouting",
     "_statusCard",
     "_anchor_stream_id",
