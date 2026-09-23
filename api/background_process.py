@@ -1267,13 +1267,18 @@ def _resolve_completion_target(
 
 
 def _canonical_wakeup_session_id(session_id: str) -> str:
-    """Resolve an archived WebUI origin to its canonical live compression tip.
+    """Resolve a compression-sealed WebUI origin to its resumable continuation.
 
     ``origin_ui_session_id`` remains the authority for cross-tab ownership, but
-    compression intentionally seals that concrete session id. SessionDB is the
-    authority for the successor: its chain resolver excludes branch,
-    delegate/subagent, and tool children. The selected tip must still be live
-    before WebUI starts the wakeup turn.
+    compression intentionally seals that concrete session id.  SQLite owns the
+    lineage: reuse the same read-only resolver as ``/api/chat/start``
+    (``durable_compression_continuation``), which pins the snapshot's own
+    profile (``None``/empty -> explicit ``default``, never the TLS or
+    process-global profile), follows ``get_compression_tip()`` and excludes
+    branch, delegate/subagent and tool children.  A sealed origin without a
+    resumable tip, or a sidecar-only snapshot that SQLite cannot confirm, fails
+    closed so the caller's drop/retry path runs instead of writing into the
+    sealed parent.
     """
     target = str(session_id or "")
     if not target:
@@ -1284,8 +1289,9 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
 
         session = _get_or_materialize_session(target, refresh_cli_messages=False)
     except Exception:
-        # Without a snapshot there is no profile fallback to authorize: retain
-        # the historical exact-ID path for ordinary live/legacy sessions.
+        # Without a snapshot there is no profile owner to authorize a lineage
+        # lookup: retain the historical exact-ID path.
+        logger.debug("process wakeup keeps exact origin %s (no snapshot)", target, exc_info=True)
         return target
 
     resolved_session_id = str(getattr(session, "session_id", "") or "")
@@ -1298,55 +1304,34 @@ def _canonical_wakeup_session_id(session_id: str) -> str:
         )
         return ""
 
-    if not getattr(session, "pre_compression_snapshot", False):
-        return target
-
-    # This runs on a background completion thread, where profile=None would
-    # select state_sync's TLS/process-global fallback.  Legacy/default WebUI
-    # sidecars legitimately store None or "", so pin those values to the
-    # explicit root-profile alias instead of risking a named profile's DB.
-    profile = str(getattr(session, "profile", "") or "") or "default"
-    db = None
     try:
-        from api.state_sync import _get_state_db
+        from api.compression_continuation import durable_compression_continuation
 
-        db = _get_state_db(profile=profile)
-        if db is None:
-            logger.warning(
-                "process wakeup cannot resolve archived session %s: state.db unavailable",
-                target,
-            )
-            return ""
-
-        tip = str(db.get_compression_tip(target) or "")
-        if not tip or tip == target:
-            logger.warning(
-                "process wakeup cannot resolve archived session %s: no durable continuation",
-                target,
-            )
-            return ""
-        row = db.get_session(tip)
-        if not row or row.get("ended_at") is not None:
-            logger.warning(
-                "process wakeup cannot resolve archived session %s: tip %s is not live",
-                target,
-                tip,
-            )
-            return ""
-        return tip
+        sealed, tip = durable_compression_continuation(session)
     except Exception:
         logger.warning(
             "process wakeup compression-lineage resolution failed for session %s",
             target,
             exc_info=True,
         )
+        sealed, tip = False, None
+
+    if sealed:
+        tip = str(tip or "")
+        if not tip or tip == target:
+            logger.warning(
+                "process wakeup cannot resolve compressed session %s: no resumable continuation",
+                target,
+            )
+            return ""
+        return tip
+    if getattr(session, "pre_compression_snapshot", False):
+        logger.warning(
+            "process wakeup cannot resolve archived session %s: no durable continuation",
+            target,
+        )
         return ""
-    finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:
-                logger.debug("state.db close failed after wakeup routing", exc_info=True)
+    return target
 
 
 def _process_one(evt: dict) -> None:
