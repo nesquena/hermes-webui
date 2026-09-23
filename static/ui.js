@@ -605,6 +605,8 @@ function clearVisibleMessageRowCache(){
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
   _visWithIdxCacheSrc=null;
+  // In-place content edits keep (reference, length): drop the silent-turn memo too.
+  if(typeof _silentWakeupTurnHiddenIdxs==='function') _silentWakeupTurnHiddenIdxs.memo=null;
 }
 function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCache=[];
@@ -653,21 +655,74 @@ function _messageIsRenderable(m){
   const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
+// Silent wakeup turns: an agent woken by a background process may answer with
+// exactly the [[SILENT]] sentinel to acknowledge it without speaking to the
+// user. Such a turn (the process_wakeup row, its assistant/tool rows and the
+// sentinel reply) collapses at render time. Contract:
+// - only turns opened by a process_wakeup row are eligible;
+// - the turn's FINAL assistant reply must be exactly the sentinel after trim;
+//   prose that merely contains the token is never collapsed;
+// - render-only: S.messages and persisted history are never mutated, and the
+//   collapsed rows stay a real turn boundary (_hasHiddenProcessWakeupBoundaryBefore).
+function _isSilentWakeupSentinelReply(m){
+  if(!m||m.role!=='assistant') return false;
+  return String(msgContent(m)??'').trim()==='[[SILENT]]';
+}
+function _computeSilentWakeupTurnIdxs(messages){
+  const hidden=new Set();
+  const msgs=Array.isArray(messages)?messages:[];
+  let turn=null;
+  const close=()=>{
+    if(turn&&turn.lastAssistantIdx>=0&&_isSilentWakeupSentinelReply(msgs[turn.lastAssistantIdx])){
+      for(const idx of turn.idxs) hidden.add(idx);
+    }
+    turn=null;
+  };
+  for(let idx=0;idx<msgs.length;idx++){
+    const m=msgs[idx];
+    if(!m||typeof m!=='object') continue;
+    if(m.role==='user'){
+      close();
+      if(m._source==='process_wakeup') turn={idxs:[idx],lastAssistantIdx:-1};
+      continue;
+    }
+    if(!turn) continue;
+    turn.idxs.push(idx);
+    if(m.role==='assistant') turn.lastAssistantIdx=idx;
+  }
+  close();
+  return hidden;
+}
+// Memoized on the (reference, length) key of the visible-row cache: the
+// hidden-boundary probe runs once per visible assistant row in several render
+// loops, so recomputing the O(n) scan per call would make each render O(n^2).
+function _silentWakeupTurnHiddenIdxs(){
+  const msgs=S.messages||[];
+  const memo=_silentWakeupTurnHiddenIdxs.memo;
+  if(memo&&memo.src===msgs&&memo.len===msgs.length) return memo.idxs;
+  const idxs=_computeSilentWakeupTurnIdxs(msgs);
+  _silentWakeupTurnHiddenIdxs.memo={src:msgs,len:msgs.length,idxs};
+  return idxs;
+}
 function _hasHiddenProcessWakeupBoundaryBefore(rawIdx){
-  if(window._showBackgroundWakeups!==false) return false;
+  const wakeupsHidden=window._showBackgroundWakeups===false;
+  const silent=_silentWakeupTurnHiddenIdxs();
+  if(!wakeupsHidden&&!silent.size) return false;
   for(let idx=Number(rawIdx)-1;idx>=0;idx--){
     const previous=(S.messages||[])[idx];
-    if(previous&&previous._source==='process_wakeup') return true;
+    if(previous&&previous._source==='process_wakeup'&&(wakeupsHidden||silent.has(idx))) return true;
+    if(silent.has(idx)) continue;
     if(_messageIsRenderable(previous)) return false;
   }
   return false;
 }
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
+    const silent=_silentWakeupTurnHiddenIdxs();
     const rebuilt=[];
     let rawIdx=0;
     for(const m of (S.messages||[])){
-      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+      if(!silent.has(rawIdx)&&_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
       rawIdx++;
     }
     _visWithIdxCache=rebuilt;

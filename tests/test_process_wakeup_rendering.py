@@ -73,6 +73,9 @@ const heightStart = src.indexOf('const MESSAGE_RENDER_WINDOW_DEFAULT');
 const heightEnd = src.indexOf('const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS', heightStart);
 if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd));
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
+for(const name of ['_isSilentWakeupSentinelReply', '_computeSilentWakeupTurnIdxs', '_silentWakeupTurnHiddenIdxs']){
+  if(src.indexOf('function ' + name) !== -1) eval(extractFunc(name));
+}
 if(src.indexOf('function _hasHiddenProcessWakeupBoundaryBefore') !== -1) eval(extractFunc('_hasHiddenProcessWakeupBoundaryBefore'));
 function _assistantVisibleContentForReasoningCompare(m){ return String((m && m.content) || ''); }
 eval(extractFunc('_assistantTurnFinalVisibleContentMap'));
