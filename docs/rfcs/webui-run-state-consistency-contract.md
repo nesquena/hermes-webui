@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-08-22
+- **Updated:** 2026-09-23
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -206,6 +206,21 @@ and 5; it does not mark every run-state boundary implemented.
    and idempotent.
    Agent state.db alone cannot restore the original attachment if the WebUI
    sidecar is lost.
+   Server-owned process-wakeup turns carry a complete Agent-persisted provenance
+   pair: `display_kind="process_wakeup"` and a non-empty
+   `display_metadata.delivery_id` derived from the accepted WebUI stream. WebUI
+   passes those optional persistence fields only when the Agent
+   `run_conversation` signature supports them; older Agent builds keep their
+   existing call contract, and their state rows must not gain wake authority
+   from user-controlled text. Display projection may mark a row as
+   `_source="process_wakeup"` only from the complete durable pair.
+   Sidecar/`state.db` reconciliation deduplicates process wakeups by
+   `delivery_id`. It may transfer the durable pair to a sidecar row only for the
+   same delivery, compatible durable state-row identity, or exact role, content,
+   and full-precision timestamp, and only when the target has no partial or
+   conflicting provenance. If transfer is rejected, preserve the sidecar row
+   unchanged and keep the authoritative `state.db` wake as a distinct row;
+   different non-empty delivery IDs must never consume one another.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
