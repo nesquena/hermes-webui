@@ -120,6 +120,10 @@ def _run_drag_probe(steps: list[dict]) -> dict:
     payload = {
         "guard": constants + "\n" + _function_source("_isMessageTailJitter"),
         "dragHelpers": drag_helpers,
+        "resetHelpers": "\n".join(
+            _function_source(name)
+            for name in ("_resetScrollDirectionTracker", "_resetStreamScrollFollow")
+        ),
         "listener": _message_scroll_listener_source(),
         "steps": steps,
     }
@@ -169,12 +173,18 @@ let _messageUserUnpinned=false;
 let _newMessageCueVisible=false;
 let _lastMessageKeyScrollIntentMs=-Infinity;
 let _lastMessageScrollIntentMs=-Infinity;
+let _lastMessageWheelIntentMs=-Infinity;
+let _lastMessageTouchScrollIntentMs=-Infinity;
+let _messageTouchScrollActive=false;
+let _touchStartY=null;
+let _deferredOlderMessagesTimer=0;
 const noop=()=>{};
 const _scheduleMessageVirtualizedRender=noop;
 const _scheduleMessageJumpScrollReconcile=noop;
 const _freshProgrammaticScrollActive=()=>false;
 const _markMessageVirtualScrollActive=noop;
 const _cancelBottomSettle=noop;
+const _cancelMessageJumpScroll=noop;
 const _clearNewMessageScrollCue=noop;
 const _syncScrollToBottomCue=noop;
 const _updateSessionStartJumpButton=noop;
@@ -190,6 +200,7 @@ const _recentMessageWheelIntent=()=>false;
 const _recentMessageKeyScrollIntent=()=>false;
 eval(payload.guard);
 eval(payload.dragHelpers);
+eval(payload.resetHelpers);
 eval(payload.listener);
 
 const snapshots={};
@@ -208,6 +219,15 @@ for(const step of payload.steps){
     if(typeof step.clientX==='number') event.clientX=step.clientX;
     elHandlers.pointerdown(event);
   }else if(step.op==='scrollTop'){ el.scrollTop=step.value; }
+  else if(step.op==='seed'){
+    _lastScrollTop=el.scrollTop;
+    _lastMessageClientHeight=el.clientHeight;
+  }
+  else if(step.op==='reset'){
+    if(step.name==='_resetScrollDirectionTracker') _resetScrollDirectionTracker();
+    else if(step.name==='_resetStreamScrollFollow') _resetStreamScrollFollow();
+    else throw new Error('unknown reset '+step.name);
+  }
   else if(step.op==='pointerup'){ windowHandlers.pointerup(); }
   else if(step.op==='pointercancel'){ windowHandlers.pointercancel(); }
   else if(step.op==='scroll'){ elHandlers.scroll(); }
@@ -492,12 +512,34 @@ def test_pending_drag_scroll_after_release_owns_intent_then_render_nudge_cannot(
 
 
 @pytest.mark.parametrize("reset", ["_resetScrollDirectionTracker", "_resetStreamScrollFollow"])
-def test_scrollbar_drag_intent_latch_is_cleared_by_scroll_ownership_resets(reset):
-    source = _function_source(reset)
-    assert "_scrollbarDragActive=false;" in source
-    assert "_scrollbarDragIntentQueued=false;" in source
-    assert "_scrollbarDragIntentUntil=-Infinity;" in source
-    assert "_scrollbarDragObservedTop=null;" in source
+@pytest.mark.parametrize("pending_intent", ["stamp", "queued_frame"])
+def test_scroll_ownership_resets_prevent_drag_intent_leaking(reset, pending_intent):
+    """Session/stream ownership changes discard both undelivered drag stamps and
+    drag intent already queued for classification. A no-input tail nudge in the
+    new owner must therefore remain jitter instead of unpinning the reader."""
+    steps = [{"op": "pointerdown", "offsetX": 800}]
+    if pending_intent == "queued_frame":
+        steps.extend(
+            [
+                {"op": "scrollTop", "value": 6492},
+                {"op": "scroll"},  # queues old owner's drag classification
+            ]
+        )
+    steps.extend(
+        [
+            {"op": "reset", "name": reset},
+            # Session loading/programmatic placement seeds the new owner's tail.
+            {"op": "scrollTop", "value": 6500},
+            {"op": "seed"},
+            # Browser-only 8px layout nudge: no scrollbar input in this owner.
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    result = _run_drag_probe(steps)
+    assert result["state"]["_scrollPinned"] is True
+    assert result["state"]["_messageUserUnpinned"] is False
 
 
 @pytest.mark.parametrize("intent", ["wheel", "touch", "key", "scrollbar", "nonMessage"])
