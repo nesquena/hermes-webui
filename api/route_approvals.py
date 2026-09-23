@@ -2,6 +2,24 @@
 
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
+
+Gateway approvals carry two pieces of state with one lifecycle:
+
+* the **producer** entry in ``tools.approval._gateway_queues`` — the queued
+  approval itself, which owns the lifecycle; and
+* the **mirror** entry in ``_pending`` — this module's projection of that
+  producer for the UI.
+
+A producer is consumed only by an explicit settlement operation, which assigns
+its result and signals its waiter before fallible projection work begins.
+``retire_gateway_pending_mirror`` cleans up the UI projection; it must not
+silently delete a producer, because that would strand the agent thread parked
+on the producer's event. For a provider-qualified response,
+``resolve_gateway_pending_run`` matches the exact ``(run_id, approval_id)``
+pair, settles that producer, and preserves same-run siblings and other runs.
+When a run becomes terminal, ``settle_gateway_pending_run`` fail-closes every
+producer owned by that run with ``deny`` before retiring its mirrors; producers
+owned by another run remain live.
 """
 import queue
 import threading
@@ -265,6 +283,23 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
             live_local_tokens.add(live_entry_token)
             if not str(live_data.get("approval_id") or "").strip():
                 live_data["approval_id"] = f"gwlocal:{live_entry_token}"
+
+    # A raw id-less LOCAL entry in `_pending` (agent-side _pending_result drops
+    # `{command, pattern_key, pattern_keys, description}` verbatim when no
+    # gateway notifier is registered) is unactionable by contract: the frontend
+    # owner-capture requires an approval_id, so its card can neither be
+    # approved nor dismissed — the poll re-serves it forever. Mint a stable id
+    # on the entry itself (the same contract the producer-tokenization loop
+    # above applies to _gateway_queues producers). Minting on the stored dict
+    # keeps the id stable across polls, so frontend dismiss markers persist.
+    for entry in queue_list:
+        if not isinstance(entry, dict) or _is_gateway_mirror_entry(entry):
+            continue
+        if str(entry.get("approval_id") or "").strip():
+            continue
+        if str(entry.get("run_id") or "").strip():
+            continue
+        entry["approval_id"] = f"gwlocal-mirrorless:{uuid.uuid4().hex}"
     live_token = (
         _gateway_mirror_entry_token(live_head_entry)
         if live_head_entry and live_head_data
@@ -500,21 +535,26 @@ def release_gateway_approval_relay_owner(session_key: str, run_id: str, approval
         _gateway_relay_owners.pop(key, None)
 
 
+def _settle_gateway_entry(entry, choice: str, reason: str | None = None) -> None:
+    """Complete a removed producer before any fallible projection work."""
+    entry.result = choice
+    if reason:
+        entry.reason = reason
+    entry.event.set()
+
+
 def retire_gateway_pending_mirror(
     session_key: str,
     approval_id: str = "",
     run_id: str = "",
     mirror_token: str = "",
 ) -> bool:
-    """Retire one approval, or every mirror for a terminal run."""
+    """Retire one approval mirror, or every mirror for a terminal run."""
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_key)
         queue = _pending.get(session_key)
         entries = queue if isinstance(queue, list) else [queue] if queue else []
         normalized_run_id = str(run_id or "").strip()
-        gateway_queue = _gateway_queues.get(session_key) or []
-        retained_gateway_queue = gateway_queue
-        gateway_queue_changed = False
         if approval_id:
             match = _gateway_pending_mirror_locked(
                 session_key,
@@ -564,11 +604,6 @@ def retire_gateway_pending_mirror(
             return changed
         for match in retired:
             entries.remove(match)
-        if normalized_run_id and not approval_id:
-            if retained_gateway_queue:
-                _gateway_queues[session_key] = retained_gateway_queue
-            else:
-                _gateway_queues.pop(session_key, None)
         if entries:
             _pending[session_key] = entries
         else:
@@ -577,6 +612,60 @@ def retire_gateway_pending_mirror(
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_resolved")
     return True
+
+
+def settle_gateway_pending_run(
+    session_key: str,
+    run_id: str,
+    *,
+    reason: str,
+) -> tuple[int, dict | None, int]:
+    """Fail-close every producer and mirror owned by a terminal gateway run."""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return 0, None, 0
+
+    targets = []
+    with _lock:
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            if str(data.get("run_id") or "").strip() == run_id:
+                targets.append(entry)
+            else:
+                retained_gateway_queue.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+
+        # Removal and waiter settlement are one semantic operation. In
+        # particular, reconciliation and SSE notification below may raise.
+        for entry in targets:
+            _settle_gateway_entry(entry, "deny", reason)
+
+        queue = _pending.get(session_key)
+        entries = queue if isinstance(queue, list) else [queue] if queue else []
+        retained_pending = [
+            entry
+            for entry in entries
+            if not (
+                _is_gateway_mirror_entry(entry)
+                and str(entry.get("run_id") or "").strip() == run_id
+            )
+        ]
+        mirrors_retired = len(retained_pending) != len(entries)
+        if retained_pending:
+            _pending[session_key] = retained_pending
+        else:
+            _pending.pop(session_key, None)
+
+        head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    if targets or mirrors_retired or changed:
+        publish_session_list_changed("attention_resolved")
+    return len(targets), head, total
 
 
 def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str | None:
@@ -810,14 +899,50 @@ def resolve_gateway_pending_local(
             _gateway_queues[session_key] = gateway_queue
         else:
             _gateway_queues.pop(session_key, None)
+        if target is not None:
+            _settle_gateway_entry(target, choice, reason)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
     if target is None:
         return 0, head, total
-    target.result = choice
-    if reason:
-        target.reason = reason
-    target.event.set()
+    publish_session_list_changed("attention_resolved")
+    return 1, head, total
+
+
+def resolve_gateway_pending_run(
+    session_key: str,
+    approval_id: str,
+    run_id: str,
+    choice: str,
+    reason: str | None = None,
+) -> tuple[int, dict | None, int]:
+    """Resolve one exact run-backed producer and wake its parked waiter."""
+    target = None
+    approval_id = str(approval_id or "").strip()
+    run_id = str(run_id or "").strip()
+    if not approval_id or not run_id:
+        return 0, None, 0
+    with _lock:
+        gateway_queue = _gateway_queues.get(session_key) or []
+        retained_gateway_queue = []
+        for entry in gateway_queue:
+            data = getattr(entry, "data", None) or {}
+            entry_approval_id = str(data.get("approval_id") or "").strip()
+            entry_run_id = str(data.get("run_id") or "").strip()
+            if target is None and entry_approval_id == approval_id and entry_run_id == run_id:
+                target = entry
+            else:
+                retained_gateway_queue.append(entry)
+        if retained_gateway_queue:
+            _gateway_queues[session_key] = retained_gateway_queue
+        else:
+            _gateway_queues.pop(session_key, None)
+        if target is not None:
+            _settle_gateway_entry(target, choice, reason)
+        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    if target is None:
+        return 0, head, total
     publish_session_list_changed("attention_resolved")
     return 1, head, total
 
@@ -862,12 +987,9 @@ def resolve_gateway_pending_local_no_run_mirror(
             _pending[session_key] = entries
         else:
             _pending.pop(session_key, None)
+        _settle_gateway_entry(target, choice, reason)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
-    target.result = choice
-    if reason:
-        target.reason = reason
-    target.event.set()
     publish_session_list_changed("attention_resolved")
     return True, 1, head, total
 
@@ -910,14 +1032,11 @@ def resolve_gateway_pending_local_all(
         else:
             _pending.pop(session_key, None)
 
+        for entry in targets:
+            _settle_gateway_entry(entry, choice, reason)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
 
-    for entry in targets:
-        entry.result = choice
-        if reason:
-            entry.reason = reason
-        entry.event.set()
     if targets or removed_pending:
         publish_session_list_changed("attention_resolved")
     return len(targets), head, total

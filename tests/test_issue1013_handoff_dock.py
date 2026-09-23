@@ -620,6 +620,25 @@ def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
     import api.models as models
     import api.routes as routes
 
+    if provider.startswith("custom:"):
+        # A named ``custom:<slug>`` route is identity-owned: the endpoint comes
+        # from the record that names the slug, and a route no record owns fails
+        # closed (#1806). ``resolve_model_provider`` only ever returns this
+        # provider/base_url pair BECAUSE such a row exists, so the fixture must
+        # carry it — otherwise the handler is handed a connection with no
+        # authority behind it and falls back before reaching the Codex path.
+        monkeypatch.setitem(
+            cfg.cfg,
+            "custom_providers",
+            [
+                {
+                    "name": provider.split(":", 1)[1],
+                    "base_url": base_url,
+                    "api_key": "handoff-summary-key",
+                }
+            ],
+        )
+
     if expects_normalized_base_url:
         real_urlsplit = routes.urlsplit
 
