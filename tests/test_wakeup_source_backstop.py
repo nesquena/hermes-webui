@@ -7,6 +7,8 @@ import sqlite3
 import textwrap
 import types
 
+import pytest
+
 import api.models as models
 import api.streaming as streaming
 from api.models import (
@@ -127,8 +129,9 @@ def test_merge_never_combines_partial_provenance_into_trusted_pair():
     before = dict(sidecar)
     state = _wake("delivery-1", timestamp=1)
 
-    assert merge_session_messages_append_only([sidecar], [state]) == [sidecar]
+    assert merge_session_messages_append_only([sidecar], [state]) == [sidecar, state]
     assert sidecar == before
+    assert state["_source"] == "process_wakeup"
 
 
 def test_distinct_delivery_ids_never_deduplicate_even_with_identical_text():
@@ -495,3 +498,47 @@ def test_mixed_sub_second_timestamp_mismatch_does_not_transfer_provenance(
 
     _assert_browser_row_untouched(merged, browser, before)
     assert _delivery_ids(merged) == ["delivery-1"]
+
+
+@pytest.mark.parametrize(
+    "existing_provenance",
+    [
+        {"display_kind": "process_wakeup"},
+        {
+            "display_kind": "other",
+            "display_metadata": {"delivery_id": "sidecar-conflict"},
+        },
+    ],
+    ids=("partial", "conflicting"),
+)
+def test_mixed_rejected_provenance_transfer_keeps_authoritative_wake(
+    tmp_path,
+    monkeypatch,
+    existing_provenance,
+):
+    """A rejected exact-pair transfer must fail closed without dropping state.db."""
+    sidecar = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.25,
+        **existing_provenance,
+    }
+    before = json.loads(json.dumps(sidecar))
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [sidecar],
+        [_wake("delivery-authoritative", timestamp=100.25)],
+    )
+
+    assert len(merged) == 4
+    assert merged[2] is sidecar
+    assert sidecar == before
+    authoritative = [
+        msg
+        for msg in merged
+        if models._trusted_wakeup_delivery_id(msg) == "delivery-authoritative"
+    ]
+    assert len(authoritative) == 1
+    assert authoritative[0]["_source"] == "process_wakeup"

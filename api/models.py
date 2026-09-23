@@ -11945,12 +11945,13 @@ def _merge_session_messages_append_only_impl(
         if wakeup_delivery_id:
             # Trusted wake pairing must run before fuzzy replay paths.
             wake_target = _wakeup_pair_target(msg, wakeup_delivery_id)
-            if wake_target is not None:
+            if wake_target is not None and _transfer_wakeup_provenance(
+                wake_target, msg
+            ):
                 wakeup_paired_targets.add(id(wake_target))
                 if _session_message_api_content_key(wake_target) is None:
                     _copy_api_content_sidecar(wake_target, msg)
                 _merge_session_display_metadata(wake_target, msg)
-                _transfer_wakeup_provenance(wake_target, msg)
                 _remember_wakeup_delivery(wake_target)
                 if (
                     state_replay_idx < len(sidecar_visible_messages)
