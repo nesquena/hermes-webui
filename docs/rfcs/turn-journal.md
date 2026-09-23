@@ -188,6 +188,32 @@ appending a duplicate. The matching rules are identity-scoped, not content-only:
   token, no pending metadata — e.g. lazy retry after reopen) accepts the
   boundary-bounds check as proof so a retry does not re-append the persisted
   card.
+- **Tool-card matches are consumed one-to-one.** `_find_journal_tool_match()`
+  (`_journal_tool_already_present()` is its bool wrapper) returns the index of
+  the single existing card one journal event consumes, and the replay loop
+  records every index it consumed
+  (`consumed_tool_card_indexes`). A consumed card is skipped by later events on
+  the same pass, so N identical journaled tool calls require N distinct
+  persisted cards; the surplus appends. Without that bookkeeping one persisted
+  card absorbed every identical journal event (observed with a persisted
+  `terminal: running` card) and the surplus journaled calls vanished.
+- **A tokenless row that fully matches the checkpoint IS the current turn.**
+  `_pending_recovery_turn_start()` routes every row — tokened or not — through
+  the shared `_message_owns_current_turn()` predicate (active-turn token first,
+  then the full pending checkpoint: text + exact full-precision timestamp +
+  source + attachments). An explicit token conflict remains authoritative
+  negative evidence, but a checkpoint-identical tokenless row must not be
+  rejected merely because the session carries a token; rejecting it made
+  `_materialize_unsaved_gateway_terminal_error()` duplicate the current turn.
+- **Only an explicitly same-stream marker may be reused.** When repair decides
+  whether an existing interruption marker can stand in for the one it is about
+  to write, `_marker_reuse_index()` requires the marker's recorded stream id
+  (`_journal_retry_stream_id` or `_recovered_stream_id`) to equal
+  `str(stream_id)`. An identity-less marker — a legacy marker written before
+  stream tagging, or a demoted retry marker whose retry meta was stripped —
+  proves nothing about ownership, so reusing it for the current stream appended
+  no notice of its own and the user lost the only signal for THIS stream's
+  interruption.
 
 These rules exist to keep one assistant-turn owner per recovered turn: dedupe
 must never consume the current turn's recovered content, and failure to prove

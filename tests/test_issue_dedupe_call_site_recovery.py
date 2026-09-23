@@ -841,3 +841,199 @@ def test_repeated_repair_does_not_accumulate_reload_markers(hermes_home):
         f"SILENT 2: {len(error_markers)} error markers accumulated over 3 "
         f"repair cycles (expected <= 1)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-09-23 ~10:27Z (nesquena-hermes) — three SILENT findings + regressions:
+#   SILENT 1: the marker-reuse loops in _apply_core_sync_or_error_marker accepted
+#             an older UNTAGGED interruption marker (no _recovered_stream_id and
+#             no _journal_retry_stream_id) as belonging to the stream being
+#             repaired, so a repair for stream B reused stream A's marker and
+#             appended no notice of its own.
+#   SILENT 2: _pending_recovery_turn_start() rejected a TOKENLESS current-turn
+#             user row whenever the session had an authoritative token, even when
+#             that row fully matches the pending checkpoint. The current turn was
+#             duplicated by _materialize_unsaved_gateway_terminal_error().
+#   SILENT 3: one existing tool card satisfied every identical journal tool
+#             event: _journal_tool_already_present() returning True consumed no
+#             evidence, so two journaled 'tool' events against a single persisted
+#             'terminal: running' card dropped one.
+# ---------------------------------------------------------------------------
+
+
+def test_untagged_interruption_marker_is_not_reused_across_streams(hermes_home):
+    """SILENT 1: an identity-less legacy marker must never be reused as the
+    current stream's marker — the repair must append its own notice.
+
+    The branch under test is the messages-non-empty one, whose marker-reuse
+    loop scans ``session.messages`` directly (it does not reload the core
+    transcript — that is the empty-messages core-sync branch). Seeding the
+    session with the legacy marker keeps the repair in the non-empty branch.
+    """
+    sid = "regate_untagged_marker"
+    stream_id = "regate-untagged-marker-stream"
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 333},
+            {"role": "assistant", "content": "current answer", "timestamp": 334},
+            # LEGACY SHAPE: interruption marker with no stream identity at all
+            # (pre-`_recovered_stream_id`, or a demoted retry marker whose
+            # retry meta was stripped by the lazy-retry give-up path).
+            {
+                "role": "assistant",
+                "content": (
+                    "**Response interrupted.**\n\n"
+                    "The live response stream stopped before this turn finished. "
+                    "The user message above was preserved, but no agent output "
+                    "was recovered."
+                ),
+                "timestamp": 335,
+                "_error": True,
+                "type": "interrupted",
+            },
+        ],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 333
+    session.pending_user_source = None
+
+    core_path = hermes_home / "sessions" / f"session_{sid}.json"
+
+    result = _apply_core_sync_or_error_marker(
+        session,
+        core_path,
+        stream_id_for_recheck=stream_id,
+        require_stream_dead=False,
+    )
+    assert result is True
+
+    # A marker for THIS stream must exist. The untagged legacy marker cannot
+    # stand in for it, so recovery must append its own stream-tagged marker.
+    this_stream_markers = [
+        m
+        for m in session.messages
+        if isinstance(m, dict)
+        and m.get("_error")
+        and m.get("type") == "interrupted"
+        and m.get("_recovered_stream_id") == stream_id
+    ]
+    assert this_stream_markers, (
+        f"SILENT 1: recovery reused the identity-less marker and appended no "
+        f"notice for stream {stream_id!r} (markers={session.messages!r})"
+    )
+    # The legacy marker itself must be left untouched (different stream's
+    # notice still needs its own marker, and identity-less ones never
+    # provide reuse).
+    legacy_markers = [
+        m
+        for m in session.messages
+        if isinstance(m, dict)
+        and m.get("_error")
+        and m.get("type") == "interrupted"
+        and not m.get("_recovered_stream_id")
+    ]
+    assert len(legacy_markers) == 1, (
+        f"the pre-existing identity-less marker must survive untouched "
+        f"(legacy markers={legacy_markers!r})"
+    )
+
+
+def test_tokenless_fully_matching_checkpoint_row_is_current_turn(hermes_home):
+    """SILENT 2: a tokenless row that fully matches the pending checkpoint must
+    be accepted as the current turn — the current-turn row must not be
+    duplicated by terminal-error materialization."""
+    from api.models import _pending_recovery_turn_start
+
+    sid = "regate_tokenless_checkpoint"
+    stream_id = "regate-tokenless-stream"
+    append_run_event(sid, stream_id, "token", {"text": "partial answer"})
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "earlier turn", "timestamp": 100},
+            {"role": "assistant", "content": "earlier reply", "timestamp": 101},
+        ],
+    )
+    # Authoritative session token exists (active_stream_id + pending_started_at),
+    # but the materialized current-turn user row is TOKENLESS (legacy shape).
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_started_at = 500.9
+    session.pending_attachments = []
+    session.pending_user_source = None
+    session.messages.append(
+        {
+            "role": "user",
+            "content": "run the check",
+            "timestamp": 500.9,
+            "_recovered": True,
+        }
+    )
+
+    turn_start = _pending_recovery_turn_start(session)
+    assert turn_start == len(session.messages) - 1, (
+        f"SILENT 2: tokenless fully-matching checkpoint row rejected as the "
+        f"current turn (turn_start={turn_start!r}, messages={session.messages!r})"
+    )
+
+
+def test_two_identical_journal_tool_events_consume_two_cards(hermes_home):
+    """SILENT 3: one existing tool card must satisfy exactly ONE journal tool
+    event — two identical journaled calls against a single persisted
+    ``terminal: running`` card must yield two cards, not one."""
+    sid = "regate_two_identical_tools"
+    stream_id = "regate-two-tools-stream"
+    # Two identical journaled tool calls (the 'terminal: running' re-issue
+    # shape: the same command was journaled twice inside one dead turn).
+    append_run_event(sid, stream_id, "token", {"text": "listing."})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls"})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls"})
+
+    # Prior recovery pass persisted ONE card anchored at the current turn's
+    # assistant row (production shape: untagged, anchor owned by this turn).
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 222},
+            {"role": "assistant", "content": "listing.", "timestamp": 223},
+        ],
+    )
+    session.tool_calls = [
+        {
+            "name": "terminal",
+            "preview": "ls",
+            "snippet": "ls",
+            "assistant_msg_idx": 1,
+            "done": True,
+        }
+    ]
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_started_at = 222
+    session.pending_attachments = []
+    session.pending_user_source = None
+    session.save()
+
+    from api.models import _append_journaled_partial_output
+
+    _append_journaled_partial_output(session, stream_id, dedupe_existing=True)
+
+    recovered = [
+        tc
+        for tc in (session.tool_calls or [])
+        if tc.get("name") == "terminal"
+    ]
+    # One existing card consumes the first journal event; the second event has
+    # no unconsumed card to dedupe against, so it must append.
+    assert len(recovered) == 2, (
+        f"SILENT 3: one existing card absorbed multiple identical journal "
+        f"events (cards={recovered!r})"
+    )
