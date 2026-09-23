@@ -6515,6 +6515,12 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .cron-run-section-label{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
 .cron-run-context-disclosure{margin-top:4px;border:1px solid var(--border-subtle);border-radius:6px;padding:4px 8px;background:var(--surface-subtle);}
 .cron-run-context-disclosure>summary{cursor:pointer;font-size:11px;color:var(--text-secondary);list-style:none;outline:none;user-select:none;}
+/* #7303 re-gate 9/21 (accessibility): the disclosure removed its
+   only focus indicator. Re-add a visible focus-visible ring using
+   the same pattern the rest of the stylesheet already uses for
+   custom controls. Mouse focus stays invisible (``outline:none``);
+   keyboard focus paints the ring. */
+.cron-run-context-disclosure>summary:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:4px;}
 .cron-run-context-disclosure>summary::-webkit-details-marker{display:none;}
 .cron-run-context-disclosure>summary::before{content:"▸";display:inline-block;width:10px;color:var(--muted);transition:transform .12s ease;}
 .cron-run-context-disclosure[open]>summary::before{transform:rotate(90deg);}
