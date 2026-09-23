@@ -6109,6 +6109,12 @@ function _isMessageTailJitter(top,bottomDistance,scrollbarDragIntent=false){
 function _markScrollbarDragIntent(){
   _scrollbarDragIntentUntil=performance.now()+SCROLLBAR_DRAG_INTENT_WINDOW_MS;
 }
+function _clearScrollbarDragIntent(){
+  _scrollbarDragActive=false;
+  _scrollbarDragIntentQueued=false;
+  _scrollbarDragIntentUntil=-Infinity;
+  _scrollbarDragObservedTop=null;
+}
 // `top` is the scrollTop this scroll event delivers: while the drag is active it
 // is recorded as observed, so release can tell pending movement apart.
 function _consumeScrollbarDragIntent(top){
@@ -6504,9 +6510,15 @@ if(typeof window!=='undefined'){
     if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop);
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
-  window.addEventListener('blur',()=>{ _scrollbarDragActive=false; },{passive:true});
+  window.addEventListener('blur',()=>{
+    if(typeof _clearScrollbarDragIntent==='function') _clearScrollbarDragIntent();
+    else _scrollbarDragActive=false;
+  },{passive:true});
   document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='hidden') _scrollbarDragActive=false;
+    if(document.visibilityState==='hidden'){
+      if(typeof _clearScrollbarDragIntent==='function') _clearScrollbarDragIntent();
+      else _scrollbarDragActive=false;
+    }
   },{passive:true});
   // #4970 review (greptile P1): record keyboard-driven message-pane scrolling as
   // user intent. PageUp/PageDown, Arrow keys, Space/Shift+Space, Home/End scroll
