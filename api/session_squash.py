@@ -935,11 +935,19 @@ def _apply_state_barrier(sid: str, profile: str) -> dict:
     conn = sqlite3.connect(str(db_path), timeout=5.0, isolation_level=None)
     try:
         conn.row_factory = sqlite3.Row
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
-        if not {"id", "session_id", "active", "compacted"}.issubset(cols):
-            raise SquashError("state.db lacks the required squash barrier columns", 409)
         conn.execute("BEGIN IMMEDIATE")
         try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+            if not {"id", "session_id", "active", "compacted"}.issubset(cols):
+                # A legacy state.db without matching session rows has nothing
+                # to project. Hold the write lock through the check so a row
+                # cannot appear between schema inspection and this decision.
+                if "session_id" in cols and conn.execute(
+                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1", (sid,)
+                ).fetchone() is None:
+                    conn.execute("COMMIT")
+                    return {"state_barrier": "no-session-rows", "state_archived_row_ids": []}
+                raise SquashError("state.db lacks the required squash barrier columns", 409)
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "session_turn_leases" not in tables:
                 raise SquashError("state.db lacks turn leases; squash cannot fence delayed writes", 409)
