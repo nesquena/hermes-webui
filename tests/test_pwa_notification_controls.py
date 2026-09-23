@@ -81,10 +81,10 @@ def test_completion_notification_fires_when_tab_was_hidden_during_stream():
     # sendBrowserNotification honors forceHidden but still respects the
     # notifications-enabled setting (forceHidden is NOT the test-button force).
     assert "const forceHidden=!!(options&&options.forceHidden);" in MESSAGES_JS
-    assert "if(!force&&!window._notificationsEnabled) return;" in MESSAGES_JS
+    assert "if(!force&&!window._notificationsEnabled) return skip();" in MESSAGES_JS
     assert "function _isBackgroundedForBrowserNotification(){" in MESSAGES_JS
     assert "window.__hermesSetBackgrounded=(value)=>{" in MESSAGES_JS
-    assert "if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;" in MESSAGES_JS
+    assert "if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return skip();" in MESSAGES_JS
 
 
 def test_desktop_background_notification_signal_stays_out_of_stream_visibility():
