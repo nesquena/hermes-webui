@@ -489,6 +489,10 @@ def _recover_session_owned(
             try:
                 _publish_sidecar_no_replace(tmp_path, session_path)
             except FileExistsError:
+                # A competing create made every cached ABSENT owner stale.
+                # Evict it before reporting the failed recovery so a later
+                # read/retry must adopt the visible generation.
+                _invalidate_cached_session_generation(session_path.stem)
                 tmp_path.unlink(missing_ok=True)
                 return {**status, "restored": False, "stale_generation": True}
             tmp_path.unlink(missing_ok=True)
@@ -835,7 +839,9 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                         materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.
-            pass
+            # The cached owner (if any) still claims ABSENT and must not survive
+            # this failed materialization result.
+            _invalidate_cached_session_generation(sid)
         except OSError as exc:
             details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
             detail_recorded = True
