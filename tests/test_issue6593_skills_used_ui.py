@@ -342,6 +342,7 @@ def test_active_stream_conflict_keeps_resolved_use_payload():
     script = textwrap.dedent(
         """
         const assert = require('assert');
+        const _recoverCompressedSend = async () => false;
         const input = {value:'hello'};
         const queued = [];
         const S = {
