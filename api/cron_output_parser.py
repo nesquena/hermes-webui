@@ -122,6 +122,12 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     lines = text.split("\n")
     in_fence = False
     in_html_pre = False
+    # #7303 re-gate 9/21: track <pre> and <code> depths separately
+    # so a ``</code>`` inside a still-open ``<pre>`` does not clear
+    # the HTML-block guard and accept a heading inside the quoted
+    # HTML as the response boundary.
+    _pre_depth = 0
+    _code_depth = 0
     response_idx: int | None = None
     fence_char: str | None = None
     fence_len = 0
@@ -154,11 +160,44 @@ def parse_cron_output(text: str) -> CronOutputProjection:
             continue
         # Track HTML <pre>/<code> blocks (some skill output uses them
         # for shell snippets and the parser must respect the boundary).
-        if re.search(r"<pre\b|<code\b", line, re.IGNORECASE):
+        # #7303 re-gate 9/21 (correctness gap): the previous single
+        # ``in_html_pre`` boolean conflates two independently nestable
+        # elements — for a ``<pre><code>...</code></pre>`` shape, a
+        # ``</code>`` inside the still-open ``<pre>`` would clear the
+        # flag and a later ``## Response`` heading (inside the quoted
+        # HTML) would be accepted as the boundary.
+        #
+        # Two-tier detection to keep well-formed artifacts tracking
+        # correctly without confusing plain-text mentions like
+        # ``the open <pre> tag`` for an actual tag:
+        # 1. **Entry** — a line that *starts* (after optional indent)
+        #    with ``<pre`` or ``<code`` opens the HTML block, and that
+        #    specific opening token is counted as the open. This is
+        #    the only place open tokens are recognised.
+        # 2. **Inside** — while ``in_html_pre`` is True, ``</pre>`` and
+        #    ``</code>`` tokens update the depth (close). Any further
+        #    ``<pre`` / ``<code`` tokens in the same line are treated
+        #    as plain text, not as a new open — this prevents skill
+        #    output that *quotes* HTML from accidentally re-opening the
+        #    block. Once both depths hit zero, the block closes.
+        _opening_match = re.match(r"^\s*<(pre|code)\b", line, re.IGNORECASE)
+        if _opening_match and not in_html_pre:
+            # Open the HTML block on this single starting token.
             in_html_pre = True
-        if in_html_pre and re.search(r"</pre>|</code>", line, re.IGNORECASE):
-            in_html_pre = False
-            continue
+            if _opening_match.group(1).lower() == "pre":
+                _pre_depth = 1
+                _code_depth = 0
+            else:
+                _pre_depth = 0
+                _code_depth = 1
+        if in_html_pre:
+            _closes_pre = len(re.findall(r"</pre>", line, re.IGNORECASE))
+            _closes_code = len(re.findall(r"</code>", line, re.IGNORECASE))
+            _pre_depth = max(0, _pre_depth - _closes_pre)
+            _code_depth = max(0, _code_depth - _closes_code)
+            in_html_pre = _pre_depth > 0 or _code_depth > 0
+            if in_fence or in_html_pre:
+                continue
         if in_fence or in_html_pre:
             continue
         if _RESPONSE_HEADING_RE.match(line):
