@@ -602,17 +602,22 @@ def test_session_compact_includes_parent():
     """Verify compact() includes parent_session_id."""
     src = _read('api/models.py')
     # Find the compact method and scan its full body for parent_session_id.
-    # PR #1591 (May 2026) added a has_pending_user_message recompute block at
-    # the top of compact() which pushed the parent_session_id field beyond a
-    # 1500-char window — widen the scan to 3000 chars to cover the full
-    # return-dict body without re-tightening every time compact() grows.
-    # compact() accepts optional projection flags on separate lines; match the
-    # method name and first parameter without pinning formatting.
+    # Fixed character windows (1500, then 3000) kept breaking whenever a new
+    # field was added near the top of the return dict, so bound the scan by
+    # the method itself: from ``def compact(`` to the next method definition
+    # at the same class indentation. compact() accepts optional projection
+    # flags on separate lines; match the method name and first parameter
+    # without pinning formatting.
     compact_def_match = re.search(r"def compact\(\s*self", src)
     assert compact_def_match, "Could not find compact() method"
-    snippet = src[compact_def_match.start():compact_def_match.start() + 3000]
+    body_start = compact_def_match.start()
+    next_def = re.search(r"\n    def \w+\(", src[body_start + 1:])
+    body_end = body_start + 1 + next_def.start() if next_def else len(src)
+    snippet = src[body_start:body_end]
     assert "'parent_session_id'" in snippet, \
         "compact() should include parent_session_id"
+    assert "self.parent_session_id" in snippet, \
+        "compact() should emit the session's parent_session_id value"
 
 
 def test_session_metadata_fields_includes_parent():
