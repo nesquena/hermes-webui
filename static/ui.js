@@ -597,6 +597,11 @@ let _scrollbarDragIntentQueued=false;
 // instead (see _markScrollbarDragIntent / _consumeScrollbarDragIntent).
 const SCROLLBAR_DRAG_INTENT_WINDOW_MS=250;
 let _scrollbarDragIntentUntil=-Infinity;
+// scrollTop last DELIVERED to the scroll listener during the active drag (seeded
+// at pointerdown). Release compares it with the live scrollTop: only a movement
+// whose scroll event is still pending may re-arm the drag intent (see
+// _releaseScrollbarDragIntent); otherwise the release clears the intent.
+let _scrollbarDragObservedTop=null;
 // An OVERLAY scrollbar (macOS; Firefox keeps one even with scrollbar-width:thin,
 // Mozilla bug 1568939) is drawn INSIDE the client box, so a press on its thumb
 // reports offsetX<clientWidth and the gutter-only test never fires. Treat a
@@ -6104,10 +6109,26 @@ function _isMessageTailJitter(top,bottomDistance,scrollbarDragIntent=false){
 function _markScrollbarDragIntent(){
   _scrollbarDragIntentUntil=performance.now()+SCROLLBAR_DRAG_INTENT_WINDOW_MS;
 }
-function _consumeScrollbarDragIntent(){
+// `top` is the scrollTop this scroll event delivers: while the drag is active it
+// is recorded as observed, so release can tell pending movement apart.
+function _consumeScrollbarDragIntent(top){
+  if(_scrollbarDragActive&&typeof top==='number') _scrollbarDragObservedTop=top;
   const fresh=performance.now()<=_scrollbarDragIntentUntil;
   _scrollbarDragIntentUntil=-Infinity;
   return fresh;
+}
+// pointerup/pointercancel: re-stamp ONLY when the drag moved scrollTop past the
+// last position the scroll listener has already seen, i.e. the drag's own async
+// scroll event is still undelivered and must own the next classification. When
+// every drag movement was already delivered (and classified), clear the intent
+// instead of extending it: a fresh window would otherwise be consumed by the
+// NEXT scroll -- typically render/layout generated -- and unpin a reader who had
+// dragged back to the tail and was re-pinned.
+function _releaseScrollbarDragIntent(top){
+  const observed=_scrollbarDragObservedTop;
+  _scrollbarDragObservedTop=null;
+  if(observed!==null&&typeof top==='number'&&top!==observed) _markScrollbarDragIntent();
+  else _scrollbarDragIntentUntil=-Infinity;
 }
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
 // scrolls up, streaming stops auto-following until they return to the bottom or
@@ -6327,6 +6348,7 @@ function _resetScrollDirectionTracker(){
   _scrollbarDragActive=false;
   _scrollbarDragIntentQueued=false;
   _scrollbarDragIntentUntil=-Infinity;
+  _scrollbarDragObservedTop=null;
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
   _messageUserUnpinned=false;
@@ -6356,6 +6378,7 @@ function _resetStreamScrollFollow(){
   _scrollbarDragActive=false;
   _scrollbarDragIntentQueued=false;
   _scrollbarDragIntentUntil=-Infinity;
+  _scrollbarDragObservedTop=null;
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -6463,20 +6486,22 @@ if(typeof window!=='undefined'){
     if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     _scrollbarDragActive=true;
     if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    if(typeof _scrollbarDragObservedTop!=='undefined') _scrollbarDragObservedTop=el.scrollTop;
     if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
   },{passive:true});
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
     // `scroll` is async: the drag's own scroll event may only be dispatched
-    // AFTER this release. Re-stamp so that first classification still owns it.
-    if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
+    // AFTER this release. Re-stamp only if that movement is still undelivered;
+    // otherwise clear the intent so a later render scroll cannot consume it.
+    if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop);
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
-    if(typeof _markScrollbarDragIntent==='function') _markScrollbarDragIntent();
+    if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop);
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('blur',()=>{ _scrollbarDragActive=false; },{passive:true});
@@ -6522,8 +6547,8 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    // Consume the pointerdown/pointerup stamp on the first scroll after it (never leaks).
-    const dragStamp=typeof _consumeScrollbarDragIntent==='function'&&_consumeScrollbarDragIntent();
+    // Consume the drag stamp on the first scroll after it (never leaks); record delivered top.
+    const dragStamp=typeof _consumeScrollbarDragIntent==='function'&&_consumeScrollbarDragIntent(el.scrollTop);
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
