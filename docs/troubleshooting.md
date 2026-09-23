@@ -141,6 +141,31 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## Background completion targets an archived session
+
+**Symptom.** A background process finishes after its originating conversation
+was compressed, but the completion does not appear as a new turn in that
+archived conversation.
+
+**Why.** A process completion retains its original WebUI session ID as the
+ownership anchor. Before starting a wakeup turn, the server loads that exact
+session and resolves its compression lineage in the session's own profile's
+read-only `state.db` (an absent profile means `default`, not the process's
+current profile). If the origin is sealed, delivery targets its live resumable
+continuation instead of reopening the archived parent. A foreign session
+snapshot, unknown origin, missing/closed continuation, or lineage lookup error
+does not authorize routing to the parent: the wakeup takes the existing
+drop/retry path. The UI's **Show background wakeups** Appearance switch only
+changes transcript visibility of process-completion prompts; it does not
+change delivery or delete persisted messages.
+
+**Diagnostic.** Check that the continuation is still live in the originating
+profile. If the archived origin has no valid resumable continuation, start a
+new turn in a live conversation rather than trying to send to the sealed ID.
+Do not repair lineage by editing session JSON or by changing the active profile.
+
+---
+
 ## "Context compression exhausted" after a long-running turn
 
 **Symptom.** A long-running session, often with many tool calls or a small
