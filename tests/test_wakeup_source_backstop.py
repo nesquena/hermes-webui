@@ -5,6 +5,7 @@ import inspect
 import json
 import sqlite3
 import textwrap
+import types
 
 import api.models as models
 import api.streaming as streaming
@@ -276,3 +277,221 @@ def test_all_run_conversation_retries_forward_wakeup_provenance():
         keyword_names = {keyword.arg for keyword in call.keywords}
         assert "persist_user_display_kind" in keyword_names
         assert "persist_user_display_metadata" in keyword_names
+
+
+# ---------------------------------------------------------------------------
+# Mixed sidecar + state.db reconciliation through the real SQLite reader.
+# Each store is covered on its own above; wake provenance must also survive the
+# cross-store pairing without being laundered onto browser rows or consuming a
+# distinct delivery.
+# ---------------------------------------------------------------------------
+
+
+def _write_state_db(db_path, rows):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id TEXT, role TEXT, content TEXT, timestamp REAL, "
+            "display_kind TEXT, display_metadata TEXT)"
+        )
+        for row in rows:
+            metadata = row.get("display_metadata")
+            conn.execute(
+                "INSERT INTO messages "
+                "(session_id, role, content, timestamp, display_kind, display_metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "session-1",
+                    row["role"],
+                    row["content"],
+                    row["timestamp"],
+                    row.get("display_kind"),
+                    json.dumps(metadata) if metadata is not None else None,
+                ),
+            )
+
+
+# Rows older than the first sidecar row are treated as compacted-out history
+# and never resurrected, so every fixture starts from shared prior history.
+HISTORY = (
+    {"role": "user", "content": "hi", "timestamp": 50.0},
+    {"role": "assistant", "content": "hello", "timestamp": 51.0},
+)
+
+
+def _reconcile(tmp_path, monkeypatch, sidecar, state_rows):
+    sidecar = [dict(row) for row in HISTORY] + list(sidecar)
+    state_rows = [dict(row) for row in HISTORY] + list(state_rows)
+    db_path = tmp_path / "state.db"
+    _write_state_db(db_path, state_rows)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+    session = types.SimpleNamespace(
+        session_id="session-1",
+        profile=None,
+        messages=sidecar,
+        truncation_watermark=None,
+        truncation_boundary=None,
+    )
+    return models.reconciled_state_db_messages_for_session(session)
+
+
+def _browser(content, timestamp):
+    return {
+        "role": "user",
+        "content": content,
+        "timestamp": timestamp,
+        "_source": "webui",
+    }
+
+
+def _delivery_ids(messages):
+    return [
+        (msg.get("display_metadata") or {}).get("delivery_id")
+        for msg in messages
+        if msg.get("display_kind") == "process_wakeup"
+    ]
+
+
+def _assert_browser_row_untouched(messages, browser, before):
+    rows = [msg for msg in messages if msg is browser]
+    assert rows == [browser]
+    assert browser == before
+    assert browser.get("_source") == "webui"
+    assert "display_kind" not in browser
+    assert "display_metadata" not in browser
+    assert "_wakeup_meta" not in browser
+
+
+def test_mixed_exact_browser_lookalike_keeps_provenance_and_both_rows(
+    tmp_path, monkeypatch
+):
+    browser = _browser(WAKE_TEXT, 200.0)
+    before = dict(browser)
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [browser],
+        [_wake("delivery-old", timestamp=100.0)],
+    )
+
+    _assert_browser_row_untouched(merged, browser, before)
+    assert _delivery_ids(merged) == ["delivery-old"]
+    assert [msg["timestamp"] for msg in merged] == [50.0, 51.0, 100.0, 200.0]
+    assert merged[2]["_source"] == "process_wakeup"
+
+
+def test_mixed_exact_browser_lookalike_with_state_mirror_of_browser_row(
+    tmp_path, monkeypatch
+):
+    """state.db also mirrors the browser turn without provenance."""
+    browser = _browser(WAKE_TEXT, 200.0)
+    before = dict(browser)
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [browser],
+        [
+            _wake("delivery-old", timestamp=100.0),
+            {"role": "assistant", "content": "noted", "timestamp": 101.0},
+            {"role": "user", "content": WAKE_TEXT, "timestamp": 200.0},
+        ],
+    )
+
+    _assert_browser_row_untouched(merged, browser, before)
+    assert _delivery_ids(merged) == ["delivery-old"]
+    assert [msg["content"] for msg in merged].count(WAKE_TEXT) == 2
+
+
+def test_mixed_quoted_browser_lookalike_keeps_provenance_and_both_rows(
+    tmp_path, monkeypatch
+):
+    browser = _browser(f"Why did this fail?\n\n> {WAKE_TEXT}\n\nPlease retry.", 200.0)
+    before = dict(browser)
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [browser],
+        [_wake("delivery-old", timestamp=100.0)],
+    )
+
+    _assert_browser_row_untouched(merged, browser, before)
+    assert _delivery_ids(merged) == ["delivery-old"]
+    assert len(merged) == 4
+
+
+def test_mixed_same_text_distinct_deliveries_both_survive(tmp_path, monkeypatch):
+    sidecar_a = _wake("delivery-a", timestamp=100.0)
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [sidecar_a],
+        [_wake("delivery-b", timestamp=200.0)],
+    )
+
+    assert _delivery_ids(merged) == ["delivery-a", "delivery-b"]
+    assert sidecar_a["display_metadata"] == {"delivery_id": "delivery-a"}
+
+
+def test_mixed_same_text_same_timestamp_distinct_deliveries_both_survive(
+    tmp_path, monkeypatch
+):
+    sidecar_a = _wake("delivery-a", timestamp=100.0)
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [sidecar_a],
+        [
+            _wake("delivery-a", timestamp=100.0),
+            _wake("delivery-b", timestamp=100.0),
+        ],
+    )
+
+    assert _delivery_ids(merged) == ["delivery-a", "delivery-b"]
+    assert sidecar_a["display_metadata"] == {"delivery_id": "delivery-a"}
+
+
+def test_mixed_exact_role_content_timestamp_match_receives_provenance(
+    tmp_path, monkeypatch
+):
+    """The legitimate same-turn pairing still projects durable provenance."""
+    sidecar = {
+        "role": "user",
+        "content": WAKE_TEXT,
+        "timestamp": 100.25,
+        "_source": "process_wakeup",
+    }
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [sidecar],
+        [_wake("delivery-1", timestamp=100.25)],
+    )
+
+    assert merged[2:] == [sidecar]
+    assert len(merged) == 3
+    assert sidecar["display_metadata"] == {"delivery_id": "delivery-1"}
+    assert sidecar["_source"] == "process_wakeup"
+
+
+def test_mixed_sub_second_timestamp_mismatch_does_not_transfer_provenance(
+    tmp_path, monkeypatch
+):
+    browser = _browser(WAKE_TEXT, 100.5)
+    before = dict(browser)
+
+    merged = _reconcile(
+        tmp_path,
+        monkeypatch,
+        [browser],
+        [_wake("delivery-1", timestamp=100.25)],
+    )
+
+    _assert_browser_row_untouched(merged, browser, before)
+    assert _delivery_ids(merged) == ["delivery-1"]

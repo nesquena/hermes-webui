@@ -10065,21 +10065,48 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
         value = source.get(key)
         if _message_display_metadata_value_present(value):
             target[key] = copy.deepcopy(value)
+    # Agent wake provenance (display_kind/display_metadata) is deliberately NOT
+    # merged here: callers reach this helper through timestamp-blind exact and
+    # fuzzy text pairing, which must never launder a delivery identity onto a
+    # browser-typed lookalike. See _transfer_wakeup_provenance().
 
-    # Agent wake provenance is a trusted pair, not two independent display
-    # fields. Copy it atomically from the state.db row; combining one field from
-    # each store could manufacture apparently trusted provenance.
-    target_kind = target.get("display_kind")
-    target_metadata = target.get("display_metadata")
+
+def _transfer_wakeup_provenance(target: dict | None, source: dict | None) -> bool:
+    """Copy trusted wake provenance onto a row already proven to be the same turn.
+
+    Only the reconciler's identity-pairing path may call this (same delivery id,
+    durable state.db row identity, or exact role + content + full-precision
+    timestamp). The pair is copied atomically; a target carrying any partial or
+    different provenance is left untouched so fields from two stores are never
+    combined into apparently trusted provenance.
+    """
+    delivery_id = _trusted_wakeup_delivery_id(source)
+    if not delivery_id or not isinstance(target, dict):
+        return False
+    target_delivery_id = _trusted_wakeup_delivery_id(target)
+    if target_delivery_id:
+        return target_delivery_id == delivery_id
     if (
-        _message_display_metadata_value_present(target_kind)
-        or _message_display_metadata_value_present(target_metadata)
+        _message_display_metadata_value_present(target.get("display_kind"))
+        or _message_display_metadata_value_present(target.get("display_metadata"))
     ):
-        return
-    source_metadata = source.get("display_metadata")
-    if _trusted_wakeup_delivery_id(source):
-        target["display_kind"] = "process_wakeup"
-        target["display_metadata"] = copy.deepcopy(source_metadata)
+        return False
+    target["display_kind"] = "process_wakeup"
+    target["display_metadata"] = copy.deepcopy(source.get("display_metadata"))
+    return True
+
+
+def _wakeup_exact_pair_key(message: dict | None):
+    """Return ``(content, timestamp)`` for exact same-turn wake pairing, or None."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return None
+    content = message.get("content")
+    if not isinstance(content, str) or not content:
+        return None
+    timestamp, valid = _message_exact_timestamp_details(message)
+    if not valid or timestamp is None:
+        return None
+    return content, timestamp
 
 
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
@@ -11619,6 +11646,45 @@ def _merge_session_messages_append_only_impl(
         _remember_merged_message(msg, source="sidecar")
     if _sidecar_has_terminal_partial_error(sidecar_messages):
         return _normalize_wakeup_rows_for_display(merged_messages)
+    # Sidecar rows an incoming trusted wake may pair with by exact role, content
+    # and full-precision timestamp. Rows that already carry a delivery id pair
+    # only through merged_by_wakeup_delivery_id (same delivery).
+    wakeup_exact_pair_candidates = {}
+    for sidecar_message in sidecar_messages:
+        if _trusted_wakeup_delivery_id(sidecar_message):
+            continue
+        pair_key = _wakeup_exact_pair_key(sidecar_message)
+        if pair_key is not None:
+            wakeup_exact_pair_candidates.setdefault(pair_key, []).append(sidecar_message)
+    wakeup_paired_targets = set()
+
+    def _wakeup_pair_target(message, delivery_id):
+        """Return the merged row this trusted wake is proven to be, if any."""
+        same_delivery = merged_by_wakeup_delivery_id.get(delivery_id)
+        if same_delivery is not None:
+            return same_delivery
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        durable = (
+            merged_by_row_id.get(row_id)
+            if row_id_valid and row_id is not None and row_id not in ambiguous_row_ids
+            else None
+        )
+        if (
+            durable is not None
+            and id(durable) not in wakeup_paired_targets
+            and not _trusted_wakeup_delivery_id(durable)
+            and _row_id_fast_path_allowed(durable, message)
+        ):
+            return durable
+        pair_key = _wakeup_exact_pair_key(message)
+        for candidate in wakeup_exact_pair_candidates.get(pair_key, ()):
+            if (
+                id(candidate) not in wakeup_paired_targets
+                and not _trusted_wakeup_delivery_id(candidate)
+                and _message_private_identity_compatible(candidate, message)
+            ):
+                return candidate
+        return None
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_multimodal_mirror_keys = {}
     ambiguous_state_multimodal_mirrors = set()
@@ -11876,9 +11942,26 @@ def _merge_session_messages_append_only_impl(
             seen_visible_keys.add(visible_key)
             _remember_merged_message(msg, source="state")
             continue
+        if wakeup_delivery_id:
+            # Trusted wake pairing must run before fuzzy replay paths.
+            wake_target = _wakeup_pair_target(msg, wakeup_delivery_id)
+            if wake_target is not None:
+                wakeup_paired_targets.add(id(wake_target))
+                if _session_message_api_content_key(wake_target) is None:
+                    _copy_api_content_sidecar(wake_target, msg)
+                _merge_session_display_metadata(wake_target, msg)
+                _transfer_wakeup_provenance(wake_target, msg)
+                _remember_wakeup_delivery(wake_target)
+                if (
+                    state_replay_idx < len(sidecar_visible_messages)
+                    and sidecar_visible_messages[state_replay_idx] is wake_target
+                ):
+                    state_replay_idx += 1
+                seen_dedup_keys.add(dedup_key)
+                continue
         multimodal_mirror_key = (
             state_multimodal_mirror_keys.get(id(source_message))
-            if sidecar_multimodal_mirrors
+            if sidecar_multimodal_mirrors and not wakeup_delivery_id
             else None
         )
         multimodal_replay_target = (
@@ -11906,7 +11989,7 @@ def _merge_session_messages_append_only_impl(
             continue
         replays_sidecar_prefix = False
         replay_target = None
-        if state_replay_idx < len(sidecar_visible_sequence):
+        if not wakeup_delivery_id and state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
             if visible_key == expected_visible_key or _has_visible_duplicate(
                 visible_key, {expected_visible_key}
@@ -11916,7 +11999,6 @@ def _merge_session_messages_append_only_impl(
                 state_replay_idx += 1
         if replays_sidecar_prefix:
             _merge_session_display_metadata(replay_target, msg)
-            _remember_wakeup_delivery(replay_target)
             matched_visible_key = _matching_visible_duplicate(
                 visible_key,
                 sidecar_visible_keys,
@@ -11937,18 +12019,13 @@ def _merge_session_messages_append_only_impl(
             if row_id_valid and row_id is not None
             else None
         )
-        existing_delivery_id = _trusted_wakeup_delivery_id(existing)
         if (
-            row_id_valid
+            not wakeup_delivery_id
+            and row_id_valid
             and row_id is not None
             and existing is not None
             and row_id not in ambiguous_row_ids
             and _row_id_fast_path_allowed(existing, msg)
-            and not (
-                wakeup_delivery_id
-                and existing_delivery_id
-                and existing_delivery_id != wakeup_delivery_id
-            )
         ):
             existing_api_content = _session_message_api_content_key(existing)
             incoming_api_content = _session_message_api_content_key(msg)
@@ -11961,7 +12038,6 @@ def _merge_session_messages_append_only_impl(
                 if existing_api_content is None and incoming_api_content is not None:
                     _copy_api_content_sidecar(existing, msg)
                 _merge_session_display_metadata(existing, msg)
-                _remember_wakeup_delivery(existing)
                 continue
         checkpoint_consumed = state_replay_idx >= len(sidecar_visible_sequence)
         if _state_row_is_truncated(
@@ -11969,14 +12045,10 @@ def _merge_session_messages_append_only_impl(
         ):
             continue
         # Trusted Agent delivery identity outranks content/timestamp similarity.
-        # Once truncation guards have admitted the row, collapse only the same
-        # delivery id; a distinct delivery must survive even with identical text
-        # and timestamp.
+        # An unpaired wake (identity pairing ran above) is a distinct delivery:
+        # once truncation guards have admitted it, it must survive even with
+        # identical text, never folding into a lookalike or another delivery.
         if wakeup_delivery_id:
-            existing_wakeup = merged_by_wakeup_delivery_id.get(wakeup_delivery_id)
-            if existing_wakeup is not None:
-                _merge_session_display_metadata(existing_wakeup, msg)
-                continue
             if _insert_state_message_chronologically(merged_messages, msg):
                 seen_message_keys.add(key)
                 seen_dedup_keys.add(dedup_key)
