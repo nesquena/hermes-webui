@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import json
 import logging
 import math
 import re
@@ -64,13 +65,13 @@ def completion_delivery_id(evt: Any) -> str:
 _WAKEUP_COMPLETION_RE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) completed "
     r"\(exit_code=(?P<exit_code>[^)\n]*)\)\.\n"
-    r"Command: (?P<cmd>[^\n]*)\n"
+    r"Command(?P<json> JSON)?: (?P<cmd>[^\n]*)\n"
     r"Output:\n"
 )
 _WAKEUP_WATCH_MATCH_RE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) matched watch pattern "
     r"\"(?P<pattern>.*)\"\.\n"
-    r"Command: (?P<cmd>[^\n]*)\n"
+    r"Command(?P<json> JSON)?: (?P<cmd>[^\n]*)\n"
     r"Matched output:\n"
 )
 
@@ -85,7 +86,8 @@ def wakeup_display_meta(text: Any) -> dict | None:
     metadata never duplicates multi-KB process output in the store.
 
     Header fields are anchored to the pinned single-line grammar (``sid``,
-    ``exit_code``, ``command``, ``pattern`` never contain newlines). The
+    ``exit_code``, ``pattern`` never contain newlines; ``Command JSON`` encodes
+    multiline commands as a JSON string on one physical line). The
     optional watch suppression note is deliberately NOT parsed out: it lives in
     the free-form output tail, where process output can contain the exact same
     "(N earlier matches were suppressed…)" text, so inferring it from the body
@@ -93,8 +95,20 @@ def wakeup_display_meta(text: Any) -> dict | None:
     rendered output verbatim (#6350 review finding 2).
     """
     body = str(text or "")
-    m = _WAKEUP_COMPLETION_RE.match(body)
-    if m:
+    m = _WAKEUP_COMPLETION_RE.match(body) or _WAKEUP_WATCH_MATCH_RE.match(body)
+    if not m:
+        return None
+    command = m.group("cmd")
+    if m.group("json"):
+        if "\r" in command:
+            return None
+        try:
+            command = json.loads(command)
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(command, str):
+            return None
+    if m.re is _WAKEUP_COMPLETION_RE:
         exit_code: Any = m.group("exit_code")
         try:
             exit_code = int(exit_code)
@@ -103,15 +117,14 @@ def wakeup_display_meta(text: Any) -> dict | None:
         return {
             "type": "completion",
             "task_id": m.group("sid"),
-            "command": m.group("cmd"),
+            "command": command,
             "exit_code": exit_code,
         }
-    m = _WAKEUP_WATCH_MATCH_RE.match(body)
-    if m:
+    if m.re is _WAKEUP_WATCH_MATCH_RE:
         return {
             "type": "watch_match",
             "task_id": m.group("sid"),
-            "command": m.group("cmd"),
+            "command": command,
             "pattern": m.group("pattern"),
         }
     return None
