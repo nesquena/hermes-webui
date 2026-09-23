@@ -28341,6 +28341,21 @@ function applyLocaleToDOM() {
   if (typeof renderChatTodos === 'function') renderChatTodos();
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
+  // #1804 (re-gate 9/22): the busy-mode action label rendered via
+  // the CSS ::after pseudo-element reads ``data-label``, which
+  // ``_setComposerPrimaryButtonIcon`` materialises from the current
+  // locale's ``t()`` translation. The standard ``[data-i18n]`` restamp
+  // does not touch this attribute (it is set imperatively, not via the
+  // ``data-i18n`` machinery), so an in-place locale change while the
+  // button is busy left the pill in the old language. Re-run the
+  // single owner of the action-to-label mapping so the live locale
+  // always wins, without duplicating the four-key map here. The
+  // helper also clears ``data-label`` outside busy mode, so this is
+  // a no-op for the common idle path.
+  const _sendBtnLocaleRestamp = document.getElementById('btnSend');
+  if (_sendBtnLocaleRestamp && typeof _setComposerPrimaryButtonIcon === 'function') {
+    _setComposerPrimaryButtonIcon(_sendBtnLocaleRestamp, _sendBtnLocaleRestamp.dataset.action || 'send');
+  }
 }
 
 // Apply saved locale immediately so there's no flash of English on reload.
