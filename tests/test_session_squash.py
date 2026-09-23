@@ -268,6 +268,46 @@ def test_live_descendant_is_refused(env):
     _assert_unchanged(env, before)
 
 
+def test_descendant_beyond_prefix_and_after_confirmation_is_refused(env):
+    _make_session(env)
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    child = _make_session(env, "child_fork_deep_01", archived=False, parent_session_id=SID)
+    # The normal continuation heuristic reads only a short prefix. Simulate a
+    # large metadata field before parent_session_id without relying on its order.
+    child_path = child.path
+    payload = json.loads(child_path.read_text(encoding="utf-8"))
+    child_path.write_text(json.dumps({"padding": "x" * 5000, **payload}), encoding="utf-8")
+    with api.models.LOCK:
+        api.models.SESSIONS.pop(child.session_id, None)
+    before = _snapshot(env)
+    with pytest.raises(session_squash.SquashError, match="descendant"):
+        session_squash.start_squash_job(SID, confirm=authority, summary=SUMMARY, request_profile="default")
+    _assert_unchanged(env, before)
+
+
+def test_lineage_probe_error_fails_closed(env, monkeypatch):
+    _make_session(env)
+    def _broken(_session):
+        raise OSError("state unavailable")
+    monkeypatch.setattr("api.compression_continuation.durable_compression_continuation", _broken)
+    with pytest.raises(session_squash.SquashError, match="cannot verify"):
+        session_squash.preview_squash(SID, request_profile="default")
+
+
+def test_descendant_added_during_summary_blocks_commit(env, monkeypatch):
+    _make_session(env)
+    original = session_squash._generate_summary
+    def _summarize(session, sid, provided):
+        result = original(session, sid, provided)
+        _make_session(env, "child_late_01", archived=False, parent_session_id=sid)
+        return result
+    monkeypatch.setattr(session_squash, "_generate_summary", _summarize)
+    before = _snapshot(env)
+    job, _ = _squash()
+    assert job["status"] == "error" and "descendant" in job["error"]
+    assert (env.sessions_dir / f"{SID}.json").read_bytes() == before["bytes"]
+
+
 def test_confirmation_must_echo_current_authority(env):
     _make_session(env)
     authority = session_squash.preview_squash(SID, request_profile="default")
@@ -503,6 +543,35 @@ def test_injected_failure_rolls_back_exactly(env, monkeypatch, stage):
     _assert_unchanged(env, before)
 
 
+def test_missing_state_barrier_schema_rolls_back_without_success(env):
+    _make_session(env)
+    db = env.home / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, active INTEGER)")
+        conn.execute("INSERT INTO messages (session_id, active) VALUES (?, 1)", (SID,))
+    before_bytes = (env.sessions_dir / f"{SID}.json").read_bytes()
+    before_index = _index_entry(env)
+    before_cache = api.models.SESSIONS[SID]
+    job, _ = _squash()
+    assert job["status"] == "error" and "required squash barrier" in job["error"]
+    assert (env.sessions_dir / f"{SID}.json").read_bytes() == before_bytes
+    assert _index_entry(env) == before_index
+    assert api.models.SESSIONS[SID] is before_cache
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT active FROM messages WHERE session_id = ?", (SID,)).fetchall() == [(1,)]
+
+
+def test_missing_turn_lease_table_rolls_back_without_success(env):
+    _make_session(env)
+    _make_state_db(env)
+    with sqlite3.connect(env.home / "state.db") as conn:
+        conn.execute("DROP TABLE session_turn_leases")
+    before = _snapshot(env)
+    job, _ = _squash()
+    assert job["status"] == "error" and "lacks turn leases" in job["error"]
+    _assert_unchanged(env, before)
+
+
 def test_live_agent_turn_lease_blocks_state_barrier_and_rolls_back(env):
     _make_session(env)
     _make_state_db(env, lease="pid=1:turn")
@@ -607,7 +676,41 @@ def test_restore_refuses_when_session_moved_on(env):
     with pytest.raises(session_squash.SquashError) as exc:
         session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"], confirm=confirm,
                                       request_profile="default")
-    assert "no longer the untouched result" in str(exc.value)
+    assert "digest mismatch" in str(exc.value)
+
+
+def test_restore_refuses_rewritten_summary_even_with_fresh_confirmation(env):
+    _make_session(env)
+    snap, authority = _squash()
+    path = env.sessions_dir / f"{SID}.json"
+    s = api.models.SESSIONS[SID]
+    s.title = "rewritten after squash"
+    s.save()
+    before = _snapshot(env)
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    with pytest.raises(session_squash.SquashError, match="digest mismatch"):
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"], confirm=confirm,
+                                      request_profile="default")
+    _assert_unchanged(env, before)
+
+
+def test_restore_rolls_back_state_if_cache_publish_fails(env, monkeypatch):
+    _make_session(env)
+    _make_state_db(env)
+    snap, authority = _squash()
+    assert snap["status"] == "done"
+    before = _snapshot(env)
+    path = env.sessions_dir / f"{SID}.json"
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    def _fail_publish(_sid, _session):
+        raise RuntimeError("injected cache publish failure")
+    monkeypatch.setattr(session_squash, "_publish_cache", _fail_publish)
+    with pytest.raises(RuntimeError, match="injected cache publish failure"):
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"],
+                                      confirm=confirm, request_profile="default")
+    _assert_unchanged(env, before)
 
 
 def test_restore_rejects_path_traversal_archive_name(env):

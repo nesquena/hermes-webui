@@ -535,12 +535,27 @@ def _unreleased_writeback_owner(sid: str) -> str | None:
 
 
 def _has_live_descendant(sid: str) -> bool:
-    """True when any WebUI session (fork or compression child) names ``sid``
-    as its parent. Squashing such a parent would change the history the
-    descendant stitches or points at, so it is refused."""
+    """Inspect full sidecars, not the bounded-prefix continuation heuristic.
+
+    A destructive squash cannot treat a child whose parent field lies beyond
+    the first 4096 characters (or an unreadable child) as proof of no child.
+    """
     from api import models
 
-    return bool(models._has_compression_continuation(type("_S", (), {"session_id": sid})()))
+    with models.LOCK:
+        if any(getattr(child, "parent_session_id", None) == sid
+               for child in models.SESSIONS.values()):
+            return True
+    for path in Path(models.SESSION_DIR).glob("*.json"):
+        if path.stem == sid or path.name.startswith("_"):
+            continue
+        try:
+            payload = json.loads(path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise SquashError(f"cannot verify session lineage ({path.name})", 409) from exc
+        if isinstance(payload, dict) and payload.get("parent_session_id") == sid:
+            return True
+    return False
 
 
 def _state_db_path_for(profile: str) -> Path | None:
@@ -562,8 +577,8 @@ def _resolve_lineage_tip(session) -> str:
         from api.compression_continuation import durable_compression_continuation
 
         sealed, tip = durable_compression_continuation(session)
-    except Exception:
-        sealed, tip = False, None
+    except Exception as exc:
+        raise SquashError("cannot verify durable compression lineage", 409) from exc
     if sealed:
         detail = f" (continuation {tip})" if tip else ""
         raise SquashError(f"session is a sealed compression parent{detail} — not the lineage tip", 409)
@@ -922,20 +937,21 @@ def _apply_state_barrier(sid: str, profile: str) -> dict:
         conn.row_factory = sqlite3.Row
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
         if not {"id", "session_id", "active", "compacted"}.issubset(cols):
-            return {"state_barrier": "unsupported-schema", "state_archived_row_ids": []}
+            raise SquashError("state.db lacks the required squash barrier columns", 409)
         conn.execute("BEGIN IMMEDIATE")
         try:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "session_turn_leases" in tables:
-                keys = _lease_keys(conn, sid, tables)
-                now = time.time()
-                live = conn.execute(
-                    f"SELECT conversation_id FROM session_turn_leases WHERE expires_at > ? "
-                    f"AND conversation_id IN ({','.join('?' * len(keys))})",
-                    (now, *keys),
-                ).fetchone()
-                if live is not None:
-                    raise SquashError("an Agent turn currently owns this conversation — retry once it is idle", 409)
+            if "session_turn_leases" not in tables:
+                raise SquashError("state.db lacks turn leases; squash cannot fence delayed writes", 409)
+            keys = _lease_keys(conn, sid, tables)
+            now = time.time()
+            live = conn.execute(
+                f"SELECT conversation_id FROM session_turn_leases WHERE expires_at > ? "
+                f"AND conversation_id IN ({','.join('?' * len(keys))})",
+                (now, *keys),
+            ).fetchone()
+            if live is not None:
+                raise SquashError("an Agent turn currently owns this conversation — retry once it is idle", 409)
             ids = [int(r["id"]) for r in conn.execute(
                 "SELECT id FROM messages WHERE session_id = ? AND active = 1 ORDER BY id", (sid,))]
             if ids:
@@ -994,6 +1010,8 @@ def _reactivate_state_rows(sid: str, profile: str, ids: list[int]) -> int:
                     f"AND active = 0 AND compacted = 1 AND id IN ({','.join('?' * len(chunk))})",
                     (sid, *chunk),
                 ).rowcount
+            if restored != len(ids):
+                raise SquashError("state.db restore rows changed since squash", 409)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -1001,6 +1019,23 @@ def _reactivate_state_rows(sid: str, profile: str, ids: list[int]) -> int:
     finally:
         conn.close()
     return restored
+
+
+def _rearchive_restored_state_rows(sid: str, profile: str, ids: list[int]) -> None:
+    """Undo a restore's committed state reactivation on a later failure."""
+    if not ids:
+        return
+    db_path = _state_db_path_for(profile)
+    if db_path is None:
+        raise SquashError("state.db disappeared during restore rollback", 500)
+    with sqlite3.connect(str(db_path), timeout=5.0) as conn:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            conn.execute(
+                f"UPDATE messages SET active = 0, compacted = 1 WHERE session_id = ? "
+                f"AND id IN ({','.join('?' * len(chunk))})",
+                (sid, *chunk),
+            )
 
 
 def _publish_cache(sid: str, session_obj) -> None:
@@ -1040,7 +1075,9 @@ def _commit_squash(session, authority: SquashAuthority, summary: str) -> dict:
     if Path(session.path).resolve() != live:
         raise SquashError("session sidecar is not at its canonical path", 409)
 
-    # 1. CAS precondition: the live bytes are exactly the confirmed ones.
+    # 1. Selection and CAS preconditions: lineage can advance after preview
+    # and even after job admission while the summary is being generated.
+    _resolve_lineage_tip(session)
     current_sha, live_sig = _sha256_and_signature(live)
     if current_sha != authority.source_sha256:
         raise SquashError("session changed since confirmation (digest mismatch) — preview again", 409)
@@ -1254,8 +1291,8 @@ def _commit_restore(session, manifest: dict, archive_path: Path, profile: str, c
     sid = manifest["session_id"]
     live = _canonical_sidecar_path(sid)
     current_sha, live_sig = _sha256_and_signature(live)
-    if current_sha != confirm["current_sha256"]:
-        raise SquashError("session changed since confirmation (digest mismatch)", 409)
+    if current_sha != confirm["current_sha256"] or current_sha != manifest.get("squashed_sha256"):
+        raise SquashError("session changed since squash (digest mismatch)", 409)
     try:
         persisted = json.loads(live.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1268,6 +1305,12 @@ def _commit_restore(session, manifest: dict, archive_path: Path, profile: str, c
         and messages[0].get("_squash_summary") is True
     ):
         raise SquashError("live session is no longer the untouched result of this squash — restore refused", 409)
+    if manifest.get("state_barrier") == "applied":
+        expected_ids = list(manifest.get("state_archived_row_ids") or [])
+    else:
+        expected_ids = []
+    if len(expected_ids) != len(set(expected_ids)) or any(type(row_id) is not int for row_id in expected_ids):
+        raise SquashError("archive state row ids are invalid", 409)
     if _gzip_payload_sha256(archive_path) != manifest["source_sha256"]:
         raise SquashError("archive payload digest mismatch", 409)
 
@@ -1300,12 +1343,17 @@ def _commit_restore(session, manifest: dict, archive_path: Path, profile: str, c
         index_written = True
         _write_index_for(restored)
         _verify_index(sid, int(manifest.get("source_message_count") or len(restored.messages or [])))
-        reactivated = _reactivate_state_rows(sid, profile, list(manifest.get("state_archived_row_ids") or []))
+        reactivated = _reactivate_state_rows(sid, profile, expected_ids)
         _publish_cache(sid, restored)
         committed = True
     finally:
         if not committed:
             staged_path.unlink(missing_ok=True)
+            if reactivated:
+                try:
+                    _rearchive_restored_state_rows(sid, profile, expected_ids)
+                except Exception:
+                    logger.error("restore rollback: state rows not re-archived for %s", sid, exc_info=True)
             if claim is not None and published_sig is not None:
                 try:
                     _restore_claim(live, published_sig, claim)
