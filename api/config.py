@@ -7047,6 +7047,31 @@ def _minimal_static_models_catalog() -> dict:
         }
 
 
+def _mark_non_authoritative_catalog(
+    catalog: dict, *, reason: str
+) -> dict:
+    """Tag a no-wait fallback catalog as non-authoritative.
+
+    The display path (``GET /api/session?...&resolve_model=1``) calls
+    ``get_available_models(prefer_cache=True, wait_for_inflight_rebuild=False)``
+    and gets back either the network-free minimal catalog or a stale on-disk
+    snapshot when a rebuild is in flight. Both fallbacks are KNOWN to be
+    incomplete — Copilot, custom proxies, recently-added providers, etc. may
+    all be missing. The persisted session model is the user's authoritative
+    selection; the catalog is only a default-model backstop. Marking the
+    catalog as non-authoritative lets
+    ``_resolve_compatible_session_model_state`` short-circuit and return the
+    persisted (model, model_provider) pair unchanged, so the display response
+    does not silently rewrite the next ``/api/chat/start`` payload.
+
+    ``reason`` is the no-wait branch the catalog came from (kept for
+    observability; the resolver only checks the boolean marker).
+    """
+    catalog["_non_authoritative"] = True
+    catalog["_non_authoritative_reason"] = reason
+    return catalog
+
+
 def _static_models_catalog_without_live_probes() -> dict:
     """Return a network-free /api/models catalog from local config/auth only."""
     try:
@@ -10116,8 +10141,14 @@ def get_available_models(
             if disk_groups is not None:
                 return copy.deepcopy(disk_groups)
             if stale_disk_groups is not None:
-                return copy.deepcopy(stale_disk_groups)
-            return copy.deepcopy(_minimal_static_models_catalog())
+                return _mark_non_authoritative_catalog(
+                    copy.deepcopy(stale_disk_groups),
+                    reason="no_wait_stale_disk_cache",
+                )
+            return _mark_non_authoritative_catalog(
+                copy.deepcopy(_minimal_static_models_catalog()),
+                reason="no_wait_minimal_static_catalog",
+            )
         _exit_stack.callback(_available_models_cache_lock.release)
 
     with _exit_stack, _available_models_cache_lock:
@@ -10239,7 +10270,10 @@ def get_available_models(
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
             # serve the network-free minimal catalog and leave the flag alone.
-            return copy.deepcopy(_minimal_static_models_catalog())
+            return _mark_non_authoritative_catalog(
+                copy.deepcopy(_minimal_static_models_catalog()),
+                reason="prefer_cache_cold_minimal",
+            )
 
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:

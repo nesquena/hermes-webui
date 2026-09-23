@@ -7620,6 +7620,28 @@ def _resolve_compatible_session_model_state(
         catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
 
+    # Non-authoritative catalog guard (re-review #7568 round 6).
+    #
+    # The display path (``GET /api/session?...&resolve_model=1``) passes
+    # ``prefer_cached_catalog=True, wait_for_inflight_rebuild=False`` and may
+    # receive a catalog from the no-wait fallback: the network-free minimal
+    # catalog or a stale on-disk snapshot. ``get_available_models`` tags those
+    # with ``_non_authoritative=True`` exactly so this guard can fire. The
+    # catalog is KNOWN to be incomplete (Copilot, custom proxies, recently
+    # added providers may all be missing) and the persisted session pair is
+    # the user's authoritative selection; never let a non-authoritative
+    # catalog rewrite it. Returning the persisted pair unchanged also pins
+    # the next ``/api/chat/start`` payload — the browser echoes
+    # ``S.session.model`` / ``S.session.model_provider`` back as the routing
+    # state, so a normalized display answer silently reroutes the next turn
+    # to a backend the user did not pick.
+    #
+    # Only fires when BOTH model and provider are present on the call: empty
+    # model or empty provider still need the catalog as a default-model
+    # backstop, and the persisted pair is incomplete in those cases.
+    if catalog.get("_non_authoritative") and model and requested_provider:
+        return model, requested_provider, False
+
     # Profile-aware resolution: when the caller supplies profile context
     # (not an explicit per-chat override), use the profile's provider and
     # default model as the resolution context instead of the catalog's
