@@ -139,6 +139,7 @@ for (const name of [
 }
 globalThis.loadDir = async () => null;
 globalThis._setNewSessionPending = () => {};
+globalThis._projectCanReceiveNewSession = () => false;
 globalThis.api = async (url, opts) => {
   const body = JSON.parse(opts.body);
   captured.push({ url, body });
@@ -157,6 +158,7 @@ globalThis.api = async (url, opts) => {
 };
 
 eval(extractFunction(src, 'function _adoptRegenerationRevision('));
+eval(extractFunction(src, 'function _newSessionProjectSelection('));
 eval(extractFunction(src, 'async function newSession('));
 
 (async () => {

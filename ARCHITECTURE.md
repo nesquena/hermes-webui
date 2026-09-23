@@ -63,6 +63,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
+      projects_db_adapter.py Optional read-only bridge to per-profile Agent projects.db
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
       startup.py           Startup helpers: auto_install_agent_deps()
@@ -111,7 +112,12 @@ State directory (runtime data, separate from source):
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
-    projects.json      Session project groups (name, color, id)
+    projects.json      Legacy writable session-group registry (name, color, id)
+
+Agent profile state read by the compatibility bridge:
+
+    <profile-home>/state.db     Imported sessions; cwd can derive native membership
+    <profile-home>/projects.db  Native project visibility/path authority (read-only in WebUI)
 
 Log file:
 
@@ -212,7 +218,7 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
       updated_at    float Unix timestamp, updated on every save()
       pinned        bool, default False (Sprint 12)
       archived      bool, default False (Sprint 14)
-      project_id    string or null, FK to projects.json (Sprint 15)
+      project_id    string or null; legacy sidecars reference projects.json
       tool_calls    list of tool call dicts (Sprint 10)
 
     Key methods:
@@ -277,6 +283,20 @@ visibility stage decides whether recovered background rows are shown. In
 `all_profiles=True` mode the per-profile source bounds are disabled before rows
 are merged; cross-profile scoping, visibility, deduplication, and final route
 limits remain downstream responsibilities.
+
+For a single-profile projection, ordinary imported Agent sessions can derive a
+native `project_id` from the selected row's persisted `state.db` `cwd`. The
+projection batches paths through `api/projects_db_adapter.py`, which delegates
+matching to the Agent's `project_for_path()` against that profile's existing
+`projects.db`. Cron, webhook, and Kanban precedence is unchanged, and all-profile
+scans disable this native mapping. Older schemas without `sessions.cwd`, a missing
+native database/module, or matcher failures leave rows visible and unassigned.
+
+`projects.json` remains the legacy writable grouping registry. PR1 reads
+`projects.db` only for active-profile native project visibility and imported
+session classification; it does not create, migrate, or write native project
+state. See [`docs/native-project-compatibility.md`](docs/native-project-compatibility.md)
+for identity, failure boundaries, staged migration, and rollback.
 
 ### 4.3 SSE Streaming Engine
 

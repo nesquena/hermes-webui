@@ -576,7 +576,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # expects from "Show agent sessions" sorted by activity.
         for key in (
             'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
-            'ended_at', 'end_reason', 'last_activity',
+            'ended_at', 'end_reason', 'last_activity', 'cwd',
         ):
             if key in tip:
                 merged[key] = tip[key]
@@ -683,6 +683,7 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        cwd_expr = _optional_col('cwd', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -790,6 +791,7 @@ def read_importable_agent_session_rows(
                    {origin_chat_id_expr},
                    {origin_user_id_expr},
                    {platform_expr},
+                   {cwd_expr},
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},

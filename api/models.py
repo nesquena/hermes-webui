@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import stat as stat_module
 import threading
 import time
 import uuid
@@ -46,6 +47,7 @@ from api.agent_sessions import (
     read_session_lineage_metadata,
 )
 from api.process_event_utils import stamp_message_source
+from api.projects_db_adapter import native_project_ids_for_paths
 
 logger = logging.getLogger(__name__)
 # Size of the interactive sidebar recency window. Also bounds how many
@@ -7815,17 +7817,25 @@ def _path_stat_cache_key(path):
         return None
 
 
-def _callable_accepts_include_claude_code(callable_obj) -> bool:
+def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
     try:
-        signature = inspect.signature(callable_obj)
+        parameters = inspect.signature(callable_obj).parameters
     except (TypeError, ValueError):
         return True
-    if 'include_claude_code' in signature.parameters:
+    parameter = parameters.get(keyword)
+    if parameter is not None and parameter.kind in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }:
         return True
     return any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
+        candidate.kind == inspect.Parameter.VAR_KEYWORD
+        for candidate in parameters.values()
     )
+
+
+def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    return _callable_accepts_keyword(callable_obj, 'include_claude_code')
 
 
 def _sqlite_content_fingerprint(db_path: Path):
@@ -7913,6 +7923,40 @@ def _sqlite_file_stat_cache_key(db_path: Path):
     )
 
 
+def _projects_db_stat_cache_key(db_path: Path):
+    """Fingerprint durable main/WAL files without opening SQLite or reading SHM."""
+
+    def _durable_stat(path: Path, *, mark_non_regular: bool = False):
+        try:
+            path_stat = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return None
+        if not stat_module.S_ISREG(path_stat.st_mode):
+            if not mark_non_regular:
+                return None
+            return (
+                "non-regular",
+                stat_module.S_IFMT(path_stat.st_mode),
+                path_stat.st_mtime_ns,
+                path_stat.st_ctime_ns,
+                path_stat.st_size,
+                path_stat.st_dev,
+                path_stat.st_ino,
+            )
+        return (
+            path_stat.st_mtime_ns,
+            path_stat.st_ctime_ns,
+            path_stat.st_size,
+            path_stat.st_dev,
+            path_stat.st_ino,
+        )
+
+    wal_stat = _durable_stat(Path(f"{db_path}-wal"))
+    if wal_stat is not None and wal_stat[2] <= 0:
+        wal_stat = None
+    return (_durable_stat(db_path, mark_non_regular=True), wal_stat)
+
+
 def _cli_sessions_streaming_freeze_marker():
     """Return a stable cache-key marker while any turn is actively streaming.
 
@@ -7976,6 +8020,7 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         cli_profile = None
 
     db_path = hermes_home / 'state.db'
+    projects_db_path = hermes_home / 'projects.db'
     projects_dir = _default_claude_code_projects_dir()
     # #4842: while a turn streams, freeze the volatile state.db component of the
     # key so per-message writes don't bust the CLI cache and re-run the heavy
@@ -7991,6 +8036,7 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         str(db_path),
         str(source_filter or ''),
         db_state_key,
+        _projects_db_stat_cache_key(projects_db_path),
         bool(include_claude_code),
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
@@ -8125,6 +8171,7 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    include_native_project_membership: bool = True,
 ) -> list:
     cli_sessions = []
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
@@ -8208,12 +8255,31 @@ def _load_cli_sessions_uncached(
             _webhook_pid_cache[0] = ensure_webhook_project(profile=_cli_profile)
         return _webhook_pid_cache[0]
 
-    def _state_row_project_id(sid: str, source: str | None) -> str | None:
-        if is_cron_session(sid, source):
+    def _state_row_project_id(
+        sid: str,
+        normalized_source: str | None,
+        cwd: str | None,
+        native_project_ids: dict[str, str],
+    ) -> str | None:
+        if is_cron_session(sid, normalized_source):
             return _cron_pid()
-        if is_webhook_session(sid, source):
+        if is_webhook_session(sid, normalized_source):
             return _webhook_pid()
-        return None
+        if normalized_source == 'kanban':
+            return None
+        if not isinstance(cwd, str) or not cwd.strip():
+            return None
+        return native_project_ids.get(cwd)
+
+    def _is_system_state_row(row: dict) -> bool:
+        sid = row['id']
+        source = row.get('source') or 'cli'
+        normalized_source = normalize_agent_session_source(source)['session_source']
+        return (
+            is_cron_session(sid, normalized_source)
+            or is_webhook_session(sid, normalized_source)
+            or normalized_source == 'kanban'
+        )
 
     profile_value = _cli_profile or 'default'
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
@@ -8226,7 +8292,7 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
-    for row in read_importable_agent_session_rows(
+    _state_rows = list(read_importable_agent_session_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
@@ -8240,7 +8306,43 @@ def _load_cli_sessions_uncached(
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
-    ):
+    ))
+    _native_project_ids: dict[str, str] = {}
+    _system_only_filter = (
+        source_filter is not None
+        and normalize_agent_session_source(source_filter).get('session_source')
+        in {'cron', 'webhook', 'kanban'}
+    )
+    if include_native_project_membership and not _system_only_filter:
+        _native_project_paths = list(dict.fromkeys(
+            cwd
+            for row in _state_rows
+            if not _is_system_state_row(row)
+            and isinstance((cwd := row.get('cwd')), str)
+            and cwd.strip()
+        ))
+        if _native_project_paths:
+            _requested_native_project_paths = set(_native_project_paths)
+            try:
+                _native_project_result = native_project_ids_for_paths(
+                    _native_project_paths,
+                    profile_name=profile_value,
+                )
+                _native_project_ids = (
+                    {
+                        path: project_id
+                        for path, project_id in _native_project_result.items()
+                        if isinstance(path, str)
+                        and path in _requested_native_project_paths
+                        and isinstance(project_id, str)
+                        and project_id.strip()
+                    }
+                    if isinstance(_native_project_result, dict)
+                    else {}
+                )
+            except Exception:
+                logger.debug("Native project membership lookup failed")
+    for row in _state_rows:
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
@@ -8282,7 +8384,12 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
+            'project_id': _state_row_project_id(
+                sid,
+                _source_meta['session_source'],
+                row.get('cwd'),
+                _native_project_ids,
+            ),
             'profile': profile,
             'source_tag': _source,
             'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
@@ -8484,7 +8591,7 @@ def _load_cli_sessions_uncached(
                     'updated_at': raw_ts,
                     'pinned': False,
                     'archived': _archived,
-                    'project_id': _state_row_project_id(sid, _source),
+                    'project_id': _state_row_project_id(sid, _source, None, {}),
                     'profile': profile_value,
                     'source_tag': 'kanban',
                     'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
@@ -8567,6 +8674,10 @@ def get_cli_sessions(
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
             _load_cli_sessions_uncached
         )
+        loader_supports_native_membership = _callable_accepts_keyword(
+            _load_cli_sessions_uncached,
+            'include_native_project_membership',
+        )
         if all_profiles:
             merged: list[dict] = []
             for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
@@ -8579,6 +8690,8 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
+                if loader_supports_native_membership:
+                    load_kwargs['include_native_project_membership'] = False
                 merged.extend(
                     _load_cli_sessions_uncached(
                         ctx_home,

@@ -39,7 +39,10 @@ def _extract_function(source: str, name: str) -> str:
 def test_new_session_uses_explicit_project_override_before_active_filter():
     src = _read(SESSIONS_JS)
     assert "Object.prototype.hasOwnProperty.call(options,'project_id')" in src
-    assert "reqBody.project_id=options.project_id" in src
+    assert "_projectCanReceiveNewSession(projectId)" in src
+    assert "!_isReadOnlyProject(project)" in src
+    assert "_projectListScopeMatchesActive()" in src
+    assert "if(projectSelection.include) reqBody.project_id=projectSelection.projectId" in src
 
 
 def test_quick_create_button_attaches_filter_align_and_request_path():
@@ -74,30 +77,36 @@ def test_project_quick_create_styles_exist_and_are_discrete_to_pointer_layouts()
     assert "@media (hover:none) and (pointer:coarse)" in css
 
 
-def _run_new_session_case(options, active_project=None):
+def _run_new_session_case(options, active_project=None, projects=None):
     _DRIVER = r"""
 const fs = require('fs');
 const [path, argsJson] = process.argv.slice(-2);
 const args = JSON.parse(argsJson);
 const src = fs.readFileSync(path, 'utf8');
 
-function extractAsyncFunction(source, name) {
-  const marker = `async function ${name}(`;
-  const start = source.indexOf(marker);
-  if (start < 0) throw new Error(name + ' not found');
-  const brace = source.indexOf('{', source.indexOf(')', start));
-  let depth = 0;
-  for (let i = brace; i < source.length; i++) {
-    if (source[i] === '{') depth += 1;
-    else if (source[i] === '}') {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, i + 1);
+function extractFunction(source, name) {
+  for (const marker of [`async function ${name}(`, `function ${name}(`]) {
+    const start = source.indexOf(marker);
+    if (start < 0) continue;
+    const brace = source.indexOf('{', source.indexOf(')', start));
+    let depth = 0;
+    for (let i = brace; i < source.length; i++) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return source.slice(start, i + 1);
+      }
     }
   }
-  throw new Error('function body not closed for ' + name);
+  throw new Error(name + ' not found or function body not closed');
 }
 
-const newSessionSrc = extractAsyncFunction(src, 'newSession');
+const projectAuthorizationActiveProfileSrc = extractFunction(src, '_projectAuthorizationActiveProfile');
+const projectProfileMatchesSrc = extractFunction(src, '_projectProfileMatchesActive');
+const projectListScopeMatchesSrc = extractFunction(src, '_projectListScopeMatchesActive');
+const projectCanReceiveNewSessionSrc = extractFunction(src, '_projectCanReceiveNewSession');
+const newSessionProjectSelectionSrc = extractFunction(src, '_newSessionProjectSelection');
+const newSessionSrc = extractFunction(src, 'newSession');
 
 globalThis.window = globalThis;
 globalThis.document = {
@@ -119,6 +128,12 @@ globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 globalThis.history = { replaceState: () => {} };
 globalThis.NO_PROJECT_FILTER = '__none__';
 globalThis._activeProject = args.activeProject;
+globalThis._allProjects = args.projects;
+globalThis._allProjectsScope = {profile: 'default', allProfiles: false};
+globalThis._profilesCache = {active: 'default', profiles: []};
+globalThis._projectForId = projectId =>
+  globalThis._allProjects.find(project => project.project_id === projectId) || null;
+globalThis._isReadOnlyProject = project => Boolean(project && project.read_only === true);
 globalThis._sessionSourceFilter = 'webui';
 globalThis._newSessionInFlight = null;
 globalThis._messagesTruncated = false;
@@ -129,6 +144,7 @@ globalThis.S = {
   toolCalls: [],
   messages: [],
   activeProfile: 'default',
+  activeProfileIsDefault: true,
   _pendingSessionToolsets: null,
   _profileSwitchWorkspace: null,
   _profileDefaultWorkspace: null,
@@ -162,7 +178,14 @@ globalThis.api = async (_url, opts) => {
   return { session: { session_id: 's-1', messages: [], model: 'gpt-4', model_provider: 'openai', workspace: null, message_count: 0, last_usage: {} } };
 };
 
-eval(newSessionSrc);
+eval([
+  projectAuthorizationActiveProfileSrc,
+  projectListScopeMatchesSrc,
+  projectProfileMatchesSrc,
+  projectCanReceiveNewSessionSrc,
+  newSessionProjectSelectionSrc,
+  newSessionSrc,
+].join('\n'));
 
 (async () => {
   await newSession(false, args.options);
@@ -175,6 +198,7 @@ eval(newSessionSrc);
 
     payload = {
         "activeProject": active_project,
+        "projects": projects or [],
         "options": options,
         "session": {"session_id": "session-1"},
     }
@@ -194,7 +218,11 @@ eval(newSessionSrc);
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_new_session_aligns_project_id_override_when_explicitly_set():
-    body = _run_new_session_case({"project_id": "explicit-project"}, active_project="active-project")
+    body = _run_new_session_case(
+        {"project_id": "explicit-project"},
+        active_project="active-project",
+        projects=[{"project_id": "explicit-project"}],
+    )
     assert body["project_id"] == "explicit-project"
 
 
@@ -207,7 +235,11 @@ def test_new_session_respects_explicit_project_id_none():
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_new_session_falls_back_to_active_project_when_override_missing():
-    body = _run_new_session_case({}, active_project="active-project")
+    body = _run_new_session_case(
+        {},
+        active_project="active-project",
+        projects=[{"project_id": "active-project"}],
+    )
     assert body["project_id"] == "active-project"
 
 
@@ -276,6 +308,7 @@ globalThis._newSessionInFlight = params.newSessionInFlightReject
       ? Promise.resolve(params.newSessionInFlight)
       : null);
 
+eval(extractFunction(sessionsSrc, '_isReadOnlyProject'));
 eval(extractFunction(sessionsSrc, '_attachProjectQuickCreateButton'));
 
 const chip = {

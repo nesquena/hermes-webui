@@ -366,7 +366,9 @@ def test_active_profile_boot_non_401_errors_fallback_without_redirect(driver_pat
     assert payload["storageSnapshot"] == {}
 
 
-def test_active_profile_boot_invalid_payload_falls_back_without_redirect(driver_path):
+def test_active_profile_boot_invalid_identity_remains_unresolved_without_redirect(
+    driver_path,
+):
     payload = _run_boot_profile_scenario(
         driver_path,
         {
@@ -374,19 +376,28 @@ def test_active_profile_boot_invalid_payload_falls_back_without_redirect(driver_
             "useDefaultLoader": True,
             "attempts": [
                 {"status": 200, "payload": {"is_default": False}, "nextUrl": "/"},
+                {"status": 200, "payload": {"name": ""}, "nextUrl": "/"},
+                {"status": 200, "payload": {"name": "   "}, "nextUrl": "/"},
+                {"status": 200, "payload": {"name": " padded "}, "nextUrl": "/"},
+                {"status": 200, "payload": {"name": 7}, "nextUrl": "/"},
             ],
         },
     )
 
-    assert payload["attempts"][0]["status"] == "fallback"
-    assert payload["attempts"][0]["bootContinues"] is True
-    assert payload["attempts"][0]["profile"] == "default"
-    assert payload["attempts"][0]["isDefault"] is True
-    assert payload["attempts"][0]["bootProfile"] == "default"
-    assert payload["attempts"][0]["bootIsDefault"] is True
-    assert payload["attempts"][0]["applyBotNameCalls"] == 1
+    assert [attempt["status"] for attempt in payload["attempts"]] == [
+        "unresolved"
+    ] * 5
+    assert [attempt["bootContinues"] for attempt in payload["attempts"]] == [True] * 5
+    assert [attempt["profile"] for attempt in payload["attempts"]] == [None] * 5
+    assert [attempt["isDefault"] for attempt in payload["attempts"]] == [False] * 5
+    assert [attempt["bootProfile"] for attempt in payload["attempts"]] == [None] * 5
+    assert [attempt["bootIsDefault"] for attempt in payload["attempts"]] == [False] * 5
+    assert [attempt["applyBotNameCalls"] for attempt in payload["attempts"]] == [1] * 5
     assert payload["redirects"] == []
-    assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-invalid-payload") is None
+    assert all(
+        snapshot.get("test-5001-active-profile-recovery-invalid-payload") is None
+        for snapshot in payload["storageHistory"]
+    )
     assert payload["storageSnapshot"] == {}
 
 
@@ -415,3 +426,37 @@ def test_active_profile_success_path_applies_boot_state_and_continues(driver_pat
     assert payload["redirects"] == []
     assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-success") is None
     assert payload["storageSnapshot"] == {}
+
+
+def test_active_profile_boot_accepts_only_literal_true_default_provenance(driver_path):
+    payload = _run_boot_profile_scenario(
+        driver_path,
+        {
+            "markerKey": "test-active-profile-default-provenance",
+            "attempts": [
+                {"type": "success", "payload": {"name": "literal-true", "is_default": True}},
+                {"type": "success", "payload": {"name": "literal-false", "is_default": False}},
+                {"type": "success", "payload": {"name": "missing"}},
+                {"type": "success", "payload": {"name": "string", "is_default": "false"}},
+                {"type": "success", "payload": {"name": "number", "is_default": 1}},
+                {"type": "success", "payload": {"name": "object", "is_default": {"value": True}}},
+            ],
+        },
+    )
+
+    assert [attempt["isDefault"] for attempt in payload["attempts"]] == [
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert [attempt["bootIsDefault"] for attempt in payload["attempts"]] == [
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]

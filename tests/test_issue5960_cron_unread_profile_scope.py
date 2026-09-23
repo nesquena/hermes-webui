@@ -51,7 +51,7 @@ def test_successful_profile_switch_resets_unread_cron_state():
     switch_end = PANELS_JS.index("// ── Cron completion alerts", switch_start)
     switch_body = PANELS_JS[switch_start:switch_end]
 
-    state_update = switch_body.index("S.activeProfile = data.active || name;")
+    state_update = switch_body.index("S.activeProfile = responseActive;")
     reset_call = switch_body.index("_resetCronUnreadForProfileSwitch();")
     assert reset_call > state_update
 

@@ -7125,8 +7125,15 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
-    S.activeProfile = data.active || name;
-    S.activeProfileIsDefault = !!data.is_default;
+    const responseActive = data && data.active;
+    if (typeof responseActive !== 'string' || responseActive === '' || responseActive.trim() !== responseActive) {
+      S.activeProfile = null;
+      S.activeProfileIsDefault = false;
+      if (typeof _allProjectsScope !== 'undefined') _allProjectsScope = null;
+      throw new Error('Profile switch returned invalid active profile identity.');
+    }
+    S.activeProfile = responseActive;
+    S.activeProfileIsDefault = data.is_default === true;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7203,7 +7210,7 @@ async function switchToProfile(name) {
       if (S.session && !sessionInProgress) {
         S.session.model = modelToUse;
         S.session.model_provider = modelState.model_provider||providerId||null;
-        S.session.profile = data.active || name;
+        S.session.profile = responseActive;
       }
     }
     // #3331 follow-up (Codex gate): retag the in-memory session's profile on
@@ -7213,7 +7220,7 @@ async function switchToProfile(name) {
     // switch to a model-less profile. Guarded by !sessionInProgress like the
     // model patch above (don't touch a session about to be replaced).
     if (S.session && !sessionInProgress) {
-      S.session.profile = data.active || name;
+      S.session.profile = responseActive;
     }
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
       refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);

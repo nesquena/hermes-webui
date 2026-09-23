@@ -63,6 +63,7 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.projects_db_adapter import load_native_projects
 from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
@@ -497,6 +498,106 @@ def _all_profiles_query_flag(parsed_url) -> bool:
 def _all_profiles_enabled(parsed_url) -> bool:
     """Enable aggregate profile reads only when the request asks and mode allows it."""
     return _all_profiles_query_flag(parsed_url) and not _is_isolated_profile_mode()
+
+
+def _canonical_project_profile(profile):
+    profile = profile or "default"
+    return "default" if _is_root_profile(profile) else profile
+
+
+def _merge_active_profile_projects(legacy_rows, native_rows, active_profile):
+    """Append unrelated native rows without mutating either input."""
+    merged = list(legacy_rows)
+    identities = {
+        (_canonical_project_profile(row.get("profile")), row.get("project_id"))
+        for row in legacy_rows
+        if isinstance(row, dict) and row.get("project_id")
+    }
+    for row in native_rows:
+        if not isinstance(row, dict):
+            continue
+        profile = row.get("profile")
+        project_id = row.get("project_id")
+        if not isinstance(profile, str) or not profile.strip():
+            continue
+        if not isinstance(project_id, str) or not project_id.strip():
+            continue
+        if not _profiles_match(profile, active_profile):
+            continue
+        identity = (_canonical_project_profile(profile), project_id)
+        if identity not in identities:
+            merged.append(row)
+            identities.add(identity)
+    return merged
+
+
+_INVALID_PROJECT_ASSIGNMENT = "Invalid project assignment"
+
+
+def _validated_new_session_project_id(body):
+    """Return an authorized legacy project ID for a new session.
+
+    Authorization deliberately uses only ``load_projects()``. Native projects
+    are read-only in WebUI, so excluding the native adapter creates a legacy
+    allowlist and also preserves legacy precedence when a native row collides
+    with the same active-profile identity.
+    """
+    if "project_id" not in body or body["project_id"] is None:
+        return None
+
+    project_id = body["project_id"]
+    if (
+        not isinstance(project_id, str)
+        or not project_id
+        or project_id.strip() != project_id
+    ):
+        raise ValueError(_INVALID_PROJECT_ASSIGNMENT)
+
+    active_profile = _get_active_profile_name()
+    if (
+        not isinstance(active_profile, str)
+        or not active_profile
+        or active_profile.strip() != active_profile
+    ):
+        raise ValueError(_INVALID_PROJECT_ASSIGNMENT)
+
+    if "profile" in body:
+        requested_profile = body["profile"]
+        if (
+            not isinstance(requested_profile, str)
+            or not requested_profile
+            or requested_profile.strip() != requested_profile
+            or not _profiles_match(requested_profile, active_profile)
+        ):
+            raise ValueError(_INVALID_PROJECT_ASSIGNMENT)
+
+    try:
+        projects = load_projects()
+    except Exception as exc:
+        raise ValueError(_INVALID_PROJECT_ASSIGNMENT) from exc
+    if not isinstance(projects, list):
+        raise ValueError(_INVALID_PROJECT_ASSIGNMENT)
+
+    for row in projects:
+        if not isinstance(row, dict) or row.get("project_id") != project_id:
+            continue
+        row_profile = row.get("profile")
+        if (
+            not isinstance(row_profile, str)
+            or not row_profile
+            or row_profile.strip() != row_profile
+        ):
+            continue
+        if row.get("project_source") == "hermes-agent":
+            continue
+        if "read_only" in row and not isinstance(row["read_only"], bool):
+            continue
+        if row.get("read_only") is True:
+            continue
+        if _profiles_match(row_profile, active_profile):
+            return project_id
+
+    raise ValueError(_INVALID_PROJECT_ASSIGNMENT)
 
 
 def _query_flag(parsed_url, name: str) -> bool:
@@ -14475,6 +14576,15 @@ def handle_get(handler, parsed) -> bool:
             scoped = [p for p in all_projects
                       if _profiles_match(p.get("profile"), active_profile)]
             other_profile_count = 0 if isolated_profile_mode else len(all_projects) - len(scoped)
+            try:
+                native_projects = load_native_projects(active_profile)
+            except (ImportError, OSError, sqlite3.Error):
+                logger.debug("Native projects backend unavailable", exc_info=True)
+                native_projects = None
+            if isinstance(native_projects, list):
+                scoped = _merge_active_profile_projects(
+                    scoped, native_projects, active_profile
+                )
         return j(handler, {
             "projects": scoped,
             "all_profiles": all_profiles,
@@ -15668,6 +15778,10 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        try:
+            validated_project_id = _validated_new_session_project_id(body)
+        except ValueError:
+            return bad(handler, _INVALID_PROJECT_ASSIGNMENT, status=400)
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
@@ -15800,7 +15914,7 @@ def handle_post(handler, parsed) -> bool:
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
-            project_id=body.get("project_id") or None,
+            project_id=validated_project_id,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )

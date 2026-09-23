@@ -319,7 +319,7 @@ def test_session_event_profile_filter_tolerates_default_root_aliases():
     assert "activeProfileIsDefault:true" in UI_JS
     assert "const activeProfileState = await _resolveActiveProfileBootstrapState();" in BOOT_JS
     assert "S.activeProfileIsDefault = activeProfileState.isDefault;" in BOOT_JS
-    assert "S.activeProfileIsDefault = !!data.is_default;" in PANELS_JS
+    assert "S.activeProfileIsDefault = data.is_default === true;" in PANELS_JS
 
 
 def test_session_list_render_signature_serializes_full_rows_not_a_narrow_allowlist():
