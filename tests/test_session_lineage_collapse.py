@@ -499,6 +499,181 @@ console.log(JSON.stringify(rows));
     assert "_orphan_child_session" not in rows[0]["_child_sessions"][0]
 
 
+def test_cross_surface_subagents_stack_under_visible_messaging_parent():
+    """Delegated subagents stay nested even when their visible parent is external."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isExternalSession(s) {{ return !!(s && (s.is_cli_session || s.session_source === 'messaging')); }}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{
+  session_id:'messaging_parent',
+  title:'Messaging parent',
+  raw_source:'weixin',
+  source_tag:'weixin',
+  session_source:'messaging',
+  message_count:3,
+}}];
+const raw = [
+  collapsed[0],
+  ...['delegate_a', 'delegate_b', 'delegate_c'].map(session_id => ({{
+    session_id,
+    title:'Subagent Session',
+    parent_session_id:'messaging_parent',
+    relationship_type:'child_session',
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    _parent_lineage_root_id:'messaging_parent',
+    _cross_surface_child_session:true,
+  }})),
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["messaging_parent"]
+    assert rows[0]["_child_session_count"] == 3
+    assert [child["session_id"] for child in rows[0]["_child_sessions"]] == [
+        "delegate_a",
+        "delegate_b",
+        "delegate_c",
+    ]
+    assert all("_orphan_child_session" not in child for child in rows[0]["_child_sessions"])
+
+
+
+
+def test_delegated_subagent_source_precedence_ignores_stale_metadata():
+    """Only the first nonblank raw-role marker may assert delegation."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{
+  session_id:'messaging_parent',
+  title:'Messaging parent',
+  raw_source:'weixin',
+  source_tag:'weixin',
+  session_source:'messaging',
+}};
+function runCase(name, overrides, includeChildInCollapsed=false) {{
+  const child = {{
+    session_id:name,
+    title:name,
+    parent_session_id:'messaging_parent',
+    relationship_type:'child_session',
+    raw_source:'api_server',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'api',
+    _parent_lineage_root_id:'messaging_parent',
+    _cross_surface_child_session:true,
+    ...overrides,
+  }};
+  const collapsed = includeChildInCollapsed ? [{{...parent}}, child] : [{{...parent}}];
+  const rows = _attachChildSessionsToSidebarRows(collapsed, [collapsed[0], child]);
+  const parentRow = rows.find(row => row.session_id === 'messaging_parent');
+  return {{
+    name,
+    topLevel:rows.map(row => row.session_id),
+    nested:(parentRow._child_sessions || []).map(row => row.session_id),
+  }};
+}}
+const results = [
+  runCase('stale_source_tag', {{
+    raw_source:'api_server',
+    source_tag:'subagent',
+  }}),
+  runCase('stale_session_source', {{
+    raw_source:'api_server',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'subagent',
+  }}),
+  runCase('source_tag_fallback', {{
+    raw_source:'   ',
+    source_tag:' SubAgent ',
+    source:'api_server',
+    session_source:'other',
+  }}),
+  runCase('authentic_raw_source', {{
+    raw_source:'subagent',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'other',
+  }}),
+  runCase('not_child_session', {{
+    relationship_type:null,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    source:'subagent',
+    session_source:'other',
+  }}, true),
+];
+console.log(JSON.stringify(results));
+"""
+    assert json.loads(_run_node(source)) == [
+        {
+            "name": "stale_source_tag",
+            "topLevel": ["messaging_parent", "stale_source_tag"],
+            "nested": [],
+        },
+        {
+            "name": "stale_session_source",
+            "topLevel": ["messaging_parent", "stale_session_source"],
+            "nested": [],
+        },
+        {
+            "name": "source_tag_fallback",
+            "topLevel": ["messaging_parent"],
+            "nested": ["source_tag_fallback"],
+        },
+        {
+            "name": "authentic_raw_source",
+            "topLevel": ["messaging_parent"],
+            "nested": ["authentic_raw_source"],
+        },
+        {
+            "name": "not_child_session",
+            "topLevel": ["messaging_parent", "not_child_session"],
+            "nested": [],
+        },
+    ]
+
 
 def test_cross_surface_subagent_child_stacks_under_visible_fork_parent():
     """Forked WebUI conversations can still own subagent child rows."""
@@ -552,6 +727,85 @@ console.log(JSON.stringify(rows));
     assert [row["session_id"] for row in rows] == ["fork_parent"]
     assert rows[0]["_child_session_count"] == 1
     assert rows[0]["_child_sessions"][0]["session_id"] == "subagent_child"
+
+
+def test_read_only_child_sessions_are_stacked_after_writable_children():
+    """Read-only delegated children should render after fork/writable children."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isReadOnlySession'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{
+  session_id:'parent',
+  title:'Parent conversation',
+  message_count:3,
+  updated_at: 1700000010,
+  last_message_at: 1700000010,
+}}];
+const raw = [
+  collapsed[0],
+  {{
+    session_id:'read_only_subagent',
+    title:'Retained Subagent',
+    parent_session_id:'parent',
+    relationship_type:'child_session',
+    read_only: true,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    updated_at: 1700000030,
+    last_message_at: 1700000030,
+  }},
+  {{
+    session_id:'fork_child',
+    title:'Fork',
+    parent_session_id:'parent',
+    session_source:'fork',
+    raw_source:'webui',
+    source_tag:'webui',
+    source_label:'WebUI',
+    updated_at: 1700000040,
+    last_message_at: 1700000040,
+  }},
+  {{
+    session_id:'writable_subagent',
+    title:'Writable Subagent',
+    parent_session_id:'parent',
+    relationship_type:'child_session',
+    read_only: false,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    updated_at: 1700000020,
+    last_message_at: 1700000020,
+  }},
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows[0]._child_sessions.map(row => row.session_id)));
+"""
+    rows = json.loads(_run_node(source))
+    assert rows == ["fork_child", "writable_subagent", "read_only_subagent"]
+    assert "const sortedChildren=[...s._child_sessions];" in js
+    assert "const sortedChildren=[...s._child_sessions].sort" not in js
 
 
 def test_parent_source_label_display_text_does_not_force_external_orphaning():

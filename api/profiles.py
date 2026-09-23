@@ -198,7 +198,19 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # are operator/deployment-level postures, not per-profile toggles. Letting a
 # profile .env set HERMES_WEBUI_ISOLATED_PROFILE=0 would let a contained user
 # escape isolation (#4589).
-_PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
+_PROTECTED_ENV_KEYS = frozenset({
+    'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Server-wide sidebar window; a profile .env must not widen the per-request query.
+    'HERMES_WEBUI_VISIBLE_SESSION_LIMIT',
+    # #7656 round-3: HERMES_WEBUI_MAX_SESSION_RESOLVE is a process-wide resource
+    # cap (controls the BoundedSemaphore that gates full-transcript resolves).
+    # A profile's .env is per-profile by design; allowing it to set a
+    # server-wide limit (and a first-load-wins asymmetry) would let a
+    # single profile drag the rest into a tighter or looser posture than
+    # the operator intended. Same shape as the isolated-profile key: only
+    # the operator/launcher env at startup can set it.
+    'HERMES_WEBUI_MAX_SESSION_RESOLVE',
+})
 
 
 def _isolated_profile_opt_in() -> bool:
@@ -934,6 +946,13 @@ _BLOCKED_RUNTIME_ENV_KEYS = {
     # #4589: operator/deployment isolation posture — never overridable by a
     # profile's own env on any runtime/gateway-parity path.
     'HERMES_WEBUI_ISOLATED_PROFILE',
+    'HERMES_WEBUI_VISIBLE_SESSION_LIMIT',
+    # #7656 round-3: process-wide resolve cap. Filter out a profile's
+    # .env override the same way we filter the isolated-profile key, so
+    # the cap stays at the operator/launcher value across profile
+    # switches rather than re-sizing to whatever the first-loaded
+    # profile env set.
+    'HERMES_WEBUI_MAX_SESSION_RESOLVE',
 }
 
 
@@ -1711,19 +1730,22 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     default_workspace = None
     try:
         from api.config import DEFAULT_WORKSPACE as _DW
+        from api.workspace import _resolve_path, _remote_terminal_workspace_candidate
         lw_file = home / 'webui_state' / 'last_workspace.txt'
         if lw_file.exists():
             _p = lw_file.read_text(encoding='utf-8').strip()
             if _p:
-                _pp = Path(_p).expanduser()
-                if _pp.is_dir():
-                    default_workspace = str(_pp.resolve())
+                _pp = _resolve_path(_p, profile=name)
+                remote_cand = _remote_terminal_workspace_candidate(_p, profile=name)
+                if remote_cand is not None or _pp.is_dir():
+                    default_workspace = str(_pp)
         if default_workspace is None:
             for _key in ('workspace', 'default_workspace'):
                 _v = cfg.get(_key)
                 if _v:
-                    _pp = Path(str(_v)).expanduser().resolve()
-                    if _pp.is_dir():
+                    _pp = _resolve_path(str(_v), profile=name)
+                    remote_cand = _remote_terminal_workspace_candidate(str(_v), profile=name)
+                    if remote_cand is not None or _pp.is_dir():
                         default_workspace = str(_pp)
                         break
         if default_workspace is None:
@@ -1731,8 +1753,9 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             if isinstance(_tc, dict):
                 _cwd = _tc.get('cwd', '')
                 if _cwd and str(_cwd) not in ('.', ''):
-                    _pp = Path(str(_cwd)).expanduser().resolve()
-                    if _pp.is_dir():
+                    _pp = _resolve_path(str(_cwd), profile=name)
+                    remote_cand = _remote_terminal_workspace_candidate(str(_cwd), profile=name)
+                    if remote_cand is not None or _pp.is_dir():
                         default_workspace = str(_pp)
         if default_workspace is None:
             default_workspace = str(_DW)
@@ -1862,7 +1885,19 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         except Exception:
             pass
 
-    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    try:
+        from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    except ImportError as exc:
+        logger.debug("agent.skill_utils unavailable; reporting skill stats as unknown: %s", exc)
+        # agent source not mounted (two-container Docker,
+        # HERMES_WEBUI_CHAT_BACKEND=gateway): this must never 500 GET
+        # /api/profiles (#7305). Report the skill stats as unknown — a stable
+        # (0, 0) — instead of keeping a partial shadow of agent.skill_utils
+        # here: a local re-implementation cannot preserve the index walk's
+        # exclusions, frontmatter-name identity or platform filtering, so any
+        # count it produced would be inaccurate. The UI omits the skills line
+        # when the total is 0, so the profile picker stays fully usable.
+        return (0, 0)
 
     seen_names = set()
     enabled_count = 0

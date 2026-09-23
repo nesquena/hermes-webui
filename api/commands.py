@@ -260,7 +260,15 @@ def _run_reload_mcp_command() -> str:
     """Execute the MCP reconnect path and return a short user-facing summary."""
     with _RELOAD_MCP_LOCK:
         try:
-            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
+            from tools.mcp_tool import _servers, _lock
+            from api.agent_compat import agent_attr
+
+            shutdown_mcp_servers = agent_attr(
+                "tools.mcp_tool", "shutdown_mcp_servers", "tools.mcp_tool_lifecycle"
+            )
+            discover_mcp_tools = agent_attr(
+                "tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery"
+            )
         except Exception as exc:
             logger.warning("Failed to import MCP runtime for /reload-mcp", exc_info=True)
             raise RuntimeError("MCP runtime unavailable") from exc

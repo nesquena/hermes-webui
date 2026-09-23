@@ -19,6 +19,7 @@ import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
 
+from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
@@ -31,6 +32,11 @@ def _kb():
     from hermes_cli import kanban_db as kb
 
     return kb
+
+
+def _kb_connect(kb, board=None):
+    """Raw ``kb.connect`` (moved to ``hermes_cli.kanban_db_connect`` by the Agent split)."""
+    return agent_attr(kb, "connect", "hermes_cli.kanban_db_connect")(board=board)
 
 
 def _resolve_board(parsed):
@@ -93,13 +99,13 @@ def _conn(board=None):
     """
     kb = _kb()
     kb.init_db(board=board)
-    closing = getattr(kb, "connect_closing", None)
+    closing = agent_attr(kb, "connect_closing", "hermes_cli.kanban_db_connect", None)
     if closing is not None:
         return closing(board=board)
     # Older kanban_db builds (and lightweight test doubles) without
     # connect_closing: fall back to the raw connection; sqlite3's own
     # context manager at least scopes the transaction.
-    return kb.connect(board=board)
+    return _kb_connect(kb, board=board)
 
 
 def _obj_dict(value):
@@ -720,10 +726,11 @@ def _dispatch_payload(parsed):
     kb = _kb()
     dry_run = _bool_query(parsed, "dry_run", False)
     max_spawn = _int_query(parsed, "max", 8, minimum=1, maximum=100)
-    if not hasattr(kb, "dispatch_once"):
+    dispatch_once = agent_attr(kb, "dispatch_once", "hermes_cli.kanban_db_dispatch", None)
+    if dispatch_once is None:
         raise ValueError("dispatcher is unavailable")
     with _conn(board=board) as conn:
-        result = kb.dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
+        result = dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
     if isinstance(result, dict):
         return result
     try:
@@ -787,7 +794,7 @@ def _board_counts_for_slug(slug):
     if not kb.board_exists(slug):
         return {}
     try:
-        conn = kb.connect(board=slug)
+        conn = _kb_connect(kb, board=slug)
     except Exception:
         return {}
     try:
@@ -1021,7 +1028,7 @@ def _kanban_sse_fetch_new(board, cursor):
         if board != default_slug and not kb.board_exists(board):
             return cursor, []
     try:
-        conn = kb.connect(board=board)
+        conn = _kb_connect(kb, board=board)
     except Exception:
         return cursor, []
     try:
