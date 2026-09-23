@@ -3999,6 +3999,9 @@ function renderContextBrief(brief, panel){
   if (!panel) return;
   if (!brief){ panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('context_brief_error'))}</div>`; return; }
   panel._briefData = brief;
+  // Automatic regeneration is opt-in (off by default): only poll for newer
+  // worker generations while the server reports it enabled.
+  if (typeof _syncContextBriefAutoRefresh === 'function') _syncContextBriefAutoRefresh(brief.auto);
   const meta = brief.meta || {};
   const parts = [];
 
@@ -4304,8 +4307,20 @@ async function _pollContextBriefJob(){
   }
 }
 
-// Refresh visible brief panels when the background worker publishes a newer generation.
+// Refresh visible brief panels when the background worker publishes a newer
+// generation. Automatic regeneration is off by default, so this poller only
+// runs while the server-reported `brief.auto.enabled` is true; the manual ↻
+// button always regenerates on demand.
 let _contextBriefAutoTimer = null;
+function _syncContextBriefAutoRefresh(auto){
+  if (auto && auto.enabled === true) _startContextBriefAutoRefresh();
+  else _stopContextBriefAutoRefresh();
+}
+function _stopContextBriefAutoRefresh(){
+  if (!_contextBriefAutoTimer) return;
+  clearInterval(_contextBriefAutoTimer);
+  _contextBriefAutoTimer = null;
+}
 function _startContextBriefAutoRefresh(){
   if (_contextBriefAutoTimer) return;
   _contextBriefAutoTimer = setInterval(async () => {
@@ -4333,7 +4348,6 @@ function _startContextBriefAutoRefresh(){
     }
   }, 45000);
 }
-_startContextBriefAutoRefresh();
 
 // Banner shown above the message window when the session history is
 // truncated server-side (long conversations): one-tap path to the brief.
