@@ -61,7 +61,7 @@ def test_recovered_journal_text_is_in_next_turn_context(hermes_home):
     )
 
     _append_recovered_pending_turn(session, timestamp=123)
-    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is True
+    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) == (True, True)
 
     visible_text = "\n".join(m.get("content", "") for m in session.messages)
     assert "v0.51.554-1-gd9bd39c0" in visible_text
@@ -106,7 +106,7 @@ def test_deduped_existing_recovered_assistant_repairs_missing_context(hermes_hom
         ],
     )
 
-    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is False
+    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) == (False, True)
 
     next_context = _context_messages_for_new_turn(session, "升级完成了吗？")
     context_text = "\n".join(m.get("content", "") for m in next_context)

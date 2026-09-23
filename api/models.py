@@ -3054,6 +3054,8 @@ def _interrupted_recovery_marker(
         'type': 'interrupted',
         'interruption_cause': interruption_cause,
     }
+    if stream_id:
+        marker['_recovered_stream_id'] = str(stream_id)
     if pending_retry and not recovered_output:
         marker['_pending_journal_recovery'] = True
     return marker
@@ -3558,14 +3560,34 @@ def _journal_tool_already_present(
             if anchor_token != current_token:
                 continue
         elif current_token is not None:
-            # Tokenless anchor vs an authoritative session token: proven only
-            # when pending turn metadata is gone (lazy retry after reopen,
-            # where the initial repair cleared pending identity) — mirroring
-            # the legacy boundary rule in content_match_owned_by_current_turn.
-            # With pending metadata present the tokenless anchor is unproven:
-            # append.
+            # Tokenless anchor vs an authoritative session token: the in-range
+            # bounds check above plus a provable-owning nearest user row
+            # (the row just before the anchor) is enough to accept this anchor
+            # as the current turn's — mirroring the content_match_owned_by_*
+            # family of helpers. Without this, a current-turn tool card
+            # anchored at the current assistant row that was persisted BEFORE
+            # the dead stream journal could be replayed (the ordinary
+            # ``_extract_tool_calls_from_messages`` shape: untagged, with
+            # ``assistant_msg_idx`` pointing at the live assistant row) would
+            # fall through to ``return False`` and the journal would append a
+            # duplicate card, plus the caller would then see no dedupe hit and
+            # emit a false "Response interrupted" marker (SILENT bug from the
+            # 2026-09-23 re-gate).
+            #
+            # Legacy lazy-retry after reopen (pending identity cleared) still
+            # falls through to the tail ``return True`` via the ``else`` arm
+            # below — that path is unchanged.
             if pending_text:
-                continue
+                owner_user = next(
+                    (
+                        message
+                        for message in reversed((session.messages or [])[:anchor])
+                        if isinstance(message, dict) and message.get('role') == 'user'
+                    ),
+                    None,
+                )
+                if owner_user is None or not _message_owns_current_turn(owner_user, session):
+                    continue
         elif pending_text:
             # No authoritative token but pending metadata exists: the owning
             # user row must provably belong to the current turn.
@@ -3888,9 +3910,27 @@ def _recover_journaled_output_and_terminal_error(
     append_context: bool = True,
     dedupe_min_index: int | None = None,
     dedupe_max_index: int | None = None,
-) -> tuple[bool, bool]:
-    """Recover readable activity first, then append its authoritative terminal error."""
-    recovered_output = _append_journaled_partial_output(
+) -> tuple[bool, bool, bool]:
+    """Recover readable activity first, then append its authoritative terminal error.
+
+    Returns ``(recovered_output, terminal_error_recovered, output_accounted_for)``:
+
+    * ``recovered_output`` — True only when ``_append_journaled_partial_output``
+      appended a FRESH recovered row on this pass. Deliberately kept as the
+      pure append signal: callers that decide whether to raise an
+      ``_interrupted_recovery_marker`` key off it, and a pure dedupe reuse
+      must not re-raise an interruption marker (2026-09-23 re-gate regression).
+    * ``terminal_error_recovered`` — True when a specific gateway terminal
+      error was materialized for this turn.
+    * ``output_accounted_for`` — True when the journal's visible output was
+      either freshly appended OR already represented via a content/reasoning/
+      tool dedupe hit. Callers that decide whether to arm the lazy reload
+      hint (``_pending_journal_recovery``) key off THIS: a dedupe reuse means
+      the output IS in the transcript, so no reload hint is needed — this is
+      the split the re-gate asked for ("track journal output accounted for
+      separately from session mutated").
+    """
+    appended_any, output_accounted_for = _append_journaled_partial_output(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
@@ -3904,7 +3944,9 @@ def _recover_journaled_output_and_terminal_error(
         stream_id,
         terminal_recovery,
     )
-    return recovered_output, terminal_error_recovered
+    # Pure append signal — NOT folded with output_accounted_for (see docstring).
+    recovered_output = bool(appended_any)
+    return recovered_output, terminal_error_recovered, output_accounted_for
 
 
 def _journal_is_still_arriving(session, stream_id: str | None) -> bool:
@@ -3949,17 +3991,40 @@ def _append_journaled_partial_output(
     dedupe_max_index: int | None = None,
     append_context: bool = True,
     display_only: bool = False,
-) -> bool:
+) -> tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
+
+    Returns ``(appended_any, output_accounted_for)`` — the re-gate split the
+    pure "did we add a fresh row" signal from "is the journal's visible
+    output represented in the transcript either way", so callers can arm a
+    lazy reload hint only for a genuine nothing-to-recover case.
 
     This repair path is intentionally conservative: it restores user-visible
     assistant text, display-only reasoning, and tool-card metadata that had
     already been emitted over SSE before the WebUI process died. Restored
     reasoning stays out of ``context_messages`` so it cannot become provider-
     facing history. The repair does not try to continue execution.
+
+    Returns ``(session_mutated, output_accounted_for)``:
+
+    * ``session_mutated`` — True when the recovery actually appended fresh
+      rows to the session (kept for back-compat with the legacy single-bool
+      contract; tests assert it for "fresh append" semantics).
+    * ``output_accounted_for`` — True when the journal's visible output was
+      attached to an existing row (a content/reasoning/tool dedupe hit) OR
+      freshly appended. This is the signal callers use to decide whether the
+      journal's partial output was already represented in the transcript: a
+      False here means there was nothing visible to recover (no journal
+      events, or events for content that did not dedupe and did not get
+      appended — the rare ownership-uncertain path). ``False`` here is the
+      only condition that justifies appending a fresh
+      ``_pending_journal_recovery`` reload marker; previously a content or
+      tool dedupe hit returned ``appended_any=False`` which the caller read
+      as "nothing recovered" and used to append a spurious reload marker
+      (SILENT bug from the 2026-09-23 re-gate).
     """
     if not stream_id:
-        return False
+        return False, False
 
     try:
         from api.run_journal import read_run_events
@@ -3971,13 +4036,14 @@ def _append_journaled_partial_output(
             stream_id,
             exc_info=True,
         )
-        return False
+        return False, False
 
     events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
     if not events:
-        return False
+        return False, False
 
     appended_any = False
+    output_accounted_for = False
     assistant_parts: list[str] = []
     reasoning_parts: list[str] = []
     assistant_started_at: float | None = None
@@ -4134,7 +4200,8 @@ def _append_journaled_partial_output(
         return True
 
     def flush_assistant() -> int | None:
-        nonlocal appended_any, assistant_parts, reasoning_parts
+        nonlocal appended_any, output_accounted_for
+        nonlocal assistant_parts, reasoning_parts
         nonlocal assistant_started_at, current_assistant_idx
         content = ''.join(assistant_parts).strip()
         reasoning = ''.join(reasoning_parts).strip()
@@ -4187,6 +4254,15 @@ def _append_journaled_partial_output(
                     append_context_projection(existing_message)
                     if attach_display_reasoning(existing_message, reasoning):
                         appended_any = True
+                # Content dedupe hit: the journal's token stream was already
+                # represented by this existing assistant row, so the journal
+                # output IS accounted for (reused) — record that even when
+                # ``attach_display_reasoning`` returned False because the row
+                # already carried reasoning. Without this, callers read
+                # ``session_mutated=False`` as "nothing recovered" and
+                # appended a false ``_pending_journal_recovery`` reload
+                # marker on every repeated repair cycle.
+                output_accounted_for = True
                 return existing_idx
         if dedupe_existing and reasoning and not content:
             reasoning_start = (
@@ -4215,6 +4291,12 @@ def _append_journaled_partial_output(
                     claimed_existing_assistant_indexes.add(existing_idx)
                     current_assistant_idx = existing_idx
                     assistant_started_at = None
+                    # Reasoning-only dedupe hit: same rationale as the
+                    # content-dedupe branch above. The journal's reasoning
+                    # text was already attached to this row, so the
+                    # caller must NOT treat ``session_mutated=False`` as
+                    # "nothing recovered".
+                    output_accounted_for = True
                     return existing_idx
         timestamp = int(assistant_started_at or time.time())
         recovered_assistant = {
@@ -4232,6 +4314,7 @@ def _append_journaled_partial_output(
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True
+        output_accounted_for = True
         return current_assistant_idx
 
     def ensure_assistant_anchor(created_at: float | None = None) -> int:
@@ -4331,6 +4414,9 @@ def _append_journaled_partial_output(
             tool_id = str(
                 payload.get('tid') or payload.get('tool_call_id') or ''
             ).strip()
+            # Flush any buffered assistant text first: the anchor index is what
+            # both branches below key the recovered tool card off.
+            anchor_idx = flush_assistant()
             if dedupe_existing and _journal_tool_already_present(
                 session,
                 name,
@@ -4344,7 +4430,11 @@ def _append_journaled_partial_output(
                 min_assistant_idx=dedupe_min_index,
                 max_assistant_idx=dedupe_max_index,
             ):
+                # The card was reused via dedupe, so the journal's tool
+                # output IS represented in the transcript — but no FRESH row
+                # was appended, so session_mutated stays False.
                 current_assistant_idx = anchor_idx
+                output_accounted_for = True
                 continue
             if anchor_idx is None:
                 anchor_idx = ensure_assistant_anchor(created_at)
@@ -4364,6 +4454,7 @@ def _append_journaled_partial_output(
                 '_recovered_stream_id': stream_id,
             })
             appended_any = True
+            output_accounted_for = True
             current_assistant_idx = anchor_idx
             continue
         if event_name == 'tool_complete':
@@ -4408,7 +4499,8 @@ def _append_journaled_partial_output(
             tool_call.pop('_journal_synthetic_tid', None)
         session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
         appended_any = True
-    return appended_any
+        output_accounted_for = True
+    return appended_any, output_accounted_for
 
 
 # ── Lazy run-journal recovery (read-side self-heal) ─────────────────────────
@@ -5434,7 +5526,7 @@ def _apply_core_sync_or_error_marker(
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
-        recovered_output, terminal_error_recovered = (
+        recovered_output, terminal_error_recovered, _output_accounted_for = (
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
@@ -5448,13 +5540,50 @@ def _apply_core_sync_or_error_marker(
         session.pending_started_at = None
         session.pending_user_source = None
         if not terminal_error_recovered:
-            session.messages.append(
-                _build_recovery_marker_with_retry_hook(
-                    recovered_output=recovered_output,
-                    stream_id=_stream_id,
-                    pending_started_at=_pending_started_at,
+            # Same-stream marker: REUSE the existing same-stream marker
+            # (either a pending-retry reload hint OR an interrupted/_error
+            # marker for this same stream) instead of appending a fresh one.
+            # Without this, repeated cache-miss repair cycles against the same
+            # dead stream accumulated a fresh marker each pass (the SILENT bug
+            # from the 2026-09-23 re-gate: Codex saw 2+ stacked markers after
+            # 3 cycles). A dedupe hit means the journal output IS already in
+            # the transcript, so no new interruption marker is warranted —
+            # reuse the one already present. Cross-stream markers are left
+            # untouched (a different stream's marker still needs its own).
+            _existing_marker_idx = None
+            for _m_idx, _m in enumerate(session.messages):
+                if not isinstance(_m, dict):
+                    continue
+                _is_pending_retry = bool(_m.get('_pending_journal_recovery'))
+                _is_interrupted = _m.get('type') == 'interrupted' and bool(_m.get('_error'))
+                if not (_is_pending_retry or _is_interrupted):
+                    continue
+                _marker_stream = (
+                    _m.get('_journal_retry_stream_id') or _m.get('_recovered_stream_id')
                 )
-            )
+                if _marker_stream and str(_marker_stream) != str(_stream_id):
+                    continue
+                _existing_marker_idx = _m_idx
+                break
+            if _existing_marker_idx is not None:
+                # Reuse: do not append. The marker (and its retry meta, if
+                # any) is already in place for this stream; budget is
+                # consumed by the existing marker, not by stacking a new one.
+                pass
+            else:
+                session.messages.append(
+                    _build_recovery_marker_with_retry_hook(
+                        # Arm the reload hint only when the journal's output
+                        # was NOT accounted for (neither freshly appended nor
+                        # dedupe-reused). A dedupe reuse means the output IS
+                        # in the transcript, so no reload hint — this is the
+                        # re-gate's "accounted for separately from mutated"
+                        # split applied to the reload-marker decision.
+                        recovered_output=recovered_output or _output_accounted_for,
+                        stream_id=_stream_id,
+                        pending_started_at=_pending_started_at,
+                    )
+                )
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
@@ -5504,7 +5633,7 @@ def _apply_core_sync_or_error_marker(
                 )
             ):
                 _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
-            recovered_output, terminal_error_recovered = (
+            recovered_output, terminal_error_recovered, _output_accounted_for = (
                 _recover_journaled_output_and_terminal_error(
                     session,
                     _stream_id,
@@ -5518,14 +5647,35 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            # Same-stream interruption marker: REUSE the matching marker
+            # from the prior repair rather than append a fresh one. The
+            # original `_apply_core_sync_or_error_marker` was the only
+            # site that wrote a marker here, and it would stack one marker
+            # per repair cycle on a session that is being re-recovered
+            # from the same core transcript + same dead stream (the
+            # SILENT bug from the 2026-09-23 re-gate). The marker is
+            # the only signal the user gets in this branch, so the reuse
+            # must skip the append when the existing marker advertises
+            # the same stream and recovery state.
             if recovered_output and not terminal_error_recovered:
-                session.messages.append(
-                    _interrupted_recovery_marker(
-                        recovered_output=True,
-                        stream_id=_stream_id,
-                        pending_started_at=_pending_started_at,
+                _existing_marker_idx = None
+                for _m_idx, _m in enumerate(session.messages):
+                    if not isinstance(_m, dict):
+                        continue
+                    if _m.get('type') != 'interrupted' or not _m.get('_error'):
+                        continue
+                    if _m.get('_recovered_stream_id') and _m.get('_recovered_stream_id') != _stream_id:
+                        continue
+                    _existing_marker_idx = _m_idx
+                    break
+                if _existing_marker_idx is None:
+                    session.messages.append(
+                        _interrupted_recovery_marker(
+                            recovered_output=True,
+                            stream_id=_stream_id,
+                            pending_started_at=_pending_started_at,
+                        )
                     )
-                )
             # NOTE: when the core transcript was synced in but the run journal
             # is not yet visible, intentionally do NOT append a lazy-retry
             # marker here. In this branch the canonical history is the core
@@ -5561,7 +5711,7 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(_recovered_pending_timestamp(session.pending_started_at))
         _recovered_row_ts = _recovered_pending_timestamp(session.pending_started_at)
         _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
-    recovered_output, terminal_error_recovered = (
+    recovered_output, terminal_error_recovered, _output_accounted_for = (
         _recover_journaled_output_and_terminal_error(
             session,
             _stream_id,
@@ -5578,7 +5728,9 @@ def _apply_core_sync_or_error_marker(
     if not terminal_error_recovered:
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
-                recovered_output=recovered_output,
+                # Same split as above: no reload hint when the journal output
+                # was already accounted for via dedupe reuse.
+                recovered_output=recovered_output or _output_accounted_for,
                 stream_id=_stream_id,
                 pending_started_at=_pending_started_at,
             )

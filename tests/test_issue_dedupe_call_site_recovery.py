@@ -649,7 +649,7 @@ def test_tool_only_replay_dedupe_does_not_allocate_orphan_anchor(hermes_home):
     )
     from api.models import _append_journaled_partial_output
 
-    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is True
+    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) == (True, True)
     messages_before = len(session.messages)
     tools_before = len(session.tool_calls or [])
 
@@ -660,7 +660,7 @@ def test_tool_only_replay_dedupe_does_not_allocate_orphan_anchor(hermes_home):
 
     tools_after = len(session.tool_calls or [])
     assert tools_after == tools_before == 1, "the deduped tool must not be re-appended"
-    if result is True:
+    if result[0] is True:
         assert len(session.messages) == messages_before, (
             "SILENT: the tool-only replay allocated a new empty assistant anchor "
             "even though the tool card was deduplicated "
@@ -715,4 +715,129 @@ def test_lazy_retry_after_reopen_does_not_duplicate_persisted_tool(hermes_home):
     assert len(recovered_again) == 1, (
         f"SILENT: reopen + lazy retry duplicated the persisted tool card "
         f"(journal-tagged cards for {stream_id}: {len(recovered_again)})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-09-23 (nesquena-hermes) — two SILENT findings + regressions:
+#   SILENT 1: core-transcript recovery duplicated an untagged tool card and
+#             added a false "Response interrupted" marker when the current
+#             turn already had an assistant answer + an ordinary UNTAGGED tool
+#             row anchored at the current-turn assistant (production shape —
+#             no fabricated _recovered_stream_id).
+#   SILENT 2: a dedupe hit (journal output already in the transcript) was read
+#             as "nothing recovered", so every repair cycle appended a fresh
+#             _pending_journal_recovery reload marker. Regression: N repair
+#             cycles must leave exactly ONE non-retry recovery marker.
+# ---------------------------------------------------------------------------
+
+
+def test_current_turn_untagged_tool_row_dedupes_without_false_interrupt(hermes_home):
+    """SILENT 1: a production-shaped UNTAGGED tool row anchored at the current
+    turn's assistant must dedupe (no duplicate card) and must NOT trigger a
+    false Response-interrupted marker."""
+    import json
+
+    sid = "regate_untagged_current"
+    stream_id = "regate-untagged-current"
+    # Journal replays the SAME token + tool the core transcript already holds.
+    append_run_event(sid, stream_id, "token", {"text": "checked"})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls"})
+
+    session = Session(session_id=sid, title="regate", messages=[])
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 222
+    session.pending_user_source = None
+
+    core_path = hermes_home / "sessions" / f"session_{sid}.json"
+    core_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "run the check", "timestamp": 222},
+                    {"role": "assistant", "content": "checked", "timestamp": 223},
+                ],
+                # PRODUCTION SHAPE: untagged card, anchor points at the CURRENT
+                # turn's assistant row (index 1). No _recovered_stream_id.
+                "tool_calls": [
+                    {
+                        "name": "terminal",
+                        "preview": "ls",
+                        "snippet": "ls",
+                        "assistant_msg_idx": 1,
+                        "done": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _apply_core_sync_or_error_marker(
+        session,
+        core_path,
+        stream_id_for_recheck=stream_id,
+        require_stream_dead=False,
+    )
+    assert result is True
+
+    # Exactly ONE terminal card — the journal replay must dedupe against the
+    # existing current-turn untagged card, not append a second one.
+    terminal_cards = [
+        tc for tc in (session.tool_calls or []) if tc.get("name") == "terminal"
+    ]
+    assert len(terminal_cards) == 1, (
+        f"SILENT 1: current-turn untagged tool card duplicated "
+        f"(cards={terminal_cards!r})"
+    )
+    # No false Response-interrupted / _error marker: the turn's output was
+    # already present, so recovery must not claim something went wrong.
+    assert not [m for m in session.messages if isinstance(m, dict) and m.get("_error")], (
+        "SILENT 1: a false error marker was appended for a healthy turn "
+        f"(messages={session.messages!r})"
+    )
+    assert session.pending_user_message is None
+
+
+def test_repeated_repair_does_not_accumulate_reload_markers(hermes_home):
+    """SILENT 2: repeated repair cycles must leave exactly ONE non-retry
+    recovery marker — a dedupe hit is 'output accounted for', not 'nothing
+    recovered', so it must not append a fresh _pending_journal_recovery each
+    pass (Codex observed 2 false reload markers after 3 cycles)."""
+    sid = "dedupe_reload_once"
+    stream_id = "dead-reload-stream"
+    _make_reasoning_only_journal(sid, stream_id)
+
+    current = None
+    for _ in range(3):
+        session = _make_repair_session(sid, stream_id, previous_messages=current)
+        result = _apply_core_sync_or_error_marker(
+            session,
+            hermes_home / "sessions" / f"session_{sid}.json",
+            stream_id_for_recheck=stream_id,
+        )
+        assert result is True
+        current = session.messages
+
+    reload_markers = [
+        m
+        for m in session.messages
+        if isinstance(m, dict) and m.get("_pending_journal_recovery")
+    ]
+    # Allow at most one pending-retry marker (the lazy-retry hook), never one
+    # stacked per cycle.
+    assert len(reload_markers) <= 1, (
+        f"SILENT 2: {len(reload_markers)} reload markers accumulated over 3 "
+        f"repair cycles (expected <= 1) "
+        f"(markers={reload_markers!r})"
+    )
+    # The interrupted/error marker must not stack either: at most one.
+    error_markers = [
+        m for m in session.messages if isinstance(m, dict) and m.get("_error")
+    ]
+    assert len(error_markers) <= 1, (
+        f"SILENT 2: {len(error_markers)} error markers accumulated over 3 "
+        f"repair cycles (expected <= 1)"
     )
