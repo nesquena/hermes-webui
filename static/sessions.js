@@ -170,8 +170,8 @@ function _paneProfileMatchesActiveProfile(paneProfile, activeProfile){
   if(paneName === activeName) return true;
   return activeName === 'default'
     && !!(typeof S !== 'undefined' && S && S.activeProfileIsDefault)
-    && typeof _cronProfileNameIsRootAlias === 'function'
-    && _cronProfileNameIsRootAlias(paneName);
+    && typeof _canonicalProfileRootAlias === 'function'
+    && _canonicalProfileRootAlias(paneName);
 }
 
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
@@ -655,6 +655,19 @@ function _activeProfileRootNamesSet(){
     return new Set(S.activeProfileRootNames);
   }
   return null;
+}
+
+// Canonical-scope root admission for AUTHORITY (pane/frame/stream). Deliberately
+// stricter than `_cronProfileNameIsRootAlias` below: that helper serves cron-marker
+// scope, where an eventually-consistent roster is an acceptable input, but it must
+// never decide stream authority (gate round 13). With no canonical scope in hand we
+// fail CLOSED — an unknown name is not admitted as the renamed root.
+function _canonicalProfileRootAlias(name){
+  if (name === 'default') return true;
+  const serverRoots = (typeof _activeProfileRootNamesSet === 'function')
+    ? _activeProfileRootNamesSet()
+    : null;
+  return !!(serverRoots && serverRoots.has(name));
 }
 
 function _cronProfileNameIsRootAlias(name) {
@@ -3480,8 +3493,10 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!data || !data.session) return false;
   if (typeof data.session !== 'object' || Array.isArray(data.session)) return false;
   if (String(data.session.session_id || '') !== String(sid)) return false;
-  if (data.session.messages !== undefined && data.session.messages !== null
-      && !Array.isArray(data.session.messages)) return false;
+  // Gate round 13: require an ARRAY. Admit nothing else — a missing or null
+  // `messages` used to reach `(data.session.messages || [])`, install an empty
+  // transcript and still report success.
+  if (!Array.isArray(data.session.messages)) return false;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;

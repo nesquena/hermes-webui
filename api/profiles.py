@@ -460,16 +460,26 @@ def _root_profile_names() -> list[str]:
     timer - so it cannot answer during a cold boot.
     Fail-open: never raise on a boot-critical path.
     """
-    names = {'default'}
     try:
-        for p in list_profiles_api():
-            try:
-                if p.get('is_default') and p.get('name'):
-                    names.add(p['name'])
-            except (AttributeError, TypeError):
-                continue
+        infos = list_profiles_api()
     except Exception:
+        # Do NOT publish a partial set as authoritative: the client prefers a
+        # non-empty canonical set and would stop consulting its own roster, so
+        # emitting just ['default'] here would reject a restored session tagged
+        # with the renamed root and its stream would never be reopened. Fall back
+        # to the memoized root-name cache, which already knows the renamed alias.
         logger.debug("Failed to list profiles for root-name lookup", exc_info=True)
+        with _root_profile_name_cache_lock:
+            if _root_profile_name_cache_loaded:
+                return sorted(_root_profile_name_cache)
+        return ['default']
+    names = {'default'}
+    for p in infos:
+        try:
+            if p.get('is_default') and p.get('name'):
+                names.add(p['name'])
+        except (AttributeError, TypeError):
+            continue
     return sorted(names)
 
 

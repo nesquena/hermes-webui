@@ -3626,9 +3626,13 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // UI roster (_profilesCache) is NOT an acceptable authority input: it starts
   // empty, can be five minutes stale from localStorage, and is warmed only after
   // the window-load timer.
-  if(Array.isArray(activeProfileState.rootNames) && activeProfileState.rootNames.length){
-    S.activeProfileRootNames = activeProfileState.rootNames.slice();
-  }
+  // Replace or CLEAR on every transition: keeping a previous profile's canonical
+  // scope when the new one could not be resolved would let stream authority keep
+  // answering from stale state (gate round 13). A resolved server set is the only
+  // canonical source; its absence leaves authority failing closed.
+  S.activeProfileRootNames = Array.isArray(activeProfileState.rootNames)
+    ? activeProfileState.rootNames.slice()
+    : null;
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

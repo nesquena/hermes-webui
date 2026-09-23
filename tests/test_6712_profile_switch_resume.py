@@ -35,6 +35,8 @@ flagged.
 """
 import json
 import re
+import sys
+import textwrap
 import shutil
 import subprocess
 from pathlib import Path
@@ -1518,12 +1520,15 @@ _RENAME_ROOT_HARNESS = r"""
 const params = __PARAMS__;
 
 const S = { session: params.session, activeProfile: params.activeProfile,
-            activeProfileIsDefault: !!params.activeProfileIsDefault };
+            activeProfileIsDefault: !!params.activeProfileIsDefault,
+            activeProfileRootNames: params.rootNames };
 let _loadingSessionId = null;
 let started = [];
 function startSessionStream(sid){ started.push(sid); }
 // Server-provided profile cache: the entry flagged is_default IS the root, whatever
-// its name — that is exactly how a renamed root is reported.
+// its name — that is exactly how a renamed root is reported. Gate round 13: authority
+// no longer comes from this roster, so the harness also carries the CANONICAL scope
+// the server delivers with the active-profile state.
 const _profilesCache = { profiles: params.profiles };
 
 function _profileMatchesActiveProfile(profile, activeProfile){
@@ -1558,8 +1563,14 @@ console.log(JSON.stringify({
 def _run_renamed_root(*, pane_profile, active_profile, active_is_default, profiles):
     """Drive the real pane predicate + re-arm guard for a renamed-root session."""
     src_js = _read(SESSIONS_JS_PATH)
-    helper = src_js[src_js.index("function _paneProfileMatchesActiveProfile("):]
-    helper = helper[: helper.index("\n}\n") + 3]
+    # The authority chain the pane predicate consults, shipped verbatim: the canonical
+    # scope reader, the canonical-only admission rule, and the pane rule itself.
+    chain = ""
+    for _name in ("_activeProfileRootNamesSet", "_canonicalProfileRootAlias",
+                  "_paneProfileMatchesActiveProfile"):
+        _seg = src_js[src_js.index("function %s(" % _name):]
+        chain += _seg[: _seg.index("\n}\n") + 3] + "\n"
+    helper = chain.rstrip("\n")
     rearm = src_js[src_js.index("function _rearmActiveSessionStream("):]
     rearm = rearm[: rearm.index("\n}\n") + 3]
     pane = _read(MESSAGES_JS_PATH)
@@ -1571,6 +1582,9 @@ def _run_renamed_root(*, pane_profile, active_profile, active_is_default, profil
             "activeProfile": active_profile,
             "activeProfileIsDefault": active_is_default,
             "profiles": profiles,
+            # Canonical scope, as delivered by /api/profile/active: the root-flagged
+            # roster entries ARE the canonical root names.
+            "rootNames": [p["name"] for p in profiles if p.get("is_default") and p.get("name")] or None,
         }))
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
@@ -1686,6 +1700,8 @@ def test_malformed_truthy_message_bodies_are_rejected_before_any_mutation():
         {"session": ["A-sid"]},                 # array
         {"session": {"session_id": "OTHER", "messages": []}},   # wrong id
         {"session": {"session_id": "A-sid", "messages": "nope"}},  # wrong-typed messages
+        {"session": {"session_id": "A-sid"}},                      # messages missing
+        {"session": {"session_id": "A-sid", "messages": None}},    # messages null
     ]
     for response in bad:
         out = _run_message_body(response)
@@ -1726,8 +1742,8 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   if(eventName === activeName) return true;
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }
-// The roster-backed resolver: unavailable at cold boot (cache null), and the only
-// remaining input if the server-provided set is missing.
+// The roster-backed resolver. Gate round 13: it is NOT an authority input, so a
+// STALE roster must have no effect — the harness seeds one deliberately.
 function _cronProfileNameIsRootAlias(name) {
   if (name === 'default') return true;
   if (typeof _profilesCache !== 'undefined' && _profilesCache
@@ -1738,6 +1754,12 @@ function _cronProfileNameIsRootAlias(name) {
   return false;
 }
 
+// A deliberately STALE roster: it still claims `kinni` is the root even when the
+// server scope says otherwise (or is absent).
+var _profilesCache = params.staleRoster
+  ? { profiles: [{ name: 'kinni', is_default: true }] }
+  : null;
+
 __HELPER_BODY__
 
 __REARM_BODY__
@@ -1747,10 +1769,11 @@ console.log(JSON.stringify({ pane: _isSessionCurrentPane('pane'), rearm: rearm }
 """
 
 
-def _run_authority(*, pane_profile, active_profile, active_is_default, root_names):
+def _run_authority(*, pane_profile, active_profile, active_is_default, root_names,
+                   stale_roster=False):
     src_js = _read(SESSIONS_JS_PATH)
-    for name in ("_activeProfileRootNamesSet", "_cronProfileNameIsRootAlias",
-                 "_paneProfileMatchesActiveProfile"):
+    for name in ("_activeProfileRootNamesSet", "_canonicalProfileRootAlias",
+                 "_cronProfileNameIsRootAlias", "_paneProfileMatchesActiveProfile"):
         helper = src_js[src_js.index("function %s(" % name):]
         if name == "_cronProfileNameIsRootAlias":
             helper = helper[: helper.index("\n}\n") + 3]
@@ -1760,8 +1783,8 @@ def _run_authority(*, pane_profile, active_profile, active_is_default, root_name
             helper = helper[: helper.index("\n}\n") + 3]
         globals()["_h_" + name] = helper
     helpers = "\n".join(globals()["_h_" + n] for n in
-                        ("_activeProfileRootNamesSet", "_cronProfileNameIsRootAlias",
-                         "_paneProfileMatchesActiveProfile"))
+                        ("_activeProfileRootNamesSet", "_canonicalProfileRootAlias",
+                         "_cronProfileNameIsRootAlias", "_paneProfileMatchesActiveProfile"))
     rearm = src_js[src_js.index("function _rearmActiveSessionStream("):]
     rearm = rearm[: rearm.index("\n}\n") + 3]
     pane = _read(MESSAGES_JS_PATH)
@@ -1773,6 +1796,7 @@ def _run_authority(*, pane_profile, active_profile, active_is_default, root_name
             "activeProfile": active_profile,
             "activeProfileIsDefault": active_is_default,
             "rootNames": root_names,
+            "staleRoster": bool(stale_roster),
         }))
     proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
@@ -1805,6 +1829,34 @@ def test_profile_authority_ignores_a_stale_roster_in_the_other_direction():
                          active_is_default=True, root_names=["default", "kinni"])
     assert ctl["pane"] is False and ctl["rearm"] == [], (
         f"a non-root profile was authorised: {ctl}"
+    )
+
+
+def test_a_stale_roster_cannot_grant_stream_authority():
+    """Gate round 13: the previous "stale roster" case never actually created a stale
+    roster, so it could not catch the roster fallback. This one does — and asserts the
+    fallback cannot grant authority in EITHER direction."""
+    # A roster insisting `kinni` is the root, with NO canonical scope resolved: the
+    # roster must not stand in for canonical authority.
+    no_scope = _run_authority(pane_profile="kinni", active_profile="default",
+                              active_is_default=True, root_names=None,
+                              stale_roster=True)
+    assert no_scope["pane"] is False and no_scope["rearm"] == [], (
+        f"a stale roster granted stream authority with no canonical scope: {no_scope}"
+    )
+    # A roster still listing a name the canonical scope does NOT: canonical wins.
+    stale_extra = _run_authority(pane_profile="rogue-root", active_profile="default",
+                                 active_is_default=True, root_names=["default"],
+                                 stale_roster=True)
+    assert stale_extra["pane"] is False and stale_extra["rearm"] == [], (
+        f"a roster overrode the canonical scope: {stale_extra}"
+    )
+    # Reverse control: with canonical scope PRESENT, the renamed root is admitted.
+    canon = _run_authority(pane_profile="kinni", active_profile="default",
+                           active_is_default=True, root_names=["default", "kinni"],
+                           stale_roster=True)
+    assert canon["pane"] is True and canon["rearm"] == ["pane"], (
+        f"canonical scope should admit the renamed root even with a stale roster: {canon}"
     )
 
 
@@ -2025,3 +2077,47 @@ def test_marker_is_retired_when_ownership_is_lost_at_each_abandonment_exit():
         f"the 409 recovery abandonment left _loadingSessionId="
         f"{out['markerAfterSwitchRecovery']!r} installed (gate G2): {out}"
     )
+
+# ── Greptile round 13: a failed listing must not publish a partial root set ───
+#
+# `_root_profile_names()` returns `['default']` when `list_profiles_api()` raises.
+# The client prefers a non-empty canonical set and stops consulting its roster, so
+# publishing that partial set would reject a restored session tagged with the
+# renamed root — its stream would never be reopened. The memoized root-name cache
+# already knows the renamed alias, so the failure path must fall back to it.
+
+PROFILES_PY = REPO_ROOT / "api" / "profiles.py"
+
+
+def _run_root_names_on_failure(*, cache_loaded: bool):
+    """Call the real `_root_profile_names()` with the profile listing failing."""
+    py = textwrap.dedent("""
+        import json
+        import sys
+        sys.path.insert(0, {repo!r})
+        import api.profiles as p
+        with p._root_profile_name_cache_lock:
+            p._root_profile_name_cache.clear()
+            p._root_profile_name_cache.add('default')
+            p._root_profile_name_cache.add('kinni')
+            p._root_profile_name_cache_loaded = {loaded!r}
+        p.list_profiles_api = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
+        print(json.dumps(p._root_profile_names()))
+    """).format(repo=str(REPO_ROOT), loaded=cache_loaded)
+    proc = subprocess.run([sys.executable, "-c", py], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"probe failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_failed_profile_listing_keeps_the_cached_root_alias():
+    """Greptile round 13: the renamed root must survive a failed listing."""
+    names = _run_root_names_on_failure(cache_loaded=True)
+    assert "kinni" in names, (
+        f"a failed profile listing published {names!r}, dropping the renamed root; the "
+        f"client prefers a non-empty canonical set, so its pane/stream authority would "
+        f"reject a restored renamed-root session (Greptile P1, round 13)"
+    )
+    assert "default" in names, names
+    # Cold cache (nothing proved yet) still fails closed to the literal alias.
+    cold = _run_root_names_on_failure(cache_loaded=False)
+    assert cold == ["default"], cold

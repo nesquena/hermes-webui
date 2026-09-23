@@ -7181,9 +7181,11 @@ async function switchToProfile(name) {
     S.activeProfileIsDefault = !!data.is_default;
     // Same authority rule as boot: root-alias scope comes from the SERVER payload
     // delivered with the active-profile state, never from the UI roster cache.
-    if (Array.isArray(data.root_names) && data.root_names.length) {
-      S.activeProfileRootNames = data.root_names.slice();
-    }
+    // Replace or clear, exactly like boot: a switch whose server metadata is
+    // missing must not leave the previous profile's canonical scope in place.
+    S.activeProfileRootNames = Array.isArray(data.root_names)
+      ? data.root_names.slice()
+      : null;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
