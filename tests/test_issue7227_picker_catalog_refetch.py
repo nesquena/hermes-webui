@@ -28,6 +28,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(
@@ -255,3 +257,26 @@ def test_boot_wires_refetch_hooks_used_by_picker_open():
     populate_start = UI_JS.index("async function populateModelDropdown(")
     populate_tail = UI_JS[populate_start:populate_start + 12000]
     assert "dd.classList.contains('open')" in populate_tail
+
+
+def test_profile_switch_invalidates_model_catalog_generation():
+    """Defect 1: Profile switch invalidates request seq and guards stale globals."""
+    assert "bumpModelDropdownRequestSeq" in UI_JS
+    assert "bumpModelDropdownRequestSeq()" in PANELS_JS
+    assert "requestedProfile" in UI_JS
+    assert "S.activeProfile!==requestedProfile" in UI_JS
+
+
+def test_open_picker_preserves_search_and_custom_inputs():
+    """Defect 2: Picker refetch preserves search and custom input text and focus."""
+    assert "_renderOpenDropdownPreservingInput" in UI_JS
+    assert "model-search-input" in UI_JS
+    assert "model-custom-input" in UI_JS
+    assert "_renderOpenDropdownPreservingInput(dd," in UI_JS
+
+
+def test_live_models_coalescing_and_sessions_hydration_tracking():
+    """Defect 3: Sessions hydration uses tracker and _fetchLiveModels coalesces in-flight fetches."""
+    assert "window._trackModelCatalogHydration" in SESSIONS_JS
+    assert "_liveModelInFlight" in UI_JS
+

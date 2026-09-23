@@ -3659,55 +3659,61 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // after the saved session is visible.
   const _redirectBootModelDropdownIfUnauth=(res)=>{
     if(!res||res.status!==401) return false;
-    window._modelDropdownReady=null;
+    if(typeof _trackModelCatalogHydration==='function') _trackModelCatalogHydration(null);
+    else window._modelDropdownReady=null;
     if(_bootActiveProfileUnauthRedirectBudget.isConsumed()) return true;
     if(_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(sessionStorage)){
       _bootActiveProfileUnauthRedirectBudget.redirectToLogin(window.location.pathname+window.location.search);
     }
     return true;
   };
-  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({
-    preferProfileDefaultOnFreshBoot:true,
-    ...(redirectIfUnauth?{redirectIfUnauth}:{}),
-  }).then(()=>{
-    const sessionModelState=S.session&&S.session.model
-      ? {model:S.session.model,model_provider:S.session.model_provider||null}
-      : null;
-    const savedState=(typeof _readPersistedModelState==='function')
-      ? _readPersistedModelState()
-      : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
-    // Active sessions are authoritative. On fresh boot without a restored
-    // session, keep the profile/server default ahead of stale browser model
-    // state when a default exists.
-    const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
-    const savedModel=stateToApply&&stateToApply.model;
-    if(savedModel && $('modelSelect')){
-      const applied=(typeof _applyModelToDropdown==='function')
-        ? (sessionModelState
-          ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
-          : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
+  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>{
+    const hydrateProfile=(typeof S!=='undefined'&&S.activeProfile)?S.activeProfile:null;
+    return populateModelDropdown({
+      preferProfileDefaultOnFreshBoot:true,
+      ...(redirectIfUnauth?{redirectIfUnauth}:{}),
+    }).then(()=>{
+      if(hydrateProfile!==null&&typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==hydrateProfile) return;
+      const sessionModelState=S.session&&S.session.model
+        ? {model:S.session.model,model_provider:S.session.model_provider||null}
         : null;
-      if(!applied) $('modelSelect').value=stateToApply.model;
-      // If the value didn't take (model not in list), clear the bad pref only
-      // for persisted browser preferences. Active sessions remain authoritative.
-      if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
-        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
-      }
-      else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
-        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else {
-          localStorage.removeItem('hermes-webui-model');
-          localStorage.removeItem('hermes-webui-model-state');
+      const savedState=(typeof _readPersistedModelState==='function')
+        ? _readPersistedModelState()
+        : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
+      // Active sessions are authoritative. On fresh boot without a restored
+      // session, keep the profile/server default ahead of stale browser model
+      // state when a default exists.
+      const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
+      const savedModel=stateToApply&&stateToApply.model;
+      if(savedModel && $('modelSelect')){
+        const applied=(typeof _applyModelToDropdown==='function')
+          ? (sessionModelState
+            ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
+            : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
+          : null;
+        if(!applied) $('modelSelect').value=stateToApply.model;
+        // If the value didn't take (model not in list), clear the bad pref only
+        // for persisted browser preferences. Active sessions remain authoritative.
+        if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
+          _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
         }
+        else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
+          if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+          else {
+            localStorage.removeItem('hermes-webui-model');
+            localStorage.removeItem('hermes-webui-model-state');
+          }
+        }
+        else if(typeof syncModelChip==='function') syncModelChip();
       }
-      else if(typeof syncModelChip==='function') syncModelChip();
-    }
-    if(S.session) syncTopbar();
-    else if(typeof syncReasoningChip==='function') syncReasoningChip();
-  }).catch(e=>{
-    window._modelDropdownReady=null;
-    throw e;
-  });
+      if(S.session) syncTopbar();
+      else if(typeof syncReasoningChip==='function') syncReasoningChip();
+    }).catch(e=>{
+      if(typeof _trackModelCatalogHydration==='function') _trackModelCatalogHydration(null);
+      else window._modelDropdownReady=null;
+      throw e;
+    });
+  };
   // Mirrors whether the hydration cached at window._modelDropdownReady has
   // SETTLED. Promise state is not synchronously observable, so the starters
   // below keep this flag: while a hydration is still in flight the cached
@@ -3718,9 +3724,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // would report "No models found" for those until a hard refresh (#7227).
   let _modelCatalogHydrationSettled=false;
   const _trackModelCatalogHydration=(next)=>{
+    if(!next){
+      window._modelDropdownReady=null;
+      _modelCatalogHydrationSettled=false;
+      return null;
+    }
     Promise.resolve(next).then(
-      ()=>{ _modelCatalogHydrationSettled=true; },
-      ()=>{ _modelCatalogHydrationSettled=false; }
+      ()=>{ if(window._modelDropdownReady===next) _modelCatalogHydrationSettled=true; },
+      ()=>{ if(window._modelDropdownReady===next) _modelCatalogHydrationSettled=false; }
     );
     window._modelDropdownReady=next;
     return next;
@@ -3742,6 +3753,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     );
   };
   window._modelDropdownReady=null;
+  window._trackModelCatalogHydration=_trackModelCatalogHydration;
   window._startBootModelDropdown=_startBootModelDropdown;
   window._ensureModelDropdownReady=_startModelDropdown;
   setTimeout(()=>{
