@@ -23,7 +23,7 @@ from api.agent_sessions import normalize_agent_session_source
 
 logger = logging.getLogger(__name__)
 
-AUTO_TITLE_LABELS = {'untitled', 'new chat'}
+AUTO_TITLE_LABELS = {'untitled', 'new chat', 'bot chat'}
 
 
 class RegenerationUnavailable(Exception):
