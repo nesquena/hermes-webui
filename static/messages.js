@@ -3478,6 +3478,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
       tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
     }
+    // #7358 round 4: the live tool mirror carries the authoritative
+    // ``is_error`` (set by the structured ``tool_complete`` callback
+    // at SSE emit time) but the persisted ``tool`` row and the
+    // ``payload`` object both lack the field. The compact /
+    // transparent render paths downstream default to ``false`` when
+    // ``is_error`` is missing, so a failed tool that was correctly
+    // shown red live reverts to "Completed" on cold reload. Carry
+    // the live value through to both rows so the cold-reload render
+    // matches the live card.
+    if(live && live.is_error === true && tool.is_error !== true && payload.is_error !== true){
+      tool.is_error = true;
+      payload.is_error = true;
+      enriched = true;
+    }
     const liveArgs=_anchorSceneToolArgs(live);
     if(liveArgs&&typeof liveArgs==='object'&&Object.keys(liveArgs).length){
       const mergeMissingArgs=(existing)=>{
