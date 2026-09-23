@@ -3052,10 +3052,19 @@ def _lift_suppressed_pool_source(provider_id: str, env_var: str) -> None:
     materialized to auth.json right now (upstream #96058 class). Best-effort:
     the .env write above has already succeeded.
     """
+    matching_providers = {provider_id}
+    for pid, ev in _PROVIDER_ENV_VAR.items():
+        if ev == env_var:
+            matching_providers.add(pid)
+
     try:
         from hermes_cli.auth import unsuppress_credential_source
 
-        unsuppress_credential_source(provider_id, f"env:{env_var}")
+        for pid in matching_providers:
+            try:
+                unsuppress_credential_source(pid, f"env:{env_var}")
+            except Exception:
+                pass
     except ImportError:
         logger.debug(
             "hermes_cli runtime unavailable; skipped unsuppress for provider %s",
@@ -3070,7 +3079,11 @@ def _lift_suppressed_pool_source(provider_id: str, env_var: str) -> None:
     try:
         from agent.credential_pool import load_pool
 
-        load_pool(provider_id)
+        for pid in matching_providers:
+            try:
+                load_pool(pid)
+            except Exception:
+                pass
     except ImportError:
         logger.debug(
             "hermes_cli runtime unavailable; skipped pool materialization "

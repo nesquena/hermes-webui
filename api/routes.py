@@ -15931,7 +15931,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         if api_key is not None:
             api_key = str(api_key).strip() or None
-        result = set_provider_key(provider_id, api_key)
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/providers", logger_override=logger):
+            result = set_provider_key(provider_id, api_key)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
@@ -15940,7 +15942,9 @@ def handle_post(handler, parsed) -> bool:
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:
             return bad(handler, "provider is required")
-        result = remove_provider_key(provider_id)
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/providers/delete", logger_override=logger):
+            result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)

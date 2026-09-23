@@ -56,6 +56,7 @@ class TestRemoveProviderKeyPurging:
         self, monkeypatch, tmp_path
     ):
         """The exact #7412 repro: env-seeded pool row must not survive delete."""
+        pytest.importorskip("hermes_cli.credential_lifecycle")
         _pin_home(monkeypatch, tmp_path)
         auth_path = _write_auth_store(
             tmp_path,
@@ -96,6 +97,7 @@ class TestRemoveProviderKeyPurging:
     def test_remove_preserves_non_env_pool_entries(self, monkeypatch, tmp_path):
         """OAuth/manual/borrowed rows must survive — the purge only targets
         ``env:<VAR>`` sources (OAuth preservation contract)."""
+        pytest.importorskip("hermes_cli.credential_lifecycle")
         _pin_home(monkeypatch, tmp_path)
         _write_auth_store(
             tmp_path,
@@ -192,6 +194,8 @@ class TestReaddLiftsSuppression:
     ):
         """Issue consequence #3: after a removal wrote suppressed_sources, a UI
         save must lift it and materialize the env-seeded pool entry (#96058)."""
+        pytest.importorskip("hermes_cli.auth")
+        pytest.importorskip("agent.credential_pool")
         _pin_home(monkeypatch, tmp_path)
         _write_auth_store(
             tmp_path,
