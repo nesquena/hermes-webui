@@ -10159,9 +10159,11 @@ def _emit_tool_complete_to_mirrors_and_sse(
     is a thin wrapper that just supplies the closure-bound lists and
     ``put`` sink.
 
-    ``is_error_override`` exists only for tests that want to pin the
-    exact classification; production callers always pass ``None`` so
-    the helper re-derives it from the payload.
+    ``is_error_override`` carries the Agent's authoritative
+    ``is_error`` captured by ``on_tool`` on the structured-callback
+    suppression path (round 5); when ``None`` the helper re-derives
+    it from the payload. Tests may also pass it to pin the exact
+    classification.
     """
     is_error = (
         is_error_override
@@ -13077,6 +13079,19 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
+            # #7358 round 5 (re-gate 9/22): the Agent's authoritative
+            # ``is_error`` is delivered via the legacy ``tool_progress_callback``'s
+            # ``cb_kwargs`` but the structured ``tool_complete_callback`` signature
+            # does not carry it. The legacy path early-returns when the structured
+            # callback is wired, so the authoritative bit is dropped. Capture it
+            # here on the suppression path, key it by ``tid`` (looked up by name
+            # in the most recent live entry), and pass it as ``is_error_override``
+            # from ``on_tool_complete``. The text-inference fallback
+            # (``_tool_result_is_error``) only fires when no authoritative value
+            # was captured — a Codex success whose output contains the literal
+            # ``"error"`` key name and a guardrail_refusal read both stay
+            # correctly classified as the Agent intended.
+            _authoritative_is_error_by_tid = {}
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -13231,6 +13246,25 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
+                    # #7358 round 5 (re-gate 9/22): the structured callback
+                    # takes over the completion path, but the Agent's
+                    # authoritative ``is_error`` was passed via the legacy
+                    # tool_progress_callback's cb_kwargs and is about to be
+                    # dropped. Capture it here, key it by ``tid`` (looked up
+                    # by name in the most recent live entry stamped by
+                    # on_tool_start), so on_tool_complete can pass it as
+                    # ``is_error_override`` and the helper skips the
+                    # text-inference fallback for this tool.
+                    _cb_is_error = cb_kwargs.get('is_error')
+                    if _cb_is_error is not None:
+                        for _live_tc in reversed(_live_tool_calls):
+                            if _live_tc.get('done'):
+                                continue
+                            if not name or _live_tc.get('name') == name:
+                                _tid = _live_tc.get('tid') or ''
+                                if _tid:
+                                    _authoritative_is_error_by_tid[_tid] = bool(_cb_is_error)
+                                break
                     return
 
                 if event_type == 'tool.completed':
@@ -13349,6 +13383,20 @@ def _run_agent_streaming(
                     seen_ids = _live_tool_event_complete_ids
                     if tool_call_id and tool_call_id not in seen_ids:
                         seen_ids.add(tool_call_id)
+                        # #7358 round 5 (re-gate 9/22): prefer the Agent's
+                        # authoritative ``is_error`` (captured by on_tool
+                        # before the structured-callback suppression) over
+                        # text-inference from the payload. The dict is
+                        # per-tid and popped on use so a stale entry from
+                        # a prior tool with the same id can never leak into
+                        # a later, different tool. A Codex success whose
+                        # output contains the literal ``"error"`` key name
+                        # and a guardrail_refusal read both reach the
+                        # helper with the Agent's verdict intact, instead
+                        # of being silently re-classified.
+                        _is_error_override = None
+                        if tool_call_id:
+                            _is_error_override = _authoritative_is_error_by_tid.pop(tool_call_id, None)
                         _emit_tool_complete_to_mirrors_and_sse(
                             tool_call_id=tool_call_id,
                             name=name,
@@ -13363,6 +13411,7 @@ def _run_agent_streaming(
                             put=put,
                             record_live_tool_complete=_record_live_tool_complete,
                             args_snapshot_fn=_tool_args_snapshot,
+                            is_error_override=_is_error_override,
                         )
                         _checkpoint_activity[0] += 1
                         # Mirror the todo tool's in-memory state into

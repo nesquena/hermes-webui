@@ -3487,7 +3487,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // shown red live reverts to "Completed" on cold reload. Carry
     // the live value through to both rows so the cold-reload render
     // matches the live card.
-    if(live && live.is_error === true && tool.is_error !== true && payload.is_error !== true){
+    // #7358 round 5 (re-gate 9/22): also honour the
+    // ``S._settledToolIsErrorByTid`` map populated by
+    // ``_syncToolCallsForLoadedMessages`` so a true cold reload with
+    // no browser-persisted live mirror still carries the persisted
+    // failure through. The live value still wins when both are set
+    // (defensive — the live can only ever be true here after the
+    // round-4 guard, and the persisted map is also gated to ``true``
+    // only, so the union is exactly the set of failed tools).
+    const _rowTid=(row&&(row.tool_call_id||(row.tool&&row.tool.id)))||'';
+    const _persistedIsError=(_rowTid&&S&&S._settledToolIsErrorByTid&&S._settledToolIsErrorByTid[_rowTid])===true;
+    const _liveIsError=Boolean(live&&live.is_error===true);
+    if((_liveIsError||_persistedIsError)&&tool.is_error!==true&&payload.is_error!==true){
       tool.is_error = true;
       payload.is_error = true;
       enriched = true;
@@ -4604,6 +4615,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const live=matchEntry.tc||{};
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+        // #7358 round 5 (re-gate 9/22): preserve the live mirror's
+        // ``is_error`` when the persisted summary doesn't carry it. The
+        // merge is one-way: live can only upgrade the row to a failure,
+        // never downgrade a persisted failure back to success. A
+        // session.tool_calls entry that already has ``is_error: true`` is
+        // preserved (the spread above already copied it), so the only case
+        // the live write matters is the missing-or-false summary.
+        if(live.is_error===true&&next.is_error!==true){
+          next.is_error=true;
         }
       }
       return next;
