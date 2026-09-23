@@ -48,7 +48,11 @@ from api.agent_sessions import (
 from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
-CLI_VISIBLE_SESSION_LIMIT = 20
+# Size of the interactive sidebar recency window. Also bounds how many
+# delegated subagent children can be rendered at once, since a child only
+# nests when it wins a slot in this window. Resolved in api.config before
+# profile init; override with HERMES_WEBUI_VISIBLE_SESSION_LIMIT (clamped 1–200).
+CLI_VISIBLE_SESSION_LIMIT = _cfg.CLI_VISIBLE_SESSION_LIMIT
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -8581,9 +8585,26 @@ def get_state_db_session_messages(
                 cur.execute("PRAGMA table_info(sessions)")
                 session_cols = {str(row['name']) for row in cur.fetchall()}
                 if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    # session_source/model_config carry the fork/delegate boundary
+                    # identity consumed by _is_continuation_session (#6931/#7021).
+                    # Select them when present so the branch-marker guard applies
+                    # to the stitch path too; older schemas degrade to NULL.
+                    identity_cols = []
+                    if 'session_source' in session_cols:
+                        identity_cols.append('session_source')
+                    else:
+                        identity_cols.append('NULL AS session_source')
+                    if 'model_config' in session_cols:
+                        identity_cols.append('model_config')
+                    else:
+                        identity_cols.append('NULL AS model_config')
+                    lineage_select = (
+                        "id, source, started_at, parent_session_id, ended_at, end_reason"
+                        + ", " + ", ".join(identity_cols)
+                    )
                     cur.execute(
-                        """
-                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        f"""
+                        SELECT {lineage_select}
                         FROM sessions
                         WHERE id = ?
                         """,
@@ -8601,8 +8622,8 @@ def get_state_db_session_messages(
                             if not parent_id or parent_id in seen:
                                 break
                             cur.execute(
-                                """
-                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                f"""
+                                SELECT {lineage_select}
                                 FROM sessions
                                 WHERE id = ?
                                 """,
@@ -10382,16 +10403,22 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
             # preceding assistant's tool_calls, not just the first — a multi-tool
             # turn has several adjacent tool results, and inserting between any of
             # them splits the block (assistant, tool, <insert>, tool).
-            if (
-                idx < len(messages)
-                and messages[idx].get("role") == "tool"
-                and idx > 0
-                and messages[idx - 1].get("role") == "assistant"
-                and messages[idx - 1].get("tool_calls")
-            ):
-                while idx < len(messages) and messages[idx].get("role") == "tool":
-                    idx += 1
-                    advanced = True
+            if idx < len(messages) and messages[idx].get("role") == "tool":
+                # Walk back over any contiguous tool rows already emitted for
+                # this block, so the owning assistant is found even when idx
+                # lands on the SECOND result of a multi-tool turn (where
+                # messages[idx - 1] is another tool row, not the assistant).
+                owner = idx - 1
+                while owner >= 0 and messages[owner].get("role") == "tool":
+                    owner -= 1
+                if (
+                    owner >= 0
+                    and messages[owner].get("role") == "assistant"
+                    and messages[owner].get("tool_calls")
+                ):
+                    while idx < len(messages) and messages[idx].get("role") == "tool":
+                        idx += 1
+                        advanced = True
             # (b) Skip past an equal-timestamp run whose left neighbour shares
             # this message's role — inserting there would re-order an
             # already-matched same-role turn (user, <inserted user>, assistant).
@@ -10420,6 +10447,7 @@ def merge_session_messages_append_only(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance: Literal["unverified", "state_db"] = "unverified",
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10433,6 +10461,7 @@ def merge_session_messages_append_only(
             state_messages,
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
+            incoming_provenance=incoming_provenance,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -10444,6 +10473,7 @@ def _merge_session_messages_append_only_impl(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance=None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -11038,7 +11068,21 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
         seen_visible_keys.add(visible_key)
-        merged_messages.append(msg)
+        # This terminal path is shared by state.db reconciliation and by ordered
+        # sidecar stitching (notably compression continuations). Only the caller
+        # that read state.db may authorize timestamp-based recovery placement;
+        # stable child-sidecar sequence remains authoritative even when an
+        # archived parent was restamped later.
+        if (
+            incoming_provenance == "state_db"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp < max_sidecar_timestamp
+        ):
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+        else:
+            merged_messages.append(msg)
         _remember_merged_message(msg, source="state")
     return merged_messages
 
@@ -11158,6 +11202,7 @@ def reconciled_state_db_messages_for_session(
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
     )
     return _state_db_session_messages_result(
         reconciled_messages,

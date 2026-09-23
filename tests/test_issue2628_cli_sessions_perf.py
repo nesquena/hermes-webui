@@ -1,15 +1,14 @@
 """Regression coverage for capped CLI/agent session sidebar scans (#2628)."""
 
-import pathlib
 import sqlite3
 import time
+from contextlib import contextmanager
 
 import pytest
 
 import api.agent_sessions as agent_sessions
 
 _REAL_SQLITE_CONNECT = sqlite3.connect
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _make_state_db(path, *, sessions=80, messages_per_session=3, create_messages_index=True, source="cli", session_source="cli"):
@@ -169,6 +168,24 @@ def _make_connect_with_progress_budget(*, budget_ops, interval=1):
     return _connect
 
 
+@contextmanager
+def _capture_listing_sql():
+    """Record the SQL statements the listing runs (trace callback, read-only)."""
+    statements = []
+
+    def _tracing_connect(*args, **kwargs):
+        conn = _REAL_SQLITE_CONNECT(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    original_connect = agent_sessions.sqlite3.connect
+    agent_sessions.sqlite3.connect = _tracing_connect
+    try:
+        yield statements
+    finally:
+        agent_sessions.sqlite3.connect = original_connect
+
+
 def _make_connect_with_progress_counter(*, interval=1):
     steps = {"count": 0}
 
@@ -198,24 +215,59 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     db = tmp_path / "state.db"
     _make_state_db(db, sessions=120, messages_per_session=5)
 
-    rows = agent_sessions.read_importable_agent_session_rows(db, limit=20, exclude_sources=("webui",))
+    with _capture_listing_sql() as statements:
+        rows = agent_sessions.read_importable_agent_session_rows(db, limit=20, exclude_sources=("webui",))
 
     assert len(rows) == 20
     assert [row["id"] for row in rows][:3] == ["cli_perf_0119", "cli_perf_0118", "cli_perf_0117"]
     assert {row["actual_message_count"] for row in rows} == {5}
 
-    src = (REPO_ROOT / "api" / "agent_sessions.py").read_text()
-    assert "WITH candidates AS" in src
-    assert "JOIN candidates c ON c.id = s.id" in src
-    assert "latest_messages AS" in src
-    assert "LEFT JOIN latest_messages lm ON lm.session_id = s.id" in src
-    assert 'included == ("cron",)' in src
-    assert "not messages_index_present" in src
-    assert "PRAGMA index_list(messages)" in src
-    assert "CREATE INDEX IF NOT EXISTS idx_messages_session" in src
-    assert "_CRON_PREAGGREGATE_CANDIDATE_ORDER_MIN_MESSAGES" not in src
-    assert "MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" in src
-    assert "candidate_limit = max(result_limit * 8, result_limit)" in src
+    candidates_sql = next(
+        statement
+        for statement in statements
+        if "LIMIT" in statement and "FROM sessions s" in statement
+    )
+    # The cap is applied inside the candidate subquery, not in Python after an
+    # unbounded aggregate: the oversampled window (limit * 8 = 160 here) is
+    # part of the statement SQLite actually runs, and it bounds the candidate
+    # subquery that the outer projection joins.
+    assert candidates_sql.count("LIMIT") == 1, candidates_sql
+    window_end = candidates_sql.index("LIMIT")
+    window = candidates_sql[:window_end]
+    assert "JOIN candidates" not in window, candidates_sql
+    cap = int(candidates_sql[window_end:].split(None, 2)[1])
+    assert cap == 160, candidates_sql
+
+
+def test_importable_agent_rows_candidate_window_overfilters_then_fills(tmp_path):
+    """Rows dropped after projection must not shrink the returned page.
+
+    The SQL candidate window is oversampled (limit * 8) precisely so sessions
+    filtered client-side of the SQL (invisible CLI rows here) only consume
+    candidates, not result slots: a page that would be short if the cap were
+    the plain ``limit`` still fills to ``limit`` visible rows.
+    """
+    db = tmp_path / "state.db"
+    _make_state_db(db, sessions=120, messages_per_session=5)
+
+    # 30 newest sessions are CLI rows that the projection hides (ended, default
+    # title, no user turn visible): they must fall out of the window without
+    # starving the visible page below them.
+    conn = sqlite3.connect(str(db))
+    for i in range(90, 120):
+        conn.execute(
+            "UPDATE sessions SET title = 'cli session', ended_at = 1.0, end_reason = 'timeout' WHERE id = ?",
+            (f"cli_perf_{i:04d}",),
+        )
+    conn.commit()
+    conn.close()
+
+    rows = agent_sessions.read_importable_agent_session_rows(db, limit=20, exclude_sources=("webui",))
+
+    assert len(rows) == 20
+    assert rows[0]["id"] == "cli_perf_0089"
+    assert rows[-1]["id"] == "cli_perf_0070"
+    assert {row["actual_message_count"] for row in rows} == {5}
 
 
 def test_importable_agent_rows_candidate_ordering_stays_under_progress_budget(tmp_path, monkeypatch):

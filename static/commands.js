@@ -991,6 +991,12 @@ async function resumeManualCompressionForSession(sid){
     // No active compression job or transient server error — not a real failure.
     // 404: route missed or session gone; 5xx: backend exception during status check.
     if(e&&(!e.status||e.status===404||e.status>=500)) return;
+    // #7710: a cross-profile refusal now arrives as 409
+    // (``session_profile_mismatch``) where it used to be a 404 that hit the
+    // benign early-return above. It is not a compression failure, so do not
+    // render the error state or locally settle the compression UI.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)) return;
     if(S.session&&S.session.session_id===sid&&typeof setCompressionUi==='function'){
       const visibleMessages=_manualCompressionVisibleMessages();
       setCompressionUi({

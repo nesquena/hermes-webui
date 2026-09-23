@@ -68,6 +68,21 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return default
     return value if value >= minimum else default
 
+
+def _env_int_clamped(name: str, default: int, *, minimum: int = 1, maximum: int) -> int:
+    """Like ``_env_int``, then clamp a valid override to ``maximum``."""
+    value = _env_int(name, default, minimum=minimum)
+    if not str(os.getenv(name) or "").strip():
+        return value
+    return min(value, maximum)
+
+
+# Sidebar recency window. Resolved here, before profile init, so a profile
+# .env cannot override a server-wide resource bound. Clamped at 200.
+CLI_VISIBLE_SESSION_LIMIT = _env_int_clamped(
+    "HERMES_WEBUI_VISIBLE_SESSION_LIMIT", 20, maximum=200,
+)
+
 # ── TLS/HTTPS config (optional, env-overridable) ────────────────────────────
 TLS_CERT = os.getenv("HERMES_WEBUI_TLS_CERT", "").strip() or None
 TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
@@ -1904,28 +1919,44 @@ _PROVIDER_MODELS = {
         {"id": "big-pickle", "label": "Big Pickle"},
     ],
     # OpenCode Go — flat-rate models via opencode.ai/go ($10/month).
-    # Synced 2026-07-08 from the public Go docs and documented models endpoint.
-    # Keep preview/free-only Zen models out of this Go picker snapshot.
+    # Fallback only: the live Hermes CLI catalog (Go-specific
+    # /zen/go/v1/models probe, core v0.20.5+) leads (#1240, #5311).
+    # Mirrors Hermes core's curated opencode-go list
+    # (hermes_cli/models_catalog_static.py, core main as of 2026-09-10).
+    # Core's 2026-09-09 sync dropped `ox-alpha-free` (Go relay delisted it:
+    # GET /zen/go/v1/models omits it, POST → 401) and added `glm-5.3-flash`
+    # and `muse-spark-1.3-contributor`. Core owns the sync duty against the
+    # live endpoint; WebUI mirrors.
     "opencode-go": [
-        {"id": "minimax-m3",       "label": "MiniMax M3"},
-        {"id": "minimax-m2.7",     "label": "MiniMax M2.7"},
-        {"id": "minimax-m2.5",     "label": "MiniMax M2.5"},
-        {"id": "kimi-k2.7-code",   "label": "Kimi K2.7 Code"},
-        {"id": "kimi-k2.6",        "label": "Kimi K2.6"},
-        {"id": "kimi-k2.5",        "label": "Kimi K2.5"},
-        {"id": "glm-5.2",          "label": "GLM-5.2"},
-        {"id": "glm-5.1",          "label": "GLM-5.1"},
-        {"id": "glm-5",            "label": "GLM-5"},
-        {"id": "deepseek-v4-pro",  "label": "DeepSeek V4 Pro"},
-        {"id": "deepseek-v4-flash","label": "DeepSeek V4 Flash"},
-        {"id": "qwen3.7-max",      "label": "Qwen3.7 Max"},
-        {"id": "qwen3.7-plus",     "label": "Qwen3.7 Plus"},
-        {"id": "qwen3.6-plus",     "label": "Qwen3.6 Plus"},
-        {"id": "qwen3.5-plus",     "label": "Qwen3.5 Plus"},
-        {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
-        {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
-        {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
-        {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
+        {"id": "kimi-k3",                  "label": "Kimi K3"},
+        {"id": "kimi-k2.7-code",           "label": "Kimi K2.7 Code"},
+        {"id": "kimi-k2.6",                "label": "Kimi K2.6"},
+        {"id": "kimi-k2.5",                "label": "Kimi K2.5"},
+        {"id": "gpt-5.6-luna",             "label": "GPT 5.6 Luna"},
+        {"id": "grok-4.5",                 "label": "Grok 4.5"},
+        {"id": "glm-5.3",                  "label": "GLM-5.3"},
+        {"id": "glm-5.3-flash",            "label": "GLM-5.3 Flash"},
+        {"id": "glm-5.2",                  "label": "GLM-5.2"},
+        {"id": "glm-5.1",                  "label": "GLM-5.1"},
+        {"id": "glm-5",                    "label": "GLM-5"},
+        {"id": "mimo-v2.5-pro",            "label": "MiMo V2.5 Pro"},
+        {"id": "mimo-v2.5",                "label": "MiMo V2.5"},
+        {"id": "mimo-v2-pro",              "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni",             "label": "MiMo V2 Omni"},
+        {"id": "minimax-m3",               "label": "MiniMax M3"},
+        {"id": "minimax-m2.7",             "label": "MiniMax M2.7"},
+        {"id": "minimax-m2.5",             "label": "MiniMax M2.5"},
+        {"id": "deepseek-v4-pro",          "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-v4-flash",        "label": "DeepSeek V4 Flash"},
+        {"id": "qwen3.8-max",              "label": "Qwen3.8 Max"},
+        {"id": "qwen3.7-max",              "label": "Qwen3.7 Max"},
+        {"id": "qwen3.7-plus",             "label": "Qwen3.7 Plus"},
+        {"id": "qwen3.6-plus",             "label": "Qwen3.6 Plus"},
+        {"id": "qwen3.5-plus",             "label": "Qwen3.5 Plus"},
+        {"id": "hy3",                      "label": "HY3"},
+        {"id": "hy3-preview",              "label": "HY3 Preview"},
+        {"id": "muse-spark-1.2-contributor", "label": "Muse Spark 1.2 Contributor"},
+        {"id": "muse-spark-1.3-contributor", "label": "Muse Spark 1.3 Contributor"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:
@@ -6927,8 +6958,8 @@ def _configured_model_badges_from_static_catalog(
     for entry in configured_entries:
         provider = entry["provider"]
         model = entry["model"]
-        raw_candidates = []
-        for candidate in (model, f"{provider}/{model}", f"@{provider}:{model}"):
+        raw_candidates: list[str] = []
+        for candidate in (model, f"@{provider}:{model}"):
             if candidate and candidate not in raw_candidates:
                 raw_candidates.append(candidate)
 
@@ -8374,6 +8405,26 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     return []
 
 
+def _hermes_cli_supports_opencode_go_live_catalog() -> bool:
+    """Whether the installed Agent has Go-specific model discovery.
+
+    Hermes core versions before 0.20.5 route ``opencode-go`` through a
+    generic public catalog. That lookup can return a convincing non-empty
+    list containing models the Go relay rejects with 404, so absence or an
+    unparseable/prerelease version must fail closed to WebUI's static Go list.
+    """
+    try:
+        import hermes_cli
+
+        version = str(getattr(hermes_cli, "__version__", "")).strip()
+    except Exception:
+        return False
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return False
+    return tuple(int(part) for part in match.groups()) >= (0, 20, 5)
+
+
 def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> list[dict]:
     """Convert Hermes CLI model ids into WebUI picker model entries."""
     formatter = _format_ollama_label if provider_id in ("ollama", "ollama-cloud") else None
@@ -8582,10 +8633,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for entry in configured_entries:
                 provider = entry["provider"]
                 model = entry["model"]
-                raw_candidates = []
+                raw_candidates: list[str] = []
                 for candidate in (
                     model,
-                    f"{provider}/{model}",
                     f"@{provider}:{model}",
                 ):
                     if candidate and candidate not in raw_candidates:
@@ -9771,12 +9821,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not raw_models:
                         if pid == "moa":
                             raw_models = _moa_preset_models_from_config(cfg)
-                        elif pid == "opencode-go":
-                            # Skip live /v1/models probe for OpenCode Go — it
-                            # returns models from the public catalog that are
-                            # not enabled on the Go tier, causing 404 when
-                            # selected. Use the curated static list only. (#5311)
-                            pass
+                        elif (
+                            pid == "opencode-go"
+                            and not _hermes_cli_supports_opencode_go_live_catalog()
+                        ):
+                            # Before core v0.20.5 this resolver returned the
+                            # generic public catalog, including models that
+                            # 404 on the Go tier. Use the curated Go fallback.
+                            raw_models = []
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,

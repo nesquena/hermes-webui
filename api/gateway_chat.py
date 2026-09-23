@@ -741,8 +741,12 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.completed":
-                from api.route_approvals import retire_gateway_pending_mirror
-                retire_gateway_pending_mirror(session_id, run_id=run_id)
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    run_id,
+                    reason="Gateway run completed before approval resolution",
+                )
                 if payload.get("error"):
                     raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
@@ -754,12 +758,20 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
-                from api.route_approvals import retire_gateway_pending_mirror
-                retire_gateway_pending_mirror(session_id, run_id=run_id)
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    run_id,
+                    reason="Gateway run failed before approval resolution",
+                )
                 raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
             if payload_event == "run.cancelled":
-                from api.route_approvals import retire_gateway_pending_mirror
-                retire_gateway_pending_mirror(session_id, run_id=run_id)
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    run_id,
+                    reason="Gateway run was cancelled before approval resolution",
+                )
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
@@ -981,7 +993,7 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to note gateway event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put gateway event to queue")
@@ -1467,10 +1479,14 @@ def _run_gateway_chat_streaming(
         mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
         if mapped_run_id:
             try:
-                from api.route_approvals import retire_gateway_pending_mirror
-                retire_gateway_pending_mirror(session_id, run_id=mapped_run_id)
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    mapped_run_id,
+                    reason="Gateway run ended during teardown before approval resolution",
+                )
             except Exception:
-                logger.debug("Failed to retire gateway pending mirrors during teardown", exc_info=True)
+                logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):

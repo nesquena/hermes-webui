@@ -1770,7 +1770,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO mode OFF',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO mode active — click to disable',
-    approval_skip_all: '⚡ Skip all this session',
+    approval_skip_all: 'Skip all this session',
     approval_skip_all_title: 'Skip all approval prompts for this session',
     // composer action tooltips
     composer_send: 'Send message',
@@ -3572,7 +3572,7 @@ const LOCALES = {
     yolo_disabled: 'Modalità YOLO OFF',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Modalità YOLO attiva — clicca per disabilitare',
-    approval_skip_all: '⚡ Salta tutto questa sessione',
+    approval_skip_all: 'Salta tutto questa sessione',
     approval_skip_all_title: 'Salta tutte le richieste di approvazione per questa sessione',
     // composer action tooltips
     composer_send: 'Invia messaggio',
@@ -5382,7 +5382,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO モード OFF',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO モード有効 — クリックで無効化',
-    approval_skip_all: '⚡ このセッションはすべてスキップ',
+    approval_skip_all: 'このセッションはすべてスキップ',
     approval_skip_all_title: 'このセッションのすべての承認プロンプトをスキップ',
     // composer action tooltips
     composer_send: 'メッセージを送信',
@@ -7063,7 +7063,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO режим ВЫКЛ',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO режим активен — нажмите для отключения',
-    approval_skip_all: '⚡ Пропустить все в этом сеансе',
+    approval_skip_all: 'Пропустить все в этом сеансе',
     approval_skip_all_title: 'Пропустить все запросы подтверждения в этом сеансе',
     // composer action tooltips
     composer_send: 'Отправить сообщение',
@@ -8830,7 +8830,7 @@ const LOCALES = {
     yolo_disabled: 'Modo YOLO desactivado',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Modo YOLO activo — haz clic para desactivar',
-    approval_skip_all: '⚡ Saltar todo en esta sesión',
+    approval_skip_all: 'Saltar todo en esta sesión',
     approval_skip_all_title: 'Saltar todas las solicitudes de aprobación en esta sesión',
     // composer action tooltips
     composer_send: 'Enviar mensaje',
@@ -10236,7 +10236,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO-Modus AUS',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO-Modus aktiv — Klicken zum Deaktivieren',
-    approval_skip_all: '⚡ Alle in dieser Sitzung überspringen',
+    approval_skip_all: 'Alle in dieser Sitzung überspringen',
     approval_skip_all_title: 'Alle Genehmigungsanfragen in dieser Sitzung überspringen',
     // composer action tooltips
     composer_send: 'Nachricht senden',
@@ -12312,7 +12312,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO 模式已关闭',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO 模式激活 — 点击关闭',
-    approval_skip_all: '⚡ 本次会话全部跳过',
+    approval_skip_all: '本次会话全部跳过',
     approval_skip_all_title: '跳过本次会话的所有审批提示',
     // composer action tooltips
     composer_send: '发送消息',
@@ -14208,7 +14208,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO 模式已關閉',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO 模式已啟用，點選即可關閉',
-    approval_skip_all: '⚡ 本次工作階段全部跳過',
+    approval_skip_all: '本次工作階段全部跳過',
     approval_skip_all_title: '略過本次工作階段的所有核准提示',
     // composer action tooltips
     composer_send: '傳送訊息',
@@ -17540,7 +17540,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO 모드 꺼짐',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO 모드 활성 — 클릭하여 비활성화',
-    approval_skip_all: '⚡ 이 세션에서 모두 건너뛰기',
+    approval_skip_all: '이 세션에서 모두 건너뛰기',
     approval_skip_all_title: '이 세션의 모든 승인 요청 건너뛰기',
     // composer action tooltips
     composer_send: '메시지 보내기',
@@ -19412,7 +19412,7 @@ const LOCALES = {
     yolo_disabled: 'Mode YOLO désactivé',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Mode YOLO actif — cliquez pour désactiver',
-    approval_skip_all: '⚡ Ignorer tout cette session',
+    approval_skip_all: 'Ignorer tout cette session',
     approval_skip_all_title: 'Ignorer toutes les demandes d\'approbation pour cette session',
     composer_send: 'Envoyer le message',
     composer_queue: 'Mettre en file d\'attente',
@@ -19540,7 +19540,7 @@ const LOCALES = {
     add_failed: 'Přidání selhalo: ',
     agent_soul: 'Duch agenta',
     all_uploads_failed: (n) => `Všech ${n} nahrávání selhalo`,
-    approval_skip_all: '⚡ Přeskočit vše pro tuto relaci',
+    approval_skip_all: 'Přeskočit vše pro tuto relaci',
     approval_skip_all_title: 'Přeskočit všechny výzvy ke schválení pro tuto relaci',
     archive_extracted: (n, c) => `Rozbaleno ${n} souborů z ${c} archivů`,
     auth_ack_save_failed: 'Nepodařilo se aktualizovat potvrzení: ',
@@ -22894,7 +22894,7 @@ const LOCALES = {
     yolo_disabled: 'YOLO modu KAPALI',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'YOLO modu etkin — devre dışı bırakmak için tıklayın',
-    approval_skip_all: '⚡ Tüm bu oturumu atla',
+    approval_skip_all: 'Tüm bu oturumu atla',
     approval_skip_all_title: 'Bu oturuma ilişkin tüm onay istemlerini atla',
     // composer action tooltips
     composer_send: 'Mesaj gönder',
@@ -24778,7 +24778,7 @@ const LOCALES = {
     yolo_disabled: 'Tryb YOLO WYŁĄCZONY',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Tryb YOLO aktywny — kliknij, aby wyłączyć',
-    approval_skip_all: '⚡ Pomiń wszystkie w tej sesji',
+    approval_skip_all: 'Pomiń wszystkie w tej sesji',
     approval_skip_all_title: 'Pomiń wszystkie monity o aprobatę w tej sesji',
     // composer action tooltips
     composer_send: 'Wyślij wiadomość',
@@ -26411,7 +26411,7 @@ const LOCALES = {
     approval_gateway_unsupported: 'Phê duyệt cần gateway mới hơn. Hãy nâng cấp Hermes gateway đang kết nối để bật tính năng này.',
     approval_gateway_unsupported_label: 'Không hỗ trợ phê duyệt',
     approval_pending_count: (n) => `1 trong ${n} đang chờ`,
-    approval_skip_all: '⚡ Bỏ qua tất cả trong phiên này',
+    approval_skip_all: 'Bỏ qua tất cả trong phiên này',
     approval_skip_all_title: 'Bỏ qua mọi yêu cầu phê duyệt cho phiên này',
     checkpoint_title: 'Checkpoint',
     checkpoint_empty: 'Không tìm thấy checkpoint nào cho workspace này.',

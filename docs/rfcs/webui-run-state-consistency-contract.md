@@ -131,6 +131,23 @@ and 5; it does not mark every run-state boundary implemented.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
+   Interim assistant text that duplicates the tail of the accumulated reasoning
+   transcript is stripped from the reasoning copy so the restored snapshot
+   shows the content once. That echo match is whitespace-insensitive and
+   carries no fixed search window: a compact-equivalent suffix is recognized
+   however much interior whitespace stretches its raw span. Both consumers
+   (the live-stream echo path and the journal replay in `api/routes.py`)
+   match through an incremental folded index (`_CompactEchoIndex` in
+   `api/streaming.py`): the folded view and its raw cut offsets are built as
+   each chunk is appended, so a probe costs O(len(candidate)) and never
+   rescans the transcript's whitespace. The retired windowed variants could
+   drop the strip when the span exceeded the window, duplicating the interim
+   text; the retired raw backward walk was correct but re-walked the span per
+   interim event, quadratic on whitespace-heavy transcripts. Regressions:
+   `tests/test_live_snapshot_echo_dedup.py` pins the single-occurrence
+   result, `tests/test_live_snapshot_echo_scan_scaling.py` pins the scaling
+   property (a fixed-size fixture cannot catch a per-interim rescan), and
+   `tests/test_compact_echo_index.py` pins index/oracle equivalence.
 6. **Compression is not current intent.** Automatic compression summaries and
    reference cards are recovery/handoff material. They must not be treated as a
    new user request, active-turn content, or the default visible explanation for

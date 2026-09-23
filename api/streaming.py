@@ -197,41 +197,156 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
-def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
+class _CompactEchoIndex:
+    """Incremental whitespace-folded index over a growing text buffer.
+
+    The journal-rebuild echo check runs once per interim event against the
+    whole accumulated reasoning transcript. Rescanning the raw buffer each
+    time walks every whitespace character between the tail and the first
+    non-whitespace character — on a whitespace-heavy transcript that span is
+    megabytes, and the per-interim walk turns the replay quadratic (the
+    ``_find_compact_echo_suffix_start`` shape measured ~55x slower than
+    master on a production-shaped journal in the #7569 review).
+
+    This class keeps the folded view and the raw cut offsets *incrementally*:
+
+    * ``append`` folds each new chunk once and records, per folded character,
+      its raw index — so the cost of a chunk is proportional to the chunk,
+      never to the buffer.
+    * ``matches_tail`` compares only the candidate against the end of the
+      folded view: O(len(candidate)), with no raw-text walk at all.
+    * ``cut_to`` converts a folded length back to a raw index by bisecting
+      the recorded offsets, so one call returns the same cut point the raw
+      backward walk would have produced.
+
+    ``str.isspace`` is used for folding instead of the ``\\s`` pattern used
+    by :func:`_compact_for_echo_compare`. The two agree on every Unicode code
+    point, so the indexed view and the regex-folded view stay consistent.
+    """
+
+    __slots__ = ('_compact', '_offsets', '_raw_len')
+
+    def __init__(self) -> None:
+        self._compact: list[str] = []
+        self._offsets: list[int] = []
+        self._raw_len = 0
+
+    def append(self, text: str) -> None:
+        """Fold ``text`` onto the end of the index (one pass, no rescan)."""
+        raw = str(text or '')
+        if not raw:
+            return
+        compact = self._compact
+        offsets = self._offsets
+        base = self._raw_len
+        for i, ch in enumerate(raw):
+            if not ch.isspace():
+                compact.append(ch)
+                offsets.append(base + i)
+        self._raw_len = base + len(raw)
+
+    def reset(self) -> None:
+        """Drop all indexed state (used after the raw text is truncated)."""
+        self._compact.clear()
+        self._offsets.clear()
+        self._raw_len = 0
+
+    @property
+    def compact_length(self) -> int:
+        return len(self._compact)
+
+    def matches_tail(self, suffix: str) -> bool:
+        """True when the folded ``suffix`` equals the folded tail."""
+        candidate = _compact_for_echo_compare(suffix)
+        if not candidate:
+            return False
+        n = len(candidate)
+        if n > len(self._compact):
+            return False
+        start = len(self._compact) - n
+        compact = self._compact
+        for i in range(n):
+            if compact[start + i] != candidate[i]:
+                return False
+        return True
+
+    def cut_to(self, suffix: str) -> int | None:
+        """Raw index at which the echo of ``suffix`` starts, else ``None``.
+
+        The returned index is the first raw character of the echo, matching
+        the leftmost-cut semantics of the raw backward walk. Trailing
+        whitespace before the echo is left to the caller's ``rstrip``.
+        """
+        candidate = _compact_for_echo_compare(suffix)
+        if not candidate:
+            return None
+        n = len(candidate)
+        if n > len(self._compact):
+            return None
+        start = len(self._compact) - n
+        compact = self._compact
+        for i in range(n):
+            if compact[start + i] != candidate[i]:
+                return None
+        return self._offsets[start]
+
+    def compact_view(self) -> str:
+        """The folded text (materialized on demand — never kept as a string)."""
+        return ''.join(self._compact)
+
+
+def _find_compact_echo_suffix_start(value: str, suffix: str) -> int | None:
+    """Return the index where a whitespace-folded ``suffix`` starts at the
+    end of ``value``, or ``None`` when the tail does not echo it.
+
+    The match walks ``value`` and ``suffix`` from the end, skipping
+    whitespace in ``value``; only the echo span itself is inspected, so the
+    cost is linear in the echo length and allocation-free. Unlike a fixed
+    fold window, the walk cannot miss a compact-equivalent suffix whose raw
+    span is stretched by interior whitespace.
+
+    ``str.isspace`` is used for the walk instead of the ``\\s`` pattern used
+    by :func:`_compact_for_echo_compare`. The two agree on every Unicode code
+    point, so the folded view and the walk stay consistent.
+    """
+    candidate = _compact_for_echo_compare(suffix)
+    if not candidate:
+        return None
+    i = len(value) - 1
+    j = len(candidate) - 1
+    while j >= 0:
+        while i >= 0 and value[i].isspace():
+            i -= 1
+        if i < 0 or value[i] != candidate[j]:
+            return None
+        i -= 1
+        j -= 1
+    return i + 1
+
+
+def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
     """Remove ``suffix`` from ``value`` when they match after whitespace folding.
 
-    The search window is folded once and the cut point is then located by
-    walking backwards across the echo itself. The previous implementation
-    probed every candidate cut index and re-folded the whole remaining tail for
-    each probe, which is quadratic in the window size: a 6000-character final
-    message cost seconds of CPU, held under the GIL, stalling every other
-    stream in the process.
+    The cut point is located by the same backward walk as
+    :func:`_find_compact_echo_suffix_start`: no fixed search window is
+    involved, so a compact-equivalent suffix is removed no matter how much
+    interior whitespace stretches its raw span. The previous windowed
+    implementation folded a bounded tail on every call; its retired probing
+    variant re-folded the remaining tail per candidate cut index, which is
+    quadratic: a 6000-character final message cost seconds of CPU, held under
+    the GIL, stalling every other stream in the process.
 
-    ``str.isspace`` is used for the backwards walk instead of the ``\\s``
-    pattern used by :func:`_compact_for_echo_compare`. The two agree on every
-    Unicode code point, so the folded view and the walk stay consistent.
+    Whitespace sitting between the kept text and the echo is removed by
+    ``rstrip``, which lands on the same result as the leftmost cut index the
+    probing loop used to return.
     """
     raw = str(value or '')
-    candidate = _compact_for_echo_compare(suffix)
-    if not raw or not candidate:
+    if not raw:
         return raw, False
-    tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
-    offset = len(raw) - len(tail)
-    compact_tail = _compact_for_echo_compare(tail)
-    if len(candidate) > len(compact_tail) or not compact_tail.endswith(candidate):
+    start = _find_compact_echo_suffix_start(raw, suffix)
+    if start is None:
         return raw, False
-    # Consume exactly as many non-whitespace characters as the folded suffix
-    # holds; ``idx`` then sits on the first character of the echo. Whitespace
-    # sitting between the kept text and the echo is removed by ``rstrip``,
-    # which is why this lands on the same result as the leftmost cut index the
-    # probing loop used to return.
-    remaining = len(candidate)
-    idx = len(tail)
-    while remaining and idx:
-        idx -= 1
-        if not tail[idx].isspace():
-            remaining -= 1
-    return raw[: offset + idx].rstrip(), True
+    return raw[:start].rstrip(), True
 
 
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
@@ -4379,9 +4494,10 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
        short and frequently embed a borrowed Latin technical term (e.g. a CJK
        title containing the word "Python"), the title side uses a proportion
        threshold (>=35% of the title's alphabetic characters in a non-start
-       script, min 2 chars) rather than a strict majority -- so a CJK title with
-       one English word still trips, while an English title with a single
-       foreign place-name does not.
+       script, min 2 chars) rather than a strict majority. CJK titles with
+       borrowed Latin terms are allowed when the title also contains CJK
+       characters (#7693), but pure-Latin titles for CJK conversations are
+       still rejected.
     2. The legacy German-start → English-title heuristic, preserved verbatim so
        the original behavior keeps working for same-script (latin) drift that
        the script check can't see.
@@ -4391,13 +4507,26 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
         return False
 
     # (1) Cross-script mismatch — language-agnostic.
+    # CJK text routinely borrows Latin product/technical terms (e.g. "WeChat
+    # Pay", "Python", "ProRes RAW"), so when the user writes in CJK, Latin
+    # characters in the title are acceptable as long as the title also
+    # contains CJK — i.e. the title is genuinely mixed, not pure drift.
+    # A pure-Latin title for a CJK conversation is still rejected.
+    # Unrelated scripts (Cyrillic, Arabic, Greek …) are always flagged.
     user_script = _dominant_script(user_text)
     if user_script:
         title_counts = _script_counts(candidate)
         title_total = sum(title_counts.values())
         if title_total >= 2:
             for script, n in title_counts.items():
-                if script != user_script and n >= 2 and (n / title_total) >= 0.35:
+                if script == user_script:
+                    continue
+                # When user writes in CJK, Latin in the title is a borrowed
+                # term as long as the title also contains CJK characters.
+                if user_script == 'cjk' and script == 'latin':
+                    if title_counts.get('cjk', 0) >= 2:
+                        continue
+                if n >= 2 and (n / title_total) >= 0.35:
                     return True
 
     # (2) Legacy same-script German→English heuristic.
@@ -7950,7 +8079,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                             pending_names[tid] = part.get('name', '')
                             pending_args[tid] = part.get('input', {})
                             pending_asst_idx[tid] = msg_idx
-            for tc in m.get('tool_calls', []):
+            for tc in m.get('tool_calls') or []:
                 if not isinstance(tc, dict):
                     continue
                 tid = tc.get('id', '') or tc.get('call_id', '')
@@ -9600,7 +9729,7 @@ def _run_agent_streaming(
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
@@ -10006,6 +10135,14 @@ def _run_agent_streaming(
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
             _reasoning_segments: dict = {}
+            # Incremental folded indexes mirroring each reasoning buffer. The
+            # live echo strip consults them instead of re-walking the raw
+            # buffers: an unbounded raw scan of the growing transcript is
+            # quadratic on whitespace-heavy output (#7569 review). Each index
+            # is fed on every append and re-indexed after a strip.
+            _reasoning_segment_indexes: dict = {}
+            _stream_reasoning_index = _CompactEchoIndex()
+            _reasoning_buffer_index = _CompactEchoIndex()
             _current_reasoning_idx = 0
             _tool_boundary_advanced = False
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
@@ -10028,6 +10165,10 @@ def _run_agent_streaming(
                 if _reasoning_buffer[0]:
                     put('reasoning', {'text': _reasoning_buffer[0]})
                     _reasoning_buffer[0] = ''
+                    # The folded index mirrors this buffer 1:1 — dropping the
+                    # text without dropping the index would leave it describing
+                    # text that is no longer there.
+                    _reasoning_buffer_index.reset()
 
 
             def _emit_metering():
@@ -10067,30 +10208,37 @@ def _run_agent_streaming(
                 nonlocal _reasoning_segments
                 removed = False
                 if stream_id in STREAM_REASONING_TEXT:
-                    next_text, did_remove = _strip_compact_echo_suffix(
-                        STREAM_REASONING_TEXT.get(stream_id, ''),
-                        text,
-                    )
-                    if did_remove:
+                    cut = _stream_reasoning_index.cut_to(text)
+                    if cut is not None:
+                        next_text = STREAM_REASONING_TEXT.get(stream_id, '')[:cut].rstrip()
                         STREAM_REASONING_TEXT[stream_id] = next_text
+                        _stream_reasoning_index.reset()
+                        _stream_reasoning_index.append(next_text)
                         removed = True
-                next_buffer, did_remove_buffer = _strip_compact_echo_suffix(_reasoning_buffer[0], text)
-                if did_remove_buffer:
+                cut = _reasoning_buffer_index.cut_to(text)
+                if cut is not None:
+                    next_buffer = _reasoning_buffer[0][:cut].rstrip()
                     _reasoning_buffer[0] = next_buffer
+                    _reasoning_buffer_index.reset()
+                    _reasoning_buffer_index.append(next_buffer)
                     removed = True
                 for idx in (_current_reasoning_idx, _current_reasoning_idx - 1):
                     if idx not in _reasoning_segments:
                         continue
-                    next_segment, did_remove_segment = _strip_compact_echo_suffix(
-                        _reasoning_segments.get(idx, ''),
-                        text,
-                    )
-                    if not did_remove_segment:
+                    segment_index = _reasoning_segment_indexes.get(idx)
+                    if segment_index is None:
                         continue
+                    cut = segment_index.cut_to(text)
+                    if cut is None:
+                        continue
+                    next_segment = _reasoning_segments.get(idx, '')[:cut].rstrip()
                     if next_segment:
                         _reasoning_segments[idx] = next_segment
+                        segment_index.reset()
+                        segment_index.append(next_segment)
                     else:
                         _reasoning_segments.pop(idx, None)
+                        _reasoning_segment_indexes.pop(idx, None)
                     removed = True
                     break
                 return removed
@@ -10154,15 +10302,21 @@ def _run_agent_streaming(
                 _reasoning_segments[_current_reasoning_idx] = (
                     _reasoning_segments.get(_current_reasoning_idx, '') + reasoning_delta
                 )
+                # Keep the folded index in step with the segment text.
+                _reasoning_segment_indexes.setdefault(
+                    _current_reasoning_idx, _CompactEchoIndex()
+                ).append(reasoning_delta)
                 # Mirror full concatenation to shared dict so cancel_stream() can persist
                 # it (#1361 §A). Cancel only creates one partial message, so the flat
                 # concatenation is correct there.
                 # Lock-free GIL-atomic mirror — see the STREAMS_LOCK contract in on_token.
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                _stream_reasoning_index.append(reasoning_delta)
                 # Accumulate into a coalescing buffer so every delta reaches the
                 # browser — reasoning deltas are incremental, not idempotent.
                 _reasoning_buffer[0] += reasoning_delta
+                _reasoning_buffer_index.append(reasoning_delta)
                 # Throttle reasoning SSE events to ~10 Hz to avoid overwhelming the
                 # frontend renderer. Each event triggers _parseStreamState() which
                 # scans the full accumulated text — 10k+ reasoning tokens/second
@@ -10173,6 +10327,10 @@ def _run_agent_streaming(
                     _reasoning_last_put[0] = now
                     put('reasoning', {'text': _reasoning_buffer[0]})
                     _reasoning_buffer[0] = ''
+                    # The folded index mirrors this buffer 1:1 — dropping the
+                    # text without dropping the index would leave it describing
+                    # text that is no longer there.
+                    _reasoning_buffer_index.reset()
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -10281,10 +10439,14 @@ def _run_agent_streaming(
                         _reasoning_segments[_current_reasoning_idx] = (
                             _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
                         )
+                        _reasoning_segment_indexes.setdefault(
+                            _current_reasoning_idx, _CompactEchoIndex()
+                        ).append(reason_delta)
                         # Mirror full concatenation to shared dict (#1361 §A)
                         # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_REASONING_TEXT:
                             STREAM_REASONING_TEXT[stream_id] += reason_delta
+                        _stream_reasoning_index.append(reason_delta)
                         put('reasoning', {'text': reason_delta})
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
