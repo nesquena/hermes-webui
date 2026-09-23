@@ -1861,28 +1861,94 @@ function _rearmActiveSessionStream(){
 // root metadata changes" requires — a renamed root that was absent from the stale
 // scope no longer silently stops receiving live updates (Greptile P1, round 14).
 let _profileRootScopeRefresh = null;
-// A refresh that cannot resolve the scope must not be retried on every rejected
-// frame, or a persistently failing listing would turn each frame into a request.
-// The floor is short, so recovery never requires a reload.
+// A refresh that cannot resolve the scope must not be retried on every rejected frame,
+// or a persistently failing listing would turn each frame into a request.
 let _profileRootScopeNextRefreshAt = 0;
 const _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS = 15000;
+// ...but the floor must never be the END of the story (Greptile P1, round 16). A pane
+// whose stream was never armed receives no further frames, so after the floor expires
+// nothing would call us again and the conversation would stay disconnected until
+// unrelated navigation or a reload. Every attempt that leaves the scope unresolved
+// therefore SCHEDULES its own retry, so reconciliation is guaranteed.
+let _profileRootScopeRetryTimer = null;
+
+function _clearProfileRootScopeRetry(){
+  if(_profileRootScopeRetryTimer === null) return;
+  try{ if(typeof clearTimeout === 'function') clearTimeout(_profileRootScopeRetryTimer); }catch(_){ }
+  _profileRootScopeRetryTimer = null;
+}
+
+function _scheduleProfileRootScopeRetryIn(ms){
+  if(typeof setTimeout !== 'function') return;
+  if(_profileRootScopeRetryTimer !== null) return;   // one pending retry is enough
+  const wait = (typeof ms === 'number' && ms > 0) ? ms : 1;
+  _profileRootScopeRetryTimer = setTimeout(function(){
+    _profileRootScopeRetryTimer = null;
+    if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope();
+  }, wait);
+}
+
+// Ownership token for a scope refresh (Greptile P1, round 16). A refresh may only
+// install the state of the transition it was issued under: if a newer profile switch
+// (or the 409-recovery switch) took over while the request was in flight, its state
+// owns the surface and this response describes a profile we have already left —
+// applying it would replace the newer, authoritative scope with the older one.
+function _profileScopeRefreshOwnerToken(){
+  return {
+    gen: (typeof _profileSwitchGeneration === 'number') ? _profileSwitchGeneration : null,
+    profile: (typeof S !== 'undefined' && S) ? (S.activeProfile || 'default') : null,
+  };
+}
+function _profileScopeRefreshOwnerStillOwns(token){
+  if(!token) return false;
+  const gen = (typeof _profileSwitchGeneration === 'number') ? _profileSwitchGeneration : null;
+  if(token.gen !== null && gen !== null && token.gen !== gen) return false;
+  const profile = (typeof S !== 'undefined' && S) ? (S.activeProfile || 'default') : null;
+  if(token.profile !== null && profile !== null && token.profile !== profile) return false;
+  return true;
+}
+
 function _revalidateActiveProfileRootScope(){
-  if(typeof _activeProfileRootNamesResolved === 'function' && _activeProfileRootNamesResolved()) return;
-  if(_profileRootScopeRefresh) return;
-  if(typeof Date !== 'undefined' && Date.now() < _profileRootScopeNextRefreshAt) return;
-  if(typeof api !== 'function') return;
-  _profileRootScopeNextRefreshAt = (typeof Date !== 'undefined' ? Date.now() : 0)
-    + _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS;
+  if(typeof _activeProfileRootNamesResolved === 'function' && _activeProfileRootNamesResolved()){
+    _clearProfileRootScopeRetry();
+    return;
+  }
+  if(_profileRootScopeRefresh) return;   // the in-flight attempt schedules the next one
+  const now = (typeof Date !== 'undefined' ? Date.now() : 0);
+  if(now < _profileRootScopeNextRefreshAt){
+    // Blocked by the floor. Without rescheduling, a rejected pane would wait forever
+    // for a frame it will never receive (its stream was never armed).
+    _scheduleProfileRootScopeRetryIn(_profileRootScopeNextRefreshAt - now);
+    return;
+  }
+  if(typeof api !== 'function'){
+    _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS);
+    return;
+  }
+  const owner = _profileScopeRefreshOwnerToken();
+  _profileRootScopeNextRefreshAt = now + _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS;
   _profileRootScopeRefresh = api('/api/profile/active', {redirect401: false})
     .then((d) => {
+      if(!_profileScopeRefreshOwnerStillOwns(owner)) return;   // a newer transition owns state
       if(!d || typeof d !== 'object') return;
+      const hasScope = Array.isArray(d.root_names) && d.root_names.length > 0;
+      const authoritative = hasScope && d.root_names_authoritative !== false;
+      // Never downgrade a resolved scope with a non-authoritative snapshot.
+      if(!authoritative && typeof _activeProfileRootNamesResolved === 'function'
+         && _activeProfileRootNamesResolved()) return;
       // Same writer as boot/switch: a payload WITHOUT a scope clears it and stays
       // non-authoritative, so this cannot mistake a missing scope for a resolved one.
       if(typeof _applyActiveProfileRootScope === 'function') _applyActiveProfileRootScope(d);
       _rearmActiveSessionStream();
     })
-    .catch(() => { /* stale scope: authority stays fail-closed until a later snapshot */ })
-    .finally(() => { _profileRootScopeRefresh = null; });
+    .catch(() => { /* stale scope: authority stays fail-closed */ })
+    .finally(() => {
+      _profileRootScopeRefresh = null;
+      const settled = typeof _activeProfileRootNamesResolved === 'function'
+        && _activeProfileRootNamesResolved();
+      if(settled) _clearProfileRootScopeRetry();
+      else _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS);
+    });
 }
 
 function _sessionProfileMismatchFromError(e){

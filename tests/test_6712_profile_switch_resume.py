@@ -2349,3 +2349,222 @@ def test_a_missing_scope_is_never_authoritative_and_keeps_revalidating():
     assert partial["resolved"] is False and partial["alias"] is False, (
         f"a non-authoritative listing must not be treated as resolved: {partial}"
     )
+
+# ── Greptile round 16: ownership of an in-flight refresh, and guaranteed retry ─
+#
+# (a) A scope refresh may only install the state of the transition it was issued
+# under. If a newer profile switch took over while the request was in flight, its
+# state owns the surface; applying the older response would replace the newer,
+# authoritative scope with a stale one and stop the current session's live stream.
+#
+# (b) The retry floor must not be the end of the story: a pane whose stream was never
+# armed receives no further frames, so after the floor expires nothing would call
+# again. Every attempt that leaves the scope unresolved must SCHEDULE its retry.
+
+_SCOPE_REFRESH_HARNESS = r"""
+const params = __PARAMS__;
+const S = {
+  session: { session_id: 'pane', profile: 'kinni' },
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  activeProfileRootNames: null,      // unresolved: the state the guard rejects under
+  activeProfileRootNamesAuthoritative: false,
+};
+let _loadingSessionId = null;
+let started = [];
+function startSessionStream(sid){ started.push(sid); }
+function _profileMatchesActiveProfile(profile, active){
+  const e = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const a = (typeof active === 'string' && active.trim()) ? active.trim() : 'default';
+  if (e === a) return true;
+  return e === 'default' && !!S.activeProfileIsDefault;
+}
+// Deterministic timers: record what the module schedules instead of waiting on it.
+let scheduled = [];
+let cleared = [];
+function setTimeout(fn, ms){ scheduled.push({ fn: fn, ms: ms }); return scheduled.length; }
+function clearTimeout(id){ cleared.push(id); }
+function Date(){ }
+Date.now = function(){ return params.now || 0; }
+
+// The in-flight refresh this harness controls.
+let apiCalls = 0;
+let release = null;
+function api(path){
+  apiCalls += 1;
+  return new Promise(function(res){
+    release = function(payload){ res(payload); };
+  });
+}
+__HELPERS__
+
+function _runScheduled(limit){
+  // Fire the retries the module scheduled, oldest first, up to `limit`.
+  let fired = 0;
+  while (scheduled.length && fired < limit) {
+    const next = scheduled.shift();
+    next.fn();
+    fired += 1;
+  }
+  return fired;
+}
+
+(async () => {
+  // ── (a) ownership: a newer switch takes over while the refresh is in flight ──
+  let owner = null;
+  if (typeof _profileSwitchGeneration === 'number') {
+    _profileSwitchGeneration = 3;          // this refresh is issued under gen 3
+  }
+  _revalidateActiveProfileRootScope();
+  const callsAfterIssue = apiCalls;
+  const scheduledAtIssue = scheduled.length;
+  if (typeof _profileSwitchGeneration === 'number') {
+    _profileSwitchGeneration = 4;          // a NEWER switch takes over
+  }
+  if (typeof release === 'function') {
+    release({ root_names: ['default'], root_names_authoritative: false });
+  }
+  await new Promise(r => setImmediate(r));
+  const afterStaleResponse = {
+    names: S.activeProfileRootNames,
+    namesAuthoritative: S.activeProfileRootNamesAuthoritative,
+    resolved: _activeProfileRootNamesResolved(),
+    pane: _isSessionCurrentPane('pane'),
+    started: started.slice(),
+  };
+
+  // ── (b) a request that cannot resolve the scope must schedule its own retry ──
+  // Reset to an unresolved surface and let the first attempt fail (no payload).
+  // Also drop any retry still pending from (a) so the next assertions isolate this
+  // phase — "one pending retry is enough" is correct production behaviour, but it
+  // would mask whether THIS attempt schedules.
+  S.activeProfileRootNames = null;
+  S.activeProfileRootNamesAuthoritative = false;
+  scheduled = [];
+  _profileRootScopeRetryTimer = null;
+  // Control the floor EXPLICITLY: phase (a) left it in the future, and an
+  // accidentally floor-blocked call would schedule via the floor branch instead —
+  // passing the assertions below without ever exercising the settled-attempt path.
+  _profileRootScopeNextRefreshAt = 0;
+  release = null;
+  if (typeof _profileSwitchGeneration === 'number') {
+    _profileSwitchGeneration = 5;
+  }
+  _revalidateActiveProfileRootScope();
+  const issuedInPhaseB = (typeof release === 'function');
+  if (issuedInPhaseB) release(undefined);   // transient failure
+  await new Promise(r => setImmediate(r));
+  const afterFailure = {
+    issued: issuedInPhaseB,
+    scheduled: scheduled.length,
+    scheduledMs: scheduled.map(function(s){ return s.ms; }),
+    resolved: _activeProfileRootNamesResolved(),
+    pane: _isSessionCurrentPane('pane'),
+  };
+
+  // ── (b2) blocked by the floor must ALSO schedule, not return silently ──
+  scheduled = [];
+  _profileRootScopeRetryTimer = null;
+  params.now = 1000;                       // floor is still active
+  const apiCallsBeforeFloor = apiCalls;
+  _revalidateActiveProfileRootScope();
+  const blockedByFloor = {
+    issued: apiCalls - apiCallsBeforeFloor,   // must be 0: the floor suppresses it
+    apiCalls: apiCalls,
+    scheduled: scheduled.length,
+    scheduledMs: scheduled.map(function(s){ return s.ms; }),
+  };
+
+  // ── (b3) once resolved, no retry is scheduled ──
+  _applyActiveProfileRootScope({ root_names: ['default', 'kinni'], root_names_authoritative: true });
+  scheduled = [];
+  _profileRootScopeRetryTimer = null;
+  _revalidateActiveProfileRootScope();
+  const afterResolved = { scheduled: scheduled.length, resolved: _activeProfileRootNamesResolved() };
+
+  console.log(JSON.stringify({
+    callsAfterIssue: callsAfterIssue,
+    scheduledAtIssue: scheduledAtIssue,
+    afterStaleResponse: afterStaleResponse,
+    afterFailure: afterFailure,
+    blockedByFloor: blockedByFloor,
+    afterResolved: afterResolved,
+  }));
+})();
+"""
+
+
+def _run_scope_refresh():
+    """Drive the REAL revalidation, retry scheduling, and ownership predicate."""
+    src_js = _read(SESSIONS_JS_PATH)
+    helpers = ""
+    for name in ("_activeProfileRootNamesSet", "_applyActiveProfileRootScope",
+                 "_activeProfileRootNamesResolved", "_canonicalProfileRootAlias",
+                 "_paneProfileMatchesActiveProfile", "_rearmActiveSessionStream",
+                 "_profileScopeRefreshOwnerToken", "_profileScopeRefreshOwnerStillOwns",
+                 "_clearProfileRootScopeRetry", "_scheduleProfileRootScopeRetryIn"):
+        seg = src_js[src_js.index("function %s(" % name):]
+        helpers += seg[: seg.index("\n}\n") + 3] + "\n"
+    # module-level state the refresh functions close over
+    declarations = "\n".join([
+        "let _profileRootScopeRefresh = null;",
+        "let _profileRootScopeNextRefreshAt = 0;",
+        "let _profileRootScopeRetryTimer = null;",
+        "const _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS = 15000;",
+        "let _profileSwitchGeneration = 3;",
+    ])
+    body = src_js[src_js.index("function _revalidateActiveProfileRootScope("):]
+    body = body[: body.index("\n}\n") + 3]
+    pane = _read(MESSAGES_JS_PATH)
+    pane_body = pane[pane.index("function _isSessionCurrentPane("):]
+    pane_body = pane_body[: pane_body.index("\n}\n") + 3]
+    js = _SCOPE_REFRESH_HARNESS.replace(
+        "__HELPERS__", declarations + "\n" + helpers + body + "\n" + pane_body
+    ).replace("__PARAMS__", json.dumps({"now": 0}))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_superseded_scope_refresh_cannot_overwrite_the_newer_state():
+    """Greptile round 16(a): an older response must not replace the newer scope."""
+    out = _run_scope_refresh()
+    assert out["callsAfterIssue"] == 1, (
+        f"precondition: the refresh must actually be issued: {out}"
+    )
+    stale = out["afterStaleResponse"]
+    assert stale["resolved"] is False and stale["names"] is None, (
+        f"a superseded refresh installed {'the state of a profile we already left'}: "
+        f"{stale} — a transient listing failure could thereby replace the current "
+        f"authoritative scope and stop the live stream (Greptile P1, round 16a)"
+    )
+
+
+def test_an_unresolved_scope_always_schedules_its_next_attempt():
+    """Greptile round 16(b): the floor must not be the end of the story."""
+    out = _run_scope_refresh()
+    failed = out["afterFailure"]
+    assert failed["scheduled"] >= 1, (
+        f"a refresh that left the scope unresolved scheduled nothing, so nothing would "
+        f"call again and the pane would stay disconnected until a reload "
+        f"(Greptile P1, round 16b): {failed}"
+    )
+    assert all(ms > 0 for ms in failed["scheduledMs"]), failed
+    assert failed["issued"] is True, (
+        f"precondition: phase (b) must actually issue a request, otherwise the "
+        f"settled-attempt path is never exercised and the assertion below could pass "
+        f"for the wrong reason: {failed}"
+    )
+    blocked = out["blockedByFloor"]
+    assert blocked["issued"] == 0, (
+        f"precondition: the floor must actually suppress the request, otherwise the "
+        f"reschedule branch below is never exercised: {blocked}"
+    )
+    assert blocked["scheduled"] >= 1, (
+        f"a call blocked by the retry floor returned without scheduling anything, so the "
+        f"reconciliation could never happen (Greptile P1, round 16b): {blocked}"
+    )
+    resolved = out["afterResolved"]
+    assert resolved["resolved"] is True and resolved["scheduled"] == 0, (
+        f"a resolved scope must stop retrying: {resolved}"
+    )
