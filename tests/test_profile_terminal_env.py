@@ -131,3 +131,33 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     assert env["HERMES_SESSION_PLATFORM"] == "webui"
     assert env["HERMES_HOME"] == "/active/profile/home"
     assert env["TERMINAL_ENV"] == "ssh"
+
+
+def test_turn_env_publish_skips_hermes_home_when_override_installed(monkeypatch):
+    """#6857: with the context-local override installed, a chat send must not
+    write its profile home into the process-global env (that write is what
+    leaked one session's home into concurrent turns)."""
+    from api.streaming import _publish_turn_hermes_home
+
+    monkeypatch.setenv("HERMES_HOME", "/baseline/root-home")
+    assert _publish_turn_hermes_home("/profiles/alice", override_installed=True) is False
+    assert os.environ.get("HERMES_HOME") == "/baseline/root-home"
+
+
+def test_turn_env_publish_mirrors_home_on_legacy_path(monkeypatch):
+    """Legacy agents (no override available) keep the env mirror and must
+    therefore be restored by the caller when the turn ends."""
+    from api.streaming import _publish_turn_hermes_home
+
+    monkeypatch.setenv("HERMES_HOME", "/baseline/root-home")
+    assert _publish_turn_hermes_home("/profiles/alice", override_installed=False) is True
+    assert os.environ.get("HERMES_HOME") == "/profiles/alice"
+
+
+def test_turn_env_publish_noops_without_profile_home(monkeypatch):
+    """No profile home for the turn → nothing to publish, env stays untouched."""
+    from api.streaming import _publish_turn_hermes_home
+
+    monkeypatch.setenv("HERMES_HOME", "/baseline/root-home")
+    assert _publish_turn_hermes_home("", override_installed=False) is False
+    assert os.environ.get("HERMES_HOME") == "/baseline/root-home"
