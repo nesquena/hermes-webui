@@ -170,14 +170,15 @@ class TestRemoveProviderKeyPurging:
         monkeypatch.setattr(prov, "_provider_env_var_for", lambda _pid: None)
 
         try:
-            from hermes_cli.credential_lifecycle import purge_env_credential_references
-
-            monkeypatch.setattr(
-                "hermes_cli.credential_lifecycle.purge_env_credential_references",
-                lambda env_var, clear_models_cache=True: calls.append(env_var),
-            )
+            import hermes_cli.credential_lifecycle as cred_lifecycle
         except ImportError:
             pytest.skip("runtime not installed")
+
+        monkeypatch.setattr(
+            cred_lifecycle,
+            "purge_env_credential_references",
+            lambda env_var, clear_models_cache=True: calls.append(env_var),
+        )
 
         prov._purge_env_seeded_credential_pool("anthropic")
         assert calls == []
