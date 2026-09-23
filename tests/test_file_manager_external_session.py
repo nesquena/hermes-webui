@@ -590,6 +590,99 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
     assert routes_module.SESSIONS[sid] is cached_session
 
 
+@pytest.mark.parametrize("fault", ["tombstone_not_durable", "retire_returns_false"])
+def test_delete_fails_closed_when_sidecar_retirement_does_not_commit(
+    fault, models_module, monkeypatch, tmp_path
+):
+    """#6600 review blocker 3: a retirement that raises (tombstone not durable)
+    or returns False must fail the delete with 5xx BEFORE pruning the index or
+    deleting cache/state.db/journals — never a torn delete reported as ok."""
+    routes_module = pytest.importorskip("api.routes")
+    config_module = pytest.importorskip("api.config")
+    upload_module = pytest.importorskip("api.upload")
+    turn_journal_module = pytest.importorskip("api.turn_journal")
+    run_journal_module = pytest.importorskip("api.run_journal")
+    background_module = pytest.importorskip("api.background_process")
+    terminal_module = pytest.importorskip("api.terminal")
+    sid = f"delete-torn-{fault.replace('_', '-')}"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{sid}.json"
+    sidecar_payload = {"session_id": sid, "messages": [{"role": "user", "content": "keep"}]}
+    sidecar.write_text(json.dumps(sidecar_payload), encoding="utf-8")
+    cached_session = SimpleNamespace(session_id=sid, profile=None)
+    mutations = []
+
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: cached_session})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: cached_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    if fault == "tombstone_not_durable":
+        # The marker write silently does not persist: the real helper must
+        # raise before unlinking the sidecar.
+        monkeypatch.setattr(
+            models_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
+        )
+        monkeypatch.setattr(
+            models_module, "_load_webui_deleted_session_tombstone", lambda: set()
+        )
+    else:
+        monkeypatch.setattr(
+            routes_module, "retire_session_sidecar", lambda *_a, **_k: False
+        )
+    monkeypatch.setattr(
+        routes_module, "prune_session_from_index", lambda _sid: mutations.append("index")
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_publish_session_list_changed",
+        lambda *_a, **_k: mutations.append("publish"),
+    )
+    monkeypatch.setattr(
+        config_module, "_evict_session_agent", lambda _sid: mutations.append("agent")
+    )
+    monkeypatch.setattr(
+        models_module, "delete_cli_session", lambda _sid: mutations.append("state-db")
+    )
+    monkeypatch.setattr(
+        upload_module,
+        "_session_attachment_dir",
+        lambda _sid: mutations.append("attachments") or tmp_path / "attachments" / _sid,
+    )
+    monkeypatch.setattr(
+        turn_journal_module, "delete_turn_journal", lambda _sid: mutations.append("turn-journal")
+    )
+    monkeypatch.setattr(
+        run_journal_module, "delete_run_journal", lambda _sid: mutations.append("run-journal")
+    )
+    monkeypatch.setattr(
+        background_module,
+        "forget_bg_task_completion_dedup",
+        lambda _sid: mutations.append("bg-dedup"),
+    )
+    monkeypatch.setattr(
+        terminal_module, "close_terminal", lambda _sid: mutations.append("terminal")
+    )
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    payload = json.loads(handler.wfile.getvalue())
+    assert handler.status == 500
+    assert "ok" not in payload
+    assert payload["error"]
+    assert mutations == []
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == sidecar_payload
+    assert routes_module.SESSIONS[sid] is cached_session
+
+
 def test_session_lock_registry_reuses_live_lock_and_reclaims_unused_entry():
     config_module = pytest.importorskip("api.config")
     sid = "weak-session-lock"

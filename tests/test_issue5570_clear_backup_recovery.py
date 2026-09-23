@@ -410,9 +410,36 @@ def test_post_clear_message_after_real_compaction_still_recovers(tmp_path):
     live["truncation_watermark"] = 30.0
     live["truncation_boundary"] = 30.0
     _write_json(live_path, live)
-    _write_json(bak_path, _stale_pre_clear_backup(sid))
+    backup = _stale_pre_clear_backup(sid)
+    # Keep the larger backup a strict superset of the live rows so this test
+    # isolates the clear-generation decision: recovery never discards a
+    # live-only message (#6600).
+    backup["messages"].append(dict(live["messages"][0]))
+    _write_json(bak_path, backup)
 
     status = inspect_session_recovery_status(live_path)
     # Boundary moved off the clear reset -> supersede check declines -> normal
     # recovery decides (larger backup, no compress-shrink provenance -> restore).
     assert status["recommend"] == "restore"
+
+
+def test_post_clear_live_only_message_blocks_restore_of_larger_backup(tmp_path):
+    """#6600: when the larger backup lacks the live post-clear message, the
+    supersede check still declines, but recovery fails closed for review
+    instead of discarding the live-only row."""
+    sid = "s-postclear-live-only"
+    live_path = tmp_path / f"{sid}.json"
+    bak_path = tmp_path / f"{sid}.json.bak"
+    live = _clear_sentinel(sid)
+    live["messages"] = [_msg("user", "q", 20.0, "u20")]
+    live["context_messages"] = [_msg("user", "q", 20.0, "cu20")]
+    live["truncation_watermark"] = 30.0
+    live["truncation_boundary"] = 30.0
+    _write_json(live_path, live)
+    _write_json(bak_path, _stale_pre_clear_backup(sid))
+
+    status = inspect_session_recovery_status(live_path)
+
+    assert status["recommend"] == "manual_review"
+    assert status["live_only_messages"] == 1
+    assert "intentional_clear_truncate" not in status

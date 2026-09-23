@@ -624,6 +624,85 @@ def test_recovery_equal_normalized_counts_with_divergent_membership_requires_rev
     ]
 
 
+def test_recovery_never_restores_backup_missing_live_rows_after_normalization(tmp_path):
+    """#6600 review blocker 1: normalization can drop the live count BELOW a
+    divergent backup. A larger normalized backup that misses a live-only row
+    must fail closed as manual_review and mutate neither file."""
+    from api.session_recovery import (
+        audit_session_recovery,
+        inspect_session_recovery_status,
+        recover_all_sessions_on_startup,
+        recover_session,
+    )
+
+    session_path = tmp_path / "live-only-divergent.json"
+    backup_path = tmp_path / "live-only-divergent.json.bak"
+    replayed = _incomplete_reasoning_only(1701, reasoning="replayed")
+    live_only = {"role": "user", "content": "LIVE ONLY", "id": 1799}
+    live_payload = {
+        "messages": [replayed, dict(replayed), dict(replayed), live_only],
+        "message_count": 4,
+    }
+    backup_payload = {
+        "messages": [
+            replayed,
+            {"role": "user", "content": "backup prompt", "id": 1702},
+            {"role": "assistant", "content": "backup answer", "id": 1703},
+        ],
+        "message_count": 3,
+    }
+    session_path.write_text(json.dumps(live_payload), encoding="utf-8")
+    backup_path.write_text(json.dumps(backup_payload), encoding="utf-8")
+
+    status = inspect_session_recovery_status(session_path)
+
+    assert status["live_messages"] == 2
+    assert status["bak_messages"] == 3
+    assert status["recommend"] == "manual_review"
+    assert status["membership_conflict"] is True
+    assert status["live_only_messages"] == 1
+    assert status["backup_only_messages"] == 2
+    assert recover_session(session_path)["restored"] is False
+    startup = recover_all_sessions_on_startup(tmp_path)
+    assert startup["restored"] == 0
+    assert startup["details"][0]["recommend"] == "manual_review"
+    audit = audit_session_recovery(tmp_path)
+    assert audit["status"] == "needs_manual_review"
+    assert audit["items"][0]["kind"] == "divergent_live_backup_membership"
+    assert audit["items"][0]["live_only_messages"] == 1
+    # No mutation: the LIVE ONLY row and the backup both survive untouched.
+    assert json.loads(session_path.read_text(encoding="utf-8")) == live_payload
+    assert json.loads(backup_path.read_text(encoding="utf-8")) == backup_payload
+
+
+def test_recovery_restores_strict_superset_backup_despite_normalized_live_shrink(tmp_path):
+    """The superset rule keeps genuine shrink recovery: when every normalized
+    live row is present in the larger backup, restore is still recommended."""
+    from api.session_recovery import inspect_session_recovery_status, recover_session
+
+    session_path = tmp_path / "superset.json"
+    backup_path = tmp_path / "superset.json.bak"
+    replayed = _incomplete_reasoning_only(1701, reasoning="replayed")
+    kept = {"role": "user", "content": "kept", "id": 1702}
+    lost = {"role": "assistant", "content": "lost by a bad save", "id": 1703}
+    session_path.write_text(
+        json.dumps({"messages": [replayed, dict(replayed), kept]}), encoding="utf-8"
+    )
+    backup_path.write_text(
+        json.dumps({"messages": [replayed, kept, lost]}), encoding="utf-8"
+    )
+
+    status = inspect_session_recovery_status(session_path)
+
+    assert (status["live_messages"], status["bak_messages"]) == (2, 3)
+    assert status["recommend"] == "restore"
+    assert recover_session(session_path)["restored"] is True
+    restored = json.loads(session_path.read_text(encoding="utf-8"))
+    assert [m.get("content") for m in restored["messages"]] == [
+        "", "kept", "lost by a bad save",
+    ]
+
+
 def test_owned_empty_generation_does_not_clear_tombstones_for_later_alias_append(
     tmp_path, monkeypatch
 ):
