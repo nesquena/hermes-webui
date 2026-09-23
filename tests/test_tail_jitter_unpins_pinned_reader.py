@@ -109,9 +109,13 @@ def _run_drag_probe(steps: list[dict]) -> dict:
         for line in UI_JS.splitlines()
         if line.startswith("const MESSAGE_TAIL_JITTER_MAX_")
     )
-    drag_helpers = "{}\n{}".format(
-        _function_source("_markScrollbarDragIntent"),
-        _function_source("_consumeScrollbarDragIntent"),
+    drag_helpers = "\n".join(
+        _function_source(name)
+        for name in (
+            "_markScrollbarDragIntent",
+            "_consumeScrollbarDragIntent",
+            "_releaseScrollbarDragIntent",
+        )
     )
     payload = {
         "guard": constants + "\n" + _function_source("_isMessageTailJitter"),
@@ -152,6 +156,7 @@ const performance={now(){return clockNow;}};
 let _scrollbarDragActive=false;
 let _scrollbarDragIntentQueued=false;
 let _scrollbarDragIntentUntil=-Infinity;
+let _scrollbarDragObservedTop=null;
 const SCROLLBAR_DRAG_INTENT_WINDOW_MS=250;
 const SCROLLBAR_DRAG_EDGE_BAND_PX=20;
 let _messageScrollInputGeneration=0;
@@ -204,6 +209,7 @@ for(const step of payload.steps){
     elHandlers.pointerdown(event);
   }else if(step.op==='scrollTop'){ el.scrollTop=step.value; }
   else if(step.op==='pointerup'){ windowHandlers.pointerup(); }
+  else if(step.op==='pointercancel'){ windowHandlers.pointercancel(); }
   else if(step.op==='scroll'){ elHandlers.scroll(); }
   else if(step.op==='flush'){ flushAnimationFrames(); }
   else if(step.op==='advance'){ clockNow+=step.ms; }
@@ -262,6 +268,9 @@ def test_scrollbar_drag_intent_survives_pointerup_before_scroll_frame():
         [
             {"op": "pointerdown", "offsetX": 800},
             {"op": "scrollTop", "value": 6492},
+            # Hold the thumb past the pointerdown stamp's window, so ONLY the
+            # release re-stamp can carry intent into the late scroll event.
+            {"op": "advance", "ms": 251},
             {"op": "pointerup"},
             {"op": "snapshot", "key": "beforeScroll"},  # scroll NOT yet delivered
             {"op": "scroll"},
@@ -272,12 +281,16 @@ def test_scrollbar_drag_intent_survives_pointerup_before_scroll_frame():
     before = result["snapshots"]["beforeScroll"]
     # pointerup ran before the scroll event: live flag already cleared…
     assert before["dragActive"] is False
+    # …and, because the movement was still undelivered, release re-armed intent.
+    assert before["intentUntil"] == 1251 + 250
     # …and the async scroll still arrives afterwards, queuing its classification.
     assert result["snapshots"]["afterScroll"]["dragActive"] is False
     assert result["snapshots"]["afterScroll"]["rafPending"] is True
     # The stamp survived the release, so the first classification owns the drag…
     assert result["state"]["_messageUserUnpinned"] is True
     assert result["state"]["_scrollPinned"] is False
+    # The drag's own scroll consumed the re-armed intent: nothing remains.
+    assert result["snapshots"]["afterScroll"]["intentUntil"] is None
 
 
 def test_overlay_scrollbar_press_inside_client_box_still_unpins():
@@ -371,12 +384,120 @@ def test_drag_stamp_is_consumed_once_and_never_leaks_to_a_later_scroll():
     assert result["snapshots"]["afterLaterNudge"]["intentUntil"] is None
 
 
+@pytest.mark.parametrize("release", ["pointerup", "pointercancel"])
+def test_release_after_delivered_drag_scroll_does_not_rearm_intent(release):
+    """Drag scroll delivered BEFORE release: the movement was already
+    classified, so release must clear the intent instead of opening a fresh
+    window that the next (non-drag) scroll would consume."""
+    result = _run_drag_probe(
+        [
+            {"op": "pointerdown", "offsetX": 800},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": release},
+            {"op": "snapshot", "key": "afterRelease"},
+        ]
+    )
+    assert result["snapshots"]["afterRelease"]["unpinned"] is True
+    assert result["snapshots"]["afterRelease"]["intentUntil"] is None
+
+
+@pytest.mark.parametrize("release", ["pointerup", "pointercancel"])
+def test_render_nudge_after_drag_back_to_tail_keeps_reader_pinned(release):
+    """Maintainer regression (gate 7268, round 3): drag up, drag back to the
+    tail (re-pinned), release, then a render/layout-generated tail nudge. The
+    release must not hand the nudge a stale drag intent, so the nudge is still
+    classified as tail jitter and the reader stays pinned."""
+    result = _run_drag_probe(
+        [
+            {"op": "pointerdown", "offsetX": 800},
+            {"op": "scrollTop", "value": 6000},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": "snapshot", "key": "draggedAway"},
+            {"op": "scrollTop", "value": 6300},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": "scrollTop", "value": 6500},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": "snapshot", "key": "backAtTail"},
+            {"op": release},
+            {"op": "snapshot", "key": "released"},
+            # Render-generated nudge (no input) after the release.
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["draggedAway"]["unpinned"] is True
+    assert result["snapshots"]["backAtTail"]["pinned"] is True
+    assert result["snapshots"]["backAtTail"]["unpinned"] is False
+    assert result["snapshots"]["released"]["intentUntil"] is None
+    assert result["state"]["_scrollPinned"] is True
+    assert result["state"]["_messageUserUnpinned"] is False
+
+
+def test_scrollbar_click_without_movement_leaves_no_intent_for_render_nudge():
+    """A press/release on the scrollbar that never moved scrollTop has no drag
+    scroll to own: release clears the pointerdown stamp, and a render nudge
+    right after cannot consume it."""
+    result = _run_drag_probe(
+        [
+            {"op": "pointerdown", "offsetX": 800},
+            {"op": "pointerup"},
+            {"op": "snapshot", "key": "released"},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["released"]["intentUntil"] is None
+    assert result["state"]["_scrollPinned"] is True
+    assert result["state"]["_messageUserUnpinned"] is False
+
+
+def test_pending_drag_scroll_after_release_owns_intent_then_render_nudge_cannot():
+    """Drag scroll delivered AFTER release: the re-armed intent is consumed by
+    that drag scroll only; once the reader is back at the tail and re-pinned, a
+    later render nudge is classified as jitter again."""
+    result = _run_drag_probe(
+        [
+            {"op": "pointerdown", "offsetX": 800},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "advance", "ms": 251},
+            {"op": "pointercancel"},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": "snapshot", "key": "dragClassified"},
+            # Reader returns to the tail (re-pins after two downward frames).
+            {"op": "scrollTop", "value": 6496},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": "scrollTop", "value": 6500},
+            {"op": "scroll"},
+            {"op": "flush"},
+            {"op": "snapshot", "key": "repinned"},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["dragClassified"]["unpinned"] is True
+    assert result["snapshots"]["dragClassified"]["intentUntil"] is None
+    assert result["snapshots"]["repinned"]["pinned"] is True
+    assert result["state"]["_scrollPinned"] is True
+    assert result["state"]["_messageUserUnpinned"] is False
+
+
 @pytest.mark.parametrize("reset", ["_resetScrollDirectionTracker", "_resetStreamScrollFollow"])
 def test_scrollbar_drag_intent_latch_is_cleared_by_scroll_ownership_resets(reset):
     source = _function_source(reset)
     assert "_scrollbarDragActive=false;" in source
     assert "_scrollbarDragIntentQueued=false;" in source
     assert "_scrollbarDragIntentUntil=-Infinity;" in source
+    assert "_scrollbarDragObservedTop=null;" in source
 
 
 @pytest.mark.parametrize("intent", ["wheel", "touch", "key", "scrollbar", "nonMessage"])

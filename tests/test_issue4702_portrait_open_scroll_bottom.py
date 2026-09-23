@@ -51,12 +51,15 @@ def test_portrait_history_open_stays_pinned_at_bottom_after_viewport_growth():
     """
     frames = [
         {"scrollTop": 6500, "scrollHeight": 7000, "clientHeight": 500},
-        {"scrollTop": 6350, "scrollHeight": 7000, "clientHeight": 650},
+        # Settle lands 2px short of the true bottom: the `bottomDistance>1`
+        # tail guard no longer covers the frame on its own, so only the `!grew`
+        # client-height growth guard keeps this upward delta from unpinning.
+        {"scrollTop": 6348, "scrollHeight": 7000, "clientHeight": 650},
     ]
+    assert frames[-1]["scrollHeight"] - frames[-1]["scrollTop"] - frames[-1]["clientHeight"] == 2
     state = _run_scroll_listener(frames)
     assert state["_scrollPinned"] is True
     assert state["_messageUserUnpinned"] is False
-    assert frames[-1]["scrollHeight"] - frames[-1]["scrollTop"] - frames[-1]["clientHeight"] == 0
 
 
 def test_client_height_tracker_reset_on_session_switch():
