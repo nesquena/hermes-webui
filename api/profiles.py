@@ -455,45 +455,74 @@ def _root_profile_scope_payload() -> dict:
     return {'root_names': names, 'root_names_authoritative': authoritative}
 
 
+def _root_profile_scope_rows_fresh() -> list | None:
+    """Listing rows for AUTHORITY, read WITHOUT the profile-list TTL cache.
+
+    ``list_profiles_api()`` memoizes its rows for ``_LIST_PROFILES_CACHE_TTL`` seconds,
+    and that memo is invalidated only by the mutations THIS process performs. A set
+    derived from it can therefore omit (or retain) a root alias for up to the TTL after
+    an out-of-band change — a root renamed through the agent/CLI while the WebUI stays
+    up — and still look complete. Authority must describe the CURRENT identity, so it
+    reads the same source of truth uncached (Greptile P1, round 17).
+
+    Returns None when a fresh read is unavailable: isolated-profile mode (exactly one
+    profile exists, so no alias can be hidden) or the upstream helpers are missing.
+    The caller then falls back to the normal listing and marks the result accordingly.
+    Never raises.
+    """
+    if _is_isolated_profile_mode():
+        return None
+    try:
+        return _build_profile_rows_fast()
+    except Exception:
+        logger.debug("Fresh profile rows unavailable for root-name scope", exc_info=True)
+        return None
+
+
 def _root_profile_scope() -> tuple[list[str], bool]:
     """Canonical root-alias scope, resolved server-side, plus whether it is COMPLETE.
 
     The single source of the root-alias set for profile-scope authority. Same source
-    of truth as `_is_root_profile`: the legacy 'default' alias plus every name
-    ``list_profiles_api()`` reports with is_default=True — so the WebUI can decide
-    authority WITHOUT consulting its own eventually consistent roster (which starts
-    empty, may be five minutes stale from localStorage, and is warmed only after the
-    window-load timer, so it cannot answer during a cold boot).
+    of truth as `_is_root_profile`: the legacy 'default' alias plus every name the
+    listing reports with is_default=True — so the WebUI can decide authority WITHOUT
+    consulting its own eventually consistent roster (which starts empty, may be five
+    minutes stale from localStorage, and is warmed only after the window-load timer,
+    so it cannot answer during a cold boot).
 
-    Returns ``(names, authoritative)``. ``authoritative=False`` means the listing
-    raised and *names* is the fail-closed default alias, not a resolved view of the
-    profiles that exist; the client then revalidates from a fresh snapshot instead of
-    treating that partial set as the final word.
+    Returns ``(names, authoritative)``. ``authoritative=True`` means *names* was read
+    FRESH, so it describes the identities that exist right now and the client may treat
+    it as final. ``authoritative=False`` means the set could not be confirmed current
+    (the fresh read was unavailable or the listing raised) and *names* may be missing an
+    alias; the client then keeps reconciling from fresh snapshots instead of treating
+    the set as the last word.
 
-    The memoized `_root_profile_name_cache` is deliberately NOT used here: it is
-    invalidated only by mutations this process performs (create/clone/delete), so a
-    root renamed out-of-band while the WebUI stays up would leave stale aliases
-    deciding authority. AGENTS.md: authority checks fail closed, and caches are scoped
-    by the complete identity.
+    Neither the profile-list TTL memo nor `_root_profile_name_cache` is trusted here:
+    the memo can serve an out-of-band change up to ``_LIST_PROFILES_CACHE_TTL`` late,
+    and the name cache is invalidated only by mutations this process performs. AGENTS.md:
+    authority checks fail closed, and caches are scoped by the complete identity.
 
     Reachability note: both callers (GET /api/profile/active and POST
     /api/profile/switch) build their payload alongside `list_profiles_api()` in the
-    SAME request, so a listing that raises here also fails that response. This branch
-    exists to keep authority fail-closed, not as a routine path. Never raises.
+    SAME request. Never raises.
     """
-    try:
-        infos = list_profiles_api()
-    except Exception:
-        logger.debug("Failed to list profiles for root-name scope", exc_info=True)
-        return ['default'], False
+    rows = _root_profile_scope_rows_fresh()
+    # Isolated mode has exactly one profile, so a normal listing cannot hide an alias
+    # there and may be published as authoritative.
+    confirmed = rows is not None or _is_isolated_profile_mode()
+    if rows is None:
+        try:
+            rows = list_profiles_api()
+        except Exception:
+            logger.debug("Failed to list profiles for root-name scope", exc_info=True)
+            return ['default'], False
     names = {'default'}
-    for p in infos:
+    for p in rows:
         try:
             if p.get('is_default') and p.get('name'):
                 names.add(p['name'])
         except (AttributeError, TypeError):
             continue
-    return sorted(names), True
+    return sorted(names), confirmed
 
 
 def _profiles_match(row_profile, active_profile) -> bool:

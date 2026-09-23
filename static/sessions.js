@@ -1844,11 +1844,11 @@ function _rearmActiveSessionStream(){
     ? S.session.profile.trim()
     : 'default';
   if(!_paneProfileMatchesActiveProfile(paneProfile, S.activeProfile)){
-    // Rejected, but the last root scope was not a resolved listing: this may be a
-    // renamed root we simply cannot prove yet. Refresh the scope and re-arm rather
-    // than letting the pane go silent (fail closed, then reconcile). The call is a
-    // no-op once a resolved scope holds a matching alias.
-    if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope();
+    // Rejected — evidence the scope we hold may be stale (a root renamed out-of-band
+    // while this page is open). Ask for a confirmed scope and re-arm rather than
+    // letting the pane go silent; bounded by the floor, and it stops once the server
+    // confirms a genuine mismatch (Greptile P1, round 17).
+    if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope({forced: true});
     return;
   }
   startSessionStream(activeSid);
@@ -1878,13 +1878,22 @@ function _clearProfileRootScopeRetry(){
   _profileRootScopeRetryTimer = null;
 }
 
-function _scheduleProfileRootScopeRetryIn(ms){
+// The retry must preserve WHY it was scheduled. A floor-blocked evidence-driven
+// attempt that retried as a plain one would be short-circuited by the resolved check
+// and the refresh would never actually happen (Greptile P1, round 17).
+let _profileRootScopeRetryForced = false;
+function _scheduleProfileRootScopeRetryIn(ms, forced){
   if(typeof setTimeout !== 'function') return;
   if(_profileRootScopeRetryTimer !== null) return;   // one pending retry is enough
   const wait = (typeof ms === 'number' && ms > 0) ? ms : 1;
+  const retryForced = !!forced;
+  _profileRootScopeRetryForced = retryForced;
   _profileRootScopeRetryTimer = setTimeout(function(){
     _profileRootScopeRetryTimer = null;
-    if(typeof _revalidateActiveProfileRootScope === 'function') _revalidateActiveProfileRootScope();
+    _profileRootScopeRetryForced = false;
+    if(typeof _revalidateActiveProfileRootScope === 'function'){
+      _revalidateActiveProfileRootScope(retryForced ? {forced: true} : undefined);
+    }
   }, wait);
 }
 
@@ -1908,8 +1917,17 @@ function _profileScopeRefreshOwnerStillOwns(token){
   return true;
 }
 
-function _revalidateActiveProfileRootScope(){
-  if(typeof _activeProfileRootNamesResolved === 'function' && _activeProfileRootNamesResolved()){
+function _revalidateActiveProfileRootScope(opts){
+  // `forced` marks an attempt driven by EVIDENCE: a pane was rejected against the
+  // scope we hold. A resolved scope is then not proof that the scope is current — the
+  // identity can change server-side (a root renamed out-of-band) while this page is
+  // open, and a settled snapshot would otherwise mean "reject silently forever"
+  // (Greptile P1, round 17). The attempt stays bounded: single-flight, the floor, and
+  // the rule below that a CONFIRMED mismatch stops retrying.
+  const forced = !!(opts && opts.forced);
+  if(!forced
+     && typeof _activeProfileRootNamesResolved === 'function'
+     && _activeProfileRootNamesResolved()){
     _clearProfileRootScopeRetry();
     return;
   }
@@ -1918,11 +1936,11 @@ function _revalidateActiveProfileRootScope(){
   if(now < _profileRootScopeNextRefreshAt){
     // Blocked by the floor. Without rescheduling, a rejected pane would wait forever
     // for a frame it will never receive (its stream was never armed).
-    _scheduleProfileRootScopeRetryIn(_profileRootScopeNextRefreshAt - now);
+    _scheduleProfileRootScopeRetryIn(_profileRootScopeNextRefreshAt - now, forced);
     return;
   }
   if(typeof api !== 'function'){
-    _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS);
+    _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS, forced);
     return;
   }
   const owner = _profileScopeRefreshOwnerToken();
@@ -1946,8 +1964,11 @@ function _revalidateActiveProfileRootScope(){
       _profileRootScopeRefresh = null;
       const settled = typeof _activeProfileRootNamesResolved === 'function'
         && _activeProfileRootNamesResolved();
+      // `settled` means the server CONFIRMED the identity we hold. A pane that is
+      // still rejected after a confirmed answer is a genuine mismatch, not staleness,
+      // so retrying would only poll — stop. Unconfirmed answers keep reconciling.
       if(settled) _clearProfileRootScopeRetry();
-      else _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS);
+      else _scheduleProfileRootScopeRetryIn(_PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS, forced);
     });
 }
 

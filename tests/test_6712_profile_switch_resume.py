@@ -2158,6 +2158,7 @@ def _run_root_scope_on_failure(*, cache_loaded: bool):
             p._root_profile_name_cache.add('kinni')
             p._root_profile_name_cache_loaded = {loaded!r}
         p.list_profiles_api = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
+        p._build_profile_rows_fast = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
         names, authoritative = p._root_profile_scope()
         print(json.dumps({{'names': names, 'authoritative': authoritative}}))
     """).format(repo=str(REPO_ROOT), loaded=cache_loaded)
@@ -2206,11 +2207,16 @@ const S = { session: params.session, activeProfile: params.activeProfile,
             activeProfileIsDefault: !!params.activeProfileIsDefault };
 let _loadingSessionId = null;
 let revalidated = false;
-function _revalidateActiveProfileRootScope(){ revalidated = true; }
+let revalidatedForced = null;
+// Record whether the guard reports EVIDENCE. A rejection is evidence the scope may be
+// stale, and a plain (non-forced) call is short-circuited by a settled scope — so the
+// flag is what lets reconciliation survive an out-of-band rename (round 17).
+function _revalidateActiveProfileRootScope(opts){ revalidated = true; revalidatedForced = !!(opts && opts.forced); }
 // Reject everything: the point is what the guard does about a rejection.
 function _paneProfileMatchesActiveProfile(){ return false; }
 __PANE_BODY__
-console.log(JSON.stringify({ pane: _isSessionCurrentPane('pane'), revalidated: revalidated }));
+console.log(JSON.stringify({ pane: _isSessionCurrentPane('pane'), revalidated: revalidated,
+                             revalidatedForced: revalidatedForced }));
 """
 
 
@@ -2234,6 +2240,11 @@ def test_a_rejected_pane_requests_scope_revalidation():
     assert out["revalidated"] is True, (
         f"a rejected pane went silent without requesting a fresh root scope, so a renamed "
         f"root would stop receiving live updates permanently (Greptile P1, round 14): {out}"
+    )
+    assert out["revalidatedForced"] is True, (
+        f"the guard requested a scope refresh WITHOUT evidence, so a settled-but-stale "
+        f"snapshot would short-circuit it and the pane would be rejected forever "
+        f"(Greptile P1, round 17): {out}"
     )
 
 # ── Greptile round 15: a MISSING scope must not become authoritative ──────────
@@ -2567,4 +2578,250 @@ def test_an_unresolved_scope_always_schedules_its_next_attempt():
     resolved = out["afterResolved"]
     assert resolved["resolved"] is True and resolved["scheduled"] == 0, (
         f"a resolved scope must stop retrying: {resolved}"
+    )
+
+
+# ── Greptile round 17: authority reads the CURRENT identity, not a TTL memo ────
+#
+# `list_profiles_api()` memoizes rows for `_LIST_PROFILES_CACHE_TTL` seconds and that
+# memo is invalidated only by mutations THIS process performs. A root renamed through
+# the agent/CLI while the WebUI stays up therefore stays invisible to a memoized read
+# for up to the TTL — yet the scope was still published as `authoritative: true`, so
+# the client treated it as final and stopped reconciling. Authority must describe the
+# identity that exists now, and an unconfirmable set must stay non-authoritative.
+
+_SCOPE_FRESH_PROBE = r"""
+import json
+import sys
+import time
+sys.path.insert(0, {repo!r})
+import api.profiles as p
+
+mode = {mode!r}
+STALE = [{{'name': 'default', 'is_default': True}}]
+FRESH = [{{'name': 'default', 'is_default': True}}, {{'name': 'kinni', 'is_default': True}}]
+
+# Prime the TTL memo with a set that does NOT know about the renamed root.
+p._LIST_PROFILES_CACHE = (STALE, time.time())
+
+if mode == 'fresh-wins':
+    p._build_profile_rows_fast = lambda: FRESH
+elif mode == 'unconfirmable':
+    p._build_profile_rows_fast = lambda: None
+    p.list_profiles_api = lambda: FRESH
+elif mode == 'both-fail':
+    p._build_profile_rows_fast = lambda: None
+    p.list_profiles_api = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
+
+memo = p.list_profiles_api() if mode == 'fresh-wins' else None
+names, authoritative = p._root_profile_scope()
+print(json.dumps({{
+    'names': names,
+    'authoritative': authoritative,
+    'memo_names': ([r['name'] for r in memo] if memo else None),
+}}))
+"""
+
+
+def _run_scope_fresh_probe(mode):
+    py = textwrap.dedent(_SCOPE_FRESH_PROBE).format(repo=str(REPO_ROOT), mode=mode)
+    proc = subprocess.run([sys.executable, "-c", py], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"probe failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_scope_reads_fresh_despite_a_primed_ttl_memo():
+    """Greptile round 17: a live rename must reach the scope, and be authoritative."""
+    out = _run_scope_fresh_probe("fresh-wins")
+    # Precondition: the memo really was primed and still serving the stale set.
+    assert out["memo_names"] == ["default"], (
+        f"precondition: the primed TTL memo must still serve the stale rows, otherwise "
+        f"this test proves nothing about bypassing it: {out}"
+    )
+    assert "kinni" in out["names"], (
+        f"the scope was derived from the TTL memo and missed the renamed root that a "
+        f"fresh read reports, so the client would reject it for up to the TTL after an "
+        f"out-of-band rename (Greptile P1, round 17): {out}"
+    )
+    assert out["authoritative"] is True, (
+        f"a fresh read describes the CURRENT identity, so it must be authoritative: {out}"
+    )
+
+
+def test_an_unconfirmable_scope_stays_non_authoritative():
+    """Unconfirmed freshness must fail closed WITH reconciliation, not be final."""
+    out = _run_scope_fresh_probe("unconfirmable")
+    assert "kinni" in out["names"], out
+    assert out["authoritative"] is False, (
+        f"a set that could not be confirmed current was published as authoritative, so "
+        f"the client would stop reconciling and treat it as final (Greptile P1, round "
+        f"17): {out}"
+    )
+    failed = _run_scope_fresh_probe("both-fail")
+    assert failed["names"] == ["default"] and failed["authoritative"] is False, failed
+
+# ── Greptile round 17 (client): evidence must outlive a settled snapshot ───────
+#
+# A resolved scope is not proof the identity is still current: the root can be renamed
+# server-side while the page is open. Once the server CONFIRMS the scope, a pane that
+# is still rejected is a genuine mismatch and retrying would only poll — so the loop
+# must stop there. This drives the real refresh with deterministic timers.
+
+_SCOPE_EVIDENCE_HARNESS = r"""
+const S = {
+  session: { session_id: 'pane', profile: 'kinni' },
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  // A RESOLVED snapshot that does NOT know about the renamed root: the situation the
+  // round-17 finding describes (identity changed server-side after this was adopted).
+  activeProfileRootNames: ['default'],
+  activeProfileRootNamesAuthoritative: true,
+};
+let _loadingSessionId = null;
+let started = [];
+function startSessionStream(sid){ started.push(sid); }
+function _profileMatchesActiveProfile(profile, active){
+  const e = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const a = (typeof active === 'string' && active.trim()) ? active.trim() : 'default';
+  if (e === a) return true;
+  return e === 'default' && !!S.activeProfileIsDefault;
+}
+let scheduled = [];
+let cleared = [];
+function setTimeout(fn, ms){ scheduled.push({ fn: fn, ms: ms }); return scheduled.length; }
+function clearTimeout(id){ cleared.push(id); }
+function Date(){ }
+Date.now = function(){ return params.now || 0; }
+
+let apiCalls = 0;
+let releases = [];
+function api(path){
+  apiCalls += 1;
+  return new Promise(function(res){ releases.push(res); });
+}
+function releaseNext(payload){ const r = releases.shift(); if (r) r(payload); }
+__HELPERS__
+
+(async () => {
+  // ── (a) a settled scope must NOT short-circuit an evidence-driven attempt ──
+  const aliasBefore = _canonicalProfileRootAlias('kinni');
+  const resolvedBefore = _activeProfileRootNamesResolved();
+  _revalidateActiveProfileRootScope({ forced: true });   // the pane was rejected
+  const issuedForced = apiCalls;
+  if (issuedForced === 1) releaseNext({ root_names: ['default', 'kinni'], root_names_authoritative: true });
+  await new Promise(r => setImmediate(r));
+  const afterConfirmedRename = {
+    aliasBefore: aliasBefore,
+    resolvedBefore: resolvedBefore,
+    issuedForced: issuedForced,
+    alias: _canonicalProfileRootAlias('kinni'),
+    pane: _isSessionCurrentPane('pane'),
+    started: started.slice(),
+    scheduled: scheduled.length,
+  };
+
+  // ── (b) a NON-forced call is still short-circuited by a settled scope ──
+  const callsBeforeIdle = apiCalls;
+  _revalidateActiveProfileRootScope();                   // no evidence
+  const issuedIdle = apiCalls - callsBeforeIdle;
+
+  // ── (c) after the server CONFIRMS the scope, a still-rejected pane must STOP ──
+  // Re-reject the pane with the confirmed scope held: a genuine mismatch, not staleness.
+  S.activeProfileRootNames = ['default'];                // renamed root absent…
+  S.activeProfileRootNamesAuthoritative = true;           // …but CONFIRMED current
+  scheduled = [];
+  _profileRootScopeRetryTimer = null;
+  // Control the floor EXPLICITLY: phase (a) issued its request at now=0, which left the
+  // floor in the future. Without this reset the call below is silently floor-blocked and
+  // the assertions would pass without ever exercising the confirmed-mismatch path.
+  _profileRootScopeNextRefreshAt = 0;
+  const callsBeforeMismatch = apiCalls;
+  _revalidateActiveProfileRootScope({ forced: true });
+  const issuedForMismatch = apiCalls - callsBeforeMismatch;
+  if (issuedForMismatch > 0) releaseNext({ root_names: ['default'], root_names_authoritative: true });
+  await new Promise(r => setImmediate(r));
+  const afterGenuineMismatch = {
+    issued: issuedForMismatch,
+    alias: _canonicalProfileRootAlias('kinni'),
+    scheduled: scheduled.length,
+  };
+
+  console.log(JSON.stringify({
+    afterConfirmedRename: afterConfirmedRename,
+    issuedIdle: issuedIdle,
+    afterGenuineMismatch: afterGenuineMismatch,
+  }));
+})();
+"""
+
+
+def _run_scope_evidence():
+    """Drive the REAL refresh with the forced/evidence semantics."""
+    src_js = _read(SESSIONS_JS_PATH)
+    helpers = ""
+    for name in ("_activeProfileRootNamesSet", "_applyActiveProfileRootScope",
+                 "_activeProfileRootNamesResolved", "_canonicalProfileRootAlias",
+                 "_paneProfileMatchesActiveProfile", "_rearmActiveSessionStream",
+                 "_profileScopeRefreshOwnerToken", "_profileScopeRefreshOwnerStillOwns",
+                 "_clearProfileRootScopeRetry", "_scheduleProfileRootScopeRetryIn"):
+        seg = src_js[src_js.index("function %s(" % name):]
+        helpers += seg[: seg.index("\n}\n") + 3] + "\n"
+    declarations = "\n".join([
+        "let _profileRootScopeRefresh = null;",
+        "let _profileRootScopeNextRefreshAt = 0;",
+        "let _profileRootScopeRetryTimer = null;",
+        "const _PROFILE_ROOT_SCOPE_REFRESH_FLOOR_MS = 15000;",
+    ])
+    body = src_js[src_js.index("function _revalidateActiveProfileRootScope("):]
+    body = body[: body.index("\n}\n") + 3]
+    pane = _read(MESSAGES_JS_PATH)
+    pane_body = pane[pane.index("function _isSessionCurrentPane("):]
+    pane_body = pane_body[: pane_body.index("\n}\n") + 3]
+    js = _SCOPE_EVIDENCE_HARNESS.replace(
+        "__HELPERS__", declarations + "\n" + helpers + body + "\n" + pane_body
+    ).replace("__PARAMS__", "{}").replace("const params = {};", "const params = { now: 0 };")
+    if "const params = {" not in js:
+        js = "const params = { now: 0 };\n" + js
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_rejected_pane_reconciles_through_a_settled_snapshot():
+    """Greptile round 17: a settled scope must not mean 'reject silently forever'."""
+    out = _run_scope_evidence()
+    confirmed = out["afterConfirmedRename"]
+    assert confirmed["resolvedBefore"] is True, (
+        f"precondition: this test is about a SETTLED snapshot, otherwise the resolved "
+        f"short-circuit could not happen and the finding is not exercised: {confirmed}"
+    )
+    assert confirmed["aliasBefore"] is False, (
+        f"precondition: the settled snapshot must NOT know the renamed root: {confirmed}"
+    )
+    assert confirmed["issuedForced"] == 1, (
+        f"a rejected pane against a settled scope issued no refresh, so an out-of-band "
+        f"rename would leave the stream disconnected indefinitely "
+        f"(Greptile P1, round 17): {confirmed}"
+    )
+    assert confirmed["alias"] is True and confirmed["pane"] is True, (
+        f"the confirmed scope must re-admit the renamed root and reconnect the pane: "
+        f"{confirmed}"
+    )
+    assert confirmed["started"] == ["pane"], confirmed
+    assert confirmed["scheduled"] == 0, (
+        f"once the server CONFIRMS the identity, retrying would only poll: {confirmed}"
+    )
+    # A non-evidence call with a settled scope still short-circuits.
+    assert out["issuedIdle"] == 0, (
+        f"a scope refresh without evidence must not bypass a settled scope, or every "
+        f"idle path would poll the endpoint: {out['issuedIdle']}"
+    )
+    # And a genuine mismatch (confirmed scope, root really absent) stops the loop.
+    mismatch = out["afterGenuineMismatch"]
+    assert mismatch["issued"] == 1, (
+        f"precondition: the confirmed-mismatch attempt must actually issue a request, "
+        f"otherwise this assertion could pass for the wrong reason: {mismatch}"
+    )
+    assert mismatch["alias"] is False and mismatch["scheduled"] == 0, (
+        f"a CONFIRMED mismatch is not staleness, so it must not keep retrying: {mismatch}"
     )
