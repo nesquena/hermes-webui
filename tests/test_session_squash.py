@@ -1,222 +1,690 @@
 """Coverage for api/session_squash.py — the in-process squash behind the
-WebUI squash button (POST /api/session/squash + GET .../squash/status).
+WebUI squash action (POST /api/session/squash[/preview|/restore] +
+GET /api/session/squash/status).
 
-The flow is exercised end-to-end with a fake Session object and a real
-sidecar file in a temp dir: job start, guard refusals, archive + manifest,
-sidecar mutation contract (single visible summary + compaction marker +
-manual anchor + watermark barrier + lineage detach), and job status.
+Backend tests run against REAL ``Session`` objects persisted in a temp
+session dir, a temp sidebar index and a temp Agent ``state.db``, so the
+selection authority, detached authority, compare-and-swap, transactional
+rollback, durable state barrier and restore are exercised on the production
+code paths rather than on stand-ins.
 """
 
+import collections
 import gzip
 import hashlib
 import json
+import os
 import shutil
+import sqlite3
 import subprocess
 import textwrap
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
 import api.models
 import api.routes
-import api.session_ops
 from api import session_squash
 
 
 SID = "20260801_120000_ab12cd"
+SUMMARY = ("synthèse fournie " * 40).strip()
 
 
-def _make_session(tmp_path, *, messages=None, **overrides):
+# ── fixtures ─────────────────────────────────────────────────────────────
+
+def _messages(n=4, base=1000.0):
+    out = []
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        out.append({"role": role, "content": f"{role} message {i}", "timestamp": base + i})
+    return out
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    """Isolated session store, sidebar index, profile home and state.db."""
     sessions_dir = tmp_path / "webui" / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    path = sessions_dir / f"{SID}.json"
-    if messages is None:
-        messages = [
-            {"role": "user", "content": "première demande de test", "timestamp": 1000.0},
-            {"role": "assistant", "content": "# CONCLUSION\n---\n> 🟢 fait", "timestamp": 1001.0},
-            {"role": "user", "content": "seconde demande", "timestamp": 1002.0},
-            {"role": "assistant", "content": "réponse finale", "timestamp": 1003.0},
-        ]
-    sess = SimpleNamespace(
-        session_id=SID,
+    sessions_dir.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(api.models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(api.models, "SESSION_INDEX_FILE", sessions_dir / "_index.json")
+    monkeypatch.setattr(api.models, "SESSIONS", collections.OrderedDict())
+    monkeypatch.setattr(api.models, "_get_profile_home", lambda _profile: home)
+    monkeypatch.setattr(api.routes, "_publish_session_list_changed", lambda *a, **k: None)
+    monkeypatch.setattr("api.config._evict_session_agent", lambda _sid: None)
+    monkeypatch.setattr(
+        "api.compression_continuation.durable_compression_continuation",
+        lambda _session: (False, None),
+    )
+    session_squash._JOBS.clear()
+    return SimpleNamespace(sessions_dir=sessions_dir, home=home, tmp=tmp_path)
+
+
+def _make_session(env, sid=SID, *, archived=True, messages=None, **fields):
+    s = api.models.Session(
+        session_id=sid,
         title="session de test",
-        workspace="/tmp/ws",
+        workspace=str(env.tmp),
+        messages=_messages() if messages is None else messages,
+        archived=archived,
+        profile="default",
         created_at=1000.0,
         updated_at=1003.0,
-        messages=messages,
-        context_messages=list(messages),
-        tool_calls=[{"id": "t1"}],
-        active_stream_id=None,
-        active_checkpoint=None,
-        pending_turn_id=None,
-        pending_user_message=None,
-        pending_attachments=[],
-        pending_started_at=None,
-        pending_user_source=None,
-        parent_session_id="parent-fork-123",
-        anchor_activity_scenes={"s1": {"foo": "bar"}},
-        compression_anchor_visible_idx=None,
-        compression_anchor_message_key=None,
-        compression_anchor_summary=None,
-        compression_anchor_mode=None,
-        truncation_watermark=None,
-        truncation_boundary=None,
-        read_only=False,
-        profile="default",
-        path=path,
+        **fields,
     )
-    for key, value in overrides.items():
-        setattr(sess, key, value)
-
-    def _save(**_kwargs):
-        payload = {
-            "session_id": SID,
-            "title": sess.title,
-            "workspace": sess.workspace,
-            "created_at": sess.created_at,
-            "updated_at": sess.updated_at,
-            "messages": sess.messages,
-            "context_messages": sess.context_messages,
-            "tool_calls": sess.tool_calls,
-            "active_stream_id": sess.active_stream_id,
-            "active_checkpoint": sess.active_checkpoint,
-            "pending_turn_id": sess.pending_turn_id,
-            "pending_user_message": sess.pending_user_message,
-            "pending_attachments": sess.pending_attachments,
-            "pending_started_at": sess.pending_started_at,
-            "pending_user_source": sess.pending_user_source,
-            "parent_session_id": sess.parent_session_id,
-            "anchor_activity_scenes": sess.anchor_activity_scenes,
-            "compression_anchor_visible_idx": sess.compression_anchor_visible_idx,
-            "compression_anchor_message_key": sess.compression_anchor_message_key,
-            "compression_anchor_summary": sess.compression_anchor_summary,
-            "compression_anchor_mode": sess.compression_anchor_mode,
-            "truncation_watermark": sess.truncation_watermark,
-            "truncation_boundary": sess.truncation_boundary,
-            "message_count": len(sess.messages or []),
-            "read_only": sess.read_only,
-            "profile": sess.profile,
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    sess.save = _save
-    _save()
-    return sess
+    s.context_messages = list(s.messages)
+    s.save(touch_updated_at=False)
+    with api.models.LOCK:
+        api.models.SESSIONS[sid] = s
+    return s
 
 
-def _run_job(sess, *, summary="synthèse fournie " * 40):
-    summary = summary.strip()
-    with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess), \
-         patch.object(api.session_ops, "_live_active_stream_id", lambda _s: None), \
-         patch.object(api.routes, "_get_session_agent_lock", _dummy_lock), \
-         patch.object(api.routes, "_publish_session_list_changed", lambda *a, **k: None), \
-         patch("api.config._evict_session_agent", lambda _sid: None), \
-         patch.object(session_squash, "_generate_summary", lambda s, sid, provided: (provided, "provided")):
-        job = session_squash.start_squash_job(SID, confirm_session_id=SID, summary=summary)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            snap = session_squash.squash_job_status(job["job_id"])
-            if snap["status"] in ("done", "error"):
-                return snap
-            time.sleep(0.02)
+def _make_state_db(env, sid=SID, rows=4, lease=None):
+    db = env.home / "state.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT);
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, active INTEGER NOT NULL DEFAULT 1, compacted INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS session_turn_leases (
+            conversation_id TEXT PRIMARY KEY, holder TEXT NOT NULL,
+            acquired_at REAL NOT NULL, expires_at REAL NOT NULL);
+        """
+    )
+    conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (sid,))
+    for i in range(rows):
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+            (sid, "user" if i % 2 == 0 else "assistant", f"state row {i}", 1000.0 + i),
+        )
+    if lease:
+        conn.execute("INSERT INTO session_turn_leases VALUES (?,?,?,?)", (sid, lease, time.time(), time.time() + 300))
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _state_rows(env, sid=SID):
+    conn = sqlite3.connect(env.home / "state.db")
+    try:
+        return conn.execute(
+            "SELECT id, active, compacted FROM messages WHERE session_id = ? ORDER BY id", (sid,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _index_entry(env, sid=SID):
+    entries = json.loads((env.sessions_dir / "_index.json").read_text(encoding="utf-8"))
+    return next((e for e in entries if e.get("session_id") == sid), None)
+
+
+def _wait(job_id, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = session_squash.squash_job_status(job_id)
+        if snap["status"] in ("done", "error"):
+            return snap
+        time.sleep(0.02)
     raise AssertionError("squash job did not finish")
 
 
-class _DummyLock:
-    def acquire(self, timeout=None):
-        return True
-
-    def release(self):
-        return None
+def _squash(sid=SID, *, summary=SUMMARY, confirm=None, request_profile="default"):
+    authority = confirm or session_squash.preview_squash(sid, request_profile=request_profile)
+    job = session_squash.start_squash_job(sid, confirm=authority, summary=summary, request_profile=request_profile)
+    return _wait(job["job_id"]), authority
 
 
-def _dummy_lock(_sid):
-    return _DummyLock()
+def _snapshot(env, sid=SID):
+    path = env.sessions_dir / f"{sid}.json"
+    return {
+        "bytes": path.read_bytes(),
+        "index": _index_entry(env, sid),
+        "cache": api.models.SESSIONS.get(sid),
+        "cache_messages": list(getattr(api.models.SESSIONS.get(sid), "messages", []) or []),
+        "state": _state_rows(env, sid) if (env.home / "state.db").exists() else None,
+        "archives": sorted(p.name for p in (env.tmp / "webui" / "session-squash-archives" / sid).glob("*.gz"))
+        if (env.tmp / "webui" / "session-squash-archives" / sid).exists() else [],
+    }
 
 
-def test_squash_job_collapses_session(tmp_path):
-    sess = _make_session(tmp_path)
-    original_bytes = sess.path.read_bytes()
-    original_sha = hashlib.sha256(original_bytes).hexdigest()
+def _assert_unchanged(env, before, sid=SID):
+    after = _snapshot(env, sid)
+    assert after["bytes"] == before["bytes"], "sidecar bytes changed"
+    assert after["index"] == before["index"], "sidebar index changed"
+    assert after["cache"] is before["cache"], "cache object replaced"
+    assert after["cache_messages"] == before["cache_messages"], "cached transcript mutated"
+    assert after["state"] == before["state"], "state.db rows changed"
+    assert after["archives"] == before["archives"], "archive left behind"
+    leftovers = [p.name for p in env.sessions_dir.iterdir() if ".squash-" in p.name or ".restore-" in p.name]
+    assert leftovers == [], leftovers
 
-    snap = _run_job(sess)
+
+# ── happy path ───────────────────────────────────────────────────────────
+
+def test_squash_job_collapses_archived_session(env):
+    _make_session(env)
+    _make_state_db(env)
+    original = (env.sessions_dir / f"{SID}.json").read_bytes()
+    original_sha = hashlib.sha256(original).hexdigest()
+
+    snap, authority = _squash()
     assert snap["status"] == "done", snap.get("error")
+    assert authority["source_sha256"] == original_sha
+    assert authority["lineage_tip"] == SID
+    assert authority["profile"] == "default"
     result = snap["result"]
-    assert result["already_squashed"] is False
     assert result["before"]["message_count"] == 4
     assert result["after"]["message_count"] == 1
-    assert result["original_sha256"] == original_sha
+    assert result["state_barrier"] == "applied"
+    assert result["state_archived_rows"] == 4
 
-    persisted = json.loads(sess.path.read_text(encoding="utf-8"))
-    assert len(persisted["messages"]) == 1
-    assert persisted["messages"][0]["_squash_summary"] is True
-    assert persisted["messages"][0]["role"] == "assistant"
-    assert len(persisted["context_messages"]) == 1
+    persisted = json.loads((env.sessions_dir / f"{SID}.json").read_text(encoding="utf-8"))
+    assert [m.get("_squash_summary") for m in persisted["messages"]] == [True]
     assert persisted["context_messages"][0]["content"].startswith("[CONTEXT COMPACTION")
     assert persisted["compression_anchor_mode"] == "manual"
-    assert persisted["compression_anchor_visible_idx"] == 0
-    assert persisted["compression_anchor_message_key"]["role"] == "assistant"
-    assert persisted["truncation_watermark"] == persisted["truncation_boundary"]
-    assert persisted["truncation_watermark"] > 1003.0
-    assert persisted["parent_session_id"] is None
-    assert persisted["active_stream_id"] is None
-    assert persisted["pending_user_message"] is None
-    assert persisted["tool_calls"] == []
+    assert persisted["truncation_watermark"] == persisted["truncation_boundary"] > 1003.0
+    assert persisted["intentional_shrink_generation"] == result["squash_generation"]
+    assert persisted["archived"] is True
+    # Index and cache are published only after commit and agree with disk.
+    assert _index_entry(env)["message_count"] == 1
+    assert api.models.SESSIONS[SID].messages[0]["_squash_summary"] is True
+    # Durable state barrier: every pre-squash Agent row is soft-archived.
+    assert [(a, c) for _id, a, c in _state_rows(env)] == [(0, 1)] * 4
 
-    # Archive: gzip payload matches the original checksum, manifest is
-    # compatible with the squash-chat skill's restore command.
-    archive_path = sess.path.parent.parent / "session-squash-archives" / SID / result["archive_path"].split("/")[-1]
-    assert archive_path.is_file()
-    with gzip.open(archive_path, "rb") as fh:
+    archive = Path(result["archive_path"])
+    with gzip.open(archive, "rb") as fh:
         assert hashlib.sha256(fh.read()).hexdigest() == original_sha
-    manifest = json.loads(
-        archive_path.with_suffix(archive_path.suffix + ".manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["session_id"] == SID
+    assert manifest["profile"] == "default"
     assert manifest["source_sha256"] == original_sha
+    assert manifest["squash_generation"] == result["squash_generation"]
+    assert len(manifest["state_archived_row_ids"]) == 4
+    assert not (env.sessions_dir / f"{SID}.json.bak").exists()
 
-    # No stale .bak may survive (startup recovery could undo the squash).
-    assert not sess.path.with_suffix(".json.bak").exists()
+
+def test_squash_keeps_fork_parent_link(env):
+    _make_session(env, "parent_fork_01", archived=False)
+    _make_session(env, parent_session_id="parent_fork_01", session_source="fork")
+    snap, _ = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    persisted = json.loads((env.sessions_dir / f"{SID}.json").read_text(encoding="utf-8"))
+    assert persisted["parent_session_id"] == "parent_fork_01"
 
 
-def test_squash_requires_confirm(tmp_path):
-    _make_session(tmp_path)
+def test_squash_detaches_compression_snapshot_parent(env):
+    _make_session(env, "parent_snap_01", archived=True, pre_compression_snapshot=True)
+    _make_session(env, parent_session_id="parent_snap_01")
+    snap, _ = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    persisted = json.loads((env.sessions_dir / f"{SID}.json").read_text(encoding="utf-8"))
+    assert persisted["parent_session_id"] is None
+
+
+# ── selection authority ──────────────────────────────────────────────────
+
+def test_non_archived_target_is_refused_with_zero_writes(env):
+    _make_session(env, archived=False)
+    before = _snapshot(env)
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.preview_squash(SID, request_profile="default")
+    assert exc.value.status == 409 and "archived" in str(exc.value)
+    _assert_unchanged(env, before)
+
+
+def test_sealed_compression_parent_is_not_a_tip(env, monkeypatch):
+    _make_session(env)
+    monkeypatch.setattr(
+        "api.compression_continuation.durable_compression_continuation",
+        lambda _session: (True, "child_tip_01"),
+    )
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.preview_squash(SID, request_profile="default")
+    assert exc.value.status == 409 and "lineage tip" in str(exc.value)
+
+
+def test_pre_compression_snapshot_is_not_a_tip(env):
+    _make_session(env, pre_compression_snapshot=True)
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.preview_squash(SID, request_profile="default")
+    assert exc.value.status == 409
+
+
+def test_live_descendant_is_refused(env):
+    _make_session(env)
+    _make_session(env, "child_fork_01", archived=False, parent_session_id=SID)
+    before = _snapshot(env)
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.preview_squash(SID, request_profile="default")
+    assert "descendant" in str(exc.value)
+    _assert_unchanged(env, before)
+
+
+def test_confirmation_must_echo_current_authority(env):
+    _make_session(env)
+    authority = session_squash.preview_squash(SID, request_profile="default")
     with pytest.raises(session_squash.SquashError):
-        session_squash.start_squash_job(SID, confirm_session_id="wrong", summary=None)
+        session_squash.start_squash_job(SID, confirm={"session_id": SID}, summary=None, request_profile="default")
+    stale = dict(authority, source_sha256="0" * 64)
+    before = _snapshot(env)
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.start_squash_job(SID, confirm=stale, summary=None, request_profile="default")
+    assert exc.value.status == 409 and "source_sha256" in str(exc.value)
+    _assert_unchanged(env, before)
 
 
-def test_squash_refuses_active_session(tmp_path):
-    sess = _make_session(tmp_path, active_stream_id="stream-123")
-    with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess):
-        with pytest.raises(session_squash.SquashError) as excinfo:
-            session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
-    assert excinfo.value.status == 409
+def test_cross_profile_request_is_refused(env):
+    _make_session(env)
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.preview_squash(SID, request_profile="other-profile")
+    assert "different profile" in str(exc.value)
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    with pytest.raises(session_squash.SquashError):
+        session_squash.start_squash_job(SID, confirm=authority, summary=None, request_profile="other-profile")
 
 
-def test_squash_refuses_read_only(tmp_path):
-    sess = _make_session(tmp_path, read_only=True)
-    with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess):
-        with pytest.raises(session_squash.SquashError):
-            session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
+def test_active_or_read_only_sessions_are_refused(env):
+    _make_session(env, active_stream_id="stream-123")
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.preview_squash(SID, request_profile="default")
+    assert exc.value.status == 409
+    _make_session(env, "20260801_120000_ro0001", read_only=True)
+    with pytest.raises(session_squash.SquashError):
+        session_squash.preview_squash("20260801_120000_ro0001", request_profile="default")
 
 
-def test_squash_refuses_empty_session(tmp_path):
-    sess = _make_session(tmp_path, messages=[])
-    snap = _run_job(sess)
+# ── detached authority ───────────────────────────────────────────────────
+
+def test_detached_worker_runs_under_captured_profile_scope(env, monkeypatch):
+    _make_session(env)
+    seen = []
+    import contextlib
+    import api.profiles
+
+    @contextlib.contextmanager
+    def _scope(name, purpose="", logger_override=None):
+        seen.append((name, threading.current_thread().name))
+        yield
+
+    monkeypatch.setattr(api.profiles, "profile_scope_for_detached_worker", _scope)
+    snap, _ = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    assert seen and seen[0][0] == "default"
+    assert seen[0][1].startswith("session-squash-")
+    assert snap["profile"] == "default"
+
+
+def test_worker_enforces_frozen_authority_not_a_bare_session_id(env):
+    """The detached job carries the accepted authority. If the live session no
+    longer matches it (profile or digest), the worker refuses with zero writes
+    instead of re-resolving whatever ``get_session(sid)`` now returns."""
+    _make_session(env)
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    before = _snapshot(env)
+    for mutated in (dict(authority, profile="other-profile"), dict(authority, source_sha256="f" * 64)):
+        job = {"job_id": "frozen-authority", "session_id": SID, "status": "running",
+               "_authority": session_squash.SquashAuthority(**mutated)}
+        session_squash._run_squash_job(job, SUMMARY)
+        assert job["status"] == "error", job
+        assert job["error"].startswith("session") and ("profile" in job["error"] or "digest" in job["error"]), job["error"]
+    _assert_unchanged(env, before)
+
+
+def test_jobs_are_keyed_by_profile_and_canonical_path(env, monkeypatch):
+    _make_session(env)
+    release = threading.Event()
+    monkeypatch.setattr(session_squash, "_generate_summary", lambda s, sid, p: (release.wait(5), (SUMMARY, "provided"))[1])
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    first = session_squash.start_squash_job(SID, confirm=authority, summary=None, request_profile="default")
+    try:
+        with pytest.raises(session_squash.SquashError) as exc:
+            session_squash.start_squash_job(SID, confirm=authority, summary=None, request_profile="default")
+        assert exc.value.status == 409
+    finally:
+        release.set()
+    assert _wait(first["job_id"])["status"] == "done"
+
+
+# ── cross-process exclusion + CAS ────────────────────────────────────────
+
+def test_digest_change_after_confirmation_fails_with_zero_writes(env, monkeypatch):
+    _make_session(env)
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    path = env.sessions_dir / f"{SID}.json"
+
+    # Another process rewrites the sidecar while the summary is generated.
+    def _other_process_writes(s, sid, provided):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["messages"].append({"role": "user", "content": "written elsewhere", "timestamp": 2000.0})
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return SUMMARY, "provided"
+
+    monkeypatch.setattr(session_squash, "_generate_summary", _other_process_writes)
+    job = session_squash.start_squash_job(SID, confirm=authority, summary=None, request_profile="default")
+    before_commit_bytes = None
+    snap = _wait(job["job_id"])
+    assert snap["status"] == "error" and "digest mismatch" in snap["error"]
+    before_commit_bytes = path.read_bytes()
+    assert b"written elsewhere" in before_commit_bytes
+    assert not list((env.tmp / "webui" / "session-squash-archives" / SID).glob("*.gz"))
+
+
+def test_replace_between_digest_and_swap_is_detected(env, monkeypatch):
+    _make_session(env)
+    _make_state_db(env)
+    path = env.sessions_dir / f"{SID}.json"
+    concurrent = {}
+
+    def _hook(stage):
+        if stage == "claimed":
+            # A second process publishes a new generation at the live path in
+            # the claim window (atomic replace, different inode).
+            tmp = path.with_name(".concurrent.tmp")
+            tmp.write_text('{"session_id": "%s", "messages": [], "concurrent": true}' % SID, encoding="utf-8")
+            os.replace(tmp, path)
+            concurrent["bytes"] = path.read_bytes()
+
+    monkeypatch.setattr(session_squash, "_cas_hook", _hook)
+    snap, _ = _squash()
     assert snap["status"] == "error"
-    assert "nothing to squash" in snap["error"]
+    assert "concurrent writer" in snap["error"]
+    # The concurrent writer's generation wins; it is never overwritten.
+    assert path.read_bytes() == concurrent["bytes"]
+    assert [(a, c) for _id, a, c in _state_rows(env)] == [(1, 0)] * 4
 
 
-def test_squash_already_squashed_is_idempotent(tmp_path):
-    sess = _make_session(tmp_path, messages=[{
-        "role": "assistant", "content": "synthèse", "timestamp": 1.0, "_squash_summary": True,
-    }])
-    snap = _run_job(sess)
+def test_second_process_holding_squash_lock_blocks(env):
+    _make_session(env)
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    before = _snapshot(env)
+    lock_dir = env.tmp / "webui" / "session-squash-archives" / SID
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [
+            os.environ.get("PYTHON", __import__("sys").executable), "-c",
+            "import fcntl,os,sys,time;fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR);"
+            "fcntl.flock(fd,fcntl.LOCK_EX);print('locked',flush=True);time.sleep(30)",
+            str(lock_dir / ".squash.lock"),
+        ],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        job = session_squash.start_squash_job(SID, confirm=authority, summary=SUMMARY, request_profile="default")
+        snap = _wait(job["job_id"])
+        assert snap["status"] == "error" and "another process" in snap["error"]
+    finally:
+        holder.kill()
+        holder.wait()
+    before["archives"] = []
+    _assert_unchanged(env, before)
+
+
+# ── partial-failure rollback ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("stage", [
+    "archive",
+    "stage_verify",
+    "after_replace_verify",
+    "index_write",
+    "index_verify",
+    "state_barrier",
+    "manifest_finalize",
+])
+def test_injected_failure_rolls_back_exactly(env, monkeypatch, stage):
+    _make_session(env)
+    _make_state_db(env)
+    api.models._write_session_index(updates=[api.models.SESSIONS[SID]])
+    before = _snapshot(env)
+    boom = session_squash.SquashError(f"injected {stage}", 500)
+
+    if stage == "archive":
+        monkeypatch.setattr(session_squash, "_archive_file", lambda *a, **k: (_ for _ in ()).throw(boom))
+    elif stage == "stage_verify":
+        real = session_squash._verify_squashed_payload
+        calls = []
+
+        def _fail_first(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise boom
+            return real(*a, **k)
+        monkeypatch.setattr(session_squash, "_verify_squashed_payload", _fail_first)
+    elif stage == "after_replace_verify":
+        real = session_squash._verify_squashed_payload
+        calls = []
+
+        def _fail_second(*a, **k):
+            calls.append(1)
+            if len(calls) == 2:
+                raise boom
+            return real(*a, **k)
+        monkeypatch.setattr(session_squash, "_verify_squashed_payload", _fail_second)
+    elif stage == "index_write":
+        real = session_squash._write_index_for
+        calls = []
+
+        def _fail_first_index(session):
+            calls.append(1)
+            if len(calls) == 1:
+                real(session)  # the write lands, then the step reports failure
+                raise boom
+            return real(session)
+        monkeypatch.setattr(session_squash, "_write_index_for", _fail_first_index)
+    elif stage == "index_verify":
+        monkeypatch.setattr(session_squash, "_verify_index", lambda *a, **k: (_ for _ in ()).throw(boom))
+    elif stage == "state_barrier":
+        def _hook(point):
+            if point == "before-commit":
+                raise boom
+        monkeypatch.setattr(session_squash, "_state_barrier_hook", _hook)
+    elif stage == "manifest_finalize":
+        real = session_squash._write_manifest
+        calls = []
+
+        def _fail_second_manifest(path, manifest):
+            calls.append(1)
+            if len(calls) == 2:
+                raise boom
+            return real(path, manifest)
+        monkeypatch.setattr(session_squash, "_write_manifest", _fail_second_manifest)
+
+    snap, _ = _squash()
+    assert snap["status"] == "error", snap
+    assert f"injected {stage}" in snap["error"]
+    _assert_unchanged(env, before)
+
+
+def test_live_agent_turn_lease_blocks_state_barrier_and_rolls_back(env):
+    _make_session(env)
+    _make_state_db(env, lease="pid=1:turn")
+    api.models._write_session_index(updates=[api.models.SESSIONS[SID]])
+    before = _snapshot(env)
+    snap, _ = _squash()
+    assert snap["status"] == "error" and "Agent turn" in snap["error"]
+    _assert_unchanged(env, before)
+
+
+# ── delayed state rows / durable generation ──────────────────────────────
+
+def test_delayed_pre_squash_state_rows_cannot_resurface(env):
+    _make_session(env)
+    _make_state_db(env)
+    snap, _ = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    persisted = json.loads((env.sessions_dir / f"{SID}.json").read_text(encoding="utf-8"))
+    cutoff = persisted["truncation_watermark"]
+    # A delayed pre-squash row lands after commit (stale writer / queue).
+    conn = sqlite3.connect(env.home / "state.db")
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+        (SID, "assistant", "delayed pre-squash row", cutoff - 5),
+    )
+    conn.commit()
+    conn.close()
+    state_rows = api.models.get_state_db_session_messages(SID, profile="default")
+    # Barrier: only the delayed row is still active (the 4 pre-squash rows are archived) ...
+    assert [m["content"] for m in state_rows] == ["delayed pre-squash row"]
+    # ... and the persisted watermark keeps it out of the merged transcript.
+    merged = api.models.merge_session_messages_append_only(
+        persisted["messages"], state_rows,
+        truncation_watermark=persisted["truncation_watermark"],
+        truncation_boundary=persisted["truncation_boundary"],
+    )
+    assert [m.get("_squash_summary") for m in merged] == [True]
+
+
+def test_startup_recovery_honours_squash_generation(env):
+    from api.session_recovery import inspect_session_recovery_status
+
+    _make_session(env)
+    path = env.sessions_dir / f"{SID}.json"
+    pre = path.read_text(encoding="utf-8")
+    snap, _ = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    # A stale pre-squash .bak (e.g. written by another process) must not be
+    # restored over the intentional shrink.
+    path.with_suffix(".json.bak").write_text(pre, encoding="utf-8")
+    status = inspect_session_recovery_status(path)
+    assert status["recommend"] == "no_action", status
+
+
+# ── restore ──────────────────────────────────────────────────────────────
+
+def test_restore_drill_round_trips_bytes_index_cache_and_state(env):
+    _make_session(env)
+    _make_state_db(env)
+    path = env.sessions_dir / f"{SID}.json"
+    original = path.read_bytes()
+    snap, authority = _squash()
+    assert snap["status"] == "done", snap.get("error")
+    result = snap["result"]
+    squashed_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"], "current_sha256": squashed_sha}
+    # Wrong digests / foreign profile are refused with zero writes.
+    before = _snapshot(env)
+    for bad_confirm, profile in (
+        (dict(confirm, current_sha256="0" * 64), "default"),
+        (dict(confirm, source_sha256="0" * 64), "default"),
+        (confirm, "other-profile"),
+    ):
+        with pytest.raises(session_squash.SquashError):
+            session_squash.restore_squash(SID, archive_name=result["archive_name"], confirm=bad_confirm,
+                                          request_profile=profile)
+    _assert_unchanged(env, before)
+
+    restored = session_squash.restore_squash(SID, archive_name=result["archive_name"], confirm=confirm,
+                                             request_profile="default")
+    assert path.read_bytes() == original
+    assert restored["restored_message_count"] == 4
+    assert restored["state_rows_reactivated"] == 4
+    assert [(a, c) for _id, a, c in _state_rows(env)] == [(1, 0)] * 4
+    assert _index_entry(env)["message_count"] == 4
+    assert len(api.models.SESSIONS[SID].messages) == 4
+    # The squashed state stays restorable too.
+    assert Path(restored["squashed_archive_path"]).is_file()
+
+
+def test_restore_refuses_when_session_moved_on(env):
+    _make_session(env)
+    snap, authority = _squash()
+    path = env.sessions_dir / f"{SID}.json"
+    # A new turn after the squash: restoring would lose it.
+    s = api.models.SESSIONS[SID]
+    s.messages = s.messages + [{"role": "user", "content": "after squash", "timestamp": time.time()}]
+    s.save()
+    confirm = {"session_id": SID, "source_sha256": authority["source_sha256"],
+               "current_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    with pytest.raises(session_squash.SquashError) as exc:
+        session_squash.restore_squash(SID, archive_name=snap["result"]["archive_name"], confirm=confirm,
+                                      request_profile="default")
+    assert "no longer the untouched result" in str(exc.value)
+
+
+def test_restore_rejects_path_traversal_archive_name(env):
+    _make_session(env)
+    with pytest.raises(session_squash.SquashError):
+        session_squash.restore_squash(SID, archive_name="../x.json.gz",
+                                      confirm={"session_id": SID, "source_sha256": "a", "current_sha256": "b"},
+                                      request_profile="default")
+
+
+# ── cancelled-writeback fence (kept from the previous gate) ──────────────
+
+def test_cancelled_writeback_cannot_survive_squash(env):
+    """turn admitted → operator stops it → cancel clears busy indicators while
+    the worker still owns writeback → squash must fail closed; once the
+    worker releases ownership the squash proceeds and holds the tombstone."""
+    from api import config as api_config
+
+    _make_session(env)
+    path = env.sessions_dir / f"{SID}.json"
+    original = path.read_bytes()
+    api_config.register_session_writeback_owner(SID, "stream-old")
+    try:
+        with pytest.raises(session_squash.SquashError) as excinfo:
+            session_squash.preview_squash(SID, request_profile="default")
+        assert excinfo.value.status == 409 and "writeback" in str(excinfo.value)
+        assert path.read_bytes() == original
+    finally:
+        api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
+
+    owners_seen = []
+    real = session_squash._commit_squash
+
+    def _spy(session, authority, summary):
+        owners_seen.append(api_config.session_writeback_owner(SID))
+        return real(session, authority, summary)
+
+    session_squash._commit_squash, saved = _spy, session_squash._commit_squash
+    try:
+        snap, _ = _squash()
+    finally:
+        session_squash._commit_squash = saved
+    assert snap["status"] == "done", snap.get("error")
+    assert owners_seen and all(o and o.startswith("squash-") for o in owners_seen)
+    assert api_config.session_writeback_owner(SID) is None
+
+
+def test_worker_recheck_refuses_ownership_registered_after_admission(env):
+    from api import config as api_config
+
+    _make_session(env)
+    authority = session_squash.preview_squash(SID, request_profile="default")
+    before = _snapshot(env)
+    job = {"job_id": "recheck-test-job", "session_id": SID, "status": "running",
+           "_authority": session_squash.SquashAuthority(**authority)}
+    api_config.register_session_writeback_owner(SID, "stream-old")
+    try:
+        session_squash._run_squash_job(job, SUMMARY)
+        assert job["status"] == "error" and "writeback" in job["error"]
+        assert api_config.session_writeback_owner(SID) == "stream-old"
+    finally:
+        api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
+    _assert_unchanged(env, before)
+
+
+def test_already_squashed_is_idempotent(env):
+    _make_session(env, messages=[{"role": "assistant", "content": "synthèse", "timestamp": 1.0,
+                                  "_squash_summary": True}])
+    snap, _ = _squash()
     assert snap["status"] == "done"
     assert snap["result"]["already_squashed"] is True
+
+
+def test_empty_session_is_refused(env):
+    _make_session(env, messages=[])
+    snap, _ = _squash()
+    assert snap["status"] == "error" and "nothing to squash" in snap["error"]
 
 
 def test_distill_transcript_respects_budget():
@@ -265,106 +733,7 @@ def test_mobile_context_panel_contains_squash_action():
     assert "$('composerMobileSquashBtn')" in js
 
 
-# ── #6704 P1 focused regressions ─────────────────────────────────────────
-
-def test_cancelled_writeback_cannot_survive_squash(tmp_path):
-    """Focused regression for the failing production ordering (#6704 P1):
-
-    turn admitted (writeback ownership registered) → operator stops it →
-    cancel_stream() clears the live/busy indicators eagerly while the worker
-    is still unwinding (ownership NOT yet released) → operator starts squash.
-
-    Admission must fail closed on the surviving ownership record: while it
-    exists the old worker may still save its pre-squash snapshot, silently
-    restoring the archived transcript after the squash reported success.
-    Once the worker's own ``finally`` releases ownership, squash must
-    proceed — and during the mutation the ownership slot must hold the
-    squash tombstone, so a late ownership-gated finalizer from the old
-    stream compares against it and fails closed instead of matching an
-    empty slot.
-    """
-    from api import config as api_config
-
-    sess = _make_session(tmp_path)  # cancel already cleared the busy indicators
-    original = sess.path.read_bytes()
-
-    # The cancelled worker still owns the writeback (its finally has not run).
-    api_config.register_session_writeback_owner(SID, "stream-old")
-    try:
-        with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess):
-            with pytest.raises(session_squash.SquashError) as excinfo:
-                session_squash.start_squash_job(SID, confirm_session_id=SID, summary=None)
-        assert excinfo.value.status == 409
-        assert "writeback" in str(excinfo.value)
-        # Fail-closed means NO mutation and NO archive: the transcript on disk
-        # is byte-identical and nothing was archived.
-        assert sess.path.read_bytes() == original
-        assert not (sess.path.parent.parent / "session-squash-archives").exists()
-    finally:
-        # The worker's own finally releases ownership — only now may squash run.
-        api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
-
-    owners_seen = []
-    real_save = sess.save
-
-    def _spy_save(**kwargs):
-        owners_seen.append(api_config.session_writeback_owner(SID))
-        real_save(**kwargs)
-
-    sess.save = _spy_save
-    snap = _run_job(sess)
-    assert snap["status"] == "done", snap.get("error")
-    assert snap["result"]["already_squashed"] is False
-    # During the squash save the ownership slot held the squash tombstone: an
-    # ownership-gated finalizer from the cancelled stream ("stream-old") would
-    # see owner != its stream_id and skip its writeback (fail closed).
-    assert owners_seen, "squash never saved"
-    assert all(owner and owner.startswith("squash-") for owner in owners_seen), owners_seen
-    # The tombstone is released afterwards (conditionally: a successor turn's
-    # own entry would never be clobbered).
-    assert api_config.session_writeback_owner(SID) is None
-    persisted = json.loads(sess.path.read_text(encoding="utf-8"))
-    assert len(persisted["messages"]) == 1
-    assert persisted["messages"][0]["_squash_summary"] is True
-
-
-def test_squash_job_recheck_refuses_ownership_registered_after_admission(tmp_path):
-    """The admission pre-check runs without the per-session agent lock, so a
-    turn admitted-and-cancelled in that window leaves a surviving ownership
-    record the pre-check never saw. The under-lock re-check inside the job
-    worker must fail closed on it — busy indicators alone are not evidence
-    of idleness."""
-    from api import config as api_config
-
-    sess = _make_session(tmp_path)
-    original = sess.path.read_bytes()
-    api_config.register_session_writeback_owner(SID, "stream-old")
-    job = {
-        "job_id": "recheck-test-job",
-        "session_id": SID,
-        "title": "session de test",
-        "status": "running",
-        "started_at": time.time(),
-        "finished_at": None,
-        "result": None,
-        "error": None,
-    }
-    try:
-        with patch.object(api.models, "get_session", lambda sid, metadata_only=False: sess), \
-             patch.object(api.session_ops, "_live_active_stream_id", lambda _s: None), \
-             patch.object(api.routes, "_get_session_agent_lock", _dummy_lock), \
-             patch.object(api.routes, "_publish_session_list_changed", lambda *a, **k: None), \
-             patch("api.config._evict_session_agent", lambda _sid: None):
-            session_squash._run_squash_job(job, "synthèse fournie " * 40)
-        assert job["status"] == "error", job
-        assert "writeback" in (job["error"] or "")
-        assert sess.path.read_bytes() == original
-        assert not (sess.path.parent.parent / "session-squash-archives").exists()
-        # The refusal must not release the old worker's ownership entry.
-        assert api_config.session_writeback_owner(SID) == "stream-old"
-    finally:
-        api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
-
+# ── #6704 frontend regressions ──────────────────────────────────────────
 
 def test_squash_completion_reload_reconciles_same_session_navigation():
     """Completion must reconcile a superseding same-session load without
@@ -565,6 +934,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
             showConfirmDialog:async()=>true,
             showToast:(...args)=>toasts.push(args),
             api:async(url, opts)=>{
+              if(url==='/api/session/squash/preview') return {authority:{session_id:JSON.parse(opts.body).session_id}};
               if(url==='/api/session/squash') return {job:{job_id:'job-A'}};
               if(url.startsWith('/api/session/squash/status')) return status.promise;
               throw new Error('unexpected api '+url+' '+JSON.stringify(opts||{}));

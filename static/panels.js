@@ -4925,6 +4925,19 @@ async function squashConversation() {
   // remains on A while a newer B metadata request is pending, so visible state
   // alone cannot authorize the eventual completion refresh.
   const navigationAuthority = _captureSessionNavigationAuthority(sid);
+  // The server binds the squash to an immutable authority (profile, canonical
+  // sidecar, lineage tip, source digest). Fetch it first and echo it back so a
+  // concurrent change between confirmation and commit fails with zero writes.
+  let authority;
+  try {
+    const preview = await api('/api/session/squash/preview', {method:'POST', timeoutMs: 30000,
+      body: JSON.stringify({session_id: sid})});
+    authority = preview && preview.authority;
+    if(!authority || authority.session_id !== sid) throw new Error('invalid squash preview');
+  } catch(e) {
+    showToast(t('squash_failed') + e.message, 7000, 'error');
+    return;
+  }
   const _sqConfirmed = await showConfirmDialog({
     title: t('squash_title'),
     message: t('squash_message'),
@@ -4937,7 +4950,7 @@ async function squashConversation() {
   showToast(t('squash_started'), 4000);
   try {
     const start = await api('/api/session/squash', {method:'POST', timeoutMs: 30000,
-      body: JSON.stringify({session_id: sid, confirm_session_id: sid})});
+      body: JSON.stringify({session_id: sid, confirm: authority})});
     const jobId = start && start.job && start.job.job_id;
     if(!jobId) throw new Error('no job id returned');
     const job = await _pollSquashJob(jobId, sid);

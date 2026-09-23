@@ -14341,8 +14341,9 @@ def handle_get(handler, parsed) -> bool:
         if not job_id:
             return bad(handler, "Missing job_id")
         from api.session_squash import squash_job_status
+        from api.profiles import _profiles_match as _squash_profiles_match
         job = squash_job_status(job_id)
-        if not job:
+        if not job or not _squash_profiles_match(job.get("profile"), _get_active_profile_name()):
             return bad(handler, "job not found", 404)
         return j(handler, {"ok": True, "job": job})
 
@@ -16443,11 +16444,11 @@ def handle_post(handler, parsed) -> bool:
             },
         )
 
-    if parsed.path == "/api/session/squash":
-        # Collapse an idle session to one verified summary message (squash-chat
-        # skill, in-process). Runs as a background job — aux-LLM summary
-        # generation can take minutes on long transcripts; the UI polls
-        # GET /api/session/squash/status.
+    if parsed.path in ("/api/session/squash", "/api/session/squash/preview", "/api/session/squash/restore"):
+        # Collapse an archived, idle session to one verified summary message
+        # (squash-chat skill, in-process). preview returns the immutable
+        # authority the client must echo; squash runs as a background job
+        # polled via GET /api/session/squash/status; restore reverses it.
         try:
             require(body, "session_id")
         except ValueError as e:
@@ -16457,18 +16458,30 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Invalid session id", 400)
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
-        from api.session_squash import SquashError, start_squash_job
+        from api import session_squash as _squash
+        request_profile = _get_active_profile_name()
         try:
-            job = start_squash_job(
+            if parsed.path.endswith("/preview"):
+                return j(handler, {"ok": True, "authority": _squash.preview_squash(sid, request_profile=request_profile)})
+            if parsed.path.endswith("/restore"):
+                result = _squash.restore_squash(
+                    sid,
+                    archive_name=body.get("archive_name"),
+                    confirm=body.get("confirm"),
+                    request_profile=request_profile,
+                )
+                return j(handler, {"ok": True, "result": result})
+            job = _squash.start_squash_job(
                 sid,
-                confirm_session_id=body.get("confirm_session_id"),
+                confirm=body.get("confirm"),
                 summary=body.get("summary"),
+                request_profile=request_profile,
             )
-        except SquashError as exc:
+        except _squash.SquashError as exc:
             return bad(handler, str(exc), exc.status)
         except Exception:
-            logger.exception("session squash start failed for %s", sid)
-            return bad(handler, "Failed to start squash", status=500)
+            logger.exception("session squash request failed for %s", sid)
+            return bad(handler, "Squash request failed", status=500)
         return j(handler, {"ok": True, "job": job})
 
     if parsed.path == "/api/session/clear":
