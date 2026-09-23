@@ -1375,12 +1375,24 @@ let _loadingSessionId = null;
 // The production ownership helper, injected verbatim.
 __OWNERSHIP_BODY__
 
-// The profile comparison the re-arm guard consults (verbatim from sessions.js).
+// The profile comparisons the re-arm guard consults (verbatim from sessions.js):
+// the base matcher, the symmetric root-alias rule, and the cache-backed root resolver.
 function _profileMatchesActiveProfile(profile, activeProfile){
   const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
   const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
   if(eventName === activeName) return true;
   return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+function _cronProfileNameIsRootAlias(name) { return name === 'default'; }
+function _paneProfileMatchesActiveProfile(paneProfile, activeProfile){
+  if(_profileMatchesActiveProfile(paneProfile, activeProfile)) return true;
+  const paneName = (typeof paneProfile === 'string' && paneProfile.trim()) ? paneProfile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(paneName === activeName) return true;
+  return activeName === 'default'
+    && !!(typeof S !== 'undefined' && S && S.activeProfileIsDefault)
+    && typeof _cronProfileNameIsRootAlias === 'function'
+    && _cronProfileNameIsRootAlias(paneName);
 }
 
 __REARM_BODY__
@@ -1437,6 +1449,17 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   if(eventName === activeName) return true;
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }
+function _cronProfileNameIsRootAlias(name) { return name === 'default'; }
+function _paneProfileMatchesActiveProfile(paneProfile, activeProfile){
+  if(_profileMatchesActiveProfile(paneProfile, activeProfile)) return true;
+  const paneName = (typeof paneProfile === 'string' && paneProfile.trim()) ? paneProfile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(paneName === activeName) return true;
+  return activeName === 'default'
+    && !!(typeof S !== 'undefined' && S && S.activeProfileIsDefault)
+    && typeof _cronProfileNameIsRootAlias === 'function'
+    && _cronProfileNameIsRootAlias(paneName);
+}
 
 __PANE_BODY__
 
@@ -1477,3 +1500,112 @@ def test_frames_for_a_pane_from_another_profile_are_rejected():
     assert ok["current"] is True, (
         f"the guard must not reject a pane that belongs to the active profile: {ok}"
     )
+
+
+# ── Gate round 11 (23 Sep): the profile guards must treat a renamed root and
+#    'default' as the same root in BOTH directions ──────────────────────────────
+#
+# The backend treats a renamed root (e.g. `kinni`) and `default` as equivalent.
+# `_profileMatchesActiveProfile` covered literal equality plus the FORWARD alias
+# (a name tagged 'default' while the active surface is a renamed root). The pane
+# guard and the re-arm guard added in round 10 used only that rule, so a session
+# created under the renamed root — restored by a later boot that reports the root as
+# 'default' — had its own frames rejected and its stream never reopened:
+# `_isSessionCurrentPane()` returned false and `_rearmActiveSessionStream()` bailed,
+# so the restored conversation stopped receiving live updates.
+
+_RENAME_ROOT_HARNESS = r"""
+const params = __PARAMS__;
+
+const S = { session: params.session, activeProfile: params.activeProfile,
+            activeProfileIsDefault: !!params.activeProfileIsDefault };
+let _loadingSessionId = null;
+let started = [];
+function startSessionStream(sid){ started.push(sid); }
+// Server-provided profile cache: the entry flagged is_default IS the root, whatever
+// its name — that is exactly how a renamed root is reported.
+const _profilesCache = { profiles: params.profiles };
+
+function _profileMatchesActiveProfile(profile, activeProfile){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+
+function _cronProfileNameIsRootAlias(name) {
+  if (name === 'default') return true;
+  if (typeof _profilesCache !== 'undefined' && _profilesCache
+    && Array.isArray(_profilesCache.profiles)) {
+    const entry = _profilesCache.profiles.find((p) => p && p.name === name);
+    if (entry && entry.is_default) return true;
+  }
+  return false;
+}
+
+__HELPER_BODY__
+
+__REARM_BODY__
+
+const rearm = (() => { _rearmActiveSessionStream(); return started.slice(); })();
+console.log(JSON.stringify({
+  pane: _isSessionCurrentPane('pane'),
+  rearm: rearm,
+}));
+"""
+
+
+def _run_renamed_root(*, pane_profile, active_profile, active_is_default, profiles):
+    """Drive the real pane predicate + re-arm guard for a renamed-root session."""
+    src_js = _read(SESSIONS_JS_PATH)
+    helper = src_js[src_js.index("function _paneProfileMatchesActiveProfile("):]
+    helper = helper[: helper.index("\n}\n") + 3]
+    rearm = src_js[src_js.index("function _rearmActiveSessionStream("):]
+    rearm = rearm[: rearm.index("\n}\n") + 3]
+    pane = _read(MESSAGES_JS_PATH)
+    pane_body = pane[pane.index("function _isSessionCurrentPane("):]
+    pane_body = pane_body[: pane_body.index("\n}\n") + 3]
+    js = _RENAME_ROOT_HARNESS.replace("__HELPER_BODY__", helper + "\n" + pane_body).replace(
+        "__REARM_BODY__", rearm).replace("__PARAMS__", json.dumps({
+            "session": {"session_id": "pane", "profile": pane_profile},
+            "activeProfile": active_profile,
+            "activeProfileIsDefault": active_is_default,
+            "profiles": profiles,
+        }))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_a_renamed_root_and_default_are_the_same_root_for_the_profile_guards():
+    """Round 11: a session created under the renamed root must keep its stream when a
+    later boot reports the same root as 'default'."""
+    # Boot reports the root as 'default'; the session carries the renamed-root name.
+    out = _run_renamed_root(pane_profile="kinni", active_profile="default",
+                            active_is_default=True,
+                            profiles=[{"name": "kinni", "is_default": True}])
+    assert out["pane"] is True, (
+        f"a pane belonging to the renamed root was treated as another profile and its "
+        f"frames rejected — the restored conversation would stop receiving live "
+        f"updates (Greptile P1, round 11): {out}"
+    )
+    assert out["rearm"] == ["pane"], (
+        f"the stream of a renamed-root pane was not reopened: {out}"
+    )
+
+
+def test_the_profile_guards_still_reject_a_genuinely_different_profile():
+    """Control: symmetry must not weaken round 10 — a real cross-profile pane stays out."""
+    out = _run_renamed_root(pane_profile="other-profile", active_profile="default",
+                            active_is_default=True,
+                            profiles=[{"name": "kinni", "is_default": True}])
+    assert out["pane"] is False, (
+        f"a pane from a genuinely different profile was accepted: {out}"
+    )
+    assert out["rearm"] == [], f"a cross-profile stream was armed: {out}"
+    # And the forward direction (pane 'default' while the surface is the renamed root)
+    # must still work, so the new rule is symmetric rather than merely relaxed.
+    fwd = _run_renamed_root(pane_profile="default", active_profile="kinni",
+                            active_is_default=True,
+                            profiles=[{"name": "kinni", "is_default": True}])
+    assert fwd["pane"] is True and fwd["rearm"] == ["pane"], fwd

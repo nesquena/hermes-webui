@@ -153,6 +153,27 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }
 
+// Symmetric root-alias equivalence for the ACTIVE surface. `_profileMatchesActiveProfile`
+// covers literal equality plus the FORWARD direction (a name tagged 'default' while the
+// active surface is a renamed root). The REVERSE direction — a pane tagged with the
+// renamed-root name (e.g. `kinni`) while a later boot reports the same root as 'default' —
+// is the same root and must match too, exactly as `_cronMarkerProfileMatchesActive` already
+// does for cron markers. With only the forward direction, the profile guards on the pane
+// and on the stream re-arm would reject the CURRENT pane's own frames and refuse to reopen
+// its stream, so a restored conversation would stop receiving live updates (Greptile P1,
+// round 11). Kept as ONE named rule so the pane check, the re-arm check and any future
+// caller cannot drift apart the way two divergent matchers did in round 8.
+function _paneProfileMatchesActiveProfile(paneProfile, activeProfile){
+  if(_profileMatchesActiveProfile(paneProfile, activeProfile)) return true;
+  const paneName = (typeof paneProfile === 'string' && paneProfile.trim()) ? paneProfile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(paneName === activeName) return true;
+  return activeName === 'default'
+    && !!(typeof S !== 'undefined' && S && S.activeProfileIsDefault)
+    && typeof _cronProfileNameIsRootAlias === 'function'
+    && _cronProfileNameIsRootAlias(paneName);
+}
+
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
   if(!(typeof eventProfile === 'string' && eventProfile.trim())) return true;
   return _profileMatchesActiveProfile(eventProfile, activeProfile);
@@ -1752,7 +1773,7 @@ function _rearmActiveSessionStream(){
   const sessionProfile = (S.session && typeof S.session.profile === 'string' && S.session.profile.trim())
     ? S.session.profile.trim()
     : 'default';
-  if(!_profileMatchesActiveProfile(sessionProfile, S.activeProfile || 'default')) return;
+  if(!_paneProfileMatchesActiveProfile(sessionProfile, S.activeProfile || 'default')) return;
   startSessionStream(activeSid);
 }
 

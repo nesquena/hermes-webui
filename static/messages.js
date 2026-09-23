@@ -94,13 +94,13 @@ function _isSessionCurrentPane(sid) {
   // arrive on a per-session stream that carries no profile (see
   // routes.py server_turn_started), so the only place to reject them is here —
   // otherwise the old profile's live turn attaches to this pane.
-  if(typeof _profileMatchesActiveProfile === 'function'
+  if(typeof _paneProfileMatchesActiveProfile === 'function'
      && typeof S.activeProfile !== 'undefined'
      && S.activeProfile){
     const paneProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
       ? S.session.profile.trim()
       : 'default';
-    if(!_profileMatchesActiveProfile(paneProfile, S.activeProfile)) return false;
+    if(!_paneProfileMatchesActiveProfile(paneProfile, S.activeProfile)) return false;
   }
   return true;
 }
