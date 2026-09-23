@@ -92,13 +92,14 @@ def test_attach_live_stream_reconnect_does_not_reuse_connecting_transport():
 
 
 def test_attach_live_stream_closes_other_session_streams_before_opening_new_one():
-    """Only the selected conversation pane should hold an open chat SSE transport."""
+    """Only the selected pane may retain chat-SSE event-handler closures."""
     body = _function_body(MESSAGES_JS, "attachLiveStream")
     helper = _function_body(MESSAGES_JS, "closeOtherLiveStreams")
 
     helper_compact = helper.replace(" ", "")
     assert "Object.keys(LIVE_STREAMS)" in helper
     assert "if(sid!==activeSid)closeLiveStream(sid)" in helper_compact
+    assert "_liveStreamPoolMax" not in helper
 
     reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
     close_other_pos = body.find("closeOtherLiveStreams(activeSid)")
@@ -108,6 +109,16 @@ def test_attach_live_stream_closes_other_session_streams_before_opening_new_one(
         "same-stream reuse should happen before pruning, and pruning should happen "
         "before replacing the active session transport"
     )
+
+
+def test_wire_sse_registers_through_late_foreground_chokepoint():
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    wire_pos = body.find("function _wireSSE(source)")
+    register_pos = body.find("_registerLiveStream(activeSid,streamId,source)", wire_pos)
+    direct_publish_pos = body.find("LIVE_STREAMS[activeSid]=", wire_pos)
+    assert wire_pos != -1
+    assert register_pos != -1
+    assert direct_publish_pos == -1
 
 
 def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
@@ -246,10 +257,7 @@ def test_close_live_stream_marks_inflight_for_reattach_on_return():
 
 
 def test_close_other_live_streams_triggers_reattach_for_backgrounded_sessions():
-    """closeOtherLiveStreams() during session switch must mark every closed
-    background session for reattach. Otherwise switching back to a session whose
-    stream was closed during the switch leaves the SSE permanently disconnected.
-    """
+    """Every background transport closes through snapshot + reattach teardown."""
     helper_body = _function_body(MESSAGES_JS, "closeOtherLiveStreams")
     close_body = _function_body(MESSAGES_JS, "closeLiveStream")
     # closeOtherLiveStreams delegates per-session teardown to closeLiveStream,
@@ -257,6 +265,10 @@ def test_close_other_live_streams_triggers_reattach_for_backgrounded_sessions():
     # chain to work — this guards the indirection.
     assert "closeLiveStream(sid)" in helper_body.replace(" ", ""), (
         "closeOtherLiveStreams() must delegate teardown to closeLiveStream()"
+    )
+    assert ".close()" not in helper_body, (
+        "closeOtherLiveStreams() must not tear down a transport directly: that "
+        "would skip the snapshot + reattach bookkeeping in closeLiveStream()"
     )
     assert "reattach" in close_body, (
         "closeLiveStream() must set the reattach flag so closeOtherLiveStreams() "
