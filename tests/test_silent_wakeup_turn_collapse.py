@@ -137,6 +137,26 @@ CASES = {
         _assistant("Nothing to report yet, so I would normally answer [[SILENT]] here."),
     ],
     "token_prefix_with_suffix": [HUMAN, ANSWER, _wakeup(), _assistant("[[SILENT]] deploy failed")],
+    "silent_with_status_card": [
+        HUMAN, ANSWER, _wakeup(),
+        _assistant("[[SILENT]]", _statusCard={"title": "Tool iteration limit reached"}),
+    ],
+    "silent_with_attachments": [
+        HUMAN, ANSWER, _wakeup(),
+        _assistant("[[SILENT]]", attachments=[{"name": "result.txt"}]),
+    ],
+    "silent_with_error": [
+        HUMAN, ANSWER, _wakeup(),
+        _assistant("[[SILENT]]", _error="Tool execution failed"),
+    ],
+    "silent_with_error_field": [
+        HUMAN, ANSWER, _wakeup(),
+        _assistant("[[SILENT]]", error="Tool execution failed"),
+    ],
+    "prose_with_status_card": [
+        HUMAN, ANSWER, _wakeup(),
+        _assistant("[[SILENT]] but the deploy failed", _statusCard={"title": "Failure"}),
+    ],
     "lowercase_token": [HUMAN, ANSWER, _wakeup(), _assistant("[[silent]]")],
     "silent_after_tool_work": [
         HUMAN,
@@ -194,6 +214,16 @@ def test_prose_or_near_miss_sentinel_is_never_collapsed():
     assert out["silent_not_final"]["visible"] == [0, 1, 2, 3, 4]
     # Turns not opened by a background wakeup are outside the contract.
     assert out["human_turn_silent"]["visible"] == [0, 1]
+
+
+def test_sentinel_with_user_facing_payload_keeps_wakeup_and_status_visible():
+    out = _run()
+    for name in (
+        "silent_with_status_card", "silent_with_attachments",
+        "silent_with_error", "silent_with_error_field", "prose_with_status_card",
+    ):
+        assert out[name]["visible"] == [0, 1, 2, 3], name
+        assert out[name]["rawUnchanged"] is True, name
 
 
 def test_collapsed_turn_stays_a_boundary_between_visible_turns():

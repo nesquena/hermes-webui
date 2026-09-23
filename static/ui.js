@@ -666,6 +666,9 @@ function _messageIsRenderable(m){
 //   collapsed rows stay a real turn boundary (_hasHiddenProcessWakeupBoundaryBefore).
 function _isSilentWakeupSentinelReply(m){
   if(!m||m.role!=='assistant') return false;
+  // A sentinel is silent only when it has no separate user-facing payload.
+  // In particular, terminal failures can attach a status card to this reply.
+  if(m._statusCard||m.attachments?.length||m._error||m.error) return false;
   return String(msgContent(m)??'').trim()==='[[SILENT]]';
 }
 function _computeSilentWakeupTurnIdxs(messages){
