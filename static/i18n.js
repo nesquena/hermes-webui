@@ -171,6 +171,7 @@ const LOCALES = {
     approval_gateway_unsupported: 'Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.',
     approval_gateway_unsupported_label: 'Approvals not supported',
     approval_pending_count: (n) => `1 of ${n} pending`,
+    approval_dismiss_deny: 'Dismiss and deny',
     clarify_heading: 'Clarification needed',
     clarify_hint: 'Pick a choice, or type your own answer below.',
     clarify_other: 'Other',
@@ -2025,6 +2026,7 @@ const LOCALES = {
     reconnect_finished: 'Una risposta era in corso quando hai lasciato. I messaggi potrebbero essere aggiornati.',
     // approval card
     approval_heading: 'Approvazione richiesta',
+    approval_dismiss_deny: 'Ignora e nega',
     approval_desc_prefix: 'Comando pericoloso rilevato',
     approval_btn_once: 'Consenti una volta',
     approval_btn_once_title: 'Consenti questo comando (Invio)',
@@ -3830,6 +3832,7 @@ const LOCALES = {
     reconnect_finished: '前回離脱時に応答が進行中でした。メッセージが更新されている可能性があります。',
     // approval card
     approval_heading: '承認が必要',
+    approval_dismiss_deny: '閉じて拒否',
     approval_desc_prefix: '危険なコマンドを検出しました',
     approval_btn_once: '今回だけ許可',
     approval_btn_once_title: 'このコマンド1回だけ許可 (Enter)',
@@ -5623,6 +5626,7 @@ const LOCALES = {
     reconnect_active: 'Ответ всё ещё генерируется. Обновить, когда будет готово?',
     reconnect_finished: 'Когда вы уходили, ответ ещё генерировался. Сообщения могли обновиться.',
     approval_heading: 'Требуется подтверждение',
+    approval_dismiss_deny: 'Отклонить и закрыть',
     approval_desc_prefix: 'Обнаружена опасная команда',
     approval_btn_once: 'Разрешить один раз',
     approval_btn_once_title: 'Разрешить только эту команду (Enter)',
@@ -7396,6 +7400,7 @@ const LOCALES = {
     reconnect_finished: 'Había una respuesta en curso cuando te fuiste. Puede que los mensajes se hayan actualizado.',
     // approval card
     approval_heading: 'Se requiere aprobación',
+    approval_dismiss_deny: 'Descartar y denegar',
     approval_desc_prefix: 'Se detectó un comando peligroso',
     approval_btn_once: 'Permitir una vez',
     approval_btn_once_title: 'Permitir solo este comando (Enter)',
@@ -9147,6 +9152,7 @@ const LOCALES = {
     reconnect_finished: 'Eine Antwort war in Arbeit, als Sie zuletzt gegangen sind. Nachrichten könnten aktualisiert worden sein.',
     // approval card
     approval_heading: 'Genehmigung erforderlich',
+    approval_dismiss_deny: 'Verwerfen und ablehnen',
     approval_desc_prefix: 'Gefährlicher Befehl erkannt',
     approval_btn_once: 'Einmal zulassen',
     approval_btn_once_title: 'Diesen einen Befehl zulassen (Enter)',
@@ -10892,6 +10898,7 @@ const LOCALES = {
     reconnect_finished: '你离开时有回复正在生成，消息内容可能已经更新。',
     // approval card
     approval_heading: '需要审批',
+    approval_dismiss_deny: '关闭并拒绝',
     approval_desc_prefix: '检测到危险命令',
     approval_btn_once: '允许一次',
     approval_btn_once_title: '允许执行此命令一次（Enter）',
@@ -12660,6 +12667,7 @@ const LOCALES = {
     reconnect_finished: '離開時仍有回覆正在處理。訊息可能已經更新。',
     // approval card
     approval_heading: '需要核准',
+    approval_dismiss_deny: '關閉並拒絕',
     approval_desc_prefix: '偵測到危險命令',
     approval_btn_once: '允許一次',
     approval_btn_once_title: '允許這一道命令（Enter）',
@@ -14373,6 +14381,7 @@ const LOCALES = {
     reconnect_finished: 'Uma resposta estava em andamento quando você saiu. As mensagens podem ter atualizado.',
     // approval card
     approval_heading: 'Aprovação necessária',
+    approval_dismiss_deny: 'Dispensar e negar',
     approval_desc_prefix: 'Comando perigoso detectado',
     approval_btn_once: 'Permitir uma vez',
     approval_btn_once_title: 'Permitir este comando (Enter)',
@@ -16063,6 +16072,7 @@ const LOCALES = {
     reconnect_finished: 'A response was in progress when you last left. Messages may have updated.',
     // approval card
     approval_heading: '승인 필요',
+    approval_dismiss_deny: '닫기 및 거부',
     approval_desc_prefix: '위험한 명령이 감지되었습니다',
     approval_btn_once: '한 번 허용',
     approval_btn_once_title: '이 명령만 허용(Enter)',
@@ -17878,6 +17888,7 @@ const LOCALES = {
     reconnect_active: 'Une réponse est toujours en cours de génération. Recharger quand vous êtes prêt ?',
     reconnect_finished: 'Une réponse était en cours lors de votre dernier départ. Les messages ont peut-être été mis à jour.',
     approval_heading: 'Approbation requise',
+    approval_dismiss_deny: 'Ignorer et refuser',
     approval_desc_prefix: 'Commande dangereuse détectée',
     approval_btn_once: 'Autoriser une fois',
     approval_btn_once_title: 'Autoriser cette commande (Entrée)',
@@ -20726,6 +20737,7 @@ const LOCALES = {
     approval_gateway_unsupported_label: 'Schválení nejsou podporována',
     approval_pending_count: (n) => `1 z ${n} čeká`,
     approval_heading: 'Požadováno schválení',
+    approval_dismiss_deny: 'Zavřít a zamítnout',
     approval_responding: 'Reakce\u2026',
     auto_compress_label: 'Automatická komprese',
     available_commands: 'Dostupné příkazy',
@@ -21421,6 +21433,7 @@ const LOCALES = {
     reconnect_finished: 'En son ayrıldığınızda bir yanıt sürüyordu. Mesajlar güncellenmiş olabilir.',
     // approval card
     approval_heading: 'Onay gerekli',
+    approval_dismiss_deny: 'Kapat ve reddet',
     approval_desc_prefix: 'Tehlikeli komut algılandı',
     approval_btn_once: 'Bir kez izin ver',
     approval_btn_once_title: 'Bu tek komuta izin ver (Enter)',
@@ -23228,6 +23241,7 @@ const LOCALES = {
     reconnect_finished: 'Podczas Twojej ostatniej wizyty odpowiedź była w toku. Wiadomości mogły zostać zaktualizowane.',
     // approval card
     approval_heading: 'Wymagana aprobata',
+    approval_dismiss_deny: 'Zamknij i odrzuć',
     approval_desc_prefix: 'Wykryto niebezpieczne polecenie',
     approval_btn_once: 'Zezwól raz',
     approval_btn_once_title: 'Zezwól na to jedno polecenie (Enter)',
@@ -25020,6 +25034,7 @@ const LOCALES = {
     reconnect_finished: 'Một phản hồi đang diễn ra khi bạn rời đi lần trước. Tin nhắn có thể đã được cập nhật.',
     // approval card
     approval_heading: 'Yêu cầu phê duyệt',
+    approval_dismiss_deny: 'Bỏ qua và từ chối',
     approval_desc_prefix: 'Phát hiện lệnh nguy hiểm',
     approval_btn_once: 'Cho phép một lần',
     approval_btn_once_title: 'Cho phép lệnh này một lần (Enter)',

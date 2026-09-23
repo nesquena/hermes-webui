@@ -7580,13 +7580,42 @@ let _approvalDisplayedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
-// Dismissed approvals are namespaced by session so that two sessions carrying
-// the SAME approval_id (e.g. a gateway/run source that reuses externally
-// supplied IDs across sessions) can't have a dismissal in one session hide the
-// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
-function _approvalDismissKey(sid, approvalId) {
+// Dismissed approvals are namespaced by profile, session, approval_id, run_id,
+// and mirror_token so that:
+// (a) cross-profile and cross-session approvals are isolated;
+// (b) a gateway client that numbers approvals (approval_id: "1", "2", ...)
+//     reusing IDs within a session will not have a later approval suppressed
+//     by an earlier settled approval (#7242).
+function _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile) {
   if (!approvalId) return '';
-  return String(sid || '') + '\u0000' + String(approvalId);
+  let r = runId;
+  let m = mirrorToken;
+  let prof = profile;
+  if ((r === undefined || m === undefined) && sid) {
+    if (typeof _approvalResponding !== 'undefined' && _approvalResponding && _approvalResponding.sid === sid && _approvalResponding.approvalId === approvalId) {
+      if (r === undefined) r = _approvalResponding.runId;
+      if (m === undefined) m = _approvalResponding.mirrorToken;
+      if (prof === undefined) prof = _approvalResponding.profile;
+    }
+    if (typeof _approvalDisplayedOwner !== 'undefined' && _approvalDisplayedOwner && _approvalDisplayedOwner.sid === sid && _approvalDisplayedOwner.approvalId === approvalId) {
+      if (r === undefined) r = _approvalDisplayedOwner.runId;
+      if (m === undefined) m = _approvalDisplayedOwner.mirrorToken;
+      if (prof === undefined) prof = _approvalDisplayedOwner.profile;
+    }
+    if (typeof _approvalPendingBySession !== 'undefined' && _approvalPendingBySession) {
+      const entry = _approvalPendingBySession.get(sid);
+      const p = entry && entry.pending;
+      if (p && p.approval_id === approvalId) {
+        if (r === undefined) r = p.run_id;
+        if (m === undefined) m = p._gateway_mirror_token;
+        if (prof === undefined) prof = p.profile;
+      }
+    }
+  }
+  const resolvedProf = prof || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  const resolvedRun = String(r || '').trim();
+  const resolvedMirror = String(m || '').trim();
+  return String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000' + resolvedRun + '\u0000' + resolvedMirror;
 }
 
 function _getDismissedApprovals() {
@@ -7594,14 +7623,43 @@ function _getDismissedApprovals() {
   catch (_) { return []; }
 }
 
-function _isApprovalDismissed(sid, approvalId) {
-  const key = _approvalDismissKey(sid, approvalId);
-  if (!key) return false;
-  return _getDismissedApprovals().includes(key);
+function _isApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
+  if (!approvalId) return false;
+  let r = runId;
+  let m = mirrorToken;
+  let prof = profile;
+  if ((r === undefined || m === undefined) && sid) {
+    if (typeof _approvalResponding !== 'undefined' && _approvalResponding && _approvalResponding.sid === sid && _approvalResponding.approvalId === approvalId) {
+      if (r === undefined) r = _approvalResponding.runId;
+      if (m === undefined) m = _approvalResponding.mirrorToken;
+      if (prof === undefined) prof = _approvalResponding.profile;
+    }
+    if (typeof _approvalDisplayedOwner !== 'undefined' && _approvalDisplayedOwner && _approvalDisplayedOwner.sid === sid && _approvalDisplayedOwner.approvalId === approvalId) {
+      if (r === undefined) r = _approvalDisplayedOwner.runId;
+      if (m === undefined) m = _approvalDisplayedOwner.mirrorToken;
+      if (prof === undefined) prof = _approvalDisplayedOwner.profile;
+    }
+    if (typeof _approvalPendingBySession !== 'undefined' && _approvalPendingBySession) {
+      const entry = _approvalPendingBySession.get(sid);
+      const p = entry && entry.pending;
+      if (p && p.approval_id === approvalId) {
+        if (r === undefined) r = p.run_id;
+        if (m === undefined) m = p._gateway_mirror_token;
+        if (prof === undefined) prof = p.profile;
+      }
+    }
+  }
+  const resolvedProf = prof || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  if (r !== undefined || m !== undefined) {
+    const key = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000' + String(r || '').trim() + '\u0000' + String(m || '').trim();
+    return _getDismissedApprovals().includes(key);
+  }
+  const prefix = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000';
+  return _getDismissedApprovals().some(k => k === prefix || k.startsWith(prefix));
 }
 
-function _markApprovalDismissed(sid, approvalId) {
-  const key = _approvalDismissKey(sid, approvalId);
+function _markApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
+  const key = _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile);
   if (!key) return;
   const set = _getDismissedApprovals().filter(k => k !== key);
   set.push(key);
@@ -7609,10 +7667,17 @@ function _markApprovalDismissed(sid, approvalId) {
   catch (_) {}
 }
 
-function _unmarkApprovalDismissed(sid, approvalId) {
-  const key = _approvalDismissKey(sid, approvalId);
-  if (!key) return;
-  const set = _getDismissedApprovals().filter(k => k !== key);
+function _unmarkApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
+  if (!approvalId) return;
+  const resolvedProf = profile || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
+  let set = _getDismissedApprovals();
+  if (runId !== undefined || mirrorToken !== undefined) {
+    const key = _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile);
+    set = set.filter(k => k !== key);
+  } else {
+    const prefix = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000';
+    set = set.filter(k => k !== prefix && !k.startsWith(prefix));
+  }
   try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
   catch (_) {}
 }
@@ -7672,6 +7737,18 @@ function _approvalMirrorOwnerFor(sid, approvalId) {
   const runId = String(pending.run_id || '').trim();
   const mirrorToken = String(pending._gateway_mirror_token || '').trim();
   return runId && mirrorToken ? {runId, mirrorToken} : {runId: '', mirrorToken: ''};
+}
+
+function _approvalPendingHasActionableHead(pending) {
+  // A re-fetched head is authoritative ONLY in this shape: a non-array object
+  // carrying a usable approval identity. Anything else — `false`, a string, an
+  // array, `{}` or an object without a non-empty approval_id — proves nothing
+  // about the captured tuple and must never be read as a live card (it cannot
+  // be denied) or as settled absence. (#7242 re-gate)
+  if (!pending || typeof pending !== "object" || Array.isArray(pending)) return false;
+  const id = pending.approval_id;
+  if (typeof id !== "string" && typeof id !== "number") return false;
+  return String(id).trim() !== "";
 }
 
 function _approvalOwnerForPending(sid, pending) {
@@ -7833,6 +7910,13 @@ function showApprovalCard(pending, pendingCount) {
     responding ? (_approvalResponding.controlChoice || _approvalResponding.choice) : null,
     responding,
   );
+  if (!_approvalCurrentId || !_approvalDisplayedOwner) {
+    // No actionable identity (legacy idless producer): render the card as an
+    // explicit unresolved state — action buttons disabled so they cannot
+    // silently no-op; X hides locally but never emits a response (an
+    // identityless deny would consume an unidentified FIFO head). (#7242)
+    _setApprovalControlsDisabled(null, true);
+  }
   _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
@@ -7847,9 +7931,193 @@ function showApprovalCard(pending, pendingCount) {
 
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
-  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  const approvalId = _approvalCurrentId;
+  // Guard: an approval with an in-flight Allow/Deny response owner is already
+  // being settled — the X must never race it into a concurrent deny. (#7242)
+  if (approvalId && _approvalResponseMatches(sid, approvalId)) return;
+  const owner = _captureApprovalResponseOwner();
+  if (!owner) {
+    // Idless/legacy card (no actionable approval_id) or no longer owned by
+    // the active session: hide locally but NEVER emit a response — an
+    // identityless deny would consume whatever head the legacy FIFO path pops
+    // next, denying an approval the user never saw. (#7242)
+    hideApprovalCard(true);
+    if (sid) _clearApprovalPendingForSession(sid);
+    return;
+  }
+  const {sid: ownerSid, approvalId: ownerApprovalId} = owner;
+  // Snapshot the local projection so a failed request can restore the card.
+  const entry = _approvalPendingBySession.get(ownerSid);
+  const snapshot = entry ? {pending: entry.pending, pendingCount: entry.pendingCount} : null;
+  // Durable dismissal: resolve the matching server-side pending entry (deny)
+  // so the same stale head is not re-rendered by the next poll and gateway-
+  // backed producers are unblocked instead of waiting out their 60s BLOCKED
+  // timeout. The hide is optimistic, but the local dismissal is settled ONLY
+  // from the authoritative response — a silent failure must never leave the
+  // server approval pending while the dismissal marker suppresses re-render.
+  // (#7242)
+  _markApprovalDismissed(ownerSid, ownerApprovalId);
+  _approvalClearedOwner = null;
+  // Claim the response owner BEFORE hiding so hideApprovalCard preserves the
+  // displayed owner (needed to restore the card if the deny fails).
+  _approvalResponding = {...owner, choice: "deny"};
+  _approvalResponding.controlChoice = "deny";
   hideApprovalCard(true);
-  if (sid) _clearApprovalPendingForSession(sid);
+  if (ownerSid) _clearApprovalPendingForSession(ownerSid);
+  const restoreAfterFailure = (errMsg) => {
+    _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+    if (snapshot && !_approvalPendingBySession.has(ownerSid)) {
+      _approvalPendingBySession.set(ownerSid, snapshot);
+    }
+    _restoreFailedApprovalResponse(owner, errMsg);
+  };
+  const body = {session_id: ownerSid, choice: "deny", approval_id: ownerApprovalId};
+  if (owner.runId) body.run_id = owner.runId;
+  if (owner.mirrorToken) body.mirror_token = owner.mirrorToken;
+  api("/api/approval/respond", {
+    method: "POST",
+    body: JSON.stringify(body),
+    timeoutToast: false,
+  })
+    .then(result => {
+      if (result && result.ok) {
+        // Authoritative success — the marker, hidden card and cleared
+        // projection stand; a queued successor will re-render on its own.
+        _releaseApprovalResponseOwner(owner);
+        return;
+      }
+      const errMsg = (result && result.error) ||
+        "Approval dismissal not accepted — the approval is still pending. Try again.";
+      restoreAfterFailure(errMsg);
+    })
+    .catch(err => {
+      // Parse the structured error BEFORE deciding terminality: an HTTP 409
+      // alone is not proof of settlement. The respond contract returns
+      // RETRYABLE 409s — `gateway_approval_in_progress` while another
+      // response owns the run, `gateway_run_unavailable` while the exact
+      // mirror can remain pending/retryable — and a 409 with no JSON body or
+      // unrecognized code is a proxy artifact, never backend settlement.
+      // Treating every 409 as terminal released the local response owner but
+      // kept the dismissal marker, so the fallback poll suppressed the
+      // still-pending approval and the user lost the retry affordance
+      // (re-gate 09/08).
+      let errorPayload = null;
+      if (err && typeof err.body === "string") {
+        try { errorPayload = JSON.parse(err.body); } catch (_) { /* non-JSON HTTP error body */ }
+      }
+      if (err && err.status === 404) {
+        if (errorPayload && (errorPayload.code === "approval_not_found" || errorPayload.error === "approval_not_found")) {
+          _releaseApprovalResponseOwner(owner);
+          return;
+        }
+        const notFoundMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+          || "Approval or session unavailable in active profile. Try again.";
+        restoreAfterFailure(notFoundMsg);
+        return;
+      }
+      const code = errorPayload && errorPayload.code;
+      const errMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+        || (err && err.message)
+        || "Approval dismissal not accepted.";
+      if (err && err.status === 409) {
+        if (code === "gateway_approval_in_progress") {
+          // Another response owns the run right now — the exact approval is
+          // NOT settled. Unmark/re-show/re-enable so the user (or the poll)
+          // can retry once the winner finishes.
+          restoreAfterFailure(errMsg);
+          return;
+        }
+        if (code === "gateway_run_unavailable") {
+          // The exact mirror may be gone (another actor settled it) or merely
+          // out of the current head while still pending. Re-fetch the
+          // authoritative pending state before deciding: restore when the
+          // captured tuple is still pending, render a live successor head,
+          // and keep the dismissal hidden ONLY when the re-fetch positively
+          // shows the captured tuple is absent/settled. A re-fetch that
+          // fails or answers without a pending field is not authoritative,
+          // so it must never be read as "settled".
+          void (async () => {
+            let pending = null;
+            let pendingCount = 1;
+            let fetched = false;
+            try {
+              const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(ownerSid), {timeoutToast: false});
+              if (data && typeof data === "object" && "pending" in data) {
+                pending = data.pending;
+                pendingCount = data.pending_count || 1;
+                fetched = true;
+              }
+            } catch (_) { /* re-fetch failed: not authoritative either way */ }
+            if (!fetched) {
+              // Fail closed: a rejected, 5xx or malformed re-fetch proves
+              // nothing about the captured tuple, so the untouched
+              // `pending === null` must never be read as "settled". Restore
+              // the retry affordance — the restore is a no-op when our owner
+              // is no longer current, but dropping the marker is not.
+              restoreAfterFailure(errMsg + " Try again.");
+              return;
+            }
+            if (pending !== null && !_approvalPendingHasActionableHead(pending)) {
+              // A 200 whose `pending` is not an explicit null and not an
+              // actionable head (`false`, a string, an array, `{}`, an object
+              // without a usable approval_id) is NOT authoritative: it can
+              // neither prove the captured tuple settled nor render a card
+              // that could be denied. Fail closed to the captured card
+              // instead of settling it or showing an undenable successor.
+              restoreAfterFailure(errMsg + " Try again.");
+              return;
+            }
+            if (!_approvalResponseOwnerIsCurrent(owner)) {
+              // A successor or a parallel poll took over while we re-fetched
+              // — that flow owns the card now; just release our owner.
+              _releaseApprovalResponseOwner(owner);
+              return;
+            }
+            if (pending === null) {
+              // Authoritative absence: the re-fetch positively reports no
+              // pending entry for this session, so the dismissal stands
+              // hidden.
+              _releaseApprovalResponseOwner(owner);
+              return;
+            }
+            const sameRun = !owner.runId || (
+              String(pending.run_id || "").trim() === owner.runId &&
+              String(pending._gateway_mirror_token || "").trim() === owner.mirrorToken
+            );
+            if (pending.approval_id === ownerApprovalId && sameRun) {
+              // Still pending/retryable — bring the card back.
+              restoreAfterFailure(errMsg);
+              return;
+            }
+            if (pending.approval_id === ownerApprovalId) {
+              // Same approval_id under a DIFFERENT run/mirror ownership: the
+              // server reused the id for another tuple, so the marker we just
+              // set (keyed by session + approval_id) would suppress a
+              // successor the user never dismissed.
+              _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+            }
+            // Any other successor head — including a different approval_id —
+            // is live now: clear the captured tuple's dismissal marker BEFORE
+            // rendering it. The marker only covers the captured tuple's own
+            // denial, and it would suppress that same tuple if the queue
+            // rotates A back to the head after the successor settles (the
+            // re-fetch exposes only the current head, so seeing B never
+            // proved A settled). Only the captured response owner is
+            // released: a successor rendered by someone else keeps its own.
+            _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+            showApprovalForSession(ownerSid, pending, pendingCount);
+            _releaseApprovalResponseOwner(owner);
+          })();
+          return;
+        }
+        // A 409 without a recognized retryable code is not authoritative
+        // backend settlement — restore with a retry affordance.
+        restoreAfterFailure(errMsg + " Try again.");
+        return;
+      }
+      // Network / 5xx / other — never authoritative.
+      restoreAfterFailure(errMsg + " Try again.");
+    });
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -8042,7 +8310,39 @@ function _startApprovalFallbackPoll(sid) {
     _approvalFallbackPollInFlight = true;
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
-      if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
+      if (data.pending) {
+        if (data.pending.approval_id && _isApprovalDismissed(sid, data.pending.approval_id, data.pending.run_id, data.pending._gateway_mirror_token, data.pending.profile)) {
+          // Durable dismissal: compare the fetched owner against the stored/displayed owner:
+          // ignore stale responses when a successor owns the state, and force-hide only
+          // the exact dismissed card. (#7242)
+          const currentOwner = _captureApprovalResponseOwner();
+          const fetchedRunId = String(data.pending.run_id || '').trim();
+          const fetchedMirrorToken = String(data.pending._gateway_mirror_token || '').trim();
+          const matchesDisplayed = !!(
+            currentOwner &&
+            currentOwner.sid === sid &&
+            currentOwner.approvalId === data.pending.approval_id &&
+            String(currentOwner.runId || '').trim() === fetchedRunId &&
+            String(currentOwner.mirrorToken || '').trim() === fetchedMirrorToken
+          );
+          if (matchesDisplayed) {
+            hideApprovalCard(true);
+          }
+          const stored = _approvalPendingBySession.get(sid);
+          const storedPending = stored && stored.pending;
+          const matchesStored = !!(
+            storedPending &&
+            storedPending.approval_id === data.pending.approval_id &&
+            String(storedPending.run_id || '').trim() === fetchedRunId &&
+            String(storedPending._gateway_mirror_token || '').trim() === fetchedMirrorToken
+          );
+          if (matchesStored) {
+            _clearApprovalPendingForSession(sid);
+          }
+        } else {
+          showApprovalForSession(sid, data.pending, data.pending_count||1);
+        }
+      }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
