@@ -492,7 +492,10 @@ def _recover_session_owned(
                 # A competing create made every cached ABSENT owner stale.
                 # Evict it before reporting the failed recovery so a later
                 # read/retry must adopt the visible generation.
-                _invalidate_cached_session_generation(session_path.stem)
+                _invalidate_cached_session_generation(
+                    session_path.stem,
+                    expected_revision=expected_live_revision,
+                )
                 tmp_path.unlink(missing_ok=True)
                 return {**status, "restored": False, "stale_generation": True}
             tmp_path.unlink(missing_ok=True)
@@ -505,7 +508,10 @@ def _recover_session_owned(
             # The live entry may already be visible despite the failed fsync.
             # Do not leave an absent-generation cache owner behind, and do not
             # call this restoration durable until a later successful write.
-            _invalidate_cached_session_generation(session_path.stem)
+            _invalidate_cached_session_generation(
+                session_path.stem,
+                expected_revision=expected_live_revision,
+            )
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:
             tmp_path.unlink(missing_ok=True)
@@ -759,6 +765,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
     """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
     from api.models import (
         SidecarPublicationDurabilityError,
+        SidecarRevision,
         _invalidate_cached_session_generation,
         _publish_sidecar_no_replace,
         _session_sidecar_authority,
@@ -834,14 +841,20 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                         except SidecarPublicationDurabilityError:
                             # The entry exists, but no durable success was
                             # confirmed. Fence the absent-generation owner.
-                            _invalidate_cached_session_generation(sid)
+                            _invalidate_cached_session_generation(
+                                sid,
+                                expected_revision=SidecarRevision.absent(sid),
+                            )
                             raise
                         materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.
             # The cached owner (if any) still claims ABSENT and must not survive
             # this failed materialization result.
-            _invalidate_cached_session_generation(sid)
+            _invalidate_cached_session_generation(
+                sid,
+                expected_revision=SidecarRevision.absent(sid),
+            )
         except OSError as exc:
             details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
             detail_recorded = True

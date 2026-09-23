@@ -1087,7 +1087,10 @@ def test_two_process_writers_have_exactly_one_cas_winner(tmp_path, monkeypatch):
     assert persisted["_sidecar_generation_v1"] == 2
 
 
-def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cache_visible_owner", [False, True])
+def test_recovery_expected_absent_uses_create_or_fail(
+    tmp_path, monkeypatch, cache_visible_owner
+):
     from api import models, session_recovery
 
     session_dir = tmp_path / "sessions"
@@ -1112,9 +1115,16 @@ def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
     with models.LOCK:
         models.SESSIONS[alias.session_id] = alias
     real_link = session_recovery.os.link
+    winner = {}
 
     def competing_link(src, dst):
         Path(dst).write_text(json.dumps(competing), encoding="utf-8")
+        if cache_visible_owner:
+            loaded = models.Session.load(alias.session_id)
+            assert loaded is not None
+            with models.LOCK:
+                models.SESSIONS[alias.session_id] = loaded
+            winner["session"] = loaded
         return real_link(src, dst)
 
     monkeypatch.setattr(session_recovery.os, "link", competing_link)
@@ -1123,9 +1133,18 @@ def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
     assert result["stale_generation"] is True
     assert json.loads(session_path.read_text(encoding="utf-8")) == competing
     with models.LOCK:
-        assert alias.session_id not in models.SESSIONS
+        if cache_visible_owner:
+            assert models.SESSIONS[alias.session_id] is winner["session"]
+        else:
+            assert alias.session_id not in models.SESSIONS
     with pytest.raises(models.StaleSessionGenerationError):
         alias.save(skip_index=True)
+    if cache_visible_owner:
+        winner["session"].title = "valid owner survives"
+        winner["session"].save(skip_index=True)
+        persisted = json.loads(session_path.read_text(encoding="utf-8"))
+        assert persisted["title"] == "valid owner survives"
+        assert persisted["_sidecar_generation_v1"] == 2
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication")
@@ -2142,8 +2161,9 @@ def test_state_db_materialization_fsync_failure_invalidates_absent_owner(tmp_pat
     assert json.loads(reloaded.path.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 2
 
 
-def test_state_db_materialization_create_conflict_invalidates_absent_owner(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("cache_visible_owner", [False, True])
+def test_state_db_materialization_create_conflict_reconciles_cached_owner(
+    tmp_path, monkeypatch, cache_visible_owner
 ):
     from api import models, session_recovery
 
@@ -2178,9 +2198,16 @@ def test_state_db_materialization_create_conflict_invalidates_absent_owner(
     }
     target = session_dir / f"{sid}.json"
     real_link = models.os.link
+    winner = {}
 
     def competing_link(src, dst):
         target.write_text(json.dumps(competing), encoding="utf-8")
+        if cache_visible_owner:
+            loaded = models.Session.load(sid)
+            assert loaded is not None
+            with models.LOCK:
+                models.SESSIONS[sid] = loaded
+            winner["session"] = loaded
         return real_link(src, dst)
 
     monkeypatch.setattr(models.os, "link", competing_link)
@@ -2198,9 +2225,18 @@ def test_state_db_materialization_create_conflict_invalidates_absent_owner(
     ]
     assert json.loads(target.read_text(encoding="utf-8")) == competing
     with models.LOCK:
-        assert sid not in models.SESSIONS
+        if cache_visible_owner:
+            assert models.SESSIONS[sid] is winner["session"]
+        else:
+            assert sid not in models.SESSIONS
     with pytest.raises(models.StaleSessionGenerationError):
         alias.save(skip_index=True)
+    if cache_visible_owner:
+        winner["session"].title = "valid owner survives"
+        winner["session"].save(skip_index=True)
+        persisted = json.loads(target.read_text(encoding="utf-8"))
+        assert persisted["title"] == "valid owner survives"
+        assert persisted["_sidecar_generation_v1"] == 2
 
 
 def test_state_db_materialization_rechecks_delete_inside_authority(

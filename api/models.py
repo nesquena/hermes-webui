@@ -742,19 +742,39 @@ def _retire_backup_if_owned(
         return not backup_path.exists()
 
 
-def _invalidate_cached_session_generation(session_id: str) -> None:
-    """Evict and fence an alias after an out-of-band sidecar replacement."""
+def _invalidate_cached_session_generation(
+    session_id: str,
+    *,
+    expected_revision: SidecarRevision | None = None,
+) -> bool:
+    """Evict and fence an alias after an out-of-band sidecar replacement.
+
+    When ``expected_revision`` is provided, preserve a cache entry that has
+    already adopted another revision while the caller was publishing.
+    """
     with LOCK:
-        cached = SESSIONS.pop(session_id, None)
-        if cached is not None:
-            cached._sidecar_revisions[session_id] = _sidecar_revision_record(
-                SidecarRevision(
-                    sid=session_id,
-                    state="INVALIDATED",
-                    generation=-1,
-                    digest_sha256=None,
-                )
+        cached = SESSIONS.get(session_id)
+        if cached is None:
+            return False
+        if expected_revision is not None:
+            cached_record = cached._sidecar_revisions.get(session_id)
+            cached_revision = (
+                SidecarRevision.absent(session_id)
+                if cached_record is None
+                else _coerce_sidecar_revision(cached_record, session_id)
             )
+            if cached_revision != expected_revision:
+                return False
+        SESSIONS.pop(session_id, None)
+        cached._sidecar_revisions[session_id] = _sidecar_revision_record(
+            SidecarRevision(
+                sid=session_id,
+                state="INVALIDATED",
+                generation=-1,
+                digest_sha256=None,
+            )
+        )
+        return True
 
 
 @contextmanager
@@ -2617,7 +2637,10 @@ class Session:
                         intended
                     )
                 else:
-                    _invalidate_cached_session_generation(self.session_id)
+                    _invalidate_cached_session_generation(
+                        self.session_id,
+                        expected_revision=expected_revision,
+                    )
                     self._sidecar_revisions[self.session_id] = _sidecar_revision_record(
                         SidecarRevision(
                             sid=self.session_id,
