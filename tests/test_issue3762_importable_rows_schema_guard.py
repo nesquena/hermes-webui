@@ -130,3 +130,21 @@ def test_limit_path_also_guarded(tmp_path, with_timestamp):
              sessions=sessions, messages=messages)
     out = read_importable_agent_session_rows(db, limit=3, exclude_sources=None)
     assert len(out) == 3
+
+
+def test_operator_read_only_mode_does_not_create_missing_index(tmp_path, monkeypatch):
+    """Sidebar projection must not repair a live profile database."""
+    db = tmp_path / "state.db"
+    _make_db(
+        db, with_messages_table=True, with_timestamp=True,
+        sessions=[("cli-1", "Hello", "gpt", 2, 1000.0, "cli", "cli")],
+        messages=[("cli-1", "user", 1001.0), ("cli-1", "assistant", 1002.0)],
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY", "true")
+
+    out = read_importable_agent_session_rows(db, exclude_sources=None)
+
+    assert {row["id"] for row in out} == {"cli-1"}
+    with sqlite3.connect(str(db)) as conn:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(messages)")}
+    assert "idx_messages_session" not in indexes

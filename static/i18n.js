@@ -534,6 +534,24 @@ const LOCALES = {
     session_title_regenerate_failed: 'Regenerate title failed: ',
     session_copy_link: 'Copy conversation link',
     session_copy_link_desc: 'Copy a direct link to this conversation',
+    // Explicit read-only → writable handoff (POST /api/session/resume_in_webui).
+    // English-only on purpose: the other locales fall back to English until a
+    // translator picks these up, which is safe because the backend gate (not
+    // the label) decides whether a resume is allowed.
+    session_resume_in_webui: 'Resume in WebUI',
+    session_resume_in_webui_desc: 'Take over this {0} session as a writable WebUI conversation',
+    session_resume_in_webui_confirm_title: 'Resume in WebUI?',
+    session_resume_in_webui_confirm_message: '"{0}" belongs to profile "{1}". Resuming makes it a writable WebUI conversation; the original transcript is left untouched.',
+    session_resume_in_webui_confirm_btn: 'Resume',
+    session_resume_in_webui_resumed: 'Session resumed in WebUI',
+    session_resume_in_webui_failed: 'Could not resume this session. Please try again.',
+    session_resume_in_webui_confirm_required: 'Resume was not confirmed.',
+    session_resume_in_webui_not_allowed: 'This session cannot be resumed here. Ask an operator to enable resume for this profile.',
+    session_resume_in_webui_source_changed: 'This session changed elsewhere or is no longer available. Refresh and try again.',
+    session_resume_in_webui_conflict: 'Another save is in progress for this session. Wait a moment and try again.',
+    session_resume_in_webui_lineage_unavailable: 'Could not resume: this session can no longer be continued here.',
+    session_resume_in_webui_profile_mismatch: 'Could not resume: profile "{0}" is not the active profile.',
+    session_resume_in_webui_required: 'Resume in WebUI before sending',
     session_link_copied: 'Conversation link copied to clipboard',
     session_link_copy_failed: 'Failed to copy conversation link: ',
     share_session: 'Share',

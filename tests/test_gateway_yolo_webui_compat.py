@@ -174,12 +174,14 @@ def test_card_yolo_drains_all_run_backed_and_local_approvals(monkeypatch):
             "approval_id": "approval-run-1",
             "run_id": "run-drain-1",
             "command": "remote first",
+            "_gateway_profile": "default",
             "_gateway_agent_identity_v1": True,
         },
         {
             "approval_id": "approval-run-2",
             "run_id": "run-drain-2",
             "command": "remote second",
+            "_gateway_profile": "default",
             "_gateway_agent_identity_v1": True,
         },
     ]
@@ -884,6 +886,7 @@ def test_yolo_post_without_local_card_relays_run_backed_approval(monkeypatch):
         "description": "test",
         "approval_id": "approval-yolo-post",
         "run_id": run_id,
+        "_gateway_profile": "default",
         "_gateway_agent_identity_v1": True,
     })
 
@@ -1498,6 +1501,7 @@ def test_yolo_post_first_relay_serializes_next_gateway_approval(monkeypatch):
         "approval_id": "approval-first",
         "run_id": run_id,
         "_gateway_mirror": True,
+        "_gateway_profile": "default",
         "_gateway_agent_identity_v1": True,
     }
     approval_b = {

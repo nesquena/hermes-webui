@@ -13,6 +13,7 @@ const ICONS={
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
   download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
+  play:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8a5 5 0 1 0 1.5-3.6"/><polyline points="1.8,2.2 4.7,4.2 2.7,7.1"/><path d="M7 5.5l3.5 2.5L7 10.5z"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -2612,8 +2613,10 @@ async function _openSidebarSession(session, loadOpts={}){
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
   if(_isExternalSession(session)){
-    try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
-    catch(_e){ /* import failed -- fall through to read-only view */ }
+    if(!_isReadOnlySession(session)){
+      try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
+      catch(_e){ /* import failed -- fall through to read-only view */ }
+    }
   }
   await _ensureSidebarSessionProfile(session);
   // Tell loadSession to skip its pre-hook — we already ran it above.
@@ -2633,6 +2636,142 @@ function _isBranchableReadOnlySession(session) {
     session && session.source,
   ].map(v => String(v || '').trim().toLowerCase());
   return sources.includes('cron');
+}
+
+// ── Explicit "Resume in WebUI" (read-only external handoff) ──────────────────
+// While HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY is set, foreign sessions are
+// projected from each profile's state.db as read-only sidebar rows and can never
+// be materialised as writable WebUI sidecars implicitly. The single sanctioned
+// takeover path is POST /api/session/resume_in_webui, which the server gates on
+// an operator allowlist (HERMES_WEBUI_RESUME_ALLOW_PROFILES), the active profile,
+// an exact lineage root/tip match and a mandatory confirm flag.
+//
+// The action is therefore offered ONLY for read-only rows whose owning surface
+// has finished its own lifecycle and is resumable (cli/tui/acp/desktop). This
+// mirrors the backend allowlist (_RESUME_IN_WEBUI_SOURCE_ALLOWLIST in
+// api/routes.py); messaging, subagent, cron, kanban, webhook, api_server and
+// claude_code rows stay read-only forever — resuming them would steal a session
+// another surface or process still owns.
+const _RESUME_IN_WEBUI_SOURCES = new Set(['cli', 'tui', 'acp', 'desktop']);
+
+function _sessionResumeSourceKey(session){
+  return String((session && (session.raw_source || session.source_tag || session.source || session.session_source)) || '').trim().toLowerCase();
+}
+
+function _canResumeSessionInWebUi(session){
+  if(!session || !session.session_id) return false;
+  if(!_isReadOnlySession(session)) return false;
+  if(_isMessagingSession(session)) return false;
+  if(!_sessionResumeInWebUiProfile(session)) return false;
+  return _RESUME_IN_WEBUI_SOURCES.has(_sessionResumeSourceKey(session));
+}
+
+function _sessionResumeInWebUiProfile(session){
+  const raw = session && typeof session.profile === 'string' ? session.profile.trim() : '';
+  return raw;
+}
+
+function _sessionResumeInWebUiLabel(session){
+  // D6: the confirmation names the session by its human title only. The owning
+  // profile is supplied separately by the message, and no internal session
+  // identifier is shown to the user.
+  return String((session && (session.title || session.name)) || '').replace(/\s+/g, ' ').trim() || 'Untitled';
+}
+
+// D6: map a server-side Resume failure to localized, jargon-free copy. Route
+// names, env vars and lineage field names must never surface in the toast; the
+// raw server text is kept in the console detail only.
+function _resumeInWebUiErrorMessage(err){
+  const raw = String((err && err.message) || '').toLowerCase();
+  if(raw.includes('confirm')) return t('session_resume_in_webui_confirm_required');
+  if(raw.includes('disable') || raw.includes('not allowed') || raw.includes('active profile')) return t('session_resume_in_webui_not_allowed');
+  if(raw.includes('lineage') || raw.includes('source session') || raw.includes('source store') || raw.includes('not found')) return t('session_resume_in_webui_source_changed');
+  if(raw.includes('already owns') || raw.includes('does not match') || raw.includes('in flight')) return t('session_resume_in_webui_conflict');
+  return t('session_resume_in_webui_failed');
+}
+
+// Replace the matching cached sidebar row with the server's resumed projection
+// (or merge it in when the row is not cached yet) so the sidebar stops painting
+// the session as read-only before the refreshed list lands.
+function _applyResumedSessionToSidebarCache(sid, next){
+  if(!sid || !next || typeof next !== 'object') return false;
+  if(Array.isArray(_allSessions)){
+    const idx = _allSessions.findIndex(s => s && s.session_id === sid);
+    if(idx >= 0) _allSessions[idx] = Object.assign({}, _allSessions[idx], next, {session_id: sid});
+    else _allSessions.push(Object.assign({}, next, {session_id: sid}));
+  }
+  if(S.session && S.session.session_id === sid) Object.assign(S.session, next, {session_id: sid});
+  return true;
+}
+
+// A resume must send the lineage root/tip the server reports RIGHT NOW, not a
+// possibly-stale copy cached on the sidebar row: a stale pair is a hard 409. Drop
+// the cached report for this row before refetching so the values are fresh.
+async function _fetchResumeLineageReport(session){
+  const sid = session && session.session_id;
+  if(!sid) return null;
+  const lineageKey = _sidebarLineageKeyForRow(session);
+  const cacheKey = _lineageReportCacheKey(session, lineageKey);
+  if(cacheKey) _lineageReportCache.delete(cacheKey);
+  return _fetchLineageReportForRow(session, lineageKey);
+}
+
+async function resumeSessionInWebUi(session){
+  if(!_canResumeSessionInWebUi(session)) return false;
+  const sid = session.session_id;
+  const profile = _sessionResumeInWebUiProfile(session);
+  const label = _sessionResumeInWebUiLabel(session);
+  // Explicit confirmation: this is the one click that turns a read-only foreign
+  // transcript into a writable WebUI conversation, so name both the session and
+  // the profile that owns it before doing anything.
+  const confirmed = await showConfirmDialog({
+    title: t('session_resume_in_webui_confirm_title'),
+    message: t('session_resume_in_webui_confirm_message', label, profile),
+    confirmLabel: t('session_resume_in_webui_confirm_btn'),
+    danger: true,
+  });
+  if(!confirmed) return false;
+  try{
+    // The server refuses a resume unless the requested profile is the WebUI's
+    // active profile, so switch first (a no-op when the row is already in it).
+    await _ensureSidebarSessionProfile(session);
+    if(!_profileMatchesActiveProfile(profile, S.activeProfile || 'default')){
+      showToast(t('session_resume_in_webui_profile_mismatch', profile), 5000, 'error');
+      return false;
+    }
+    const report = await _fetchResumeLineageReport(session);
+    const lineageRootId = String((report && report.lineage_key) || '').trim();
+    const lineageTipId = String((report && report.tip_session_id) || '').trim();
+    if(!report || report.found === false || !lineageRootId || !lineageTipId){
+      showToast(t('session_resume_in_webui_lineage_unavailable'), 5000, 'error');
+      return false;
+    }
+    const response = await api('/api/session/resume_in_webui', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: sid,
+        profile,
+        lineage_root_id: lineageRootId,
+        lineage_tip_id: lineageTipId,
+        confirm: true,
+      }),
+    });
+    _applyResumedSessionToSidebarCache(sid, response && response.session);
+    await loadSession(sid);
+    renderSessionListFromCache();
+    void renderSessionList();
+    showToast(t('session_resume_in_webui_resumed'));
+    return true;
+  }catch(err){
+    // A failed resume materialises nothing user-visible, so the session stays
+    // read-only and the row keeps its state; surface concise, localized copy and
+    // let the user retry instead of forcing a full reload. D6: the raw server
+    // text (which may contain internal identifiers) is logged as technical
+    // detail, never appended to the toast.
+    console.warn('resume_in_webui failed', err);
+    showToast(_resumeInWebUiErrorMessage(err), 6000, 'error');
+    return false;
+  }
 }
 
 function _sourceKeyForSession(session) {
@@ -4941,6 +5080,22 @@ function _appendSessionExportHtmlAction(menu, session){
   ));
 }
 
+// "Resume in WebUI" is appended next to the other read-only-safe actions. It is
+// the only mutating entry in the read-only menu, so it stays behind the
+// _canResumeSessionInWebUi gate (read-only + resumable external source) and the
+// click handler asks for explicit confirmation before anything is sent.
+function _appendSessionResumeInWebUiAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    t('session_resume_in_webui'),
+    t('session_resume_in_webui_desc', _sessionResumeSourceKey(session) || 'cli'),
+    ICONS.play,
+    async()=>{
+      closeSessionActionMenu();
+      await resumeSessionInWebUi(session);
+    }
+  ));
+}
+
 function _playSessionActionMenuEntrance(menu){
   if(!menu) return;
   const reduce=_sessionPrefersReducedMotion();
@@ -4998,6 +5153,14 @@ function _openSessionActionMenu(session, anchorEl){
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
   _appendSessionCopyLinkAction(menu, session);
+  // Explicit read-only → writable handoff (POST /api/session/resume_in_webui).
+  // Gated on _canResumeSessionInWebUi, which requires a read-only row from a
+  // resumable external source (cli/tui/acp/desktop), so writable rows and
+  // messaging/subagent/cron rows never see it and the writable menu below is
+  // unchanged.
+  if(_canResumeSessionInWebUi(session)){
+    _appendSessionResumeInWebUiAction(menu, session);
+  }
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
@@ -7314,8 +7477,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // (hasHiddenArchivedAncestor / #4293), generalizing the "parent hidden"
       // trigger from archived to filtered-out. A cross-surface WebUI child of a
       // genuinely external (messaging/CLI) parent is handled by the parentIsExternal
-      // branch above and still orphans as before.
-      if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
+      // branch above and still orphans as before. A resumable read-only external
+      // child is the narrow exception: its sidebar action menu is the only UI path
+      // to POST /api/session/resume_in_webui, so suppressing it makes takeover
+      // impossible when the parent belongs to another source bucket.
+      const resumableExternalChild=typeof _canResumeSessionInWebUi==='function'&&_canResumeSessionInWebUi(child);
+      if(child&&child._cross_surface_child_session&&_isChildSession(child)&&!resumableExternalChild) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
@@ -8706,7 +8873,8 @@ function renderSessionListFromCache(){
           row.appendChild(state);
           const readOnlyChild=_isReadOnlySession(child);
           let actions=null;
-          if(!readOnlyChild){
+          const canOpenChildActions=!readOnlyChild||_canResumeSessionInWebUi(child);
+          if(canOpenChildActions){
             actions=document.createElement('div');
             actions.className='session-actions';
             const menuBtn=document.createElement('button');
@@ -8727,11 +8895,13 @@ function renderSessionListFromCache(){
             };
             actions.appendChild(menuBtn);
             row.appendChild(actions);
-            row.append(
-              _makeSessionSwipeAffordance('right',child.archived?'undo':'archive',child.archived?'Restore':t('session_batch_archive')),
-              _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
-            );
-            installForkChildSwipe(row, child, actions);
+            if(!readOnlyChild){
+              row.append(
+                _makeSessionSwipeAffordance('right',child.archived?'undo':'archive',child.archived?'Restore':t('session_batch_archive')),
+                _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
+              );
+              installForkChildSwipe(row, child, actions);
+            }
           }
           row.oncontextmenu=(e)=>{
             if(readOnlyChild) return;
@@ -8805,7 +8975,8 @@ function renderSessionListFromCache(){
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
     let actions=null;
-    if(!readOnly){
+    const canOpenActions=!readOnly||_canResumeSessionInWebUi(s);
+    if(canOpenActions){
       actions=document.createElement('div');
       actions.className='session-actions';
       const menuBtn=document.createElement('button');

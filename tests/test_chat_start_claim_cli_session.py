@@ -549,6 +549,34 @@ def test_helper_uses_get_last_workspace_when_cwd_missing(
     assert Path(sess.workspace).resolve() == fallback_workspace.resolve()
 
 
+def test_operator_read_only_mode_refuses_claimable_cli_session(
+    routes_module, tmp_path, monkeypatch, isolated_state_db
+):
+    """A live-profile projection must never claim an existing CLI row."""
+    sid = "20260610_operator_read_only_cli"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="Existing CLI chat", source="cli", cwd=str(tmp_path),
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY", "1")
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid: {
+            "session_id": sid,
+            "source_tag": "cli",
+            "raw_source": "cli",
+            "session_source": "cli",
+        },
+    )
+
+    sess, reason = routes_module._claim_or_synthesize_cli_session(sid)
+
+    assert reason == "not_claimable"
+    assert sess is not None
+    assert sess.read_only is True
+    assert not (routes_module.SESSION_DIR / f"{sid}.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # Refusal tests — the #4911 security gate
 # ---------------------------------------------------------------------------

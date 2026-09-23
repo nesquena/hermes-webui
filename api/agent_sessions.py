@@ -4,7 +4,7 @@ import logging
 import os
 import sqlite3
 import sys
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
 
@@ -71,8 +71,16 @@ def state_db_readonly_uri(db_path, platform: str | None = None) -> str:
     return state_db_file_uri(db_path, platform=platform) + "?mode=ro"
 
 
-def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
+def open_state_db_readonly(
+    db_path: Path,
+    log: logging.Logger | None = None,
+    *,
+    strict: bool = False,
+) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
+
+    ``strict`` is retained for compatibility with callers that explicitly mark
+    foreign-profile reads; all opens are now strict read-only regardless.
 
     Same rationale as the session-listing path (#5455): a write-capable handle
     on the multi-GB, WAL ``state.db`` while the agent streams into it adds
@@ -707,7 +715,6 @@ def read_importable_agent_session_rows(
             except sqlite3.Error:
                 messages_index_present = False
 
-
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
             if 'role' in message_cols:
@@ -943,7 +950,15 @@ def _empty_lineage_report(session_id: str, *, found: bool = False) -> dict:
     }
 
 
-def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops: int = 20) -> dict:
+def read_session_lineage_report(
+    db_path: Path,
+    session_id: str | None,
+    max_hops: int = 20,
+    *,
+    strict_read_only: bool = False,
+    raise_on_error: bool = False,
+    connection: sqlite3.Connection | None = None,
+) -> dict:
     """Return a bounded, read-only lifecycle report for a session lineage.
 
     This helper intentionally reports only facts that can be derived from
@@ -956,11 +971,16 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
     if not sid:
         return _empty_lineage_report('')
     db_path = Path(db_path)
-    if not db_path.exists():
+    if connection is None and not db_path.exists():
         return _empty_lineage_report(sid)
 
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        connection_context = (
+            closing(open_state_db_readonly(db_path))
+            if connection is None
+            else nullcontext(connection)
+        )
+        with connection_context as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -1064,6 +1084,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                         continue
                     child_rows.append(child)
     except Exception:
+        if raise_on_error:
+            raise
         return _empty_lineage_report(sid)
 
     root_id = segments[-1]['id'] if segments else sid

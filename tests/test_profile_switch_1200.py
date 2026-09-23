@@ -298,6 +298,33 @@ def test_regression_switch_profile_default_workspace_not_from_process_global(tmp
         profiles._tls.profile = None
 
 
+def test_switch_profile_falls_back_to_target_profile_workspace(tmp_path):
+    """A named profile without an override must not inherit the boot workspace."""
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    target_home = base / "profiles" / "target"
+    target_workspace = target_home / "workspace"
+    target_workspace.mkdir(parents=True)
+    (target_home / "config.yaml").write_text(
+        "model:\n  default: some-model\n", encoding="utf-8"
+    )
+
+    orig_default = profiles._DEFAULT_HERMES_HOME
+    orig_active = profiles._active_profile
+    profiles._DEFAULT_HERMES_HOME = base
+    profiles._active_profile = "default"
+    profiles._tls.profile = None
+
+    try:
+        result = profiles.switch_profile("target", process_wide=False)
+        assert result["default_workspace"] == str(target_workspace.resolve())
+    finally:
+        profiles._DEFAULT_HERMES_HOME = orig_default
+        profiles._active_profile = orig_active
+        profiles._tls.profile = None
+
+
 def test_regression_models_cache_cleared_on_profile_switch():
     """
     REGRESSION GUARD (#1200 Bug 2): the model cache must be invalidated after

@@ -8451,6 +8451,7 @@ function getComposerPrimaryAction(){
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
   if(locked) return 'disabled';
+  if(typeof _isReadOnlySession==='function'&&_isReadOnlySession(S.session)) return 'disabled';
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
   const isBusy=!!S.busy||compressionRunning;
   if(!isBusy) return hasContent?'send':'disabled';
@@ -8531,7 +8532,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(typeof _isReadOnlySession==='function'&&_isReadOnlySession(S.session)) _btnTitle=_tt('session_resume_in_webui_required','Resume in WebUI before sending');
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');

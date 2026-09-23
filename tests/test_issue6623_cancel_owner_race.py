@@ -534,8 +534,7 @@ def test_issue6623_replaced_session_successor_survives_delayed_cancel_finalizer(
         )
         _filler.save()
         models.SESSIONS[_filler.session_id] = _filler
-    with config.LOCK:
-        _evicted = models._evict_sessions_over_cap(0)
+    _evicted = models._evict_sessions_over_cap(0)
     assert sid not in models.SESSIONS, (
         f"old generation should be LRU-evicted (evicted={_evicted})"
     )
@@ -633,8 +632,7 @@ def test_issue6623_replaced_session_completed_successor_still_protected_by_owner
         )
         _filler.save()
         models.SESSIONS[_filler.session_id] = _filler
-    with config.LOCK:
-        models._evict_sessions_over_cap(0)
+    models._evict_sessions_over_cap(0)
     s_new = models.get_session(sid)
     assert s_new is not s_old
 
@@ -719,8 +717,7 @@ def test_issue6623_replaced_session_process_wakeup_pause_merges_into_current(
         )
         _filler.save()
         models.SESSIONS[_filler.session_id] = _filler
-    with config.LOCK:
-        models._evict_sessions_over_cap(0)
+    models._evict_sessions_over_cap(0)
     assert sid not in models.SESSIONS
     s_new = models.get_session(sid)
     assert s_new is not s_old
@@ -823,8 +820,7 @@ def test_issue6623_completed_successor_teardown_cleared_owner_blocks_old_finaliz
         )
         _filler.save()
         models.SESSIONS[_filler.session_id] = _filler
-    with config.LOCK:
-        models._evict_sessions_over_cap(0)
+    models._evict_sessions_over_cap(0)
     s_new = models.get_session(sid)
     assert s_new is not s_old, "lazy reload must yield a DISTINCT Session instance"
 

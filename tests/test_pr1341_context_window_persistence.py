@@ -74,8 +74,14 @@ def test_streaming_persists_context_fields_on_session_before_save():
 def test_session_init_accepts_context_fields():
     """Session.__init__ must accept the three fields as named kwargs."""
     src = MODELS.read_text(encoding="utf-8")
-    # The init signature spans many lines — read the full def block
-    init_match = re.search(r"def __init__\(self,(.*?)\):", src, re.DOTALL)
+    # Scope the search to Session: helper classes above it may define __init__ too.
+    session_start = src.find("class Session:")
+    assert session_start != -1, "Session class not found"
+    init_match = re.search(
+        r"def __init__\(self,(.*?)\):",
+        src[session_start:],
+        re.DOTALL,
+    )
     assert init_match, "Session.__init__ signature not found"
     sig = init_match.group(1)
     assert "context_length" in sig, "Session.__init__ must accept context_length"

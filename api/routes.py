@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -161,7 +161,7 @@ def _persist_generated_session_title(
         with LOCK:
             SESSIONS[sid] = session
             SESSIONS.move_to_end(sid)
-            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        _evict_sessions_over_cap()  # #4765: persistence probes stay outside LOCK
     _sync_session_title_to_insights(session)
     _publish_session_list_changed(
         event_reason,
@@ -2490,6 +2490,15 @@ def _build_session_list_cache_payload(
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
         )
+        # Keep the list payload consistent with the detail payload.  In
+        # operator projection mode every row here is a foreign state.db row;
+        # copy before stamping so the cached source rows remain untouched.
+        # The frontend requires read_only=true before it will expose the
+        # explicit Resume in WebUI action for an eligible CLI/TUI/Desktop row.
+        if str(os.getenv("HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY", "")).strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            deduped_cli = [dict(s, read_only=True) for s in deduped_cli]
     else:
         diag_stage("filter_webui_sessions")
         webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
@@ -4187,7 +4196,7 @@ def _ensure_full_session_before_mutation(sid: str, session):
     with LOCK:
         SESSIONS[sid] = full_session
         SESSIONS.move_to_end(sid)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    _evict_sessions_over_cap()  # #4765: persistence probes stay outside LOCK
     return full_session
 
 
@@ -8716,6 +8725,18 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             if _ended or _started:
                 cli_meta["updated_at"] = _ended or _started
     claimable, _reason = _is_claimable_cli_source(cli_meta, state_db_source)
+    # A separate WebUI can project live profile state.db files while keeping
+    # its own sidecar store isolated. Existing CLI/TUI/Desktop rows are
+    # normally claimable, which materializes SESSION_DIR/<sid>.json on first
+    # open. That flat key is not profile-qualified and can collide across
+    # profile databases. The operator flag turns every foreign state.db row
+    # into a synthetic view-only Session. New WebUI sessions remain writable
+    # because they never enter this materialization path.
+    if str(os.getenv("HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        claimable = False
+        _reason = "operator_read_only"
     if not claimable:
         # The session is real and viewable, but the foreign source forbids
         # the WebUI from taking write ownership.  Build the Session with
@@ -10595,6 +10616,8 @@ from api.models import (
     load_projects,
     save_projects,
     import_cli_session,
+    stage_session_sidecar,
+    publish_staged_session_sidecar,
     CLAUDE_CODE_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
@@ -14680,6 +14703,9 @@ def handle_get(handler, parsed) -> bool:
             structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
             if not run_id and structured_gateway:
                 gateway_stop_blocked = True
+            # F3: stop_gateway_run owns the atomic profile binding and fails
+            # closed when the owning profile is unknown or ambiguous, so a stop
+            # can never silently degrade to an unscoped (wrong-profile) endpoint.
             if run_id:
                 if stop_gateway_run(run_id):
                     owner_sid = stream_owner_session_id(stream_id)
@@ -15897,7 +15923,7 @@ def handle_post(handler, parsed) -> bool:
             with LOCK:
                 SESSIONS[copied_session.session_id] = copied_session
                 SESSIONS.move_to_end(copied_session.session_id)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            _evict_sessions_over_cap()  # #4765: persistence probes stay outside LOCK
             # Persist immediately. The pre-PR flow (/api/session/new + /api/session/rename)
             # accidentally avoided this because `/api/session/rename` calls `s.save()`.
             # Without this explicit save, the duplicate is in-memory only — if the user
@@ -16743,7 +16769,7 @@ def handle_post(handler, parsed) -> bool:
         with LOCK:
             SESSIONS[branch.session_id] = branch
             SESSIONS.move_to_end(branch.session_id)
-            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        _evict_sessions_over_cap()  # #4765: persistence probes stay outside LOCK
 
         # Persist only if there are messages (matches new_session pattern)
         if forked_messages:
@@ -17802,6 +17828,10 @@ def handle_post(handler, parsed) -> bool:
     # ── CLI session import (POST) ──
     if parsed.path == "/api/session/import_cli":
         return _handle_session_import_cli(handler, body)
+
+    # ── Explicit, operator-gated Resume in WebUI (POST) ──
+    if parsed.path == "/api/session/resume_in_webui":
+        return _handle_session_resume_in_webui(handler, body)
 
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
@@ -23442,7 +23472,7 @@ def _start_regeneration_stream_locked(
             from api.gateway_chat import _mark_gateway_run_starting
 
             gateway_starting = True
-            _mark_gateway_run_starting(stream_id)
+            _mark_gateway_run_starting(stream_id, profile=getattr(s, "profile", None))
 
         diag.stage("worker_thread_start") if diag else None
         worker_thread = threading.Thread(target=_gated_worker, daemon=True)
@@ -23806,7 +23836,7 @@ def _start_chat_stream_for_session(
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
-        _mark_gateway_run_starting(stream_id)
+        _mark_gateway_run_starting(stream_id, profile=getattr(s, "profile", None))
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
@@ -24424,7 +24454,7 @@ def _handle_session_compression_recovery_start(handler, body):
             with LOCK:
                 SESSIONS[copied_session.session_id] = copied_session
                 SESSIONS.move_to_end(copied_session.session_id)
-                _evict_sessions_over_cap()
+            _evict_sessions_over_cap()
             created = True
     if created:
         publish_session_list_changed(
@@ -26825,7 +26855,7 @@ def _relay_gateway_run_approval(
     this chokepoint so one tab cannot retire another tab's parked remote run.
     """
     from api.config import gateway_supports_approval_identity_v1, get_config as _get_config
-    from api.gateway_chat import _gateway_api_key, _gateway_base_url
+    from api.gateway_chat import _gateway_api_key, _gateway_base_url_for_profile
     from api.runner_client import HttpRunnerClient, RunnerClientError
 
     run_id = str(mirror.get("run_id") or "").strip()
@@ -26867,7 +26897,40 @@ def _relay_gateway_run_approval(
                 enable_yolo=enable_yolo,
             )
 
-        base_url = _gateway_base_url(_get_config())
+        # Resolve the owning gateway profile without ever letting a missing or
+        # unscoped binding abort an otherwise valid relay. The mirror's immutable
+        # binding is authoritative when present; the session sidecar corroborates
+        # it. F1: a lost/absent session must not raise here. An unscoped binding
+        # falls back to the multiplexed default route rather than silently
+        # relaying against a profile-less base URL.
+        mirror_profile = str(current_mirror.get("_gateway_profile") or "").strip()
+        try:
+            approval_session = get_session(sid)
+        except KeyError:
+            approval_session = None
+        raw_profile = getattr(approval_session, "profile", None)
+        session_profile = raw_profile.strip() if isinstance(raw_profile, str) else ""
+        # A current sidecar may corroborate the mirror binding, but it can never
+        # invent or override ownership. Reject only an explicit mismatch.
+        if mirror_profile and session_profile and mirror_profile != session_profile:
+            return _gateway_approval_failure(
+                sid,
+                choice,
+                code="gateway_run_unavailable",
+                error=_GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                status=409,
+                enable_yolo=enable_yolo,
+            )
+        # Never invent an owning profile. When neither the immutable mirror
+        # binding nor the session sidecar names a profile, relay against the
+        # unscoped owner URL rather than guessing "/p/default", which could route
+        # the approval to the wrong profile. (``_gateway_base_url_for_profile``
+        # returns the unscoped base URL for an empty profile.)
+        gateway_profile = mirror_profile or session_profile
+        base_url = _gateway_base_url_for_profile(
+            gateway_profile,
+            _get_config(),
+        )
         api_key = _gateway_api_key()
         identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and (
             gateway_supports_approval_identity_v1(base_url, api_key)
@@ -29239,6 +29302,1318 @@ def _handle_session_import_cli(handler, body):
     )
 
 
+# ─ Safe backend Resume in WebUI (explicit, operator-gated handoff) ───────────
+#
+# While ``HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY`` is set, foreign CLI/TUI/ACP/
+# Desktop sessions are projected from each profile's ``state.db`` as read-only
+# stubs and can never be materialised as writable WebUI sidecars
+# (``_claim_or_synthesize_cli_session`` forces ``claimable = False``). That
+# leaves an operator with no sanctioned way to *take over* a genuinely finished
+# foreign session from the WebUI, so this endpoint is the single, explicit path
+# that performs the handoff. It is deliberately narrow:
+#
+#   * operator allowlist (``HERMES_WEBUI_RESUME_ALLOW_PROFILES``) — unset means
+#     the endpoint is disabled entirely; a requested profile must be listed;
+#   * the requested profile must be the WebUI's active profile;
+#   * the server resolves ``<profile home>/state.db`` exactly (no active-profile
+#     fallback) and opens it strictly read-only;
+#   * only ``cli``/``tui``/``acp``/``desktop`` sources are resumable;
+#   * a source session that still looks live (no ``ended_at``/``end_reason``) is
+#     refused unless WebUI already owns a matching writable sidecar;
+#   * the client's exact lineage root + tip must match
+#     ``read_session_lineage_report``;
+#   * a flat sidecar id collision (the WebUI store is not profile-qualified) is
+#     refused when the existing sidecar is blank/other-profile;
+#
+# The endpoint never writes to the source ``state.db``: it opens it read-only
+# for every probe (row, lineage), then materialises the same session id as a
+# writable WebUI sidecar bound to the requested profile.
+_RESUME_IN_WEBUI_SOURCE_ALLOWLIST = frozenset({"cli", "tui", "acp", "desktop"})
+
+
+
+def _resume_in_webui_allowed_profiles() -> set:
+    """Return the operator allowlist of profiles permitted to resume.
+
+    Read at request time so operators can flip it without a restart. An unset
+    or blank value disables the endpoint (fail-closed).
+    """
+    raw = str(os.getenv("HERMES_WEBUI_RESUME_ALLOW_PROFILES", "") or "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _open_source_state_db_readonly(db_path: Path):
+    """Open *db_path* with a strict ``mode=ro`` URI and no writable fallback.
+
+    Unlike ``open_state_db_readonly`` there is deliberately no fallback to a
+    read-write handle: this endpoint must never be able to mutate the source
+    ``state.db`` it is resuming from. Callers own the returned connection.
+    """
+    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
+def _load_resume_sidecar_nonmutating(sidecar_path: Path):
+    """Load a resume sidecar without Session.load() self-heal writes."""
+    data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("existing WebUI sidecar is not a JSON object")
+    return Session(**data)
+
+
+def _same_resume_identity(
+    session,
+    *,
+    sid: str,
+    profile: str,
+    db_path: Path,
+    root_id: str,
+    tip_id: str,
+) -> bool:
+    return (
+        str(getattr(session, "session_id", None) or "") == str(sid)
+        and not bool(getattr(session, "read_only", False))
+        and _profiles_match(getattr(session, "profile", None), profile)
+        and (
+            getattr(session, "resume_source_profile", None),
+            getattr(session, "resume_source_state_db", None),
+            getattr(session, "resume_lineage_root_id", None),
+            getattr(session, "resume_lineage_tip_id", None),
+        )
+        == (profile, str(db_path), root_id, tip_id)
+    )
+
+
+def _resume_existing_sidecar_conflict(
+    session,
+    *,
+    sid: str,
+    profile: str,
+    db_path: Path,
+    root_id: str,
+    tip_id: str,
+) -> str | None:
+    """Return the 409 message when *session* blocks this resume, else ``None``.
+
+    ``None`` means the sidecar already owns exactly this resume identity, so the
+    request is an idempotent re-resume. Shared by the pre-flight ownership check
+    and by the post-claim reconciliation of a lost exclusive publication race,
+    so both paths classify an existing sidecar identically.
+    """
+    existing_profile = getattr(session, "profile", None)
+    # The WebUI sidecar store is a single flat directory; the same session id
+    # can collide across profiles. Refuse a blank or foreign-profile sidecar
+    # rather than silently overwriting another profile's session.
+    if not str(existing_profile or "").strip() or not _profiles_match(existing_profile, profile):
+        return "a different WebUI session already owns this session id"
+    # The sidecar's own session id must equal the requested source id: the
+    # filename supplies it implicitly, so a replaced/hand-edited body that names
+    # a different session must never be accepted as an idempotent re-resume (D4).
+    if str(getattr(session, "session_id", None) or "") != str(sid):
+        return "an existing WebUI sidecar does not match this resume identity"
+    stored_identity = (
+        getattr(session, "resume_source_profile", None),
+        getattr(session, "resume_source_state_db", None),
+        getattr(session, "resume_lineage_root_id", None),
+        getattr(session, "resume_lineage_tip_id", None),
+    )
+    if bool(getattr(session, "read_only", False)) or stored_identity != (
+        profile,
+        str(db_path),
+        root_id,
+        tip_id,
+    ):
+        return "an existing WebUI sidecar does not match this resume identity"
+    return None
+
+
+def _discard_resume_staging_file(staging_path: Path) -> None:
+    """Best-effort removal of a Resume staging file that never got published."""
+    try:
+        Path(staging_path).unlink(missing_ok=True)
+    except Exception:
+        logger.warning(
+            "Failed to remove Resume in WebUI staging file %s",
+            staging_path,
+            exc_info=True,
+        )
+
+
+def _resume_canonical_is_committed_publication(sidecar_path: Path) -> bool:
+    """True when the canonical is an explicitly committed, non-denied publication.
+
+    B2: such an artifact was committed by an attempt that finished its own
+    verified commit. A *different*, failing attempt must never revoke it — not
+    by denying the id and not by moving the file out of the live namespace.
+    """
+    from api.models import resume_publication_strictly_verified
+
+    try:
+        current = _load_resume_sidecar_nonmutating(Path(sidecar_path))
+    except Exception:
+        return False
+    if current is None:
+        return False
+    return resume_publication_strictly_verified(current)
+
+
+def _quarantine_resume_sidecar(
+    sidecar_path: Path,
+    sid: str,
+    *,
+    attempt: str | None = None,
+    force: bool = False,
+) -> Path | None:
+    """Deny and move an untrusted published resume sidecar out of the live namespace.
+
+    F3 (Astra 94bfe8af): quarantine is a durable *denial* first and a
+    best-effort move second. ``revoke_resume_publication`` records the denial on
+    every durable channel (tombstone AND the publication ledger) BEFORE the
+    canonical is touched, so a delayed reader that already loaded the object
+    during the publication window — and a reader that races a failed move —
+    still fails closed. The move into ``.resume-quarantine`` (never deleted
+    outright) is best effort so an operator can inspect the rejected artifact;
+    when it fails the durable denial still refuses the id, so publication stays
+    failed-closed either way. B1: when BOTH channels fail, the in-flight
+    publication record written before the artifact existed still guards the id,
+    so the fail-closed state does not depend on this process's memory.
+
+    B2: ``force=False`` refuses to revoke an artifact that is already a
+    committed (verified, non-denied) publication — a failed attempt must never
+    revoke another attempt's artifact. Callers that provably own the commit
+    (they just wrote the verified marker for it in this request) pass
+    ``force=True``.
+    """
+    sidecar_path = Path(sidecar_path)
+    if not force and _resume_canonical_is_committed_publication(sidecar_path):
+        logger.warning(
+            "Refusing to revoke committed Resume publication %s: the canonical "
+            "belongs to an attempt that already finished its verified commit",
+            sid,
+        )
+        return None
+    # 1) Denial first — this fences in-flight Session.load/cache publication.
+    # A2: `revoke_resume_publication` records the tombstone AND evicts any cached
+    # writable object in ONE critical section that also bumps the revocation
+    # generation, so a reader parked between its admissibility check and its
+    # cache insertion is refused rather than repopulating the cache.
+    try:
+        from api.models import revoke_resume_publication
+
+        revoke_resume_publication(
+            sid,
+            reason="resume publication failed post-publish verification",
+            attempt=attempt,
+        )
+    except Exception:
+        logger.exception("Failed to record resume quarantine denial for %s", sid)
+    # 2) Best-effort move out of the live namespace — through the ONE shared
+    # implementation (``models.quarantine_denied_resume_sidecar``), so the
+    # publication path and the post-write denial recheck in ``Session.save``
+    # cannot drift into different quarantine semantics.
+    moved = None
+    try:
+        from api.models import quarantine_denied_resume_sidecar
+
+        moved = quarantine_denied_resume_sidecar(sid, source=sidecar_path)
+    except Exception:
+        logger.exception("Failed to quarantine untrusted resume sidecar %s", sidecar_path)
+    target: Path | None = moved
+    # 2b) A denial outranks any commit-complete proof, so a revoked id must not
+    # keep carrying one: the proof is the ONLY thing that authorises retiring a
+    # publication record or completing an orphan's commit, and a later reader
+    # must never find "committed" on an id that was durably refused. Best
+    # effort — the denial itself is what actually fences the id.
+    try:
+        from api.models import clear_resume_publication_commit_marker
+
+        clear_resume_publication_commit_marker(sid)
+    except Exception:
+        logger.debug("Failed to clear the Resume commit proof for %s", sid, exc_info=True)
+    # 3) Evict any writable object a concurrent reader cached during the
+    # publication/read-back window BEFORE reconciling the index. The denial
+    # above already refuses it from cache, but eviction keeps the LRU and the
+    # persisted sidebar honest.
+    try:
+        from api.models import evict_session_from_cache, prune_session_from_index
+
+        evict_session_from_cache(sid)
+        prune_session_from_index(sid)
+    except Exception:
+        logger.debug("Failed to evict cached resume sidecar %s", sid, exc_info=True)
+    return target
+
+
+def _read_source_session_row(
+    db_path: Path,
+    sid: str,
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> dict | None:
+    """Return the source ``sessions`` row for *sid* via a strict read-only open.
+
+    Returns ``None`` when the row is absent or the schema is missing ``id``.
+    """
+    connection_context = (
+        closing(_open_source_state_db_readonly(db_path))
+        if connection is None
+        else nullcontext(connection)
+    )
+    with connection_context as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(sessions)")
+        cols = {str(row[1]) for row in cur.fetchall()}
+        if "id" not in cols:
+            return None
+        wanted = [
+            c for c in (
+                "id", "title", "model", "source", "session_source", "parent_session_id",
+                "started_at", "ended_at", "end_reason", "cwd",
+            )
+            if c in cols
+        ]
+        cur.execute(
+            f"SELECT {', '.join(wanted)} FROM sessions WHERE id = ?",
+            (sid,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+
+def _read_resume_source_snapshot(db_path: Path, sid: str, profile: str):
+    """Read row, lineage and transcript from one explicit SQLite snapshot."""
+    with closing(_open_source_state_db_readonly(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        try:
+            source_row = _read_source_session_row(db_path, sid, connection=conn)
+            report = read_session_lineage_report(
+                db_path,
+                sid,
+                strict_read_only=True,
+                raise_on_error=True,
+                connection=conn,
+            )
+            # Read exactly the lineage segments that the report validated.  Do
+            # not ask the message helper to rediscover the ancestry: older
+            # sessions schemas can support the lineage report without carrying
+            # every optional column used by that helper's stitch heuristic.
+            segment_ids = [
+                str(segment.get("session_id") or "").strip()
+                for segment in reversed(report.get("segments") or [])
+                if isinstance(segment, dict)
+            ]
+            segment_ids = [segment_id for segment_id in segment_ids if segment_id]
+            if not segment_ids:
+                segment_ids = [sid]
+            messages = []
+            for segment_id in segment_ids:
+                messages.extend(get_state_db_session_messages(
+                    segment_id,
+                    profile=profile,
+                    state_db_path=db_path,
+                    strict_read_only=True,
+                    raise_on_error=True,
+                    connection=conn,
+                    stitch_continuations=False,
+                ))
+            return source_row, report, messages
+        finally:
+            conn.rollback()
+
+
+class _ResumePublicationRejected(RuntimeError):
+    """Terminal failure of a published Resume sidecar's final verification.
+
+    Raised only after the unverified canonical has been denied + quarantined
+    (best effort). It is never swallowed into a success by the broad
+    post-publish recovery, so a verification failure stays terminal even when
+    the quarantine move itself fails (F1, Astra 94bfe8af).
+    """
+
+
+def _existing_sidecar_legacy_committed(session) -> bool:
+    """Legacy existing-sidecar idempotency/migration policy (A1-distinct path).
+
+    ONLY for a sidecar that a *previous* attempt (or a pre-fix deployment)
+    already owns: a marked publication is committed only when verified and not
+    denied, while an unprefixed legacy resume sidecar with no marker is treated
+    as committed for migration compatibility.
+
+    This predicate must NEVER be used to accept a publication owned by the
+    CURRENT Resume attempt: use ``_resume_attempt_publication_verified`` there,
+    which requires the explicit verified marker (A1).
+    """
+    if session is None:
+        return False
+    from api.models import is_resume_publication_denied, resume_publication_state
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if is_resume_publication_denied(sid):
+        return False
+    state = resume_publication_state(session)
+    if state is None:
+        return True
+    return state == "verified"
+
+
+def _resume_attempt_publication_verified(session) -> bool:
+    """Strict proof that the CURRENT attempt's publication is committed (A1).
+
+    Requires the explicit ``resume_publication_state == 'verified'`` marker and
+    the absence of a denial. A missing, empty, unknown or provisional marker is
+    never accepted, so a marker lost (or never written) during a post-index or
+    post-link failure can no longer be adopted as a committed publication.
+    """
+    from api.models import resume_publication_strictly_verified
+
+    return resume_publication_strictly_verified(session)
+
+
+def _await_resume_publication_commit(existing, sidecar_path: Path, sid: str, *, timeout: float = 1.5):
+    """Bounded, fail-closed wait for a competing first publication to commit.
+
+    F2 (Astra 94bfe8af): a competing Resume must never report idempotent
+    success over a provisional artifact, but it must also not spuriously fail
+    when the first publisher is mid-verification and will commit shortly. Poll
+    for the explicit verified marker for a bounded window; return ``None`` when
+    no committed publication appears (the caller then fails closed).
+
+    F1/F2 (candidate5): the explicit verified marker is NOT commit-complete. The
+    winner still has rejection-capable work outstanding (index reconciliation and
+    the final denial check) after writing it, so a competing request may only
+    adopt the artifact once the winner's durable publishing record is GONE — and
+    that record is retired last, after the commit-complete proof. While the
+    record is still present without proof this returns ``None`` and the caller
+    fails closed with 409 instead of unguarding a publication that may still be
+    terminally rejected.
+    """
+    from api.models import is_resume_publication_denied, resume_publication_commit_pending
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    current = existing
+    while True:
+        try:
+            pending = resume_publication_commit_pending(sid, canonical_path=sidecar_path)
+        except Exception:
+            logger.debug("Failed to read the Resume publication state for %s", sid, exc_info=True)
+            pending = True  # fail closed
+        if _existing_sidecar_legacy_committed(current) and not pending:
+            return current
+        try:
+            if is_resume_publication_denied(sid):
+                return None
+        except Exception:
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.02)
+        try:
+            fresh = _load_resume_sidecar_nonmutating(sidecar_path) if sidecar_path.exists() else None
+        except Exception:
+            fresh = None
+        if fresh is None:
+            return None
+        current = fresh
+
+
+def _resume_publication_commit_pending(sid: str, sidecar_path: Path) -> bool:
+    """Fail-closed form of the F1/F2 predicate: a record guards without proof."""
+    from api.models import resume_publication_commit_pending
+
+    try:
+        return resume_publication_commit_pending(sid, canonical_path=sidecar_path)
+    except Exception:
+        logger.debug("Failed to read the Resume publication state for %s", sid, exc_info=True)
+        return True
+
+
+def _resume_publication_orphan_is_dead(sid: str) -> bool:
+    """Fail-closed form of "this record's publisher is gone" (F2)."""
+    from api.models import recovery_orphan_is_dead
+
+    try:
+        return recovery_orphan_is_dead(sid)
+    except Exception:
+        logger.debug("Failed to classify the Resume publication record for %s", sid, exc_info=True)
+        return False
+
+
+def _complete_orphaned_resume_publication_commit(
+    sid: str,
+    existing,
+    sidecar_path: Path,
+    *,
+    profile: str,
+    db_path: Path,
+    root_id: str,
+    tip_id: str,
+    source_row,
+    report,
+) -> bool:
+    """Finish an orphaned publisher's commit as the new exclusive owner (F2).
+
+    A publisher that died after linking its canonical (possibly after writing the
+    verified marker) leaves a ``publishing`` record its own process can no longer
+    retire, and ``recover_crashed_resume_publication`` must refuse it — the
+    marker alone is not commit-complete. A *new* exclusive owner therefore has to
+    actually finish the commit. It may only do so after revalidating, against the
+    live source store, everything the dead publisher would have validated last:
+
+      * the artifact is a committed-looking (verified, non-denied) sidecar;
+      * its stored resume identity is exactly this resume's identity;
+      * the source row and lineage report still match this request's snapshot.
+
+    Only then is the durable commit-complete proof written for THAT artifact and
+    the record retired (``complete_crashed_resume_publication_commit``, which
+    additionally refuses a live owner, a same-process record and a denial).
+    Returns ``True`` only when the id is verifiably unguarded afterwards.
+    """
+    if existing is None:
+        return False
+    if not _existing_sidecar_legacy_committed(existing):
+        return False
+    try:
+        if _resume_existing_sidecar_conflict(
+            existing,
+            sid=sid,
+            profile=profile,
+            db_path=db_path,
+            root_id=root_id,
+            tip_id=tip_id,
+        ):
+            return False
+    except Exception:
+        logger.debug("Failed to revalidate the Resume identity for %s", sid, exc_info=True)
+        return False
+    try:
+        fresh_row, fresh_report, fresh_messages = _read_resume_source_snapshot(
+            db_path, sid, profile
+        )
+    except Exception:
+        logger.debug("Failed to re-read the Resume source snapshot for %s", sid, exc_info=True)
+        return False
+    if fresh_row != source_row or fresh_report != report:
+        # The source moved (or its lineage changed) after this request resolved
+        # it: the orphaned publication can no longer claim to be this lineage's
+        # terminal artifact, so it stays guarded and fail-closed.
+        return False
+    if list(getattr(existing, "messages", []) or []) != fresh_messages:
+        # A dead publisher may have left a verified but stale artifact. Two
+        # snapshots read by this retry cannot establish that artifact's content.
+        return False
+    from api.models import complete_crashed_resume_publication_commit
+
+    return complete_crashed_resume_publication_commit(sid, canonical_path=sidecar_path)
+
+
+def _handle_session_resume_in_webui(handler, body):
+    """POST /api/session/resume_in_webui — explicit writable handoff.
+
+    Contract (body): ``{session_id, profile, lineage_root_id, lineage_tip_id,
+    confirm: true}``. See the module note above for the full gate list. Returns
+    the materialised (or already-owned) session projection.
+    """
+    if not isinstance(body, dict):
+        return bad(handler, "Request body must be a JSON object")
+
+    # Human confirmation is mandatory — this is the ONLY path that converts a
+    # foreign, read-only-projected session into a writable WebUI sidecar.
+    if body.get("confirm") is not True:
+        return bad(handler, "Resume requires confirm=true", 400)
+
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    if not is_safe_session_id(sid):
+        return bad(handler, "invalid session_id", 400)
+
+    # Validate the profile shape before the allowlist so a malformed name is a
+    # clean 400 (not a confusing 403), then fail closed on the operator gate.
+    profile = _normalize_import_profile_value(body.get("profile"))
+    if not profile:
+        return bad(handler, "invalid profile", 400)
+
+    lineage_root_id = str(body.get("lineage_root_id") or "").strip()
+    lineage_tip_id = str(body.get("lineage_tip_id") or "").strip()
+    if not lineage_root_id or not lineage_tip_id:
+        return bad(handler, "lineage_root_id and lineage_tip_id are required", 400)
+
+    allowed = _resume_in_webui_allowed_profiles()
+    if not allowed:
+        return bad(
+            handler,
+            "resume_in_webui is disabled; set HERMES_WEBUI_RESUME_ALLOW_PROFILES",
+            403,
+        )
+    if profile not in allowed:
+        return bad(handler, "profile is not allowed to resume in WebUI", 403)
+
+    # The requested profile must be the WebUI's current active profile: resuming
+    # a foreign profile's session while serving another profile would materialise
+    # a sidecar the user cannot actually use.
+    from api.profiles import get_active_profile_name, get_hermes_home_for_profile
+    if not _profiles_match(profile, get_active_profile_name()):
+        return bad(handler, "active profile does not match requested profile", 403)
+
+    # Resolve the exact ``<profile home>/state.db`` with no fallback. A missing
+    # DB is a hard 404 — never silently resolve the active profile's store.
+    try:
+        db_path = (Path(get_hermes_home_for_profile(profile)) / "state.db").resolve()
+    except (OSError, ValueError) as exc:
+        logger.exception("Failed to resolve source store for Resume in WebUI")
+        return bad(handler, _sanitize_error(exc), 500)
+    if not db_path.exists():
+        return bad(handler, "Session not found in source store", 404)
+
+    try:
+        source_row, report, messages = _read_resume_source_snapshot(db_path, sid, profile)
+    except (OSError, sqlite3.Error) as exc:
+        logger.exception("Failed to read source store for Resume in WebUI")
+        return bad(handler, _sanitize_error(exc), 500)
+    if source_row is None:
+        return bad(handler, "Session not found in source store", 404)
+
+    # Positive source allowlist: only sessions whose owning surface has
+    # demonstrably finished its own lifecycle may be taken over.
+    effective_source = (
+        str(source_row.get("source") or "").strip().lower()
+        or str(source_row.get("session_source") or "").strip().lower()
+    )
+    if effective_source not in _RESUME_IN_WEBUI_SOURCE_ALLOWLIST:
+        return bad(
+            handler,
+            f"source {effective_source or 'unknown'!r} is not resumable in WebUI",
+            403,
+        )
+
+    sidecar_path = SESSION_DIR / f"{sid}.json"
+    try:
+        existing = _load_resume_sidecar_nonmutating(sidecar_path) if sidecar_path.exists() else None
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Refusing Resume in WebUI over unreadable existing sidecar: %s", _sanitize_error(exc))
+        return bad(handler, "an unreadable WebUI sidecar already owns this session id", 409)
+
+    # F2 (Astra 94bfe8af): a canonical that a competing Resume has linked but
+    # not yet committed is PROVISIONAL. Never treat it as an owned writable
+    # sidecar (idempotent success) — wait briefly for the first publisher to
+    # commit, then fail closed.
+    #
+    # F1/F2 (candidate5): "committed" now means commit-complete, not merely
+    # marked verified: while the winner's durable publishing record is still
+    # present the winner is doing rejection-capable work (index reconciliation,
+    # final denial check) and this request must fail closed. Only a LIVE
+    # publisher is worth waiting for; a record stranded by a crashed publisher is
+    # resolved below by the exclusive recovery/commit-completion path, because
+    # waiting for a dead pid could only time out.
+    if existing is not None and (
+        not _existing_sidecar_legacy_committed(existing)
+        or _resume_publication_commit_pending(sid, sidecar_path)
+    ):
+        if not _resume_publication_orphan_is_dead(sid):
+            existing = _await_resume_publication_commit(existing, sidecar_path, sid)
+            if existing is None:
+                return bad(
+                    handler,
+                    "a Resume for this session is still being verified; refresh and retry",
+                    409,
+                )
+
+    # Concurrent-writer guard (B4): an unended source session may still be
+    # appended to by the process that owns it, so it is NEVER resumable — not
+    # even when WebUI already holds a matching writable sidecar from a previous
+    # explicit resume. A settled source can have been revived (``ended_at`` /
+    # ``end_reason`` cleared) after that sidecar was published, and the earlier
+    # "already owned" exemption then served an idempotent 200 over a source that
+    # is live again. The ended-source invariant is therefore checked BEFORE any
+    # idempotent success on every request: no project doc authoritatively grants
+    # an exemption from it.
+    ended_at = source_row.get("ended_at")
+    end_reason = str(source_row.get("end_reason") or "").strip()
+    if not ended_at and not end_reason:
+        return bad(
+            handler,
+            "source session appears active; refusing to resume a session "
+            "that may still be written by another process",
+            409,
+        )
+
+    # Lineage must match the client's exact root + tip so a stale sidebar entry
+    # cannot resume a session whose continuation chain moved under it.
+    if not report.get("found"):
+        return bad(handler, "Session not found in source store", 404)
+    if report.get("manual_review"):
+        return bad(
+            handler,
+            "lineage has a newer, branched, or ambiguous continuation; resume its current tip instead",
+            409,
+        )
+    if report.get("lineage_key") != lineage_root_id or report.get("tip_session_id") != lineage_tip_id:
+        return bad(handler, "lineage does not match the client's root/tip", 409)
+
+    if existing is not None:
+        conflict = _resume_existing_sidecar_conflict(
+            existing,
+            sid=sid,
+            profile=profile,
+            db_path=db_path,
+            root_id=lineage_root_id,
+            tip_id=lineage_tip_id,
+        )
+        if conflict:
+            return bad(handler, conflict, 409)
+        # B1: idempotent success is still publication authority. A live
+        # publication record for this id means an uncommitted (or denied)
+        # attempt owns it — including a marker-less artifact whose marker was
+        # lost by a failing publication — so this must not be served writable.
+        from api.models import (
+            is_resume_publication_denied as _is_denied,
+            recover_crashed_resume_publication as _recover,
+            resume_publication_authority_blocked as _authority_blocked,
+        )
+
+        # F3: a publisher that crashed after writing its durable ``publishing``
+        # record (but before retiring it) strands this id behind a record no
+        # attempt owns. A new exclusive owner — proven here by taking the
+        # cross-process ownership lock — may safely recover it, but ONLY when the
+        # canonical is absent or a COMMIT-COMPLETE publication. A durable denial
+        # is never cleared by recovery, so fail-closed admission is not weakened.
+        try:
+            _recover(sid)
+        except Exception:
+            logger.debug(
+                "Failed to recover a stranded Resume publication record for %s",
+                sid,
+                exc_info=True,
+            )
+
+        if _authority_blocked(sid) or _is_denied(sid):
+            # F2: recovery above deliberately refuses an orphan whose canonical
+            # carries only the verified marker — that marker is not
+            # commit-complete, and clearing its record would resurrect a
+            # publication that still had rejection-capable work outstanding when
+            # its publisher died. Such an orphan is instead *finished*: this
+            # request is the new exclusive owner, it has revalidated the resume
+            # identity and the source snapshot, and it writes the durable
+            # commit-complete proof for that exact artifact before retiring the
+            # record (which itself refuses a live owner, a same-process record
+            # and any denial).
+            completed = False
+            try:
+                completed = _complete_orphaned_resume_publication_commit(
+                    sid,
+                    existing,
+                    sidecar_path,
+                    profile=profile,
+                    db_path=db_path,
+                    root_id=lineage_root_id,
+                    tip_id=lineage_tip_id,
+                    source_row=source_row,
+                    report=report,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to complete an orphaned Resume publication for %s",
+                    sid,
+                    exc_info=True,
+                )
+            if not completed or _authority_blocked(sid) or _is_denied(sid):
+                return bad(
+                    handler,
+                    "a Resume for this session is still being published; refresh and retry",
+                    409,
+                )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "resumed": False,
+                "idempotent": True,
+                "session": public_session_projection(
+                    existing.compact()
+                    | {
+                        "messages": existing.messages,
+                        "is_cli_session": bool(getattr(existing, "is_cli_session", True)),
+                    }
+                ),
+            },
+        )
+
+    from api.agent_sessions import SOURCE_LABELS
+    title = str(source_row.get("title") or "").strip() or title_from(messages, "Resumed session")
+    model = str(source_row.get("model") or "").strip() or "unknown"
+    created_at = source_row.get("started_at")
+    updated_at = source_row.get("ended_at") or source_row.get("started_at")
+
+    recovered_after_publish_error = False
+    idempotent_after_race = False
+    staging_path = (
+        SESSION_DIR
+        / ".resume-staging"
+        / f"{sid}.{uuid.uuid4().hex}.json"
+    )
+    # D1: coordinate first ownership acquisition with every participating
+    # writer. The claim fails closed while an ordinary save for this id is
+    # already registered, and makes new saves for this id refuse while it is
+    # held; it never serializes ordinary saves against each other, so the #765
+    # lock-free same-session concurrent-save contract is preserved.
+    import api.models as _models_mod
+    from api.models import (
+        RESUME_PUBLICATION_PROVISIONAL,
+        _clear_webui_deleted_session_tombstone,
+        _clear_webui_zero_message_orphan_tombstone,
+        begin_resume_publication,
+        claim_session_for_resume,
+        clear_resume_publication_denial,
+        finish_resume_publication,
+        is_resume_publication_denied,
+        mark_resume_publication_commit_complete,
+        mark_resume_publication_verified,
+        release_session_claim,
+        resume_claim_ownership_token,
+        resume_store_ownership_conflict,
+    )
+    publication_record_retired = False
+    publication_authority_established = False
+    # F1: the durable attempt token is set when (and only when) this request takes
+    # the in-flight publication record. It is read by the broad post-link
+    # recovery, which Pyright cannot see is reached only after the assignment.
+    publication_attempt: str | None = None
+    # Q2/Q6: the claim's durable ownership token. It IS the publication attempt
+    # token (see ``begin_resume_publication``), and it makes this request's claim
+    # release attributable: a release that cannot be attributed must not close a
+    # live owner's descriptor.
+    claim_ownership_token: str | None = None
+    if not claim_session_for_resume(sid):
+        # B2: distinguish a cross-process ownership conflict from an ordinary
+        # in-process save so the operator sees which authority refused.
+        if resume_store_ownership_conflict(sid):
+            return bad(
+                handler,
+                "another Resume for this session is in flight in another process; refresh and retry",
+                409,
+            )
+        return bad(
+            handler,
+            "a save for this session is in flight; refresh and retry",
+            409,
+        )
+    try:
+        try:
+            # #765: no writer lock is taken anywhere on this path. Ordinary saves
+            # must stay free to race on their own ``.tmp.<pid>.<tid>`` files, so
+            # first publication is claimed atomically by
+            # ``publish_staged_session_sidecar`` (an exclusive ``os.link`` whose
+            # FileExistsError is reconciled below) instead of being serialized by
+            # ``session_file_write_lock``.
+            # Q2/Q6: record this request's ownership token the moment the claim is
+            # live. Everything below (attempt token, retirement, release) is
+            # attributable to it, so a stray or stale release can never drop the
+            # epoch's descriptor while an attempt still owns it.
+            claim_ownership_token = resume_claim_ownership_token(sid)
+            # Re-open one fresh read snapshot at the publication boundary. The
+            # first snapshot proves internal consistency; this second read
+            # detects any source-row, lineage, or transcript change that landed
+            # while the request was validating policy and sidecar ownership.
+            current_row, current_report, current_messages = _read_resume_source_snapshot(
+                db_path,
+                sid,
+                profile,
+            )
+            if (
+                current_row != source_row
+                or current_report != report
+                or current_messages != messages
+            ):
+                return bad(
+                    handler,
+                    "source session changed while Resume in WebUI was validating; refresh and retry",
+                    409,
+                )
+            try:
+                candidate = import_cli_session(
+                    sid,
+                    title,
+                    messages,
+                    model,
+                    profile=profile,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    parent_session_id=source_row.get("parent_session_id"),
+                    source_tag=effective_source,
+                    raw_source=effective_source,
+                    session_source=str(source_row.get("session_source") or effective_source),
+                    source_label=SOURCE_LABELS.get(effective_source, effective_source.upper()),
+                    read_only=False,
+                    resume_source_profile=profile,
+                    resume_source_state_db=str(db_path),
+                    resume_lineage_root_id=lineage_root_id,
+                    resume_lineage_tip_id=lineage_tip_id,
+                    workspace=source_row.get("cwd"),
+                    persist=False,
+                )
+                # F2/F3: the staged payload explicitly carries PROVISIONAL
+                # ownership. The canonical may be linked before final
+                # verification, but every reader / idempotency / index path
+                # requires the verified marker committed only after the final
+                # source re-read below succeeds.
+                candidate.resume_publication_state = RESUME_PUBLICATION_PROVISIONAL
+                staged = stage_session_sidecar(candidate, staging_path)
+                if (
+                    not _same_resume_identity(
+                        staged,
+                        sid=sid,
+                        profile=profile,
+                        db_path=db_path,
+                        root_id=lineage_root_id,
+                        tip_id=lineage_tip_id,
+                    )
+                    or list(getattr(staged, "messages", []) or []) != messages
+                    or bool(getattr(staged, "read_only", True))
+                ):
+                    raise RuntimeError("staged sidecar failed resume verification")
+                # B1: establish durable publication authority BEFORE the artifact
+                # can exist. If this fails, no canonical may be published at
+                # all — an artifact whose denial cannot be recorded durably must
+                # never be created, because a fresh lookup could then serve it
+                # and keep serving it after a restart. The record also makes the
+                # id fail closed by itself while the attempt is in flight or if
+                # this process dies mid-publication.
+                try:
+                    publication_attempt = begin_resume_publication(sid)
+                    publication_authority_established = True
+                except OSError as authority_exc:
+                    logger.error(
+                        "Refusing Resume in WebUI: durable publication authority "
+                        "could not be established: %s",
+                        _sanitize_error(authority_exc),
+                    )
+                    # Q7: the staged payload is already on disk (staged and
+                    # verified above), and nothing has been published, so without
+                    # this the refused request orphans a file in
+                    # ``.resume-staging`` for no reader — the same dead weight the
+                    # FileExistsError branch below discards.
+                    _discard_resume_staging_file(staging_path)
+                    return bad(
+                        handler,
+                        "could not establish durable Resume publication authority; "
+                        "refusing to publish",
+                        500,
+                    )
+                try:
+                    # The canonical path does not exist until this exclusive atomic
+                    # claim. Readers can observe either no writable sidecar or the
+                    # fully serialized, verified payload — never a partially written
+                    # or unverified window — and the claim is all-or-nothing against
+                    # a concurrent Resume request or a concurrent Session.save().
+                    publish_staged_session_sidecar(staged, staging_path)
+                except FileExistsError:
+                    _discard_resume_staging_file(staging_path)
+                    # Another writer won the claim for this id. F2: only a
+                    # COMMITTED (explicitly verified) winner may be reported as
+                    # an idempotent re-resume. While the winner is still
+                    # provisional, wait (bounded) for it to commit, then fail
+                    # closed instead of adopting an unverified artifact.
+                    try:
+                        published = (
+                            _load_resume_sidecar_nonmutating(sidecar_path)
+                            if sidecar_path.exists()
+                            else None
+                        )
+                    except Exception:
+                        return bad(
+                            handler,
+                            "an unreadable WebUI sidecar already owns this session id",
+                            409,
+                        )
+                    if published is None:
+                        return bad(
+                            handler,
+                            "an unreadable WebUI sidecar already owns this session id",
+                            409,
+                        )
+                    if not _existing_sidecar_legacy_committed(published):
+                        published = _await_resume_publication_commit(published, sidecar_path, sid)
+                        if published is None:
+                            return bad(
+                                handler,
+                                "a Resume for this session is still being verified; refresh and retry",
+                                409,
+                            )
+                    conflict = _resume_existing_sidecar_conflict(
+                        published,
+                        sid=sid,
+                        profile=profile,
+                        db_path=db_path,
+                        root_id=lineage_root_id,
+                        tip_id=lineage_tip_id,
+                    )
+                    if conflict:
+                        return bad(handler, conflict, 409)
+                    # Q1: a revocation that landed *inside this race window* (after
+                    # the legacy/committed pre-check and before this point) is not
+                    # a lost race to report as idempotent success. Check denial
+                    # first, as its own refusal: nothing is retired here — the
+                    # denial owns the record — and ``publication_record_retired``
+                    # therefore stays False, so the bookkeeping below cannot claim
+                    # a retirement that never happened.
+                    if is_resume_publication_denied(sid):
+                        return bad(
+                            handler,
+                            "a Resume for this session is still being published; refresh and retry",
+                            409,
+                        )
+                    # B1/B2: this attempt lost the exclusive claim race, so it
+                    # produced no artifact — but its own durable publication
+                    # record (written before the claim attempt) would otherwise
+                    # keep guarding an id whose winner has already committed.
+                    # Retire it and verify the id is genuinely unguarded before
+                    # reporting idempotent success.
+                    if not finish_resume_publication(sid, attempt=publication_attempt):
+                        return bad(
+                            handler,
+                            "a Resume for this session is still being published; refresh and retry",
+                            409,
+                        )
+                    publication_record_retired = True
+                    idempotent_after_race = True
+                    s = published
+                else:
+                    # Post-publish read-back: the canonical sidecar that is now
+                    # visible must round-trip to the exact verified identity we
+                    # measured. A load failure (for example malformed JSON) is a
+                    # verification failure, not a crash: it must not leave an
+                    # unverified artifact live or indexed.
+                    try:
+                        published = _load_resume_sidecar_nonmutating(sidecar_path)
+                    except Exception:
+                        published = None
+                    verified = (
+                        published is not None
+                        and _same_resume_identity(
+                            published,
+                            sid=sid,
+                            profile=profile,
+                            db_path=db_path,
+                            root_id=lineage_root_id,
+                            tip_id=lineage_tip_id,
+                        )
+                        and list(getattr(published, "messages", []) or []) == messages
+                    )
+                    if verified:
+                        # D2: re-open the source one last time AFTER publication.
+                        # The pre-publication snapshot ends before staging and
+                        # publish, so a source writer can still revive the row in
+                        # that window. Fail closed and quarantine the freshly
+                        # published artifact when the source moved, rather than
+                        # returning 200 over stale read-only projection.
+                        try:
+                            final_row, final_report, final_messages = _read_resume_source_snapshot(
+                                db_path,
+                                sid,
+                                profile,
+                            )
+                        except Exception as exc:
+                            # Any inability to re-read the source is treated as
+                            # "the source may have moved": fail closed.
+                            logger.warning(
+                                "Failed to re-read source store after Resume publication: %s",
+                                _sanitize_error(exc),
+                            )
+                            verified = False
+                        else:
+                            verified = (
+                                final_row == source_row
+                                and final_report == report
+                                and final_messages == messages
+                            )
+                    if not verified:
+                        # F1 (Astra 94bfe8af): final-verification failure is
+                        # TERMINAL. Deny the id first (durably, best effort) and
+                        # move the untrusted canonical out of the live
+                        # namespace; the rejection raised here is never turned
+                        # back into a success, even if the move itself failed.
+                        _quarantine_resume_sidecar(
+                            sidecar_path, sid, attempt=publication_attempt
+                        )
+                        raise _ResumePublicationRejected(
+                            "published sidecar failed post-publish verification"
+                        )
+                    # COMMIT: explicit verified ownership marker. Only after
+                    # this point may the session be served writable or
+                    # advertised by the sidebar/index.
+                    verified_session = mark_resume_publication_verified(published)
+                    # F3: the denial clear is authority-gated and returns whether
+                    # the denial is *verifiably* gone; a denial that survives
+                    # means this publication is still refused (a newer,
+                    # concurrent revocation outranks it), so it must not be
+                    # reported as success. The clear runs while this attempt
+                    # still holds the in-flight record — that record is its
+                    # proof of authority.
+                    denial_cleared = clear_resume_publication_denial(
+                        sid, attempt=publication_attempt
+                    )
+                    # F1: the durable publication record is this attempt's
+                    # authority and MUST outlive index reconciliation AND the
+                    # final authority check below. It is retired LAST (see the
+                    # commit block after the final check); retiring it early left
+                    # a committed artifact with no durable guard, so a
+                    # post-commit rejection could neither deny nor quarantine it
+                    # and it stayed served writable.
+                    try:
+                        # Route the index write through the models module
+                        # attribute (not the import-time alias) so an
+                        # index I/O fault is observable/attributable at the
+                        # same seam ordinary saves and the audit probes use.
+                        _models_mod._write_session_index(updates=[verified_session])
+                        if list(getattr(verified_session, "messages", []) or []):
+                            _clear_webui_zero_message_orphan_tombstone(sid)
+                            _clear_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        # An index/tombstone side effect failed AFTER the
+                        # verified commit. Do NOT silently adopt it: re-validate
+                        # that the explicit verified artifact is still intact
+                        # and the denial state is absent, and otherwise treat the
+                        # publication as terminally rejected (F1). This artifact
+                        # is THIS attempt's own commit, so the rejection is
+                        # forced: the committed-publication protection must never
+                        # block quarantining our own failing commit.
+                        logger.warning(
+                            "Failed to reconcile index after verified Resume publication",
+                            exc_info=True,
+                        )
+                        still = None
+                        try:
+                            still = (
+                                _load_resume_sidecar_nonmutating(sidecar_path)
+                                if sidecar_path.exists()
+                                else None
+                            )
+                        except Exception:
+                            still = None
+                        if not (
+                            still is not None
+                            and _resume_attempt_publication_verified(still)
+                            and _same_resume_identity(
+                                still,
+                                sid=sid,
+                                profile=profile,
+                                db_path=db_path,
+                                root_id=lineage_root_id,
+                                tip_id=lineage_tip_id,
+                            )
+                            and list(getattr(still, "messages", []) or []) == messages
+                        ):
+                            _quarantine_resume_sidecar(
+                                sidecar_path,
+                                sid,
+                                attempt=publication_attempt,
+                                force=True,
+                            )
+                            raise _ResumePublicationRejected(
+                                "published sidecar failed post-publish verification"
+                            ) from None
+                    # F3: verify publication authority one last time BEFORE the
+                    # response. A denial that is still recorded (or that a
+                    # concurrent revocation landed after the clear) means this
+                    # artifact is not servable, so the request must fail closed
+                    # instead of returning 200 over an artifact every lookup
+                    # will refuse. The artifact is ours (this attempt committed
+                    # the verified marker), so revoking it is legitimate.
+                    if not denial_cleared or is_resume_publication_denied(sid):
+                        _quarantine_resume_sidecar(
+                            sidecar_path,
+                            sid,
+                            attempt=publication_attempt,
+                            force=True,
+                        )
+                        raise _ResumePublicationRejected(
+                            "Resume publication denial could not be cleared; "
+                            "refusing to report success"
+                        )
+                    # B1/F3: the verified marker is a COMMIT only once the durable
+                    # publication record is retired — and that happens
+                    # LAST, only after the index reconciled and the final
+                    # authority check passed, so this attempt's authority guards
+                    # the id for the whole window between the verified commit and
+                    # the response. While the record survives, every lookup
+                    # refuses the artifact, so a failed retire must never report
+                    # success. The retire itself is this attempt's own action on
+                    # its own record; a rejection here force-quarantines the
+                    # artifact this attempt committed.
+                    #
+                    # F1/F2: the retire is gated on the durable
+                    # commit-complete proof, which is written HERE — after index
+                    # reconciliation and after the final denial check, the last
+                    # rejection-capable steps — and binds this exact artifact.
+                    # Without it the marker alone would claim "committed" while
+                    # this attempt could still reject the publication, which is
+                    # exactly what let a same-epoch sibling unlink this record
+                    # mid-commit (F1) and a restart resurrect the artifact (F2).
+                    if not mark_resume_publication_commit_complete(
+                        sid,
+                        attempt=publication_attempt,
+                        canonical_path=sidecar_path,
+                    ):
+                        _quarantine_resume_sidecar(
+                            sidecar_path,
+                            sid,
+                            attempt=publication_attempt,
+                            force=True,
+                        )
+                        raise _ResumePublicationRejected(
+                            "could not record the durable Resume commit-complete proof"
+                        )
+                    if not finish_resume_publication(sid, attempt=publication_attempt):
+                        _quarantine_resume_sidecar(
+                            sidecar_path,
+                            sid,
+                            attempt=publication_attempt,
+                            force=True,
+                        )
+                        raise _ResumePublicationRejected(
+                            "could not complete the durable Resume publication commit"
+                        )
+                    publication_record_retired = True
+                    s = verified_session
+            except _ResumePublicationRejected:
+                # Terminal: the canonical was already denied + quarantined.
+                # Never fall into the broad recovery below.
+                raise
+            except Exception as persist_exc:
+                _discard_resume_staging_file(staging_path)
+                # F1 (Astra 94bfe8af): recovery over a post-link error is
+                # allowed ONLY when the canonical carries the explicit verified
+                # marker AND reproduces the exact resume identity — i.e. final
+                # verification already succeeded. A provisional, denied,
+                # unreadable, or mismatched artifact is never adopted; it is
+                # made inaccessible (denial first) and the error re-raised.
+                # The resume claim (held for this whole block) makes ordinary
+                # saves for this id refuse, so any canonical that appeared here
+                # is attributable to this publication or a competing Resume.
+                try:
+                    recovered = (
+                        _load_resume_sidecar_nonmutating(sidecar_path)
+                        if sidecar_path.exists()
+                        else None
+                    )
+                except Exception:
+                    recovered = None
+                if (
+                    recovered is not None
+                    and _resume_attempt_publication_verified(recovered)
+                    and _same_resume_identity(
+                        recovered,
+                        sid=sid,
+                        profile=profile,
+                        db_path=db_path,
+                        root_id=lineage_root_id,
+                        tip_id=lineage_tip_id,
+                    )
+                    and list(getattr(recovered, "messages", []) or []) == messages
+                ):
+                    s = recovered
+                    recovered_after_publish_error = True
+                else:
+                    if sidecar_path.exists() or recovered is not None:
+                        # F1: this branch won the exclusive ``os.link``, so any
+                        # canonical here is THIS attempt's own artifact. Force the
+                        # quarantine: the committed-publication protection must
+                        # never block revoking our own failing commit, and a
+                        # transient readback failure (recovered=None) must not
+                        # skip the durable denial.
+                        _quarantine_resume_sidecar(
+                            sidecar_path,
+                            sid,
+                            attempt=publication_attempt,
+                            force=True,
+                        )
+                    raise persist_exc
+        except _ResumePublicationRejected as rejected_exc:
+            logger.error(
+                "Resume in WebUI publication rejected: %s",
+                _sanitize_error(rejected_exc),
+            )
+            return bad(handler, _sanitize_error(rejected_exc), 500)
+        except Exception as exc:
+            logger.exception("Failed to persist Resume in WebUI sidecar")
+            return bad(handler, _sanitize_error(exc), 500)
+    finally:
+        # B1 bookkeeping: a publication record must not outlive an attempt that
+        # neither published nor denied anything. If this attempt created no
+        # canonical and recorded no denial, retire its record so an unrelated
+        # refusal (for example "source changed while validating") cannot
+        # permanently guard the id. A live artifact or a recorded denial keeps
+        # its record: that IS the durable fail-closed state.
+        #
+        # F1 (candidate5): this abort is only safe while no sibling Resume is in
+        # flight. Same-epoch siblings share ONE durable record, so without the
+        # exclusivity proof below a sibling that aborts mid-flight (no canonical
+        # *yet*) could drop the record the other sibling is about to publish
+        # under — exactly the guard the winner's commit-complete transition
+        # depends on. The in-process claim registry is the authority: this
+        # request must still be the only live claim, and it must be its own.
+        try:
+            if (
+                publication_authority_established
+                and not publication_record_retired
+                and not sidecar_path.exists()
+                and not is_resume_publication_denied(sid)
+            ):
+                from api.models import (
+                    close_resume_abort_retirement,
+                    open_resume_abort_retirement,
+                )
+
+                if not open_resume_abort_retirement(
+                    sid, ownership_token=claim_ownership_token
+                ):
+                    logger.debug(
+                        "Leaving the Resume publication record for %s: another "
+                        "claim for this id is still in flight",
+                        sid,
+                    )
+                else:
+                    try:
+                        # Keep admissions closed until this attempt's durable
+                        # guard has been retired.
+                        finish_resume_publication(sid, attempt=publication_attempt)
+                    finally:
+                        close_resume_abort_retirement(
+                            sid, ownership_token=claim_ownership_token
+                        )
+        except Exception:
+            logger.debug("Failed to retire a stray Resume publication record", exc_info=True)
+        # Q6: release with the token this request captured from the claim, so an
+        # extra or stale release can never close the live epoch's descriptor.
+        # A missing token is refused rather than guessing another claim's owner.
+        release_session_claim(sid, ownership_token=claim_ownership_token)
+    assert s is not None
+    _publish_session_list_changed(
+        "session_resume_in_webui_reconciled" if recovered_after_publish_error else "session_resume_in_webui",
+        profile=profile,
+        session_id=sid,
+    )
+    return j(
+        handler,
+        {
+            "ok": True,
+            "resumed": not idempotent_after_race,
+            "idempotent": idempotent_after_race,
+            "session": public_session_projection(
+                s.compact()
+                | {
+                    "messages": list(getattr(s, "messages", None) or messages),
+                    "is_cli_session": True,
+                }
+            ),
+        },
+    )
+
+
 def _handle_session_import(handler, body):
     """Import a session from a JSON export. Creates a new session with a new ID."""
     if not body or not isinstance(body, dict):
@@ -29270,7 +30645,7 @@ def _handle_session_import(handler, body):
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    _evict_sessions_over_cap()  # #4765: persistence probes stay outside LOCK
     s.save()
     publish_session_list_changed("session_import")
     return j(

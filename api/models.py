@@ -5,6 +5,7 @@ import copy
 import datetime
 import hashlib
 import inspect
+import itertools
 import json
 import logging
 import math
@@ -13,7 +14,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, overload
@@ -208,6 +209,2242 @@ _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK = threading.Lock()
 _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# #765-preserving first-ownership gate (D1)
+# ---------------------------------------------------------------------------
+# Resume-in-WebUI publishes a canonical sidecar with an exclusive ``os.link``
+# claim. That claim is atomic against a *second* Resume, but an ordinary
+# ``Session.save()`` that already passed its ownership check can still reach
+# ``os.replace`` afterwards and clobber the freshly claimed artifact. The gate
+# below coordinates first ownership acquisition across every participating
+# writer WITHOUT reintroducing the process-global or per-session serialization
+# lock the #765 contract forbids:
+#
+#   * ``begin_session_save`` / ``end_session_save`` bracket one ordinary save.
+#     Each save holds a shared kernel lock through its final ``os.replace``;
+#     concurrent saves remain admitted, while a Resume's exclusive lock is
+#     fenced across processes. The registry lock is held only for momentary
+#     counter updates, never across sidecar disk I/O.
+#   * Resume refuses (409) while any ordinary writer for that id is active, so
+#     it never races a save that was admitted before the claim.
+#   * Once a Resume claim is active, new saves for that id refuse rather than
+#     queue, so the claim can never be overwritten mid-publication.
+#   * The persistent resume-identity guard in ``_write_sidecar_unlocked``
+#     remains the backstop that blocks a stale writer whose in-process
+#     registration lapsed (for example across a process restart).
+#
+# Nothing here serializes unrelated ids. The *first* concurrent claim for
+# an id marks an in-flight acquisition under the registry lock, releases it for
+# durable cross-process ownership I/O, then re-enters it to publish the fd after
+# revalidating the in-memory state. Same-id siblings wait on that in-flight
+# acquisition; unrelated ids never wait for its filesystem work (B2/Q5).
+_SESSION_CLAIM_LOCK = threading.Lock()
+_SESSION_CLAIM_STATE: dict[str, dict] = {}
+_SESSION_SAVE_FDS: dict[tuple[int, str], list[int]] = {}
+# Q5: how long a sibling claim waits for an in-flight durable ownership
+# acquisition of the same id before re-examining the registry. The acquisition
+# is a local mkdir/open/flock/ftruncate/write/fsync, so this is only reached on a
+# stalled filesystem; the wait re-loops rather than failing closed, because the
+# epoch the stalled acquisition publishes is the one every sibling joins.
+_RESUME_CLAIM_ACQUIRE_TIMEOUT = 30.0
+
+# ---------------------------------------------------------------------------
+# B2 — cross-process publication ownership + durable publication ledger
+# ---------------------------------------------------------------------------
+# The in-process claim registry above only coordinates threads in ONE process.
+# Two WebUI processes sharing the same session store could otherwise interleave
+# a stale publisher with a newer denial (a stale verified save outrunning or
+# erasing a revocation). The durable directory below carries the enforceable
+# cross-process ownership record; the ledger carries per-attempt publication
+# authority that survives a restart.
+RESUME_PUBLISH_LOCK_DIRNAME = ".resume-publish"
+RESUME_LEDGER_LOCK_DIRNAME = ".resume-ledger-locks"
+
+
+def _windows_lock_file_fd(fd, *, exclusive: bool) -> bool:  # pragma: no cover - native Windows
+    """Take a non-blocking shared/exclusive byte-range lock with LockFileEx."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_size_t),
+                ("InternalHigh", ctypes.c_size_t),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
+            return False
+        kernel32 = win_dll("kernel32", use_last_error=True)
+        lock_file_ex = kernel32.LockFileEx
+        lock_file_ex.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_Overlapped),
+        ]
+        lock_file_ex.restype = wintypes.BOOL
+        handle = _msvcrt.get_osfhandle(fd)  # type: ignore[union-attr]
+        if handle == -1:
+            return False
+        flags = 0x00000001  # LOCKFILE_FAIL_IMMEDIATELY
+        if exclusive:
+            flags |= 0x00000002  # LOCKFILE_EXCLUSIVE_LOCK
+        overlapped = _Overlapped()
+        return bool(lock_file_ex(
+            wintypes.HANDLE(handle), flags, 0, 1, 0, ctypes.byref(overlapped)
+        ))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _windows_unlock_file_fd(fd) -> None:  # pragma: no cover - native Windows
+    """Release the LockFileEx range used by the Resume/save fence."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_size_t),
+                ("InternalHigh", ctypes.c_size_t),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
+            return
+        kernel32 = win_dll("kernel32", use_last_error=True)
+        unlock_file_ex = kernel32.UnlockFileEx
+        unlock_file_ex.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_Overlapped),
+        ]
+        unlock_file_ex.restype = wintypes.BOOL
+        handle = _msvcrt.get_osfhandle(fd)  # type: ignore[union-attr]
+        if handle != -1:
+            overlapped = _Overlapped()
+            unlock_file_ex(
+                wintypes.HANDLE(handle), 0, 1, 0, ctypes.byref(overlapped)
+            )
+    except (AttributeError, OSError, ValueError):
+        logger.debug("Failed to unlock Windows Resume ownership fd", exc_info=True)
+
+
+def _flock_resume_lock_fd(fd) -> bool:
+    """Take a NON-blocking exclusive kernel lock on *fd*; ``False`` if held.
+
+    F2/F3: the kernel lock is the cross-process mutual exclusion primitive. It
+    is tied to the open file description, so it is released automatically when
+    the holder exits or crashes — which is why a stale lock can never be
+    mistaken for a live owner, and why PID reuse is irrelevant. If no such
+    primitive exists we fail closed (``False``) rather than pretend exclusion.
+    """
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    if _msvcrt is not None:  # pragma: no cover - native Windows
+        return _windows_lock_file_fd(fd, exclusive=True)
+    return False
+
+
+def _unlock_resume_lock_fd(fd) -> None:
+    """Release the kernel lock held on *fd* (best effort)."""
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_UN)
+        except OSError:
+            logger.debug("Failed to unlock Resume ownership fd", exc_info=True)
+        return
+    if _msvcrt is not None:  # pragma: no cover - native Windows
+        _windows_unlock_file_fd(fd)
+
+
+def _flock_session_save_fd(fd) -> bool:
+    """Take a non-blocking shared save fence; fail closed if unavailable."""
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_SH | _fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    if _msvcrt is not None:  # pragma: no cover - native Windows
+        return _windows_lock_file_fd(fd, exclusive=False)
+    return False
+
+
+def _open_resume_lock_fd(path: Path) -> int | None:
+    """Open (creating) the stable lock file; ``None`` on any failure (fail closed)."""
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        return os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return None
+
+
+def resume_ledger_lock_path(sid, *, session_dir: "Path | None" = None) -> Path:
+    """Stable cross-process transaction lock for one Resume authority record."""
+    return _resume_store_root(session_dir) / RESUME_LEDGER_LOCK_DIRNAME / f"{sid}.lock"
+
+
+@contextmanager
+def _resume_ledger_transaction(sid, *, session_dir: "Path | None" = None):
+    """Serialize one id's denial/ledger mutation across processes.
+
+    This is distinct from the long-lived publication ownership lock. A
+    publisher holds ownership for the request but takes this lock only while it
+    validates and mutates the two durable authority channels. The stable lock
+    file is never unlinked, so every process fences on the same inode and a
+    crash releases the lock. ``False`` means exclusion could not be established
+    and the caller must fail closed.
+    """
+    sid = str(sid or "")
+    fd = _open_resume_lock_fd(resume_ledger_lock_path(sid, session_dir=session_dir))
+    locked = False
+    try:
+        if fd is not None and _fcntl is not None:
+            _fcntl.flock(fd, _fcntl.LOCK_EX)
+            locked = True
+        elif fd is not None and _msvcrt is not None:  # pragma: no cover - native Windows
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            _msvcrt.locking(fd, _msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+            locked = True
+    except OSError:
+        locked = False
+    try:
+        yield locked
+    finally:
+        if locked:
+            _unlock_resume_lock_fd(fd)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                logger.debug("Failed to close Resume ledger transaction lock", exc_info=True)
+
+
+def _annotate_resume_ownership_fd(fd, payload: dict) -> None:
+    """Best-effort operator annotation inside the lock file. Never releases the lock.
+
+    The held kernel lock — not these bytes — is the authority, so a failure here
+    is diagnostic only and must never be read as "not owned".
+    """
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, data)
+        os.fsync(fd)
+    except OSError:
+        logger.debug("Failed to annotate Resume ownership lock record", exc_info=True)
+
+
+def resume_store_ownership_conflict(sid, *, session_dir: "Path | None" = None) -> bool:
+    """True when a live owner currently holds the exclusive Resume lock for *sid*.
+
+    F2/F3: liveness is a *held kernel lock*, never a pid heuristic. A leftover
+    lock file from a crashed process (or one whose pid was recycled) is not a
+    conflict, because the kernel already released that process's lock.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    path = resume_publish_lock_path(sid, session_dir=session_dir)
+    if not path.exists():
+        return False
+    fd = _open_resume_lock_fd(path)
+    if fd is None:
+        # Cannot even open the lock file: fail closed and treat it as held.
+        return True
+    try:
+        return not _flock_resume_lock_fd(fd)
+    finally:
+        _unlock_resume_lock_fd(fd)
+        try:
+            os.close(fd)
+        except OSError:  # pragma: no cover - defensive
+            pass
+
+
+def begin_session_save(sid) -> bool:
+    """Register and durably fence an ordinary canonical save for *sid*.
+
+    Returns ``False`` (a fail-closed refusal) when a Resume claim currently owns
+    the id in this or another process. Concurrent ordinary saves of the same id
+    are admitted on POSIX via shared locks.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return True
+    if not is_safe_session_id(sid):
+        raise ValueError(
+            f"Unsafe session_id {sid!r}; refusing to create a save fence outside session store"
+        )
+    fd = _open_resume_lock_fd(resume_publish_lock_path(sid))
+    if fd is None or not _flock_session_save_fd(fd):
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return False
+    with _SESSION_CLAIM_LOCK:
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if state is None:
+            state = {"writers": 0, "claims": 0, "acquiring": False}
+            _SESSION_CLAIM_STATE[sid] = state
+        if int(state.get("claims", 0)) > 0 or state.get("acquiring"):
+            _unlock_resume_lock_fd(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return False
+        state["writers"] = int(state.get("writers", 0)) + 1
+        key = (threading.get_ident(), sid)
+        _SESSION_SAVE_FDS.setdefault(key, []).append(fd)
+        return True
+
+
+def end_session_save(sid) -> None:
+    """Release the ordinary-save registration and durable fence."""
+    sid = str(sid or "")
+    if not sid:
+        return
+    fd = None
+    with _SESSION_CLAIM_LOCK:
+        key = (threading.get_ident(), sid)
+        stack = _SESSION_SAVE_FDS.get(key)
+        if stack:
+            fd = stack.pop()
+            if not stack:
+                _SESSION_SAVE_FDS.pop(key, None)
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if state is not None:
+            state["writers"] = max(0, int(state.get("writers", 0)) - 1)
+            if (
+                int(state.get("writers", 0)) == 0
+                and int(state.get("claims", 0)) == 0
+                and not state.get("acquiring")
+            ):
+                _SESSION_CLAIM_STATE.pop(sid, None)
+    if fd is not None:
+        _unlock_resume_lock_fd(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            logger.debug("Failed to close ordinary session-save fence", exc_info=True)
+
+
+def _resume_store_root(session_dir: "Path | None" = None) -> Path:
+    """The session-store directory a Resume helper operates in."""
+    return Path(session_dir) if session_dir is not None else Path(SESSION_DIR)
+
+
+def resume_publish_lock_dir(session_dir: "Path | None" = None) -> Path:
+    return _resume_store_root(session_dir) / RESUME_PUBLISH_LOCK_DIRNAME
+
+
+def resume_publish_lock_path(sid, *, session_dir: "Path | None" = None) -> Path:
+    return resume_publish_lock_dir(session_dir) / f"{sid}.lock"
+
+
+def _acquire_resume_store_ownership(sid, *, session_dir: "Path | None" = None, token=None):
+    """Take enforceable, cross-process exclusive ownership of *sid*'s publication.
+
+    F2/F3: ownership is a *held* non-blocking ``flock`` on a stable, never
+    unlinked lock file. Because the kernel drops the lock when the holder exits
+    or crashes, a dead publisher can never strand the id, and there is no
+    check-then-unlink window in which two processes could both believe they own
+    it. Returns the held descriptor while the lock is held, or ``None`` when a
+    live owner holds it (the caller must then fail closed, not publish).
+    """
+    sid = str(sid or "")
+    if not sid:
+        return None
+    path = resume_publish_lock_path(sid, session_dir=session_dir)
+    fd = _open_resume_lock_fd(path)
+    if fd is None:
+        return None
+    if not _flock_resume_lock_fd(fd):
+        try:
+            os.close(fd)
+        except OSError:  # pragma: no cover - defensive
+            pass
+        return None
+    _annotate_resume_ownership_fd(fd, {
+        "session_id": sid,
+        "token": str(token) if token else uuid.uuid4().hex,
+        "pid": os.getpid(),
+        "claimed_at": time.time(),
+    })
+    return fd
+
+
+def _release_resume_store_ownership(sid, fd) -> None:
+    """Release ownership taken by ``_acquire_resume_store_ownership``.
+
+    Only the held descriptor is unlocked and closed. The lock file is
+    deliberately left in place so every later acquirer opens the same inode;
+    unlinking it while another process waits would split later callers across
+    different inodes and defeat the lock.
+
+    Q7: no ``session_dir`` parameter. The store root is only needed to *find*
+    the lock file; releasing holds the descriptor itself, which already names
+    the inode to unlock. Threading an unused store root through here is exactly
+    the asymmetry that invites drift, so it takes none.
+    """
+    if fd is None:
+        return
+    _unlock_resume_lock_fd(fd)
+    try:
+        os.close(fd)
+    except OSError:
+        logger.debug("Failed to close Resume ownership lock for %s", sid, exc_info=True)
+
+
+def _resume_publication_retirable(sid, *, session_dir: "Path | None" = None) -> bool:
+    """True when *sid*'s canonical no longer needs its publication record.
+
+    Two — and only two — states qualify:
+
+      * NO canonical exists: the attempt published nothing, so its record is
+        pure guard-keeping and retiring it (by its owner) cannot expose an
+        artifact;
+      * the canonical carries the durable COMMIT-COMPLETE proof for that exact
+        artifact: the publication finished its rejection-capable work (index
+        reconciliation and the final denial check) and is safe to serve.
+
+    Fail-closed on everything else. In particular an artifact carrying only the
+    explicit ``verified`` marker is NOT retirable: ``verified`` proves the
+    attempt verified its own bytes, not that the publication is committed, so
+    clearing the record there would (F1) drop a sibling's guard mid-commit and
+    (F2) let a fresh process resurrect a terminally rejectable publication.
+    """
+    path = _resume_store_root(session_dir) / f"{sid}.json"
+    if _resume_canonical_artifact_signature(path) is None:
+        # Nothing is published under this name (this is also the fail-closed
+        # answer for an undescribable path — see the callers).
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+    return resume_publication_commit_complete(
+        sid, canonical_path=path, session_dir=session_dir
+    )
+
+
+def recover_crashed_resume_publication(sid, *, session_dir: "Path | None" = None) -> bool:
+    """Recover a stranded publishing record under cross-process exclusion."""
+    sid = str(sid or "")
+    if not sid:
+        return False
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            return False
+        return _recover_crashed_resume_publication_locked(sid, session_dir=session_dir)
+
+
+def _recover_crashed_resume_publication_locked(
+    sid, *, session_dir: "Path | None" = None
+) -> bool:
+    """Clear a crashed attempt's stranded ``publishing`` record for *sid*.
+
+    F3: a publisher that dies after writing its durable ``publishing`` record
+    (and before retiring it) strands the id behind a record no attempt owns.
+    Recovery is allowed ONLY when every one of these holds, so fail-closed
+    admission is never weakened:
+
+      * the record is ``publishing`` — a durable DENIAL is never cleared here;
+      * no live process holds the exclusive kernel lock (a held ``flock`` proves
+        a live owner is mid-publication, so its record is not stale);
+      * the record was written by a different process, so a same-process sibling
+        attempt still in flight is never clobbered;
+      * the canonical is absent or an explicitly verified, committed
+        publication — a provisional or marker-less artifact stays guarded.
+
+    Returns ``True`` only once the record is verifiably gone.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("state") != RESUME_LEDGER_PUBLISHING:
+        return False
+    # A durable DENIAL is never cleared here — including the tombstone-only case
+    # where the ledger record itself was not replaced (both-channel failure).
+    if is_resume_publication_denied(sid, session_dir=session_dir):
+        return False
+    try:
+        record_pid = int(entry.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if record_pid == os.getpid():
+        return False
+    if resume_store_ownership_conflict(sid, session_dir=session_dir):
+        return False
+    if not _resume_publication_retirable(sid, session_dir=session_dir):
+        return False
+    path = resume_ledger_path(sid, session_dir=session_dir)
+    try:
+        path.unlink(missing_ok=True)
+        _fsync_resume_dir(path.parent)
+    except OSError:
+        logger.debug(
+            "Failed to recover stranded Resume publication record for %s",
+            sid,
+            exc_info=True,
+        )
+        return False
+    return not _resume_ledger_record_present(sid, session_dir=session_dir)
+
+
+def claim_session_for_resume(sid, *, session_dir: "Path | None" = None) -> bool:
+    """Claim exclusive Resume ownership of *sid*.
+
+    Fail-closed: refuses (returns ``False``) while any ordinary writer is active
+    so a Resume can never race a save that was already admitted. Multiple
+    concurrent Resume requests *in this process* may hold the claim
+    simultaneously (each is reconciled at the atomic ``os.link`` publication);
+    the claim only needs to block ordinary saves. Across processes the claim
+    additionally takes a durable, enforceable exclusive ownership record so two
+    processes can never publish/deny the same id in an interleaved order (B2).
+
+    Q5: the durable ownership record — directory ``mkdir``, ``os.open``,
+    ``flock``, ``ftruncate``, the record write and its ``fsync`` — is taken
+    *outside* ``_SESSION_CLAIM_LOCK``. That lock is process-global, so holding it
+    across a stalled filesystem (AV scanner, NFS, full disk) used to stall
+    ``begin_session_save``/``end_session_save`` for *every* id in the process: a
+    divergence from the #765 "a slow fsync must never stall another
+    conversation's save" contract that this module is careful to honour
+    everywhere else. Exclusion is preserved without it:
+
+      * the acquisition flag below makes sibling claims for the SAME id wait for
+        the in-flight acquisition instead of racing it. Two descriptors on one
+        lock file are genuinely independent to ``flock(2)`` even within a single
+        process, so a sibling that raced would be refused by our own descriptor
+        and mistaken for a foreign owner;
+      * ``begin_session_save`` refuses an id that is mid-acquisition, and
+      * the counters are re-checked under the lock before the descriptor is
+        published, so a writer admitted in the window still fails the claim
+        closed.
+
+    ``session_dir`` selects the store the durable record lives in — the same
+    knob every other Resume helper here takes (``resume_store_ownership_conflict``,
+    ``resume_ledger_path``, ...). The *in-process* registry stays keyed by
+    session id alone and is deliberately store-agnostic: ordinary saves
+    (``begin_session_save``) are keyed by id alone and the WebUI sidecar store is
+    flat, so a store-scoped registry could only under-exclude. Callers that pass
+    a non-default store share the in-process exclusion with the default store
+    while the cross-process record stays store-scoped; the resume route always
+    uses the default store, so the two agree in production.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    while True:
+        waiter = None
+        with _SESSION_CLAIM_LOCK:
+            state = _SESSION_CLAIM_STATE.get(sid)
+            if state is None:
+                state = {"writers": 0, "claims": 0, "acquiring": False}
+                _SESSION_CLAIM_STATE[sid] = state
+            if int(state.get("writers", 0)) > 0:
+                return False
+            claims = int(state.get("claims", 0))
+            if claims > 0:
+                if state.get("retiring"):
+                    # A sole-owner abort is retiring this epoch's durable guard.
+                    return False
+                # An ownership epoch is live: this request joins it. An epoch
+                # always has an owner (its creator holds the descriptor), so
+                # there is nothing to acquire.
+                claim_token = uuid.uuid4().hex
+                state.setdefault("claim_tokens", set()).add(claim_token)
+                state.setdefault("claim_tokens_by_thread", {}).setdefault(
+                    threading.get_ident(), []
+                ).append(claim_token)
+                state["claims"] = claims + 1
+                return True
+            if state.get("acquiring"):
+                waiter = state.get("acquired")
+                if waiter is None:
+                    waiter = threading.Event()
+                    state["acquired"] = waiter
+            else:
+                state["acquiring"] = True
+                break
+        # Wait for the in-flight acquisition and re-examine the registry. A
+        # stalled acquisition re-loops rather than failing: the epoch it
+        # publishes is the one every sibling joins.
+        if not waiter.wait(_RESUME_CLAIM_ACQUIRE_TIMEOUT):
+            logger.warning(
+                "Timed out waiting for the in-flight Resume ownership "
+                "acquisition of %s; retrying",
+                sid,
+            )
+
+    token = uuid.uuid4().hex
+    fd = _acquire_resume_store_ownership(sid, session_dir=session_dir, token=token)
+    stale_fd = None
+    try:
+        with _SESSION_CLAIM_LOCK:
+            state = _SESSION_CLAIM_STATE.get(sid)
+            if fd is None or state is None or not state.get("acquiring"):
+                # ``fd is None``: a live owner (in this process or another)
+                # holds the durable record. Fail closed rather than publish an
+                # ownership descriptor the registry does not account for.
+                stale_fd = fd
+                if state is not None and state.get("acquiring"):
+                    _finish_resume_acquisition_locked(state, sid)
+                return False
+            if int(state.get("writers", 0)) > 0:
+                # Belt and braces: ``begin_session_save`` refuses an id that is
+                # mid-acquisition, so this is not normally reachable. If a
+                # writer was nonetheless admitted in the window, it wins and the
+                # claim fails closed instead of owning an id whose bytes are
+                # being written concurrently.
+                stale_fd = fd
+                _finish_resume_acquisition_locked(state, sid)
+                return False
+            claim_token = uuid.uuid4().hex
+            state["ownership_fd"] = fd
+            # The epoch token belongs to the durable cross-process descriptor
+            # and publication ledger.  It is intentionally shared by sibling
+            # requests in this process.
+            state["owner_token"] = token
+            # Release authority is per claim, not per epoch.  Reusing the epoch
+            # token here lets a duplicate release from one sibling consume the
+            # other sibling's claim and close the shared descriptor (Q6).
+            state["claim_tokens"] = {claim_token}
+            state["claim_tokens_by_thread"] = {
+                threading.get_ident(): [claim_token]
+            }
+            state["claims"] = int(state.get("claims", 0)) + 1
+            _finish_resume_acquisition_locked(state, sid)
+            return True
+    finally:
+        _release_resume_store_ownership(sid, stale_fd)
+
+
+def _finish_resume_acquisition_locked(state: dict, sid: str) -> None:
+    """End an in-flight acquisition, waking waiters and pruning idle state.
+
+    Must be called with ``_SESSION_CLAIM_LOCK`` held.
+    """
+    state["acquiring"] = False
+    event = state.pop("acquired", None)
+    if event is not None:
+        event.set()
+    if (
+        int(state.get("writers", 0)) == 0
+        and int(state.get("claims", 0)) == 0
+        and not state.get("retiring")
+    ):
+        _SESSION_CLAIM_STATE.pop(sid, None)
+
+
+def release_session_claim(sid, *, ownership_token=None) -> bool:
+    """Release one Resume claim taken by ``claim_session_for_resume``.
+
+    Returns ``True`` when a live claim epoch was released and ``False`` for a
+    no-op call. Q6: the epoch's ownership descriptor is the only handle on the
+    durable cross-process lock, so release is token-guarded — a stray or stale
+    release (an extra call, one with no token, or one whose ``ownership_token``
+    no longer matches the live claim) must never close a live owner's descriptor
+    and drop its flock while the attempt is still running. Refusing is free
+    because an idle id has no descriptor to release.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    fd = None
+    pruned = False
+    with _SESSION_CLAIM_LOCK:
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if state is None:
+            return False
+        claims = int(state.get("claims", 0))
+        if claims <= 0:
+            return False
+        claim_tokens = state.setdefault("claim_tokens", set())
+        by_thread = state.setdefault("claim_tokens_by_thread", {})
+        if ownership_token is None:
+            return False
+        claim_token = str(ownership_token)
+        if claim_token not in claim_tokens:
+            return False
+        claim_tokens.remove(claim_token)
+        for thread_id, tokens in list(by_thread.items()):
+            if claim_token in tokens:
+                tokens.remove(claim_token)
+                if not tokens:
+                    by_thread.pop(thread_id, None)
+                break
+        if state.get("retiring") == claim_token:
+            state.pop("retiring", None)
+        state["claims"] = claims - 1
+        if int(state["claims"]) == 0:
+            state.pop("retiring", None)
+            fd = state.pop("ownership_fd", None)
+            state.pop("owner_token", None)
+            state.pop("claim_tokens", None)
+            state.pop("claim_tokens_by_thread", None)
+            if int(state.get("writers", 0)) == 0 and not state.get("acquiring"):
+                _SESSION_CLAIM_STATE.pop(sid, None)
+                pruned = True
+    _release_resume_store_ownership(sid, fd)
+    if pruned:
+        _prune_resume_authority_state(sid)
+    return True
+
+
+def resume_claim_ownership_token(sid) -> "str | None":
+    """Return this thread's newest live, one-shot claim-release token.
+
+    Each successful claim has a distinct token.  A caller hands it back to
+    ``release_session_claim`` so a duplicate/stale release can never consume a
+    sibling's claim.  The durable ownership epoch has a separate shared token;
+    see ``_resume_claim_epoch_token``.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return None
+    with _SESSION_CLAIM_LOCK:
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if not state or int(state.get("claims", 0)) <= 0:
+            return None
+        tokens = state.get("claim_tokens_by_thread", {}).get(
+            threading.get_ident(), []
+        )
+        token = tokens[-1] if tokens else None
+        return str(token) if token else None
+
+
+def _resume_claim_epoch_token(sid) -> "str | None":
+    """Return the shared durable ownership-epoch token, or ``None``."""
+    sid = str(sid or "")
+    if not sid:
+        return None
+    with _SESSION_CLAIM_LOCK:
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if not state or int(state.get("claims", 0)) <= 0:
+            return None
+        token = state.get("owner_token")
+        return str(token) if token else None
+
+
+def evict_session_from_cache(sid) -> None:
+    """Drop *sid* from the in-memory ``SESSIONS`` cache under ``LOCK``.
+
+    Used when a canonical sidecar has been quarantined: any writable object that
+    a concurrent reader loaded during the publication window must not remain
+    retrievable. The next resolution reloads from disk (and fails closed when the
+    sidecar is gone).
+    """
+    sid = str(sid or "")
+    if not sid:
+        return
+    with LOCK:
+        SESSIONS.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# A2/A3 — Resume publication revocation protocol (Astra 4f0ad5d8)
+# ---------------------------------------------------------------------------
+# A denial must be a *revocation boundary*, not a best-effort eviction. Three
+# holes existed:
+#
+#   * the admissibility predicate ran BEFORE the cache-insertion lock, so a
+#     reader preempted between the two could repopulate ``SESSIONS`` with a
+#     writable object after quarantine (A2);
+#   * a tracked object already returned to a caller stayed writable until a
+#     later ``Session.save()`` recreated the canonical file, because the save
+#     path only consulted the momentary active-claim counter (A2);
+#   * the denial tombstone was consulted only by a batched listing snapshot, so
+#     a marker-absent legacy Resume sidecar stayed visible and re-indexable
+#     (A3).
+#
+# The protocol below gives every id a monotonic revocation *generation*:
+#
+#   * ``admit_session`` records the generation under the authority lock in the
+#     SAME critical section that inserts into the cache. A concurrent
+#     revocation either bumps the generation first (the admission refuses) or
+#     lands after the insertion (its eviction removes the entry).
+#   * ``revoke_resume_publication`` durably denies under the per-id fence, then
+#     bumps the generation and evicts the cache in short authority-lock sections.
+#   * ``assert_resume_publication_writable`` is the commit fence: a tracked
+#     Resume sidecar's canonical write is refused once the tombstone exists or
+#     the recorded admission generation no longer matches. The per-id lock held
+#     across the write keeps a concurrent revocation from interleaving.
+#
+# None of this touches an ordinary (non-Resume) session: no generation is
+# recorded, no stat is taken, and no lock is acquired, so the #765 lock-free
+# concurrent-save contract for ordinary saves is untouched.
+_RESUME_AUTHORITY_LOCK = threading.RLock()
+# Q6: a per-id lock object cannot be pruned safely — a thread that fetched the
+# lock, was preempted before ``acquire()``, and then ran after the entry was
+# popped would fence against a *different* lock object than a later writer, i.e.
+# two writers under two locks (under-exclusion). Ref-counted leases solve both
+# problems: waiters keep the exact-id entry alive, and the final release removes
+# it so the registry remains bounded by currently active/waiting ids.
+# Each tracked Resume id gets its own lock.  A fixed shard array made unrelated
+# ids serialize merely because their hashes collided.  Leases keep the registry
+# entry alive while a caller waits/holds the lock and remove it after the final
+# release, so attacker-controlled ids cannot grow this registry without bound.
+_RESUME_SID_LOCK_REGISTRY_LOCK = threading.Lock()
+_RESUME_SID_LOCK_REGISTRY: dict[str, dict] = {}
+
+
+class _ResumeSidLockLease:
+    def __init__(self, sid: str):
+        self._sid = sid
+        self._lock = None
+        self._depth = 0
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self._depth == 0:
+            with _RESUME_SID_LOCK_REGISTRY_LOCK:
+                entry = _RESUME_SID_LOCK_REGISTRY.get(self._sid)
+                if entry is None:
+                    entry = {"lock": threading.RLock(), "refs": 0}
+                    _RESUME_SID_LOCK_REGISTRY[self._sid] = entry
+                entry["refs"] += 1
+                self._lock = entry["lock"]
+        lock = self._lock
+        assert lock is not None
+        try:
+            acquired = lock.acquire(blocking, timeout)
+        except BaseException:
+            if self._depth == 0:
+                self._drop_registry_ref()
+            raise
+        if not acquired:
+            if self._depth == 0:
+                self._drop_registry_ref()
+            return False
+        self._depth += 1
+        return True
+
+    def release(self):
+        if self._depth <= 0 or self._lock is None:
+            raise RuntimeError("cannot release un-acquired Resume SID lock")
+        self._lock.release()
+        self._depth -= 1
+        if self._depth == 0:
+            self._drop_registry_ref()
+
+    def _drop_registry_ref(self):
+        lock = self._lock
+        self._lock = None
+        with _RESUME_SID_LOCK_REGISTRY_LOCK:
+            entry = _RESUME_SID_LOCK_REGISTRY.get(self._sid)
+            if entry is None or entry["lock"] is not lock:
+                return
+            entry["refs"] -= 1
+            if entry["refs"] == 0:
+                _RESUME_SID_LOCK_REGISTRY.pop(self._sid, None)
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+
+def _resume_sid_lock(sid) -> _ResumeSidLockLease:
+    """Return a bounded-lifetime lease for the exact tracked Resume id."""
+    return _ResumeSidLockLease(str(sid or ""))
+
+
+# Q6: revocation generations are drawn from ONE process-global sequence rather
+# than a per-id counter. Values are therefore never reused for an id, which is
+# what makes it safe to prune an *idle* id's entry: a stale admission stamp can
+# never coincide with a later generation, even after pruning (the comparison
+# fails closed, so a pruned entry can only ever over-refuse).
+_RESUME_REVOCATION_SEQUENCE = itertools.count(1)
+_RESUME_REVOCATION_GENERATION: dict[str, int] = {}
+
+
+def _bump_resume_revocation_generation_locked(sid: str) -> int:
+    """Assign *sid* a fresh, never-reused revocation generation.
+
+    Must be called with ``_RESUME_AUTHORITY_LOCK`` held.
+    """
+    generation = next(_RESUME_REVOCATION_SEQUENCE)
+    _RESUME_REVOCATION_GENERATION[sid] = generation
+    return generation
+
+# Ownership fields that identify a Resume-in-WebUI sidecar, including a pre-fix
+# legacy sidecar that predates the explicit publication marker.
+_RESUME_IDENTITY_FIELDS = (
+    "resume_source_state_db",
+    "resume_lineage_root_id",
+    "resume_lineage_tip_id",
+    "resume_source_profile",
+)
+
+
+def resume_revocation_generation(sid) -> int:
+    """Return the current revocation generation for *sid* (0 when never denied)."""
+    with _RESUME_AUTHORITY_LOCK:
+        return int(_RESUME_REVOCATION_GENERATION.get(str(sid or ""), 0))
+
+
+def is_tracked_resume_identity(session) -> bool:
+    """True for a marked publication or a legacy (marker-absent) Resume sidecar.
+
+    Ordinary sessions carry neither the explicit publication marker nor any
+    resume ownership field, so every caller keeps its stat-free hot path.
+    """
+    if session is None:
+        return False
+    if resume_publication_state(session) is not None:
+        return True
+    return any(getattr(session, field, None) for field in _RESUME_IDENTITY_FIELDS)
+
+
+def _stamp_resume_admission(session, sid) -> None:
+    """Record the revocation generation under which *session* was admitted."""
+    try:
+        session._resume_admission_generation = resume_revocation_generation(sid)
+    except Exception:  # pragma: no cover - exotic session stand-ins
+        logger.debug("failed to stamp Resume admission generation", exc_info=True)
+
+
+def admit_session(sid, session, *, cache_on_miss=True, promote_cache=True) -> bool:
+    """Validate publication authority and (optionally) cache *session* atomically.
+
+    The first admissibility predicate deliberately runs WITHOUT either authority
+    lock so a reader parked inside it can never block a concurrent revocation.
+    A tracked Resume identity then takes the per-SID cross-process ledger
+    transaction and repeats the durable check outside ``_RESUME_AUTHORITY_LOCK``.
+    While that transaction stays held, only the generation validation and cache
+    insertion run under the process-global authority lock. A denial therefore
+    either wins the ledger transaction before the second check, or waits until
+    admission commits and then bumps the generation and evicts it. Ordinary
+    sessions keep their stat-free path and never take the ledger transaction.
+    """
+    sid = str(sid or "")
+    snapshot = resume_revocation_generation(sid)
+    tracked_resume = is_tracked_resume_identity(session)
+    if not session_publication_admissible(session):
+        return False
+
+    def commit_admission() -> bool:
+        with _RESUME_AUTHORITY_LOCK:
+            if int(_RESUME_REVOCATION_GENERATION.get(sid, 0)) != snapshot:
+                return False
+            if cache_on_miss:
+                with LOCK:
+                    SESSIONS[sid] = session
+                    if promote_cache:
+                        SESSIONS.move_to_end(sid)
+            _stamp_resume_admission(session, sid)
+        if cache_on_miss:
+            _evict_sessions_over_cap()  # disk probes run outside global locks
+        return True
+
+    if not tracked_resume:
+        return commit_admission()
+
+    # Q9: acquire the potentially blocking cross-process fence before the
+    # global authority lock. Every current denial/ledger mutation takes this
+    # same per-SID transaction, so the second durable check and cache commit are
+    # one ordered admission relative to another process's denial. No stat,
+    # flock, open, close or fsync runs under _RESUME_AUTHORITY_LOCK.
+    with _resume_ledger_transaction(sid) as locked:
+        if not locked:
+            return False
+        if not session_publication_admissible(session):
+            return False
+        return commit_admission()
+
+
+def assert_resume_publication_writable(session) -> None:
+    """Commit fence for a tracked Resume sidecar's canonical persistence.
+
+    Callers hold the per-id lock across the write, so a concurrent
+    ``revoke_resume_publication`` cannot interleave: it either completed first
+    (the tombstone refuses this write) or waits for the write and then
+    quarantines the artifact out of the live namespace. An ordinary session
+    never reaches this helper.
+
+    B2: the fence is durable, not just in-process. It consults the on-disk
+    tombstone *and* the on-disk publication record, so a stale verified object
+    cannot be saved while another process holds an uncommitted publication for
+    the id, and it fails closed when either store cannot be read. Ordinary
+    sessions and ordinary saves are untouched.
+    """
+    sid = str(getattr(session, "session_id", "") or "")
+    if resume_publication_authority_blocked(sid):
+        raise PermissionError(
+            f"session {sid!r} Resume publication is denied; refusing to write"
+        )
+    stamped = getattr(session, "_resume_admission_generation", None)
+    if stamped is None:
+        return
+    if int(stamped) != resume_revocation_generation(sid):
+        raise PermissionError(
+            f"session {sid!r} Resume write authority was revoked after admission"
+        )
+
+
+# ---------------------------------------------------------------------------
+# F2/F3 — explicit Resume publication ownership boundary (Astra 94bfe8af)
+# ---------------------------------------------------------------------------
+# A Resume-in-WebUI first publication is a two-phase, cross-process handoff:
+#
+#   1. PROVISIONAL — the canonical sidecar is linked atomically carrying
+#      ``resume_publication_state == "provisional"``. It is *visible* so the
+#      publisher can read it back, but it is NOT yet an owned, writable
+#      session: every reader, idempotency check and index rebuild must refuse
+#      to adopt it (F2 — a competing Resume must never report idempotent
+#      success while the first publication is provisional).
+#   2. VERIFIED — only after final source re-verification succeeds does the
+#      publisher rewrite the canonical with
+#      ``resume_publication_state == "verified"``. That explicit committed
+#      marker is the sole ownership proof a reader/idempotency/index path
+#      accepts.
+#
+# Quarantine is a durable *denial*, not merely a move:
+# ``mark_resume_publication_denied`` writes a tombstone BEFORE the best-effort
+# quarantine move, so a delayed reader that already loaded the object during
+# the publication window — or a reader that races a failed move — still fails
+# closed (F3). The tombstone lives on disk in ``.resume-denied/`` so the
+# boundary holds across processes. Ordinary ``Session.save()`` never reads or
+# writes either marker, so the #765 lock-free save path is untouched.
+RESUME_PUBLICATION_PROVISIONAL = "provisional"
+RESUME_PUBLICATION_VERIFIED = "verified"
+RESUME_DENIAL_DIRNAME = ".resume-denied"
+RESUME_LEDGER_DIRNAME = ".resume-ledger"
+# Where a denied artifact is *moved* to (never deleted) for operator inspection.
+# Not ``*.json``-scanned by anything, but the moved file keeps its ``.json``
+# suffix so a human can read it back with the ordinary loaders.
+RESUME_QUARANTINE_DIRNAME = ".resume-quarantine"
+# Deliberately NOT ``*.json``: the ledger lives beside the sidecars and must
+# never be mistaken for one by a ``*.json`` directory scan.
+RESUME_LEDGER_SUFFIX = ".pubstate"
+RESUME_LEDGER_PUBLISHING = "publishing"
+RESUME_LEDGER_DENIED = "denied"
+# F1/F2 (candidate5): the durable COMMIT-COMPLETE proof.
+#
+# ``resume_publication_state == 'verified'`` proves only that an attempt
+# verified its OWN bytes. It does not prove the publication finished the
+# rejection-capable work that still follows (index reconciliation and the final
+# denial check), so treating it as "committed" let a same-epoch sibling retire
+# the winner's publishing guard mid-commit (F1) and let a restart resurrect a
+# terminally rejectable publication (F2).
+#
+# The proof below is the missing transition: written atomically and ONLY after
+# that work, binding the exact canonical artifact it committed (inode + mtime +
+# size) and the attempt token. It is what authorises retiring a publishing
+# record, and the only thing that may release an orphaned publication whose
+# canonical is merely verified.
+#
+# It is a SEPARATE file (not a state inside the ledger) so the hot authority
+# fence stays stat-only: nothing here is ever parsed under ``LOCK`` or the
+# admission critical section. The dot-directory and the non-``.json`` suffix
+# keep every ``*.json`` session scan from mistaking it for a sidecar.
+RESUME_COMMIT_DIRNAME = ".resume-committed"
+RESUME_COMMIT_SUFFIX = ".commit"
+RESUME_COMMIT_COMPLETE = "committed"
+
+# Sentinel: the commit proof exists but could not be read/parsed. "Unknown" is
+# never "commit-complete".
+_RESUME_COMMIT_UNREADABLE = object()
+
+# Sentinel: the ledger record exists but could not be read/parsed. "Unknown"
+# is never "no denial".
+_RESUME_LEDGER_UNREADABLE = object()
+
+
+def resume_denial_dir(session_dir: Path | None = None) -> Path:
+    return (Path(session_dir) if session_dir is not None else SESSION_DIR) / RESUME_DENIAL_DIRNAME
+
+
+def resume_denial_path(sid, *, session_dir: Path | None = None) -> Path:
+    return resume_denial_dir(session_dir) / f"{sid}.json"
+
+
+def resume_ledger_dir(session_dir: Path | None = None) -> Path:
+    return (Path(session_dir) if session_dir is not None else SESSION_DIR) / RESUME_LEDGER_DIRNAME
+
+
+def resume_ledger_path(sid, *, session_dir: Path | None = None) -> Path:
+    return resume_ledger_dir(session_dir) / f"{sid}{RESUME_LEDGER_SUFFIX}"
+
+
+def _fsync_resume_dir(directory: Path) -> None:
+    """Best-effort fsync of a directory entry change (durability, not policy)."""
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _durable_write_resume_record(target: Path, payload: dict) -> None:
+    """Atomically and durably write one small Resume record. Raises on failure."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(
+        f"{target.name}.tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+        _safe_replace(tmp, target)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    _fsync_resume_dir(target.parent)
+
+
+def _read_resume_ledger_entry(sid, *, session_dir: Path | None = None):
+    """Return the live publication record for *sid*.
+
+    ``None`` — no in-flight/denied publication record exists (the id is either
+    ordinary, or a pre-fix legacy Resume sidecar with no ledger). A dict — the
+    record. ``_RESUME_LEDGER_UNREADABLE`` — the record exists but cannot be
+    read, which every caller must treat as fail-closed.
+    """
+    path = resume_ledger_path(str(sid or ""), session_dir=session_dir)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _RESUME_LEDGER_UNREADABLE
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return _RESUME_LEDGER_UNREADABLE
+    return data if isinstance(data, dict) else _RESUME_LEDGER_UNREADABLE
+
+
+def _resume_ledger_record_present(sid, *, session_dir: Path | None = None) -> bool:
+    """Stat-only, fail-closed test for a live publication record (hot path)."""
+    try:
+        os.stat(resume_ledger_path(str(sid or ""), session_dir=session_dir))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def resume_commit_dir(session_dir: Path | None = None) -> Path:
+    """Where durable commit-complete proofs live (beside the sidecars)."""
+    return _resume_store_root(session_dir) / RESUME_COMMIT_DIRNAME
+
+
+def resume_commit_path(sid, *, session_dir: Path | None = None) -> Path:
+    return resume_commit_dir(session_dir) / f"{sid}{RESUME_COMMIT_SUFFIX}"
+
+
+def _resume_commit_record_present(sid, *, session_dir: Path | None = None) -> bool:
+    """Stat-only, fail-closed test for a commit proof (hot path)."""
+    try:
+        os.stat(resume_commit_path(str(sid or ""), session_dir=session_dir))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _resume_canonical_artifact_signature(path) -> "tuple[int, int, int] | None":
+    """Durable identity of one canonical artifact: (inode, mtime_ns, size).
+
+    ``None`` when the artifact cannot be described, which every caller must read
+    as "not this artifact" (fail closed).
+    """
+    try:
+        st = os.stat(str(path))
+    except OSError:
+        return None
+    return (int(st.st_ino), int(st.st_mtime_ns), int(st.st_size))
+
+
+def _resume_artifact_is_verified(path) -> bool:
+    """True when the canonical at *path* carries the explicit verified marker.
+
+    Read-only and never consulted under a global lock: it is only used by the
+    commit-complete transition and the orphan-completion path.
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return False
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(data, dict) and (
+        data.get("resume_publication_state") == RESUME_PUBLICATION_VERIFIED
+    )
+
+
+def _read_resume_commit_record(sid, *, session_dir: Path | None = None):
+    """Return the commit-complete proof for *sid*.
+
+    ``None`` — no proof exists. A dict — the proof. ``_RESUME_COMMIT_UNREADABLE``
+    — a proof exists but cannot be read/parsed, which every caller must treat as
+    fail-closed (never as "commit-complete").
+    """
+    path = resume_commit_path(str(sid or ""), session_dir=session_dir)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _RESUME_COMMIT_UNREADABLE
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return _RESUME_COMMIT_UNREADABLE
+    return data if isinstance(data, dict) else _RESUME_COMMIT_UNREADABLE
+
+
+def resume_publication_commit_complete(
+    sid, *, canonical_path=None, session_dir: Path | None = None
+) -> bool:
+    """True when *sid* carries a durable commit-complete proof for its canonical.
+
+    A verified ``resume_publication_state`` marker is NOT commit-complete: the
+    publication still has rejection-capable work outstanding (index
+    reconciliation and the final denial check) until this proof is written.
+
+    Fail-closed on every ambiguity:
+
+      * a missing, unreadable, malformed or non-``committed`` proof is not
+        proof;
+      * a proof whose bound artifact signature no longer matches the canonical on
+        disk is not proof (the artifact was replaced or rewritten afterwards);
+      * a denied id is never commit-complete, and the canonical itself must
+        still carry the explicit verified marker.
+
+    This never blocks a committed session: the proof is a separate durable file,
+    so it is only ever *consulted* on paths where an uncommitted record would
+    otherwise matter (retirement, orphan resolution, competing-request waits) —
+    never on the ordinary load/save hot path.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    if not _resume_commit_record_present(sid, session_dir=session_dir):
+        return False
+    record = _read_resume_commit_record(sid, session_dir=session_dir)
+    if not isinstance(record, dict):
+        return False
+    if record.get("state") != RESUME_COMMIT_COMPLETE:
+        return False
+    bound = record.get("canonical_signature")
+    if not isinstance(bound, (list, tuple)) or len(bound) != 3:
+        return False
+    try:
+        bound = tuple(int(part) for part in bound)
+    except (TypeError, ValueError):
+        return False
+    path = (
+        Path(canonical_path)
+        if canonical_path is not None
+        else (_resume_store_root(session_dir) / f"{sid}.json")
+    )
+    if _resume_canonical_artifact_signature(path) != bound:
+        return False
+    if is_resume_publication_denied(sid, session_dir=session_dir):
+        return False
+    return _resume_artifact_is_verified(path)
+
+
+def resume_publication_commit_pending(
+    sid, *, canonical_path=None, session_dir: Path | None = None
+) -> bool:
+    """True while a live publication record guards *sid* without commit proof.
+
+    This is the F1/F2 predicate: while it holds, the id is publishing and any
+    other request must fail closed (409) instead of reporting idempotent
+    success. A recorded DENIAL answers ``False`` — it is a refusal handled by
+    the authority fence, not a commit in flight.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    if not _resume_ledger_record_present(sid, session_dir=session_dir):
+        return False
+    if is_resume_publication_denied(sid, session_dir=session_dir):
+        return False
+    return not resume_publication_commit_complete(
+        sid, canonical_path=canonical_path, session_dir=session_dir
+    )
+
+
+def _write_resume_commit_proof(
+    sid, *, attempt=None, canonical_path=None, session_dir: Path | None = None
+) -> bool:
+    """Atomically and durably record the commit-complete proof. Never raises.
+
+    Must be called with the per-id ledger transaction held: the denial check and
+    the proof write have to linearize against a concurrent revocation.
+    """
+    path = (
+        Path(canonical_path)
+        if canonical_path is not None
+        else (_resume_store_root(session_dir) / f"{sid}.json")
+    )
+    signature = _resume_canonical_artifact_signature(path)
+    if signature is None:
+        return False
+    try:
+        _durable_write_resume_record(
+            resume_commit_path(sid, session_dir=session_dir),
+            {
+                "session_id": str(sid),
+                "state": RESUME_COMMIT_COMPLETE,
+                "attempt": attempt,
+                "canonical_signature": list(signature),
+                "pid": os.getpid(),
+                "committed_at": time.time(),
+            },
+        )
+    except Exception:
+        logger.warning(
+            "Failed to record the Resume commit-complete proof for %s", sid, exc_info=True
+        )
+        return False
+    return True
+
+
+def mark_resume_publication_commit_complete(
+    sid, *, attempt=None, canonical_path=None, session_dir: Path | None = None
+) -> bool:
+    """Durably record the commit-complete transition for *sid*'s canonical.
+
+    Called ONLY after every rejection-capable step of the publication has
+    finished (the verified marker, index reconciliation and the final denial
+    check). Returns ``True`` only when the proof is durably readable AND matches
+    the artifact, so a claim of "commit complete" is never taken on trust.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            return False
+        if is_resume_publication_denied(sid, session_dir=session_dir):
+            return False
+        if not _write_resume_commit_proof(
+            sid, attempt=attempt, canonical_path=canonical_path, session_dir=session_dir
+        ):
+            return False
+    return resume_publication_commit_complete(
+        sid, canonical_path=canonical_path, session_dir=session_dir
+    )
+
+
+def clear_resume_publication_commit_marker(
+    sid, *, session_dir: Path | None = None
+) -> bool:
+    """Best-effort removal of a commit proof (an id that was just denied).
+
+    A denial outranks any proof, so this is hygiene: it keeps a revoked id from
+    carrying a stale "committed" record into a later incident review.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    path = resume_commit_path(sid, session_dir=session_dir)
+    try:
+        path.unlink(missing_ok=True)
+        _fsync_resume_dir(path.parent)
+        return True
+    except OSError:
+        logger.debug(
+            "Failed to clear the Resume commit-complete proof for %s", sid, exc_info=True
+        )
+        return False
+
+
+def recovery_orphan_is_dead(sid, *, session_dir: Path | None = None) -> bool:
+    """True when *sid*'s live record is a stranded orphan, not an in-flight one.
+
+    F1/F2: a record written by a DIFFERENT process that no live kernel lock
+    holds is not mid-publication — its publisher is gone, so waiting for it is
+    pointless (the caller resolves it through the exclusive ownership path
+    instead). A same-process record, a denied id, an unreadable record and an id
+    whose ownership lock is held all answer ``False`` (fail closed: keep
+    waiting / refuse).
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    if not _resume_ledger_record_present(sid, session_dir=session_dir):
+        return False
+    if is_resume_publication_denied(sid, session_dir=session_dir):
+        return False
+    entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+    if not isinstance(entry, dict) or entry.get("state") != RESUME_LEDGER_PUBLISHING:
+        return False
+    try:
+        record_pid = int(entry.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if record_pid == os.getpid():
+        return False
+    try:
+        return not resume_store_ownership_conflict(sid, session_dir=session_dir)
+    except Exception:
+        return False
+
+
+def complete_crashed_resume_publication_commit(
+    sid, *, canonical_path=None, session_dir: Path | None = None
+) -> bool:
+    """Finish an orphaned publication's commit as the NEW exclusive owner (F2).
+
+    ``recover_crashed_resume_publication`` must refuse an orphan whose canonical
+    is merely ``verified``: that marker is not commit-complete, and clearing the
+    record there would resurrect a publication that still had rejection-capable
+    work outstanding when its publisher died. This is the only way such an
+    orphan may be released, and it does so by really *finishing* the commit:
+
+      * inside the per-id ledger transaction, so no denial can land in between;
+      * only for a ``publishing`` record written by ANOTHER process — a live
+        same-process sibling's in-flight record is never stolen (F1);
+      * only while no live kernel lock holds the id (no in-flight owner);
+      * only when the canonical is an explicitly verified, non-denied artifact;
+      * by writing the commit-complete proof for THAT artifact and retiring the
+        record last.
+
+    The caller is responsible for revalidating the resume identity and the
+    source snapshot before calling this (the route does). Returns ``True`` only
+    when the id is verifiably unguarded afterwards.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    path = (
+        Path(canonical_path)
+        if canonical_path is not None
+        else (_resume_store_root(session_dir) / f"{sid}.json")
+    )
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            return False
+        if is_resume_publication_denied(sid, session_dir=session_dir):
+            return False
+        entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+        if entry is None:
+            # Nothing guards the id any more: nothing to complete.
+            return True
+        if not isinstance(entry, dict) or entry.get("state") != RESUME_LEDGER_PUBLISHING:
+            return False
+        try:
+            record_pid = int(entry.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        if record_pid == os.getpid():
+            # A live sibling attempt of THIS process owns the record; only that
+            # attempt (or a later exclusive owner) may finish its commit.
+            return False
+        try:
+            if resume_store_ownership_conflict(sid, session_dir=session_dir):
+                return False
+        except Exception:
+            return False
+        if not _resume_artifact_is_verified(path):
+            # A provisional or marker-less artifact stays guarded: its record is
+            # the only thing that keeps it from being admitted as a legacy
+            # sidecar.
+            return False
+        if not _write_resume_commit_proof(
+            sid,
+            attempt=entry.get("attempt"),
+            canonical_path=path,
+            session_dir=session_dir,
+        ):
+            return False
+        if not resume_publication_commit_complete(
+            sid, canonical_path=path, session_dir=session_dir
+        ):
+            return False
+        ledger = resume_ledger_path(sid, session_dir=session_dir)
+        try:
+            ledger.unlink(missing_ok=True)
+            _fsync_resume_dir(ledger.parent)
+        except OSError:
+            logger.debug(
+                "Failed to retire a completed Resume publication record for %s",
+                sid,
+                exc_info=True,
+            )
+            return False
+        return not _resume_ledger_record_present(sid, session_dir=session_dir)
+
+
+def open_resume_abort_retirement(sid, *, ownership_token=None) -> bool:
+    """Atomically prove sole ownership and close *sid* to new Resume claims."""
+    sid = str(sid or "")
+    if not sid or ownership_token is None:
+        return False
+    with _SESSION_CLAIM_LOCK:
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if state is None or state.get("retiring"):
+            return False
+        if int(state.get("claims", 0)) != 1:
+            return False
+        tokens = state.get("claim_tokens") or set()
+        if len(tokens) != 1 or str(ownership_token) not in tokens:
+            return False
+        state["retiring"] = str(ownership_token)
+        return True
+
+
+def close_resume_abort_retirement(sid, *, ownership_token=None) -> bool:
+    """Clear the token-guarded abort-retirement admission gate."""
+    sid = str(sid or "")
+    if not sid or ownership_token is None:
+        return False
+    with _SESSION_CLAIM_LOCK:
+        state = _SESSION_CLAIM_STATE.get(sid)
+        if state is None or state.get("retiring") != str(ownership_token):
+            return False
+        state.pop("retiring", None)
+        return True
+
+
+def resume_publication_authority_blocked(sid, *, session_dir: Path | None = None) -> bool:
+    """Cheap, stat-only, fail-closed authority fence for *sid*.
+
+    True when a durable denial is recorded OR a live publication record still
+    owns the id (an in-flight, crashed or denied attempt). Used by the
+    admission critical section and the canonical-save fence, where only a stat
+    may run.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    if _resume_denial_tombstone_present(sid, session_dir=session_dir):
+        return True
+    return _resume_ledger_record_present(sid, session_dir=session_dir)
+
+
+def _resume_denial_tombstone_present(sid, *, session_dir: Path | None = None) -> bool:
+    """Return True when the denial tombstone exists. Fail-closed on any error.
+
+    Uses ``os.stat`` (not ``Path.exists``, which swallows permission errors on
+    some interpreters) so an unreadable denial directory is "denied", never
+    "no denial" (B3).
+    """
+    try:
+        os.stat(resume_denial_path(str(sid or ""), session_dir=session_dir))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _read_resume_denial_timestamp(sid, *, session_dir: Path | None = None):
+    """Return ``denied_at`` from the tombstone, or ``None`` when unavailable."""
+    try:
+        raw = resume_denial_path(str(sid or ""), session_dir=session_dir).read_bytes()
+        data = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return float(data.get("denied_at"))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_resume_publication_denied(sid, *, session_dir: Path | None = None) -> bool:
+    """Return True when *sid* is durably denied.
+
+    Denial is the union of two independent durable channels so that a failure
+    in either one cannot resurrect a quarantined id:
+
+      * the quarantine tombstone (``.resume-denied/<sid>.json``), and
+      * a ``denied`` publication-ledger record (``.resume-ledger/<sid>.pubstate``).
+
+    Fail-closed: an unreadable denial directory or an unreadable ledger record
+    counts as denied.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    if _resume_denial_tombstone_present(sid, session_dir=session_dir):
+        return True
+    entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+    if entry is _RESUME_LEDGER_UNREADABLE:
+        return True
+    return isinstance(entry, dict) and entry.get("state") == RESUME_LEDGER_DENIED
+
+
+def _write_resume_denial_tombstone(sid, *, reason: str = "", session_dir: Path | None = None) -> None:
+    """Atomically publish the durable denial tombstone for *sid*.
+
+    Never raises: a denial that cannot be recorded is logged, and the caller
+    still fails the publication closed (the publication ledger remains the
+    second, independently durable denial channel — see
+    ``deny_resume_publication``).
+    """
+    try:
+        _durable_write_resume_record(
+            resume_denial_path(sid, session_dir=session_dir),
+            {
+                "session_id": sid,
+                "state": "denied",
+                "generation": uuid.uuid4().hex,
+                "reason": str(reason or "")[:200],
+                "denied_at": time.time(),
+            },
+        )
+    except Exception:
+        logger.warning("Failed to record Resume quarantine denial for %s", sid, exc_info=True)
+
+
+def deny_resume_publication(
+    sid,
+    *,
+    attempt: str | None = None,
+    reason: str = "",
+    session_dir: Path | None = None,
+) -> bool:
+    """Record a durable denial on every available channel. Never raises.
+
+    B1: refusal authority must survive a restart even when one channel fails.
+    The tombstone is attempted first (it is the legacy, cross-version denial
+    marker); the publication-ledger record is then driven to ``denied``. The
+    call reports whether *any* channel is durably established — but note that
+    even ``False`` still fails closed, because the in-flight ``publishing``
+    record written by ``begin_resume_publication`` already guards the id.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            return False
+        _write_resume_denial_tombstone(sid, reason=reason, session_dir=session_dir)
+        established = _resume_denial_tombstone_present(sid, session_dir=session_dir)
+        entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+        if entry is _RESUME_LEDGER_UNREADABLE or (
+            isinstance(entry, dict) and entry.get("state") == RESUME_LEDGER_DENIED
+        ):
+            # Either already denied in the ledger, or the record cannot be
+            # interpreted: the id is guarded (fail closed) and we do not guess.
+            return established or entry is _RESUME_LEDGER_UNREADABLE
+        try:
+            _durable_write_resume_record(
+                resume_ledger_path(sid, session_dir=session_dir),
+                {
+                    "session_id": sid,
+                    "state": RESUME_LEDGER_DENIED,
+                    "attempt": attempt,
+                    "pid": os.getpid(),
+                    "reason": str(reason or "")[:200],
+                    "denied_at": time.time(),
+                    "started_at": entry.get("started_at") if isinstance(entry, dict) else None,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record durable Resume publication-ledger denial for %s",
+                sid,
+                exc_info=True,
+            )
+            return established
+        return True
+
+
+def mark_resume_publication_denied(
+    sid, *, reason: str = "", attempt: str | None = None, session_dir: Path | None = None
+) -> int:
+    """Create the durable denial tombstone and revoke write authority for *sid*.
+
+    Must be called before moving/removing the canonical artifact so that a
+    reader that already loaded the object, or a reader that races a failed
+    move, still fails closed. Durable denial is established under the per-id
+    fence before the generation is bumped in a short authority-lock section.
+    An admission that lands before the durable denial is fenced by the
+    generation bump; one that lands after it observes durable authority.
+    Returns the new revocation generation (``0`` for an empty id).
+
+    Q7: this is the *denial core* shared by ``revoke_resume_publication`` — the
+    single production entry point, which adds the cache eviction that a
+    revocation needs. It is deliberately the non-evicting form: proving that the
+    lookup/cache paths refuse an already-admitted object requires a transition
+    that does NOT remove it from the cache, which is what a revocation-style
+    call can never test. It raises nothing on I/O errors: the only durable work
+    happens inside ``deny_resume_publication``, which is OSError-tolerant.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return 0
+    with _resume_sid_lock(sid):
+        # Durable ledger/tombstone I/O, including the per-SID cross-process
+        # flock and fsyncs, must never run under the process-global authority
+        # lock: a slow store for one id must not stall unrelated ids.
+        deny_resume_publication(
+            sid, attempt=attempt, reason=reason, session_dir=session_dir
+        )
+        with _RESUME_AUTHORITY_LOCK:
+            generation = _bump_resume_revocation_generation_locked(sid)
+    return generation
+
+
+def revoke_resume_publication(
+    sid, *, reason: str = "", attempt: str | None = None, session_dir: Path | None = None
+) -> int:
+    """Durably deny *sid* and atomically revoke any admitted write authority.
+
+    The per-id fence spans durable denial, generation bump, and cache eviction;
+    only the in-memory linearization steps use the process-global authority
+    lock. A reader that is concurrently admitting either completes first (and
+    is then evicted) or observes the denial/generation change and refuses.
+    Returns the new generation.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return 0
+    with _resume_sid_lock(sid):
+        generation = mark_resume_publication_denied(
+            sid, reason=reason, attempt=attempt, session_dir=session_dir
+        )
+        with _RESUME_AUTHORITY_LOCK:
+            # Same critical section as the generation bump above: the sid lock is
+            # held across both, so an admission either completes before the bump
+            # (and is evicted here) or after it (and refuses on the generation).
+            evict_session_from_cache(sid)
+    return generation
+
+
+def _prune_resume_authority_state(sid) -> None:
+    """Drop *sid*'s per-id authority bookkeeping once it is demonstrably idle.
+
+    Q6: ``_RESUME_REVOCATION_GENERATION`` used to accumulate one entry per id
+    for the lifetime of the process. Pruning it is safe *because* generations are
+    drawn from a never-reused global sequence: after the entry is gone the id
+    reads generation ``0``, so any object still carrying a pre-prune stamp can
+    only ever be *refused* (fail closed), never admitted.
+
+    The id must be idle — no claim epoch, no cached session, no canonical
+    sidecar, and no *live* publication record — and the entry is only dropped
+    when a durable denial survives it (the tombstone/ledger keeps refusing the
+    id). It re-checks everything under the locks rather than trusting the
+    caller, and it refuses to drop an entry that is the only authority left.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return
+    # Read the (stat-free) ledger state first, outside every lock: a *live*
+    # publication record means the id is not idle and must keep its generation
+    # entry. A record in the ``denied`` state is the denial itself, not an owner.
+    entry = _read_resume_ledger_entry(sid)
+    if entry is _RESUME_LEDGER_UNREADABLE:
+        return
+    if isinstance(entry, dict) and entry.get("state") != RESUME_LEDGER_DENIED:
+        return
+    with _resume_sid_lock(sid):
+        with _SESSION_CLAIM_LOCK:
+            state = _SESSION_CLAIM_STATE.get(sid)
+            if state is not None and (
+                int(state.get("claims", 0)) > 0
+                or int(state.get("writers", 0)) > 0
+                or state.get("acquiring")
+            ):
+                return
+        durable_denial = is_resume_publication_denied(sid)
+        try:
+            canonical_exists = (Path(SESSION_DIR) / f"{sid}.json").exists()
+        except OSError:  # pragma: no cover - defensive
+            return
+        if canonical_exists:
+            return
+        with _RESUME_AUTHORITY_LOCK:
+            with LOCK:
+                if sid in SESSIONS:
+                    return
+            if int(_RESUME_REVOCATION_GENERATION.get(sid, 0)) and not durable_denial:
+                # Both durable channels failed when this generation was bumped,
+                # so the in-memory entry is the ONLY refusal authority for the id.
+                # Dropping it would re-open writes to a revoked id in this
+                # process: never prune it. (Fail closed beats memory hygiene.)
+                return
+            _RESUME_REVOCATION_GENERATION.pop(sid, None)
+
+
+def begin_resume_publication(sid, *, session_dir: Path | None = None) -> str:
+    """Establish durable publication authority for *sid* BEFORE it is visible.
+
+    B1: this is the architecture-complete fail-closed state. The record is
+    written (and fsync'd) *before* the canonical sidecar is linked, so from the
+    instant an artifact can exist there is also a durable record proving it was
+    produced by a marker-capable attempt and is not yet committed. If this
+    raises, no artifact may be published at all: the caller must refuse the
+    request rather than create a publication it could not durably denounce.
+    Returns the attempt token.
+    """
+    sid = str(sid or "")
+    if not sid:
+        raise OSError("resume publication requires a session id")
+    # Q2: the attempt token IS this process's durable ownership-epoch token
+    # whenever one is live for the id. Concurrent in-process Resume requests for
+    # an id share a single ownership epoch (they are mutually exclusive against
+    # *other processes* only), so they must share one attempt token too: with a
+    # fresh token per call the two siblings would each write a record the other
+    # could not legitimately retire, and the one that lost the exclusive
+    # ``os.link`` race would leave a record guarding an already-committed
+    # artifact until the process restarted. Across processes the tokens differ,
+    # which is what makes "only the owner may retire the record" enforceable.
+    token = _resume_claim_epoch_token(sid) or uuid.uuid4().hex
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            raise OSError("could not lock Resume publication ledger")
+        if is_resume_publication_denied(sid, session_dir=session_dir):
+            raise PermissionError("Resume publication is durably denied")
+        _durable_write_resume_record(
+            resume_ledger_path(sid, session_dir=session_dir),
+            {
+                "session_id": sid,
+                "state": RESUME_LEDGER_PUBLISHING,
+                "attempt": token,
+                "pid": os.getpid(),
+                "started_at": time.time(),
+            },
+        )
+    return token
+
+
+def finish_resume_publication(sid, *, attempt: str | None = None, session_dir: Path | None = None) -> bool:
+    """Retire the in-flight publication record after the verified commit.
+
+    Returns ``True`` only when no publication record guards the id any more.
+    ``False`` means the id is still guarded — the record belongs to another
+    attempt, could not be read, or could not be removed — and the caller must
+    fail the publication closed rather than report success (F3).
+
+    Q2: the attempt token written into the durable record is authoritative for
+    retirement. Only the attempt that owns the live record may retire it:
+    retiring a live sibling's record would drop the durable guard that sibling
+    still relies on for its own commit window, so an unrelated (or aborting)
+    attempt could unguard an id that is mid-commit in another process. Attempts
+    that share a durable ownership epoch (concurrent in-process requests for the
+    same id) share a token, so they retire each other's record legitimately —
+    see ``begin_resume_publication``.
+
+    ``attempt is None`` keeps the legacy per-id form for callers that are not
+    attempt-scoped (recovery/cleanup tooling); production always passes the token
+    it received from ``begin_resume_publication``.
+
+    F1: a matching token is necessary but NOT sufficient. Shares an epoch token
+    means the siblings guard the SAME record, so a token check alone let the
+    sibling that lost the exclusive ``os.link`` race retire the guard of the
+    sibling still parked in rejection-capable work (index reconciliation / final
+    denial check). Retirement is therefore gated on the commit-complete
+    transition (:func:`_resume_publication_retirable`): the record may go only
+    when nothing is published under this name, or when the published canonical
+    carries the durable commit-complete proof for that exact artifact. An abort
+    that produced no canonical still retires its own record, so a refusal can
+    never guard an id forever.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    path = resume_ledger_path(sid, session_dir=session_dir)
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            return False
+        # The denial check and unlink are one cross-process transaction. A
+        # revocation therefore linearizes wholly before this retirement (which
+        # refuses) or wholly after it; it can never replace the checked record
+        # in the check-then-unlink gap.
+        if is_resume_publication_denied(sid, session_dir=session_dir):
+            return False
+        entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+        if entry is _RESUME_LEDGER_UNREADABLE:
+            return False
+        if entry is None:
+            return True
+        if attempt is not None:
+            if not isinstance(entry, dict) or entry.get("state") != RESUME_LEDGER_PUBLISHING:
+                return False
+            record_attempt = entry.get("attempt")
+            if not record_attempt or str(record_attempt) != str(attempt):
+                return False
+        elif isinstance(entry, dict) and entry.get("state") != RESUME_LEDGER_PUBLISHING:
+            return False
+        # F1: the commit-complete gate. A merely *publishing* canonical keeps its
+        # record, whoever asks (token match included): the publisher that is
+        # still parked has not advertised commit-complete yet, so removing the
+        # guard would let a competitor adopt (or resurrect) an artifact whose
+        # publication may still be terminally rejected.
+        if not _resume_publication_retirable(sid, session_dir=session_dir):
+            return False
+        try:
+            path.unlink(missing_ok=True)
+            _fsync_resume_dir(path.parent)
+        except OSError:
+            logger.warning("Failed to retire Resume publication record for %s", sid, exc_info=True)
+            return False
+        return not _resume_ledger_record_present(sid, session_dir=session_dir)
+
+
+def clear_resume_publication_denial(
+    sid, *, attempt: str | None = None, session_dir: Path | None = None
+) -> bool:
+    """Clear a denial for a freshly committed publication. Returns success.
+
+    B2/F3: clearing is authority-gated. Only an attempt that holds the live,
+    in-flight publication record *in this process* may clear, and only when the
+    denial is not newer than that attempt — so a stale publisher can never
+    erase a newer denial. Returns ``True`` only when the denial is verifiably
+    gone; the caller must fail closed otherwise.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    with _resume_ledger_transaction(sid, session_dir=session_dir) as locked:
+        if not locked:
+            return False
+        if not is_resume_publication_denied(sid, session_dir=session_dir):
+            return True  # nothing to clear
+        entry = _read_resume_ledger_entry(sid, session_dir=session_dir)
+        if not isinstance(entry, dict) or entry.get("state") != RESUME_LEDGER_PUBLISHING:
+            return False
+        if int(entry.get("pid") or 0) != os.getpid():
+            return False
+        if attempt is not None and entry.get("attempt") not in (None, attempt):
+            return False
+        denial_stamp = _read_resume_denial_timestamp(sid, session_dir=session_dir)
+        if denial_stamp is not None and denial_stamp > float(entry.get("started_at") or 0.0):
+            # A denial recorded after this attempt began outranks it.
+            return False
+        try:
+            resume_denial_path(sid, session_dir=session_dir).unlink(missing_ok=True)
+            _fsync_resume_dir(resume_denial_dir(session_dir))
+        except OSError:
+            logger.debug("Failed to clear Resume quarantine denial for %s", sid, exc_info=True)
+        return not is_resume_publication_denied(sid, session_dir=session_dir)
+
+
+def _scan_resume_state_dir(directory: Path):
+    """List ``*.json`` stems in *directory*. Missing dir = empty; error = unknown.
+
+    B3: an absent directory is genuinely "no records here", but ANY other
+    enumeration or entry-stat error is unknown and must be reported as ``None``
+    so callers fall back to the fail-closed per-id check instead of reading an
+    error as "no denials".
+    """
+    try:
+        entries = list(os.scandir(directory))
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        logger.debug("resume denial snapshot unavailable: %s", directory, exc_info=True)
+        return None
+    found = set()
+    for entry in entries:
+        try:
+            if not entry.name.endswith(".json"):
+                continue
+            if not entry.is_file():
+                continue
+        except OSError:
+            # An entry we cannot stat makes the whole listing unknown.
+            logger.debug("resume denial entry stat failed: %s", entry.name, exc_info=True)
+            return None
+        found.add(entry.name[: -len(".json")])
+    return frozenset(found)
+
+
+def _canonical_write_signature(path) -> tuple | None:
+    """Identity signature (``st_ino``, ``st_mtime_ns``, ``st_size``) of *path*.
+
+    Q4: captured immediately after a canonical write so the post-write denial
+    recheck can prove the artifact it is about to quarantine is still the one
+    this save wrote. Without it, a canonical that a concurrent publisher
+    legitimately replaced in the window would be destroyed by the losing
+    attempt. Returns ``None`` when the artifact cannot be described.
+    """
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def quarantine_denied_resume_sidecar(
+    sid, *, source=None, signature=None, session_dir: Path | None = None
+) -> Path | None:
+    """Move a denied Resume artifact out of the live namespace, never delete it.
+
+    The single shared implementation of the quarantine move, used by both the
+    publication path (``api.routes``) and the post-write denial recheck in
+    ``Session.save``, so the two cannot drift. Semantics:
+
+      * the artifact is *moved* into ``.resume-quarantine/`` for inspection —
+        bytes are preserved, because a denied artifact is still the operator's
+        only copy of that conversation (Q4);
+      * "moved" means gone from the canonical name, which is what makes the id
+        unloadable; the durable denial (tombstone + ledger record), not the
+        absence of bytes, is what refuses the id;
+      * when *signature* is given the move happens only if the file still
+        matches it, so a losing attempt can never quarantine another attempt's
+        freshly committed canonical (Q4);
+      * nothing here is durable-authoritative: a failure to move leaves the
+        refusal fully intact, so callers must not treat ``None`` as "not denied".
+
+    Returns the quarantine path, or ``None`` when there was nothing to move or
+    the move failed.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return None
+    if source is None:
+        source = Path(session_dir or SESSION_DIR) / f"{sid}.json"
+    source = Path(source)
+    target: Path | None = None
+    try:
+        if source.exists():
+            if signature is not None and _canonical_write_signature(source) != signature:
+                return None
+            quarantine_dir = source.parent / RESUME_QUARANTINE_DIRNAME
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            dst = quarantine_dir / f"{sid}-{uuid.uuid4().hex}.json"
+            os.replace(source, dst)
+            _fsync_resume_dir(quarantine_dir)
+            target = dst
+        else:
+            target = None
+    except OSError:
+        logger.warning("Failed to quarantine Resume sidecar %s", source, exc_info=True)
+        return None
+    return target
+
+
+def _denied_resume_publication_ids(session_dir: Path | None = None):
+    """One-shot listing of Resume ids that must not be presented.
+
+    Union of quarantine tombstones and live publication-ledger records (an
+    in-flight or denied attempt owns its id and must not be advertised).
+    Returns ``None`` when any channel cannot be listed: callers must NOT read
+    that as "no denials" (see ``_denied_ids_contains``).
+    """
+    denied = _scan_resume_state_dir(resume_denial_dir(session_dir))
+    if denied is None:
+        return None
+    directory = resume_ledger_dir(session_dir)
+    try:
+        entries = list(os.scandir(directory))
+    except FileNotFoundError:
+        return denied
+    except OSError:
+        logger.debug("resume ledger snapshot unavailable", exc_info=True)
+        return None
+    found = set(denied)
+    for entry in entries:
+        try:
+            if not entry.name.endswith(RESUME_LEDGER_SUFFIX) or not entry.is_file():
+                continue
+        except OSError:
+            return None
+        rec_sid = entry.name[: -len(RESUME_LEDGER_SUFFIX)]
+        if rec_sid:
+            found.add(rec_sid)
+    return frozenset(found)
+
+
+def _sid_is_tracked_resume_identity(sid) -> bool:
+    """True when *sid*'s canonical sidecar is a tracked Resume identity.
+
+    Consulted ONLY on the error path where the batched denial snapshot is
+    unavailable. It answers "does this id own a Resume publication at all", so
+    that a permission fault in the Resume state directories fails closed for a
+    tracked publication without dropping unrelated ordinary sessions from the
+    sidebar / index / lookup paths (F5). An unreadable sidecar fails closed
+    (treated as tracked), so the per-id durable fence is still consulted.
+    """
+    sid = str(sid or "")
+    if not sid:
+        return False
+    try:
+        session = Session.load_metadata_only(sid)
+    except Exception:
+        return True
+    if session is None:
+        # Nothing on disk: no Resume publication to deny for this id.
+        return False
+    return is_tracked_resume_identity(session)
+
+
+def _denied_ids_contains(denied_ids, sid, *, session=None) -> bool:
+    """Membership test for a denied-id snapshot, falling back fail-closed.
+
+    When the batched snapshot could not be read, consult the per-id durable
+    checks; ``is_resume_publication_denied`` and
+    ``resume_publication_authority_blocked`` both fail closed on an OSError.
+
+    F5: the fail-closed fallback is scoped to a *tracked Resume identity*. An
+    unreadable denial/ledger directory (EACCES) must never make an unrelated
+    ordinary session look denied — that would drop every ordinary row from the
+    sidebar and the session index.
+
+    Q7: pass ``session=`` when the caller already holds the loaded object. The
+    identity then comes from the in-memory marker instead of disk. The fallback
+    is reached from the session-index write path *while ``_INDEX_WRITE_LOCK`` is
+    held*, so a per-id directory read there turns one unrelated id's denial into
+    a disk read under the index lock for every enumerated row — the exact stall
+    class the publish gate is meant to avoid. It is not a weakening: the object
+    in hand is the same artifact ``load_metadata_only`` would have read, so the
+    answer is at least as accurate, and an unusable object still fails closed.
+    """
+    sid = str(sid or "")
+    if denied_ids is not None:
+        return sid in denied_ids
+    if session is not None:
+        try:
+            if not is_tracked_resume_identity(session):
+                return False
+        except Exception:
+            return True
+        return resume_publication_authority_blocked(sid)
+    return _sid_is_tracked_resume_identity(sid) and resume_publication_authority_blocked(sid)
+
+
+def resume_publication_state(session) -> str | None:
+    """Return the publication marker on *session*, or ``None``."""
+    return getattr(session, "resume_publication_state", None) or None
+
+
+def resume_publication_is_verified(session) -> bool:
+    """True only for an explicitly committed (verified, not denied) publication."""
+    if resume_publication_state(session) != RESUME_PUBLICATION_VERIFIED:
+        return False
+    return not is_resume_publication_denied(getattr(session, "session_id", ""))
+
+
+def session_publication_admissible(session, *, denied_resume_ids=None) -> bool:
+    """May a loaded object be served as an owned, writable session?
+
+    Denial wins over everything: a quarantined id is inadmissible even when a
+    delayed reader still holds the object, even when the quarantine move failed
+    and the canonical file is still on disk, and — since A3 — even for a pre-fix
+    legacy Resume sidecar that predates the explicit publication marker.
+
+    B1: denial is not the only durable guard. A *live publication record*
+    (``.resume-ledger/<sid>.pubstate``) means "this id has an uncommitted
+    publication attempt" — in flight right now, crashed mid-publication, or
+    denied by an attempt whose denial channels both failed to persist. Such an
+    id is inadmissible whether or not the artifact still carries its marker,
+    and whether or not the process that published it is still alive, because
+    the record is on disk. A marker-less artifact is normally treated as a
+    pre-fix legacy publication for migration compatibility; the ledger record
+    is what distinguishes that legitimate case from a marker LOST by a failing
+    publication.
+
+    Only a *tracked* Resume identity consults the durable guards, so an
+    ordinary session keeps a stat-free hot path. Enumeration callers may pass a
+    validated ``denied_resume_ids`` snapshot to batch the check; ``None`` means
+    the snapshot was unavailable and each tracked identity falls back to the
+    fail-closed per-id stat.
+    """
+    try:
+        sid = str(getattr(session, "session_id", "") or "")
+        state = resume_publication_state(session)
+        if state is None:
+            # A pre-fix legacy Resume sidecar carries no publication marker but
+            # IS a tracked Resume identity (it owns a foreign source/lineage), so
+            # a denial must still win — for direct lookup, the cache, the
+            # fallback scan, the full rebuild and incremental updates alike.
+            if not is_tracked_resume_identity(session):
+                return True
+            if _denied_ids_contains(denied_resume_ids, sid, session=session):
+                return False
+            return not resume_publication_authority_blocked(sid)
+        if state != RESUME_PUBLICATION_VERIFIED:
+            # Provisional (or unknown) publication: never served writable.
+            return False
+        # A verified publication is still inadmissible once quarantined, even
+        # when the best-effort move failed and the canonical is still on disk.
+        if _denied_ids_contains(denied_resume_ids, sid, session=session):
+            return False
+        return not resume_publication_authority_blocked(sid)
+    except Exception:
+        logger.debug("resume publication admissibility check failed", exc_info=True)
+        return False
+
+
+def resume_publication_strictly_verified(session) -> bool:
+    """Strict proof predicate for a publication owned by the current attempt.
+
+    Requires the explicit ``resume_publication_state == 'verified'`` marker plus
+    the absence of a denial. A missing, empty, unknown or provisional marker is
+    NEVER accepted as proof (A1). This is deliberately distinct from the legacy
+    existing-sidecar idempotency/migration policy, which must keep accepting a
+    pre-fix sidecar that legitimately predates the marker.
+    """
+    if session is None:
+        return False
+    if resume_publication_state(session) != RESUME_PUBLICATION_VERIFIED:
+        return False
+    return not is_resume_publication_denied(str(getattr(session, "session_id", "") or ""))
+
+
+def mark_resume_publication_verified(session):
+    """Commit the explicit verified marker onto the canonical sidecar.
+
+    Called only after post-publish final source re-verification succeeded. Uses
+    the uncounted, unlocked sidecar writer: the Resume claim is active, so the
+    ordinary-save gate must not be taken, and this must never serialize another
+    conversation's save (#765).
+    """
+    session.resume_publication_state = RESUME_PUBLICATION_VERIFIED
+    session._write_sidecar_unlocked(
+        touch_updated_at=False,
+        skip_index=True,
+        _publish_side_effects=False,
+    )
+    return session
+
+
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
 # through filesystem load/save/delete/worktree paths without traversal risk.
@@ -383,13 +2620,18 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
         # Lazy full-rebuild path — used when index doesn't exist yet.
         if updates is None or not session_index_file.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
+            # A3: a full rebuild must deny a legacy (marker-absent) Resume
+            # sidecar whose quarantine move failed, not just a marked one. The
+            # denied-id snapshot batches the check; a snapshot that could not
+            # be read falls back to the fail-closed per-id stat.
+            denied_resume_ids = _denied_resume_publication_ids(session_dir)
             entry_map: dict[str, dict] = {}
             for p in session_dir.glob('*.json'):
                 if p.name.startswith('_'):
                     continue
                 try:
                     s = _load_session_from_path(p)
-                    if s:
+                    if s and session_publication_admissible(s, denied_resume_ids=denied_resume_ids):
                         c = s.compact()
                         sid = c.get('session_id')
                         if sid:
@@ -407,11 +2649,20 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
 
             existing_ids = set(entry_map.keys())
             with LOCK:
-                in_memory_entries = [
-                    s.compact()
-                    for s in SESSIONS.values()
-                    if s.session_id not in existing_ids
+                # Snapshot references only.  ``session_publication_admissible``
+                # probes durable Resume authority and therefore may perform
+                # filesystem I/O; ``compact`` may also become non-trivial.  Q7:
+                # neither belongs under the process-global session lock.
+                in_memory_candidates = [
+                    s for s in SESSIONS.values() if s.session_id not in existing_ids
                 ]
+            in_memory_entries = [
+                s.compact()
+                for s in in_memory_candidates
+                if session_publication_admissible(
+                    s, denied_resume_ids=denied_resume_ids
+                )
+            ]
             entries.extend(in_memory_entries)
             entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
             _payload = json.dumps(entries, ensure_ascii=False, indent=2)
@@ -438,16 +2689,36 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             # Avoid N filesystem exists() checks under LOCK by collecting
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
+            # A3: an incremental update must (a) never insert a denied tracked
+            # Resume publication and (b) actively drop a denied row already in
+            # the index, including a legacy marker-absent sidecar whose
+            # quarantine move failed.
+            denied_resume_ids = _denied_resume_publication_ids(session_dir)
             existing = json.loads(session_index_file.read_bytes())
             if not isinstance(existing, list):
                 raise ValueError("session index must be a list")
             with LOCK:
-                in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+                in_memory_sessions = dict(SESSIONS)
+                in_memory_ids = set(in_memory_sessions)
+            # Never (re-)index a tracked Resume publication that has not
+            # committed an explicit verified marker, or any denied sid.  The
+            # predicate may touch disk, so run it after releasing global LOCK.
+            updated_map = {
+                s.session_id: s.compact()
+                for s in updates
+                if session_publication_admissible(
+                    s, denied_resume_ids=denied_resume_ids
+                )
+            }
 
             existing = [
                 e for e in existing
                 if (e.get('session_id') in in_memory_ids or e.get('session_id') in on_disk_ids)
+                and not _denied_ids_contains(
+                    denied_resume_ids,
+                    e.get('session_id'),
+                    session=in_memory_sessions.get(e.get('session_id')),
+                )
             ]
 
             existing_ids = {e.get('session_id') for e in existing}
@@ -1268,6 +3539,15 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     return row
 
 
+# NOTE (#765): there is deliberately no process-wide or per-session write lock
+# around ``Session.save()``. Concurrent saves of one session race safely on
+# distinct ``.tmp.<pid>.<tid>`` files plus an atomic ``os.replace()``, and one
+# conversation's slow fsync must never stall another's save. First publication
+# of a Resume-in-WebUI sidecar is claimed with an exclusive atomic link instead
+# (see ``publish_staged_session_sidecar``), so no writer lock is required on
+# either side of that handoff.
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1418,6 +3698,23 @@ class Session:
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
+        # Internal identity for an explicit foreign-session handoff into WebUI.
+        # These fields are persisted in the sidecar but intentionally omitted
+        # from compact()/public projections. A flat SESSION_DIR key is not
+        # profile-qualified, so idempotent resume must match the full source
+        # identity rather than trusting a bare session_id.
+        self.resume_source_profile = kwargs.get('resume_source_profile')
+        self.resume_source_state_db = kwargs.get('resume_source_state_db')
+        self.resume_lineage_root_id = kwargs.get('resume_lineage_root_id')
+        self.resume_lineage_tip_id = kwargs.get('resume_lineage_tip_id')
+        # F2/F3 (Astra re-audit 94bfe8af): explicit first-ownership publication
+        # state for an explicit Resume-in-WebUI handoff. ``provisional`` means
+        # the canonical was linked atomically but has NOT passed final source
+        # re-verification; ``verified`` is the explicit committed marker every
+        # reader, idempotency check and index rebuild requires. Ordinary
+        # sessions (and pre-fix legacy resume sidecars) carry no marker, so
+        # their save/read behaviour is unchanged.
+        self.resume_publication_state = kwargs.get('resume_publication_state') or None
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
@@ -1446,6 +3743,119 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        # #765: saves stay lock-free. Two concurrent saves of the same session
+        # must both reach os.replace() with distinct ``.tmp.<pid>.<tid>`` files,
+        # and one slow fsync must never stall another conversation's save. The
+        # cross-writer guarantees a lock used to provide are enforced on the
+        # artifacts themselves instead: the atomic os.replace() below, the
+        # profile/resume ownership guard in _save_unlocked(), and the exclusive
+        # atomic claim Resume-in-WebUI performs in
+        # ``publish_staged_session_sidecar``.
+        return self._save_unlocked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_unlocked(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        _target_path=None,
+        _publish_side_effects: bool = True,
+    ) -> None:
+        """Lock-free canonical save wrapped by the first-ownership gate (#765/D1).
+
+        The gate is a momentary active-writer *count*, not a lock: concurrent
+        saves of this id all register and still reach ``os.replace`` in parallel,
+        and unrelated ids are untouched. It only refuses while a Resume claim
+        owns the id; the claim in turn refuses while any writer is registered, so
+        the two can never overlap on the same canonical artifact. The gate is
+        skipped for staging writes, which target the private namespace rather than
+        the canonical id.
+        """
+        canonical = _target_path is None
+        if canonical and not begin_session_save(self.session_id):
+            raise PermissionError(
+                f"session {self.session_id!r} is being resumed in WebUI; "
+                f"refusing a concurrent save"
+            )
+        # A2 commit fence: a tracked Resume sidecar's canonical persistence is
+        # revalidated against the revocation generation while the per-id fence
+        # is held, so a quarantine that landed after this object's admission
+        # can never be outlived by a reader-triggered save. Ordinary sessions
+        # take neither the fence lock nor the tombstone stat, so the #765
+        # lock-free concurrent-save contract is untouched.
+        _resume_fence_lock = None
+        try:
+            if canonical and is_tracked_resume_identity(self):
+                _resume_fence_lock = _resume_sid_lock(self.session_id)
+                _resume_fence_lock.acquire()
+                assert_resume_publication_writable(self)
+            self._write_sidecar_unlocked(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+                _target_path=_target_path,
+                _publish_side_effects=_publish_side_effects,
+            )
+            # F4: post-write durable authority recheck. A cross-process denial
+            # (or a revocation this process cannot see in memory) can land after
+            # the pre-write fence has already returned. Re-read the durable
+            # fence AFTER the canonical write and, if it is now blocked, evict
+            # any admitted copy, drop the artifact this save just created, and
+            # fail closed — so a denied id can never be resurrected into the
+            # cache or left served writable after a cache clear or restart.
+            if canonical and is_tracked_resume_identity(self):
+                if resume_publication_authority_blocked(self.session_id):
+                    evict_session_from_cache(self.session_id)
+                    # Q4: the artifact is QUARANTINED, never deleted. The bytes
+                    # written here are an operator's only copy of a conversation
+                    # the denial did not itself destroy, so a hard unlink turns a
+                    # fail-closed refusal into silent data loss. Moving it out of
+                    # the canonical name is all the refusal needs: the durable
+                    # tombstone/ledger record (written before this recheck ran)
+                    # is what makes the id loadable-again impossible, and the
+                    # moved copy is inert. The signature captured first means a
+                    # concurrent publisher that legitimately replaced this
+                    # canonical after our write keeps its artifact; its own
+                    # post-write recheck owns it.
+                    signature = _canonical_write_signature(self.path)
+                    if quarantine_denied_resume_sidecar(
+                        self.session_id, source=self.path, signature=signature
+                    ) is None and self.path.exists():
+                        logger.warning(
+                            "Failed to quarantine denied Resume sidecar %s after a "
+                            "post-write authority recheck",
+                            self.session_id,
+                        )
+                    # Q4/Q7: the row is dropped from the in-memory index and the
+                    # index file is rewritten incrementally by the prune. The
+                    # full rebuild that used to run here re-scanned and
+                    # re-parsed every sidecar while holding
+                    # ``_INDEX_WRITE_LOCK`` — pure duplicate work on a path that
+                    # already prunes.
+                    try:
+                        prune_session_from_index(self.session_id)
+                    except Exception:
+                        logger.debug(
+                            "Failed to reconcile index after post-write Resume denial",
+                            exc_info=True,
+                        )
+                    raise PermissionError(
+                        f"session {self.session_id!r} Resume publication was denied "
+                        f"during the write; refusing the resurrected canonical"
+                    )
+        finally:
+            if _resume_fence_lock is not None:
+                _resume_fence_lock.release()
+            if canonical:
+                end_session_save(self.session_id)
+
+    def _write_sidecar_unlocked(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        _target_path=None,
+        _publish_side_effects: bool = True,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1493,6 +3903,8 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
+            'resume_source_profile', 'resume_source_state_db',
+            'resume_lineage_root_id', 'resume_lineage_tip_id',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
@@ -1506,6 +3918,14 @@ class Session:
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(self.messages or [])
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
+        # Resume publication ownership state (F2/F3, Astra 94bfe8af): emitted in
+        # the metadata prefix ONLY for a tracked resume publication so readers
+        # and ``load_metadata_only`` can see the provisional/verified marker.
+        # Ordinary sessions (marker ``None``) never emit the key, so their
+        # sidecars and the #765 lock-free save path are byte-compatible.
+        _publication_state = getattr(self, 'resume_publication_state', None)
+        if _publication_state:
+            meta['resume_publication_state'] = str(_publication_state)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
         # sees the current value rather than a stale load-time snapshot (#5854
@@ -1517,7 +3937,7 @@ class Session:
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes', 'resume_publication_state'}
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
@@ -1535,12 +3955,31 @@ class Session:
         # The recovery path is api/session_recovery.py — at server startup and
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
+        target_path = Path(_target_path) if _target_path is not None else self.path
         try:
-            if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
+            if target_path.exists():
+                existing_text = target_path.read_text(encoding='utf-8')
                 try:
                     existing = json.loads(existing_text)
                     existing_msg_count = len(existing.get('messages') or [])
+                    existing_profile = str(existing.get('profile') or '').strip()
+                    incoming_profile = str(self.profile or '').strip()
+                    if existing_profile and existing_profile != incoming_profile:
+                        raise PermissionError(
+                            f"session sidecar is owned by profile {existing_profile!r}"
+                        )
+                    if existing_profile and not incoming_profile:
+                        raise PermissionError("session sidecar profile ownership cannot be cleared")
+                    resume_keys = (
+                        'resume_source_profile',
+                        'resume_source_state_db',
+                        'resume_lineage_root_id',
+                        'resume_lineage_tip_id',
+                    )
+                    existing_resume = tuple(existing.get(key) for key in resume_keys)
+                    incoming_resume = tuple(getattr(self, key, None) for key in resume_keys)
+                    if any(existing_resume) and existing_resume != incoming_resume:
+                        raise PermissionError("session sidecar resume ownership does not match")
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
@@ -1583,23 +4022,27 @@ class Session:
                             bak_tmp.unlink(missing_ok=True)
                         except Exception:
                             pass
+        except PermissionError:
+            # Ownership violations are safety failures, not best-effort backup
+            # errors. Never continue to the atomic replace below.
+            raise
         except OSError:
             pass
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        tmp = target_path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
+            _safe_replace(tmp, target_path)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
             raise
-        if not skip_index:
+        if _publish_side_effects and not skip_index:
             _write_session_index(updates=[self])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
@@ -1615,7 +4058,7 @@ class Session:
         # save. The helper's self-healing branch in
         # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
         # fix; this is the belt.
-        if self.messages:
+        if _publish_side_effects and self.messages:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
                 _clear_webui_deleted_session_tombstone(self.session_id)
@@ -4724,13 +7167,10 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     entries that ``_session_is_evictable()`` proves are safe. An evicted session
     transparently lazily reloads from its sidecar on the next ``get_session()``.
 
-    CALLER CONTRACT: the global ``LOCK`` MUST already be held (every call site
-    mutates ``SESSIONS`` under ``LOCK``). This function never acquires ``LOCK``
-    or any stream lock itself, so it cannot introduce a lock-ordering deadlock.
-    Under that same held ``LOCK`` it publishes the cap it enforced into
-    ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for nonblocking diagnostics
-    (#6351); any future edit that can change ``cap`` after that point must move
-    the publish down with it.
+    Filesystem eligibility checks run without ``LOCK``.  Each candidate is
+    snapshotted under ``LOCK`` and removed only if the same object and its
+    in-memory safety fields are unchanged when the lock is reacquired.  Callers
+    therefore MUST invoke this helper without already holding ``LOCK``.
 
     Returns the number of sessions evicted. If every over-cap candidate is
     active/unsaved, the cache may temporarily exceed ``cap`` — that is the
@@ -4748,23 +7188,45 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     # payload report a cap eviction actually applied — including the getter-failure
     # fallback and explicit/normalized calls, which never reach the resolver (#6351).
     _cfg._LAST_APPLIED_SESSIONS_CACHE_MAX = cap
+    def memory_guard(candidate):
+        if candidate is None:
+            return None
+        return (
+            len(getattr(candidate, 'messages', None) or []),
+            getattr(candidate, 'active_stream_id', None),
+            getattr(candidate, 'pending_user_message', None),
+            getattr(candidate, 'pending_started_at', None),
+            getattr(candidate, 'composer_draft', None),
+            getattr(candidate, 'created_at', None),
+            bool(getattr(candidate, '_loaded_metadata_only', False)),
+        )
+
     evicted = 0
-    # Iterate over a snapshot of ids in LRU order (oldest first). We stop as
-    # soon as we are at/below the cap. Skipping a non-evictable oldest entry and
-    # moving on lets us reclaim a slightly-newer clean entry instead of blocking
-    # eviction entirely behind one pinned active session.
-    for sid in list(SESSIONS.keys()):
-        if len(SESSIONS) <= cap:
-            break
-        candidate = SESSIONS.get(sid)
-        if _session_is_evictable(candidate):
-            SESSIONS.pop(sid, None)
-            evicted += 1
-    if len(SESSIONS) > cap:
+    with LOCK:
+        candidates = [(sid, candidate, memory_guard(candidate))
+                      for sid, candidate in SESSIONS.items()]
+    for sid, candidate, guard in candidates:
+        with LOCK:
+            if len(SESSIONS) <= cap:
+                break
+            if SESSIONS.get(sid) is not candidate:
+                continue
+        if not _session_is_evictable(candidate):
+            continue
+        with LOCK:
+            if len(SESSIONS) <= cap:
+                break
+            if SESSIONS.get(sid) is candidate and memory_guard(candidate) == guard:
+                SESSIONS.pop(sid, None)
+                evicted += 1
+    with LOCK:
+        above_cap = len(SESSIONS) > cap
+        cache_len = len(SESSIONS)
+    if above_cap:
         logger.debug(
             "SESSIONS cache above cap (%d > %d) after eviction pass: remaining "
             "entries are active or unsaved and were preserved (#4765)",
-            len(SESSIONS), cap,
+            cache_len, cap,
         )
     return evicted
 
@@ -4930,22 +7392,54 @@ def _resolve_session_once(
                 logger.debug(
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
                 )
+        # F3 (Astra 94bfe8af): a cached object that is a provisional or
+        # quarantined Resume publication must never be served writable. Denial
+        # wins even when a delayed reader loaded the object during the
+        # publication window, or when a failed quarantine left the canonical
+        # on disk. Evict so a later read cannot resurrect it from the LRU.
+        # A2: for a tracked Resume identity the authorization is revalidated
+        # against the revocation generation in the same critical section that
+        # would insert into the cache, so a reader preempted between the
+        # admissibility check and the cache write can no longer repopulate it
+        # after a quarantine. Ordinary sessions keep the cheap predicate.
+        if is_tracked_resume_identity(cached):
+            _authorized = admit_session(
+                sid, cached, cache_on_miss=False, promote_cache=promote_cache,
+            )
+        else:
+            _authorized = session_publication_admissible(cached)
+        if not _authorized:
+            with LOCK:
+                if SESSIONS.get(sid) is cached:
+                    SESSIONS.pop(sid, None)
+            raise KeyError(sid)
         return cached
     if metadata_only:
         s = Session.load_metadata_only(sid)
         if s:
+            if is_tracked_resume_identity(s):
+                if not admit_session(sid, s, cache_on_miss=False, promote_cache=promote_cache):
+                    raise KeyError(sid)
+            elif not session_publication_admissible(s):
+                raise KeyError(sid)
             return s
     else:
         if not allow_full_load:
             raise _FullSessionResolveRequired
         s = Session.load(sid)
     if s:
-        if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+        if is_tracked_resume_identity(s):
+            if not admit_session(sid, s, cache_on_miss=cache_on_miss, promote_cache=promote_cache):
+                raise KeyError(sid)
+        else:
+            if not session_publication_admissible(s):
+                raise KeyError(sid)
+            if cache_on_miss:
+                with LOCK:
+                    SESSIONS[sid] = s
+                    if promote_cache:
+                        SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # disk probes run outside LOCK
         if not metadata_only:
             try:
                 synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
@@ -5232,7 +7726,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    _evict_sessions_over_cap()  # disk probes run outside LOCK
     if wt:
         s.save()
     return s
@@ -5923,10 +8417,6 @@ def agent_session_rows_existing(
     wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
     if not wanted:
         return frozenset()
-    try:
-        import sqlite3
-    except ImportError:
-        return frozenset(wanted)
     db_path = _agent_state_db_path(profile=profile)
     if db_path is None:
         return frozenset(wanted)
@@ -6432,11 +8922,16 @@ def all_sessions(
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
             persisted_ids = _persisted_session_ids_snapshot()
+            # F3 (Astra 94bfe8af): quarantined Resume publications are denied
+            # from the sidebar even if a failed move left the canonical file
+            # on disk (one directory listing, not a stat per row).
+            denied_resume_ids = _denied_resume_publication_ids()
             if not index and _session_dir_has_persisted_session_files():
                 raise ValueError("empty session index while session files exist")
             index = [
                 s for s in index
-                if (
+                if not _denied_ids_contains(denied_resume_ids, s.get('session_id'))
+                and (
                     str(s.get('session_id') or '') in in_memory_ids
                     or (
                         persisted_ids is not None
@@ -6474,18 +8969,23 @@ def all_sessions(
             _diag_stage(diag, "all_sessions.overlay_lock")
             index_map = {s['session_id']: s for s in index}
             with LOCK:
-                for s in SESSIONS.values():
-                    index_map[s.session_id] = s.compact(
-                        include_runtime=True,
-                        active_stream_ids=active_stream_ids,
-                        sidebar_metadata_only=sidebar_metadata_only,
-                    )
+                cached_sessions = list(SESSIONS.values())
+            for s in cached_sessions:
+                if not session_publication_admissible(
+                    s, denied_resume_ids=denied_resume_ids):
+                    continue
+                index_map[s.session_id] = s.compact(
+                    include_runtime=True,
+                    active_stream_ids=active_stream_ids,
+                    sidebar_metadata_only=sidebar_metadata_only,
+                )
             missing_persisted_ids = []
             if persisted_ids is not None:
                 indexed_ids = {str(sid) for sid in index_map.keys() if sid}
                 missing_persisted_ids = sorted(
                     str(sid) for sid in persisted_ids
                     if sid and str(sid) not in indexed_ids
+                    and not _denied_ids_contains(denied_resume_ids, sid)
                 )
             # #4985: the tombstone is intentionally NOT a blind-drop filter
             # on missing_persisted_ids. A tombstoned sid whose sidecar is
@@ -6502,11 +9002,14 @@ def all_sessions(
             if missing_persisted_ids:
                 _diag_stage(diag, "all_sessions.recover_missing_index_sidecars")
                 for sid in missing_persisted_ids:
+                    if _denied_ids_contains(denied_resume_ids, sid):
+                        continue
                     try:
                         sidecar = Session.load_metadata_only(sid)
                     except Exception:
                         sidecar = None
-                    if not sidecar:
+                    if not sidecar or not session_publication_admissible(
+                        sidecar, denied_resume_ids=denied_resume_ids):
                         continue
                     index_map[sidecar.session_id] = sidecar.compact(
                         include_runtime=True,
@@ -6591,11 +9094,13 @@ def all_sessions(
         if p.name.startswith('_'): continue
         try:
             s = Session.load(p.stem)
-            if s: out.append(s)
+            if s and session_publication_admissible(s): out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
     _diag_stage(diag, "all_sessions.full_scan_overlay")
     for s in SESSIONS.values():
+        if not session_publication_admissible(s):
+            continue
         if all(s.session_id != x.session_id for x in out): out.append(s)
     _diag_stage(diag, "all_sessions.full_scan_sort_filter")
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
@@ -6888,6 +9393,106 @@ def is_webhook_session(session_id: str, source_tag: str | None = None) -> bool:
 
 
 
+def stage_session_sidecar(session, staging_path):
+    """Serialize a session outside the public sidecar namespace for verification."""
+    staging_path = Path(staging_path)
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    session._save_unlocked(
+        touch_updated_at=True,
+        skip_index=True,
+        _target_path=staging_path,
+        _publish_side_effects=False,
+    )
+    data = json.loads(staging_path.read_text(encoding='utf-8'))
+    data['messages'], _ = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    return Session(**data)
+
+
+def _claim_sidecar_path(staging_path, target_path) -> bool:
+    """Atomically claim *target_path* for the fully written *staging_path*.
+
+    ``os.link`` is the create-if-absent primitive: it either installs the
+    already written + fsync'd staged payload under the canonical name, or fails
+    with ``FileExistsError`` because some other writer (a concurrent Resume
+    request, or a plain ``Session.save()`` for the same id) already owns it.
+    Because the claim is a single filesystem operation there is no
+    check-then-write window, and because no writer lock is involved the #765
+    concurrent-save contract for ordinary saves stays intact.
+
+    Any other ``OSError`` (a filesystem without hard-link support, a cross-device
+    staging directory) propagates: publication fails closed rather than falling
+    back to a non-atomic rename that could expose a partial sidecar.
+    """
+    try:
+        os.link(staging_path, target_path)
+    except FileExistsError:
+        return False
+    return True
+
+
+def publish_staged_session_sidecar(session, staging_path):
+    """Atomically expose one complete provisional session under its canonical id.
+
+    First publication is an all-or-nothing exclusive claim: the canonical path
+    either appears with the complete provisional payload or never appears at
+    all, so readers cannot observe a partially written sidecar. Durable
+    authority keeps this provisional artifact unreadable until the caller
+    commits its verified marker after final source revalidation. The claim does
+    not take the (removed) global/per-session save lock, so a
+    concurrent ``Session.save()`` for another id is unaffected and the #765
+    concurrent-save guard keeps holding.
+
+    Raises ``FileExistsError`` when the id is already owned. The caller decides
+    whether that owner is an idempotent re-resume or a conflicting session.
+    """
+    staging_path = Path(staging_path)
+    if not _claim_sidecar_path(staging_path, session.path):
+        raise FileExistsError(session.path)
+    # F2/F3: the claim installs a PROVISIONAL publication. This deliberately
+    # does NOT touch the sidebar index, the webui tombstones, or any denial
+    # state: an unverified publication must never be advertised, and a
+    # competing Resume must not treat it as committed. The caller commits the
+    # explicit verified marker (``mark_resume_publication_verified``) and
+    # reconciles the index only after final source re-verification succeeds.
+    try:
+        staging_path.unlink(missing_ok=True)
+    except OSError:
+        logger.debug(
+            "Failed to drop published Resume staging file %s",
+            staging_path,
+            exc_info=True,
+        )
+    # A fresh first publication supersedes a *stale* denial from a previously
+    # quarantined attempt for this id (the canonical was absent, or the claim
+    # above would have failed). B2/F3: clearing is authority-gated — only an
+    # attempt that holds the live in-process publication record may clear, and
+    # never a denial newer than that attempt — and a clear that cannot be
+    # *verified* fails the publication outright instead of publishing an
+    # artifact that the durable denial still refuses. Denial is re-established
+    # by the caller if this attempt fails verification.
+    if not clear_resume_publication_denial(session.session_id):
+        staging_path.unlink(missing_ok=True)
+        # Q3: the exclusive claim above ALREADY installed the canonical, so the
+        # whole point of failing this publication would be lost if the canonical
+        # were left live: the id would carry an artifact the durable authority
+        # refuses. "Either it appears complete and verified or it never appears"
+        # has to be enforced here, at the shared helper — a caller-side cleanup
+        # would leave every other caller of this function with the same hole.
+        # Quarantine, not delete: the bytes are the verified staged payload and
+        # stay inspectable.
+        if quarantine_denied_resume_sidecar(session.session_id, source=session.path) is None:
+            if session.path.exists():  # pragma: no cover - only on a failed move
+                logger.warning(
+                    "Failed to withdraw uncommitted Resume canonical %s after an "
+                    "unclearable denial",
+                    session.path,
+                )
+        raise PermissionError(
+            f"session {session.session_id!r} Resume denial could not be cleared; "
+            "refusing to publish"
+        )
+
+
 def import_cli_session(
     session_id: str,
     title: str,
@@ -6897,6 +9502,18 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    *,
+    source_tag=None,
+    raw_source=None,
+    session_source=None,
+    source_label=None,
+    read_only=False,
+    resume_source_profile=None,
+    resume_source_state_db=None,
+    resume_lineage_root_id=None,
+    resume_lineage_tip_id=None,
+    workspace=None,
+    persist=True,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
@@ -6907,29 +9524,43 @@ def import_cli_session(
     s = Session(
         session_id=session_id,
         title=title,
-        workspace=get_last_workspace(profile=profile),
+        workspace=workspace or get_last_workspace(profile=profile),
         model=model,
         messages=messages,
         profile=profile,
         created_at=created_at,
         updated_at=updated_at,
         parent_session_id=parent_session_id,
+        is_cli_session=True,
+        source_tag=source_tag,
+        raw_source=raw_source,
+        session_source=session_source,
+        source_label=source_label,
+        read_only=read_only,
+        resume_source_profile=resume_source_profile,
+        resume_source_state_db=resume_source_state_db,
+        resume_lineage_root_id=resume_lineage_root_id,
+        resume_lineage_tip_id=resume_lineage_tip_id,
     )
+    if persist:
+        # Publish the sidecar before clearing tombstones. A failed import must
+        # not alter sidebar visibility when no writable artifact exists.
+        s.save(touch_updated_at=False)
     # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
     # If that sid was previously tombstoned as a webui zero-message orphan,
     # clear the tombstone entry so the freshly-imported session is visible
-    # on the next poll. Wrapped because a tombstone failure must never block
-    # an import.
-    try:
-        _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-    except Exception:
-        logger.debug(
-            "Failed to clear webui tombstone for %s",
-            s.session_id,
-            exc_info=True,
-        )
-    s.save(touch_updated_at=False)
+    # on the next poll. Wrapped because a tombstone failure must never turn a
+    # successfully published import into an HTTP failure.
+    if persist:
+        try:
+            _clear_webui_zero_message_orphan_tombstone(s.session_id)
+            _clear_webui_deleted_session_tombstone(s.session_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear webui tombstone for %s",
+                s.session_id,
+                exc_info=True,
+            )
     return s
 
 
@@ -8503,6 +11134,10 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     with_revision: Literal[False] = False,
+    state_db_path=None,
+    strict_read_only: bool = False,
+    raise_on_error: bool = False,
+    connection=None,
 ) -> list: ...
 
 
@@ -8516,6 +11151,10 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     with_revision: Literal[True],
+    state_db_path=None,
+    strict_read_only: bool = False,
+    raise_on_error: bool = False,
+    connection=None,
 ) -> StateDBSessionMessagesSnapshot: ...
 
 
@@ -8528,6 +11167,10 @@ def get_state_db_session_messages(
     include_inactive: bool = False,
     limit=None,
     with_revision: bool = False,
+    state_db_path=None,
+    strict_read_only: bool = False,
+    raise_on_error: bool = False,
+    connection=None,
 ):
     """Read messages for a Hermes session from state.db.
 
@@ -8567,23 +11210,37 @@ def get_state_db_session_messages(
     try:
         import sqlite3
     except ImportError:
+        if raise_on_error:
+            raise
         return _state_db_session_messages_result([], None, with_revision=with_revision)
 
-    if isinstance(profile, str) and profile:
+    if state_db_path is not None:
+        db_path = Path(state_db_path)
+    elif isinstance(profile, str) and profile:
         db_path = _get_profile_home(profile) / 'state.db'
     else:
         db_path = _active_state_db_path()
-    if not db_path.exists():
+    if connection is None and not db_path.exists():
+        if raise_on_error:
+            raise FileNotFoundError(f"state.db not found: {db_path}")
         return _state_db_session_messages_result([], None, with_revision=with_revision)
 
     try:
-        with closing(open_state_db_readonly(db_path)) as conn:
+        connection_context = (
+            closing(open_state_db_readonly(db_path, strict=strict_read_only))
+            if connection is None
+            else nullcontext(connection)
+        )
+        with connection_context as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
             available = {str(row['name']) for row in cur.fetchall()}
             required = {'role', 'content', 'timestamp'}
             if not required.issubset(available):
+                if raise_on_error:
+                    missing = ', '.join(sorted(required - available))
+                    raise sqlite3.DatabaseError(f"messages schema missing required columns: {missing}")
                 return _state_db_session_messages_result([], None, with_revision=with_revision)
             optional = [
                 'tool_call_id',
@@ -8754,6 +11411,8 @@ def get_state_db_session_messages(
                     _project_state_db_message(row, available, bool(id_col), optional)
                 )
     except Exception:
+        if raise_on_error:
+            raise
         return _state_db_session_messages_result([], None, with_revision=with_revision)
     return _state_db_session_messages_result(msgs, revision, with_revision=with_revision)
 

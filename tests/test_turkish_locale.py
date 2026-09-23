@@ -1,16 +1,10 @@
 from collections import Counter
 from pathlib import Path
 import re
-from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.i18n_fallback_contract import INTENTIONAL_ENGLISH_FALLBACK_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
-PROFILE_CONCEPT_FALLBACK_KEYS = {
-    *PROFILE_CONCEPT_KEYS,
-    "workspace_artifact_source_session",
-}
-
-
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -130,7 +124,7 @@ def test_turkish_locale_matches_english_key_coverage():
     src = read(REPO / "static" / "i18n.js")
     en_keys = set(locale_keys(src, "en"))
     tr_keys = set(locale_keys(src, "tr"))
-    assert sorted((en_keys - tr_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
+    assert sorted((en_keys - tr_keys) - INTENTIONAL_ENGLISH_FALLBACK_KEYS) == []
     assert sorted(tr_keys - en_keys) == []
 
 

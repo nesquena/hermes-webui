@@ -106,7 +106,8 @@ def _insert(sid_session):
     with LOCK:
         SESSIONS[sid_session.session_id] = sid_session
         SESSIONS.move_to_end(sid_session.session_id)
-        _evict_sessions_over_cap()
+    # Production deliberately performs persistence probes after releasing LOCK.
+    _evict_sessions_over_cap()
 
 
 # ─────────────────────────── config knob ────────────────────────────────────

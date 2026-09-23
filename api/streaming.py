@@ -11859,7 +11859,7 @@ def _run_agent_streaming(
                                 )
                         SESSIONS[new_sid] = s
                         SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+                    _evict_sessions_over_cap()  # persistence probes stay outside LOCK
                     # Migrate the per-session lock by aliasing new_sid to the
                     # held _agent_lock reference directly. Keep old_sid aliased
                     # too until the weak registry can reclaim both safely after

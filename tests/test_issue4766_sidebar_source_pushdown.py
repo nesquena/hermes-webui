@@ -213,6 +213,33 @@ def test_sidebar_source_cli_excludes_webui_rows(monkeypatch):
     assert body["cli_session_count"] == 20
 
 
+def test_operator_read_only_cli_projection_is_resumable_in_sidebar(monkeypatch):
+    """The list payload must expose the same read-only eligibility as detail.
+
+    The frontend only renders foreign rows that are explicitly read-only.  If
+    the operator projection flag is applied by the detail path but omitted from
+    ``/api/sessions``, the CLI tab reports an empty state and the explicit
+    Resume in WebUI action is unreachable.
+    """
+    external_row = _session_rows(webui_count=0, cli_count=1)[0]
+    _install_common_monkeypatches(monkeypatch, [])
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda source_filter=None, all_profiles=False: [external_row],
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTERNAL_STATE_READ_ONLY", "1")
+
+    handler = _handle_sessions("http://example.com/api/sessions?sidebar_source=cli")
+
+    body = handler.json_body()
+    assert handler.status == 200
+    assert len(body["sessions"]) == 1
+    assert body["sessions"][0]["session_id"] == external_row["session_id"]
+    assert body["sessions"][0]["read_only"] is True
+    assert "read_only" not in external_row  # Do not mutate the cached source row.
+
+
 def test_sidebar_source_omitted_returns_all_rows(monkeypatch):
     rows = _session_rows(webui_count=30, cli_count=20)
     _install_common_monkeypatches(monkeypatch, rows)

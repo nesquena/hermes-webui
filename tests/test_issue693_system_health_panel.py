@@ -627,8 +627,7 @@ def test_diagnostics_cap_tracks_the_eviction_owner(monkeypatch, tmp_path):
         # Poison the memo so only a real eviction pass can restore it.
         monkeypatch.setattr(config, "_LAST_APPLIED_SESSIONS_CACHE_MAX", -1)
         with _seeded_mapping(config.LOCK, config.SESSIONS, {}):
-            with config.LOCK:
-                models._evict_sessions_over_cap()
+            models._evict_sessions_over_cap()
             assert config.get_runtime_diagnostics_snapshot()["sessions"]["cap"] == expected
 
 
@@ -651,8 +650,7 @@ def test_diagnostics_cap_reports_the_owner_fallback_when_the_getter_raises(monke
     monkeypatch.setattr(models, "SESSIONS_MAX", 29)
 
     with _seeded_mapping(config.LOCK, config.SESSIONS, {}):
-        with config.LOCK:
-            models._evict_sessions_over_cap()
+        models._evict_sessions_over_cap()
         snapshot = config.get_runtime_diagnostics_snapshot()
         payload = system_health.build_system_health_payload()
 
@@ -672,8 +670,7 @@ def test_diagnostics_cap_reports_the_normalized_explicit_cap(monkeypatch):
     for explicit, expected in ((0, 17), ("nope", 17), (5, 5)):
         monkeypatch.setattr(config, "_LAST_APPLIED_SESSIONS_CACHE_MAX", 4321, raising=False)
         with _seeded_mapping(config.LOCK, config.SESSIONS, {}):
-            with config.LOCK:
-                models._evict_sessions_over_cap(cap=explicit)
+            models._evict_sessions_over_cap(cap=explicit)
             snapshot = config.get_runtime_diagnostics_snapshot()
             payload = system_health.build_system_health_payload()
 

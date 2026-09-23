@@ -240,6 +240,23 @@ console.log(JSON.stringify(rows.map(r=>({sid:r.session_id, orphan:!!r._orphan_ch
     assert out == []
 
 
+def test_resumable_read_only_child_with_missing_parent_is_rendered_for_takeover():
+    """A read-only external child remains reachable when its parent belongs to
+    another source bucket, because its action menu is the only UI takeover path."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _preamble(js) + """
+global._showArchived = false;
+global._canResumeSessionInWebUi = (session) => !!(session && session.read_only && ['cli','tui','acp','desktop'].includes(session.raw_source));
+const raw = [
+  { session_id:'external_child', title:'Tui Session', parent_session_id:'filtered_parent', relationship_type:'child_session', raw_source:'tui', source_tag:'tui', session_source:'cli', source_label:'TUI', _parent_lineage_root_id:'filtered_parent', _cross_surface_child_session:true, read_only:true, message_count:2 },
+];
+const rows = _attachChildSessionsToSidebarRows([], raw);
+console.log(JSON.stringify(rows.map(r=>({sid:r.session_id, orphan:!!r._orphan_child_session}))));
+"""
+    out = json.loads(_run_node(source))
+    assert out == [{"sid": "external_child", "orphan": True}]
+
+
 def test_5305_visible_parent_still_stacks_subagent_child():
     """Guard the common #5244 case still holds after the #5305 change: when the
     WebUI parent IS visible in the same render, the delegate child stacks under
