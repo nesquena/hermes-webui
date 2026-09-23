@@ -59,28 +59,28 @@ def test_stream_end_defers_settlement_when_live_assistant_still_present():
     assert "if(S.activeStreamId===streamId && _liveStreamEndScenePresent())" in body, (
         "stream_end should defer terminal cleanup while active live scene content is still present"
     )
-    assert "_scheduleStreamEndRecovery(source);" in body, (
+    assert "_scheduleStreamEndRecovery(source,180,_capability);" in body, (
         "stream_end should schedule the deferred recovery timer before returning"
     )
-    assert "_scheduleStreamEndRecovery(source)" in body, (
+    assert "_scheduleStreamEndRecovery(source," in body, (
         "stream_end must delegate deferred cleanup to helper"
     )
 
 
 def test_stream_end_fallback_does_not_finalize_when_session_is_still_active():
     body = _event_block("stream_end")
-    assert "const status=await _restoreSettledSession(source,{status:true});" in body
+    assert "const status=await _restoreSettledSession(source,{status:true,capability:_capability});" in body
     assert "if(status==='active'&&S.activeStreamId===streamId)" in body
-    assert "_scheduleStreamEndRecovery(source,200);" in body
+    assert "_scheduleStreamEndRecovery(source,200,_capability);" in body
     assert "_finalizeStreamEndFallback(source);" in body
 
 
 def test_stream_end_recovery_helper_retries_while_session_is_still_active():
     fn = _function_body("_runStreamEndRecovery")
     assert "if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery)" in fn
-    assert "_restoreSettledSession(source,{status:true})" in fn
+    assert "_restoreSettledSession(source,{status:true,capability})" in fn
     assert "if(status==='active'&&_streamEndRecoveryAttempts<10)" in fn
-    assert "_scheduleStreamEndRecovery(source,200);" in fn
+    assert "_scheduleStreamEndRecovery(source,200,capability);" in fn
     assert "_finalizeStreamEndFallback(source);" in fn
 
 
