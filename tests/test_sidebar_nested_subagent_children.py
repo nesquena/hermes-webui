@@ -1,4 +1,4 @@
-"""Nested delegated-subagent children never surface as sidebar orphans.
+"""Nested delegated-subagent children follow authoritative parent metadata.
 
 The server stamps ``_cross_surface_child_session`` only when a child's source
 differs from its parent's. A subagent that itself delegated produces a
@@ -7,8 +7,9 @@ absent and the #5305 "parent out of view" suppression did not apply: the row
 escaped to the top level as a view-only "Subagent Session" orphan.
 
 #7263 covered delegated children of *messaging* parents (cross-surface marker
-set). This covers the same-source nested-delegation case, while an ordinary
-WebUI child of an absent parent keeps its top-level orphan fallback.
+set). This covers the same-source nested-delegation case while preserving the
+top-level orphan fallback when the importer cannot recover the parent from its
+bounded window, and for an ordinary WebUI child of an absent parent.
 """
 import json
 
@@ -37,9 +38,19 @@ _NESTED_CHILD = (
 )
 
 
-def test_nested_subagent_child_without_visible_parent_is_not_orphaned():
+def test_nested_subagent_child_with_known_filtered_parent_is_not_orphaned():
     out = _rows("[]", f"[{_NESTED_CHILD}]")
     assert out["topLevel"] == []
+
+
+def test_nested_subagent_child_with_parent_outside_import_window_still_orphans():
+    child = (
+        "{ session_id:'windowed_subagent_child', title:'Subagent Session', parent_session_id:'old_parent',"
+        " relationship_type:'child_session', raw_source:'subagent', source_tag:'subagent', session_source:'other',"
+        " source_label:'Subagent', parent_source:null, message_count:46 }"
+    )
+    out = _rows("[]", f"[{child}]")
+    assert out["topLevel"] == [{"sid": "windowed_subagent_child", "orphan": True}]
 
 
 def test_nested_subagent_child_stacks_under_visible_subagent_parent():

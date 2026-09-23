@@ -7783,9 +7783,13 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // it when the child's source differs from its parent's. Under nested
       // delegation (a subagent that itself delegated) parent and child are both
       // raw source `subagent`, so the marker is absent; key the suppression on
-      // the delegated raw role too. Ordinary same-source WebUI children of an
-      // absent parent keep their top-level fallback.
-      if(child&&_isChildSession(child)&&(child._cross_surface_child_session||childIsDelegatedSubagent)) continue;
+      // the delegated raw role only when the importer confirms the missing
+      // parent is also a subagent. An absent parent_source means the parent fell
+      // outside the import window, so that child keeps its top-level fallback.
+      if(child&&_isChildSession(child)&&(
+        child._cross_surface_child_session||
+        (childIsDelegatedSubagent&&String(child.parent_source||'').trim().toLowerCase()==='subagent')
+      )) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
