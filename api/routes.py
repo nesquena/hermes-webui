@@ -13,6 +13,7 @@ import gzip
 import json
 from api.sse_chunked import end_sse_headers
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -45,6 +46,7 @@ from api.agent_sessions import (
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
+    open_state_db_readonly,
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
@@ -319,7 +321,7 @@ def _latest_cron_session_info_for_jobs(
     if not db_path or not Path(db_path).exists():
         return {jid: {"session_id": "", "message_count": None} for jid in requested}
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -592,7 +594,15 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
 
 
 def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
-    """Return whether ``sid`` belongs to the active profile."""
+    """Return whether ``sid`` belongs to the active profile.
+
+    On a profile mismatch, the helper mirrors the detail-load endpoint's
+    contract (#13043, #13493): return ``409 session_profile_mismatch`` for
+    a session owned by a KNOWN other profile, and keep ``404 Session
+    not found`` only for the unknown/legacy None-profile case so the
+    frontend's self-heal (clear stale URL + localStorage) keeps firing
+    for actually-missing sids. ``#7710``.
+    """
     if not isinstance(sid, str) or not sid:
         return True
     if not is_safe_session_id(sid):
@@ -601,9 +611,23 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
         session = get_session(sid, metadata_only=True)
     except KeyError:
         return True
-    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+    session_profile = getattr(session, "profile", None) or None
+    if not _session_visible_to_active_profile(session_profile, handler):
         if emit_error:
-            bad(handler, "Session not found", 404)
+            if session_profile:
+                j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": session_profile,
+                }, status=409)
+            else:
+                # Unknown/legacy None-profile sidecar: keep the 404 so the
+                # frontend's self-heal still fires. _profiles_match coerces
+                # None->'default', so a truly missing/legacy session under a
+                # non-default active profile would otherwise emit a useless
+                # 409 with profile=null.
+                bad(handler, "Session not found", 404)
         return False
     return True
 
@@ -2520,8 +2544,8 @@ def _build_session_list_cache_payload(
     )
     if show_cli_sessions:
         diag_stage("cli_cap")
-        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        archived_scoped = _cap_recent_cli_sessions(archived_scoped)
+        visible_scoped = _cap_recent_cli_sessions(visible_scoped)
     if visible_only:
         archived_scoped = [
             s for s in archived_scoped if _session_has_server_visible_messages(s)
@@ -2951,6 +2975,7 @@ from api.helpers import (
     require,
     bad,
     safe_resolve,
+    arm_connection_close_if_body_pending,
     j,
     t,
     read_body,
@@ -2967,6 +2992,128 @@ from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
+
+
+# ── Non-streaming custom-provider connection authority ───────────────────────
+#
+# Several WebUI consumers build their own AIAgent outside the streaming path
+# (POST /api/chat, manual compression, update summary, git commit message,
+# handoff summary). They resolve a model/provider, ask the Hermes runtime
+# provider for a connection, then had to apply the named ``custom:<slug>``
+# record's authority by hand.
+#
+# ``apply_custom_provider_connection_authority`` returns only the THREE
+# connection fields, and three fields are not a complete constructor contract:
+# AIAgent also takes ``api_mode`` (wire protocol), ``credential_pool``
+# (credential source) and ``acp_command``/``acp_args`` (subprocess transport).
+# A consumer that replaced the endpoint and credential while leaving those to
+# default — or, worse, to the ambient runtime — built a mixed-authority agent:
+# an exact row's ``api_mode: anthropic_messages`` or its own pool never reached
+# the constructor at all. These helpers carry the WHOLE bundle instead, exactly
+# as ``api/streaming.py`` does for the streaming path.
+
+# The constructor-routing fields that travel with provider/base_url/api_key as
+# one authority. Mirrors ``api.streaming._RUNTIME_BUNDLE_FIELDS`` and
+# ``api.config.CUSTOM_CONNECTION_SIDE_FIELDS``.
+_AGENT_BUNDLE_SIDE_FIELDS = ("api_mode", "acp_command", "acp_args", "credential_pool")
+
+
+def _resolve_agent_connection_bundle(
+    resolved_provider,
+    resolved_api_key,
+    resolved_base_url,
+    runtime_provider=None,
+    *,
+    lookup_provider=None,
+):
+    """Return the COMPLETE constructor-routing bundle for a non-streaming send.
+
+    Keys: ``provider``, ``base_url``, ``api_key`` plus every field in
+    :data:`_AGENT_BUNDLE_SIDE_FIELDS`. Pass the whole dict to the constructor
+    via :func:`_agent_bundle_kwargs` — the endpoint/credential and the
+    transport/protocol/pool fields are ONE authority.
+
+    ``runtime_provider`` is the dict ``resolve_runtime_provider`` returned. It
+    matters: the merge seeds the side fields from it and then decides, by
+    endpoint provenance, whether they are same-authority (keep) or the ambient
+    provider's (clear). Omitting it silently drops that signal.
+
+    ``lookup_provider`` preserves the pre-canonicalization ``custom:<slug>``
+    identity, since the merge rewrites a resolved bundle's provider to the
+    generic ``custom``.
+
+    Raises :class:`api.config.CustomProviderRouteError` when the merge returns a
+    TERMINAL route verdict — a named ``custom:<slug>`` that resolved no complete
+    ``(api_key, base_url)`` pair. This is the single chokepoint for every
+    non-streaming and auxiliary consumer precisely because an incomplete bundle
+    is NOT a refusal at the constructor: AIAgent's ``_init_openai_client()``
+    only honours an explicit pair when BOTH fields are truthy and otherwise
+    calls ``_routed_client_kwargs()``, which re-resolves a provider and can
+    reach the ambient endpoint or the init-time fallback chain. Returning the
+    bundle with a hole in it would therefore route the send somewhere the user
+    never asked for; raising here keeps the refusal terminal for all five call
+    sites (POST /api/chat, manual compression, update summary, git commit
+    message, handoff summary) without each having to remember to check.
+
+    The exception subclasses ``ValueError``, so the existing ``except
+    ValueError`` / broad-``except`` handlers at those call sites already turn it
+    into a controlled 400 or a deterministic non-LLM fallback.
+    """
+    return api_config.raise_for_custom_provider_route(
+        api_config.merge_custom_provider_runtime_bundle(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            runtime_provider,
+            lookup_provider=lookup_provider or resolved_provider,
+        )
+    )
+
+
+def _agent_bundle_kwargs(agent_cls, bundle):
+    """Return the bundle's side-field kwargs supported by ``agent_cls``.
+
+    ``api_mode``/``acp_command``/``acp_args``/``credential_pool`` were added to
+    AIAgent over several releases, so gate each on the constructor signature the
+    way the streaming path does rather than raising TypeError against an older
+    hermes-agent build. Values come from the BUNDLE, never from the runtime
+    provider dict: a custom-provider override clears these, and reading them off
+    the runtime would re-introduce the authority the merge just replaced.
+    """
+    import inspect as _inspect
+
+    try:
+        params = set(_inspect.signature(agent_cls.__init__).parameters)
+    except (TypeError, ValueError):
+        return {}
+    return {
+        field: bundle[field]
+        for field in _AGENT_BUNDLE_SIDE_FIELDS
+        if field in params
+    }
+
+
+def _auxiliary_main_runtime(bundle, model):
+    """Return the ``main_runtime`` an auxiliary client must receive for a bundle.
+
+    When the auxiliary client answers, AIAgent is never built, so this dict is
+    the ONLY place the resolved authority reaches the wire. It therefore carries
+    the same whole bundle :func:`_agent_bundle_kwargs` hands the constructor —
+    endpoint and credential plus every field in
+    :data:`_AGENT_BUNDLE_SIDE_FIELDS`. Sending only provider/model/base_url/
+    api_key silently downgraded an exact row's ``api_mode``
+    (``anthropic_messages`` fell back to chat completions) and dropped the
+    credential pool/ACP transport that belong to the same record.
+    """
+    runtime = {
+        "provider": bundle["provider"],
+        "model": model,
+        "base_url": bundle["base_url"],
+        "api_key": bundle["api_key"],
+    }
+    for field in _AGENT_BUNDLE_SIDE_FIELDS:
+        runtime[field] = bundle[field]
+    return runtime
 
 
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
@@ -3338,16 +3485,31 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         emit_error=False,
     ):
         return None
-    summary = find_run_summary(stream_id)
-    if not summary:
-        return None
-    session_id = str(summary.get("session_id") or "")
-    if not session_id:
-        return None
+    # Locate the run journal WITHOUT parsing it first. find_run_summary reads
+    # and parses the whole file (tens of thousands of rows on a long live
+    # run), and read_run_events below then parsed it AGAIN — two full passes
+    # cost ~0.6s per rebuild. Derive the durable summary from the single
+    # parse below instead; its last_seq / last_event_id are rebuilt from the
+    # same rows the snapshot consumes.
+    located = find_run_file(stream_id)
+    if located:
+        session_id, _journal_path = located
+    else:
+        # No journal file on disk for this run id: fall back to the
+        # historical summary-based lookup seam (defensive — a real miss
+        # returns None exactly like before; this is also the seam that
+        # long-standing tests stub with a handler-side summary).
+        fallback_summary = find_run_summary(stream_id)
+        if not fallback_summary:
+            return None
+        session_id = str(fallback_summary.get("session_id") or "")
+        if not session_id:
+            return None
     journal = read_run_events(session_id, stream_id)
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
     if not events:
         return None
+    summary = _summary_from_events(session_id, stream_id, events)
     event_run_ids: set[str] = set()
     malformed_envelope_run_id = False
     for event in events:
@@ -3367,6 +3529,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
 
     assistant_text = ""
     reasoning_text = ""
+    # Reasoning deltas arrive as thousands of tiny append events. Growing the
+    # transcript with ``reasoning_text += chunk`` copies the full (multi-
+    # hundred-KB) string on every append inside these closures — quadratic
+    # (~2.3s of a 4.6s rebuild on a 9.7k-chunk run). Collect chunks and
+    # materialize lazily; readers (echo probes, strip, final message) join at
+    # most once per interim segment.
+    reasoning_parts: list[str] = []
+    reasoning_dirty = False
+    # Incremental folded index over the reasoning transcript: the per-interim
+    # echo probe consults this instead of re-walking the raw text (see
+    # ``_CompactEchoIndex``).
+    reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
     activity_burst_anchors: list[dict] = []
@@ -3374,6 +3548,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     fresh_segment = True
     last_ts = None
     reasoning_first_tool_count: int | None = None
+
+    def _materialize_reasoning_text() -> str:
+        nonlocal reasoning_text, reasoning_dirty
+        if reasoning_dirty:
+            reasoning_text = "".join(reasoning_parts)
+            reasoning_dirty = False
+        return reasoning_text
 
     def mark_boundary() -> int:
         nonlocal current_activity_burst_id
@@ -3439,22 +3620,42 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         tool_calls.append(call)
 
     def reasoning_echo_tail_matches(text: str) -> bool:
-        candidate = _compact_for_echo_compare(text)
-        if not candidate:
-            return False
-        return _compact_for_echo_compare(reasoning_text).endswith(candidate)
+        # Indexed tail match (no raw-text walk): the incremental index folds
+        # each reasoning chunk once as it is appended, so this probe costs
+        # O(len(text)) regardless of how much interior whitespace stretches
+        # the raw span. The previous raw backward walk re-walked that span
+        # once per interim event, which turned the replay quadratic on a
+        # whitespace-heavy transcript (#7569 review, ~55x slower than master
+        # on a production-shaped journal).
+        return reasoning_index.matches_tail(text)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
-        next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
-        if did_remove:
-            reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
-        return did_remove
+        nonlocal reasoning_text, reasoning_dirty, reasoning_first_tool_count
+        cut = reasoning_index.cut_to(text)
+        if cut is None:
+            return False
+        next_reasoning = _materialize_reasoning_text()[:cut].rstrip()
+        reasoning_text = next_reasoning
+        reasoning_parts.clear()
+        reasoning_parts.append(next_reasoning)
+        reasoning_dirty = False
+        # Re-index the truncated transcript so later probes match against it
+        # instead of the pre-strip tail (the index is the match authority).
+        reasoning_index.reset()
+        reasoning_index.append(next_reasoning)
+        if not _compact_for_echo_compare(reasoning_text):
+            reasoning_first_tool_count = None
+        return True
 
     for event in events:
         event_name = str(event.get("event") or event.get("type") or "")
+        if event_name == "metering":
+            # Metering rows are the bulk of a long live journal (~10k rows,
+            # ~60% of its bytes) and project nothing onto the snapshot; skip
+            # their per-row work while preserving the last_ts watermark they
+            # carry.
+            last_ts = event.get("created_at", last_ts)
+            continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
@@ -3465,9 +3666,12 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-            reasoning_text += text
+            if text:
+                if reasoning_first_tool_count is None:
+                    reasoning_first_tool_count = len(tool_calls)
+                reasoning_parts.append(text)
+                reasoning_index.append(text)
+                reasoning_dirty = True
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
@@ -3511,6 +3715,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+
+    reasoning_text = _materialize_reasoning_text()
 
     if assistant_text or reasoning_text:
         message = {
@@ -5200,7 +5406,21 @@ def _handle_session_anchor_scene(handler, body):
     # this an authenticated request under profile A could persist anchor scenes
     # onto a session owned by profile B (cross-profile write). Reject as 404 —
     # same shape the read path uses — and leave anchor_activity_scenes untouched.
-    if not _session_visible_to_active_profile(getattr(s, "profile", None) or None, handler):
+    # #7710: cross-profile writes are rejected with 409
+    # ``session_profile_mismatch`` so the client can offer to switch
+    # to the owning profile (mirrors the detail-load endpoint's
+    # contract at #13043 / #13493). 404 is preserved for the
+    # None-profile (unknown/legacy) case so the frontend self-heal
+    # path still fires for actually-missing sids.
+    _anchor_session_profile = getattr(s, "profile", None) or None
+    if not _session_visible_to_active_profile(_anchor_session_profile, handler):
+        if _anchor_session_profile:
+            return j(handler, {
+                "error": "Session belongs to a different profile",
+                "code": "session_profile_mismatch",
+                "session_id": sid,
+                "profile": _anchor_session_profile,
+            }, status=409)
         return bad(handler, "Session not found", 404)
     with _get_session_agent_lock(sid):
         idx, message = _find_anchor_scene_message(
@@ -5712,6 +5932,15 @@ def _csrf_rejection_error(handler) -> str:
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
     if not _check_same_origin_browser_request(handler):
+        # CSRF checks run before read_body(), so close rather than reusing an
+        # HTTP/1.1 connection whose unread body would corrupt the next request --
+        # but ONLY when the framing says bytes are really queued. Arming
+        # unconditionally dropped a healthy pooled connection on a body-less
+        # write: verified on the wire, `POST /api/session/new` with
+        # `Origin: http://evil.invalid` and no `Content-Length` (and with
+        # `Content-Length: 0`) answered 403 + `Connection: close` and the
+        # pipelined `GET /api/health/agent` was never served.
+        arm_connection_close_if_body_pending(handler)
         return False
     if not _is_browser_unsafe_request(handler):
         return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
@@ -5724,6 +5953,11 @@ def _check_csrf(handler) -> bool:
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
+    # Same framing rule as the origin rejection above: a token mismatch on a
+    # body-less write has nothing unread to protect. Verified on the wire with an
+    # authenticated same-origin `POST /api/session/new` carrying no CSRF token and
+    # no `Content-Length`: 403 + `Connection: close`, follow-up dropped.
+    arm_connection_close_if_body_pending(handler)
     return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
@@ -5903,6 +6137,14 @@ def _handle_extension_sidecar_proxy(
     # DELETE fell through the CSRF compatibility path that intentionally admits
     # non-browser clients, giving unsafe methods weaker provenance than GET.
     if not _check_same_origin_browser_request(handler, require_provenance=True):
+        # Provenance rejection runs before read_body(), so close-and-advertise
+        # whenever the request DECLARED a body (Content-Length non-zero, or any
+        # Transfer-Encoding): those bytes are still queued in rfile and a reused
+        # HTTP/1.1 connection would parse them as the next request line (same
+        # class as _check_csrf). Gating on read_request_body instead was wrong in
+        # both directions — it missed a GET that carries a declared body, and it
+        # closed a healthy connection on a body-less DELETE/PUT/PATCH.
+        arm_connection_close_if_body_pending(handler)
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
@@ -6345,6 +6587,13 @@ def _handle_csp_report(handler) -> bool:
             "Dropped CSP report from %s: rate limit exceeded",
             _client_ip_for_rate_limit(handler),
         )
+        # Rate-limit rejection runs before the body is read; close-and-advertise
+        # so the unread report can't corrupt the next pooled request -- but only
+        # when a body was really declared. A body-less report answered 204 WITH
+        # `Connection: close` once the 100-per-60s limiter tripped (reproduced on
+        # the wire at request 101; the pipelined `GET /api/health/agent` was
+        # dropped), so a browser that keeps reporting loses its socket each time.
+        arm_connection_close_if_body_pending(handler)
         return _send_no_content(handler)
 
     payload = _read_csp_report_payload(handler)
@@ -9107,6 +9356,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -10155,11 +10405,16 @@ def _dedupe_cli_sidebar_sessions_for_api(
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
-CLI_VISIBLE_SESSION_CAP = 20
+def _cli_visible_session_cap() -> int:
+    """Shared sidebar window, not a second hard-coded 20."""
+    from api.config import CLI_VISIBLE_SESSION_LIMIT
+    return CLI_VISIBLE_SESSION_LIMIT
 
 
-def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
+def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int | None = None) -> list[dict]:
     """Keep only the most recent CLI-visible sessions after filtering."""
+    if cli_cap is None:
+        cli_cap = _cli_visible_session_cap()
     if cli_cap <= 0:
         return sessions
     kept = []
@@ -10365,6 +10620,11 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     exists either in memory or on disk. Follow bounded snapshot-to-snapshot hops
     so repeated compression still lands on the latest visible continuation.
     """
+    from api.compression_continuation import durable_compression_continuation
+
+    sealed, tip = durable_compression_continuation(session)
+    if sealed:
+        return tip
     if not getattr(session, "pre_compression_snapshot", False):
         return None
     sid = _safe_first(getattr(session, "session_id", None))
@@ -10543,6 +10803,7 @@ from api.workspace import (
     safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
+    _resolve_path,
     resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
     open_anchored_create_fd,
@@ -10574,13 +10835,16 @@ from api.streaming import (
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
-    _strip_compact_echo_suffix,
+    _CompactEchoIndex,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
+    _summary_from_events,
     bound_run_journal_snapshot_args,
+    find_run_file,
     find_run_summary,
+    journal_replay_visible,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
@@ -10641,8 +10905,10 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     gateway_pending_mirrors,
     release_gateway_approval_relay_owner,
     retire_gateway_pending_mirror,
+    settle_gateway_pending_run,
     reconcile_gateway_pending_mirror_locked,
     resolve_gateway_pending_local,
+    resolve_gateway_pending_run,
     resolve_gateway_pending_local_all,
     resolve_gateway_pending_local_no_run_mirror,
     set_session_yolo_enabled,
@@ -10956,9 +11222,7 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
-    <button type="submit">{{LOGIN_BTN}}</button>
-    <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
+    {{PASSWORD_FORM_HTML}}
     {{OIDC_LOGIN_HTML}}
   </form>
   <div class="err" id="err"></div>
@@ -11773,7 +12037,7 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
@@ -12408,7 +12672,7 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
                 "ms": round((time.time() - t0) * 1000, 1),
             }
         else:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(open_state_db_readonly(db_path)) as conn:
                 conn.execute("PRAGMA schema_version").fetchone()
             checks["state_db"] = {
                 "status": "ok",
@@ -12729,6 +12993,15 @@ def _handle_shutdown(handler) -> bool:
 
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
+    # This endpoint never consumes its request body on any outcome, so close when
+    # one was DECLARED -- and only then. Arming unconditionally closed the socket
+    # on every call including the successful, body-less one the WebUI actually
+    # makes: verified on the wire, `POST /api/health/restart` with no
+    # `Content-Length` answered with `Connection: close` and the pipelined
+    # `GET /api/health/agent` was never served. The single arming covers every
+    # outcome below (completed / in_progress / busy / error) because the framing,
+    # not the result, decides.
+    arm_connection_close_if_body_pending(handler)
     outcome = restart_active_profile_gateway()
 
     if outcome.get("status") == "completed":
@@ -13450,7 +13723,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
         return _serve_manifest(handler)
 
-    if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
+    if parsed.path in ("/", "/index.html", "/sessions") or parsed.path.startswith("/session/"):
         try:
             from api.extensions import inject_extension_tags
 
@@ -13501,6 +13774,36 @@ def handle_get(handler, parsed) -> bool:
         ]
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
+        # #7056: only render the password input / submit / passkey controls
+        # when password auth is actually enabled. With native OIDC configured
+        # and ``HERMES_WEBUI_PASSWORD`` unset, the form previously still
+        # displayed the password prompt and accepted — silently 401-ing at
+        # the server — every submit. The OIDC SSO entry point stays the
+        # sole path. ``is_password_auth_enabled`` is the same predicate
+        # ``/api/auth/status`` reports as ``password_auth_enabled``.
+        from api.auth import are_passkeys_enabled, is_password_auth_enabled
+
+        # The password INPUT is gated on a configured password, but the passkey
+        # button must survive a passwordless-passkey deployment: settings expose
+        # ``passwordless_enabled = passkeys registered AND not password_auth_enabled``
+        # (routes.py ~14059) and ``is_auth_enabled()`` counts passkeys as an
+        # independent auth method, so hiding the button when no password is set
+        # would remove the ONLY working login affordance for those instances.
+        _passkey_button_html = (
+            '<button type="button" id="passkey-login" class="passkey-login" '
+            'style="display:none">Sign in with passkey</button>'
+        )
+        if is_password_auth_enabled():
+            _password_form_html = (
+                f'<input type="password" id="pw" '
+                f'placeholder="{_html.escape(_login_strings["placeholder"])}" autofocus>'
+                f'<button type="submit">{_html.escape(_login_strings["btn"])}</button>'
+                f'{_passkey_button_html}'
+            )
+        elif are_passkeys_enabled():
+            _password_form_html = _passkey_button_html
+        else:
+            _password_form_html = ""
         version_token = quote(WEBUI_VERSION, safe="")
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
@@ -13509,10 +13812,7 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
-            .replace(
-                "{{LOGIN_PLACEHOLDER}}", _html.escape(_login_strings["placeholder"])
-            )
-            .replace("{{LOGIN_BTN}}", _html.escape(_login_strings["btn"]))
+            .replace("{{PASSWORD_FORM_HTML}}", _password_form_html)
             .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
@@ -14159,22 +14459,39 @@ def handle_get(handler, parsed) -> bool:
         return _handle_session_export(handler, parsed)
 
     if parsed.path == "/api/workspaces":
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        try:
+            lw = get_last_workspace(profile=active_profile)
+        except TypeError:
+            lw = get_last_workspace()
         return j(
             handler,
             {
-                "workspaces": load_workspaces(),
-                "last": get_last_workspace(),
+                "workspaces": wss,
+                "last": lw,
                 "terminal_remote_backend": _terminal_remote_backend_enabled(),
             },
         )
 
     if parsed.path == "/api/workspaces/suggest":
+        from api.profiles import get_active_profile_name
+
         qs = parse_qs(parsed.query)
         prefix = qs.get("prefix", [""])[0]
+        active_profile = get_active_profile_name()
+        try:
+            suggestions = list_workspace_suggestions(prefix, profile=active_profile)
+        except TypeError:
+            suggestions = list_workspace_suggestions(prefix)
         return j(
             handler,
             {
-                "suggestions": list_workspace_suggestions(prefix),
+                "suggestions": suggestions,
                 "prefix": prefix,
             },
         )
@@ -14337,7 +14654,11 @@ def handle_get(handler, parsed) -> bool:
                 if stop_gateway_run(run_id):
                     owner_sid = stream_owner_session_id(stream_id)
                     if owner_sid:
-                        retire_gateway_pending_mirror(owner_sid, run_id=run_id)
+                        settle_gateway_pending_run(
+                            owner_sid,
+                            run_id,
+                            reason="Gateway run was cancelled before approval resolution",
+                        )
                 else:
                     gateway_stop_blocked = True
         except Exception:
@@ -14625,7 +14946,10 @@ def handle_get(handler, parsed) -> bool:
         # profile-scoped via the per-request hermes_profile cookie set in server.py.
         # Fail open: a resolution error must never 500 this boot-critical endpoint.
         try:
-            _profile_default_workspace = get_profile_default_workspace()
+            try:
+                _profile_default_workspace = get_profile_default_workspace(profile=active_profile_name)
+            except TypeError:
+                _profile_default_workspace = get_profile_default_workspace()
         except Exception:
             logger.debug("Failed to resolve profile default workspace for /api/profile/active", exc_info=True)
             _profile_default_workspace = None
@@ -14848,27 +15172,132 @@ def _validate_session_toolsets_shape(toolsets):
     return toolsets
 
 
-def _resolve_new_session_workspace(body, visible_prev_session_id):
+def _resolve_new_session_workspace(body, visible_prev_session_id, profile=None):
     """Resolve a new-session workspace, recovering only verified inheritance."""
     candidate = body.get("workspace")
     if not candidate:
         return None
+
+    def _rtw(value):
+        # Legacy test doubles may predate the profile kwarg.
+        try:
+            return resolve_trusted_workspace(value, profile=profile)
+        except TypeError:
+            return resolve_trusted_workspace(value)
+
     if (
         body.get("workspace_inherited_from_prev_session") is not True
         or not visible_prev_session_id
     ):
-        return str(resolve_trusted_workspace(candidate))
+        return str(_rtw(candidate))
     try:
         previous_session = get_session(visible_prev_session_id, metadata_only=True)
     except KeyError:
-        return str(resolve_trusted_workspace(candidate))
+        return str(_rtw(candidate))
     if str(getattr(previous_session, "workspace", None) or "") != str(candidate):
-        return str(resolve_trusted_workspace(candidate))
-    workspace, _recovered = resolve_implicit_workspace_with_recovery(
-        candidate,
-        get_last_workspace,
-    )
+        return str(_rtw(candidate))
+    try:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            candidate,
+            get_last_workspace,
+            profile=profile,
+        )
+    except TypeError:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            candidate,
+            get_last_workspace,
+        )
     return str(workspace)
+
+
+def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: str | None = None) -> str:
+    from api import profiles as profiles_api
+
+    profile = active_profile or profiles_api.get_active_profile_name() or "default"
+
+    with profiles_api.profile_env_for_background_worker(
+        profile,
+        "update summary",
+        logger_override=logger,
+    ):
+        from api.config import (
+            get_effective_default_model,
+            resolve_model_provider,
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
+        _main_api_key = None
+        _rt = None
+        try:
+            from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                resolve_runtime_provider,
+                requested=_main_provider,
+            )
+            _main_api_key = _rt.get("api_key")
+            if not _main_provider:
+                _main_provider = _rt.get("provider")
+            if not _main_base_url:
+                _main_base_url = _rt.get("base_url")
+        except Exception as _e:
+            logger.debug("update summary runtime provider resolution failed: %s", _e)
+        # Atomic custom-provider authority (see the /api/chat note): the record
+        # that supplies the endpoint must also supply the credential — and the
+        # wire protocol, credential pool and ACP transport that go with it.
+        _bundle = _resolve_agent_connection_bundle(
+            _main_provider, _main_api_key, _main_base_url, _rt
+        )
+        _main_provider = _bundle["provider"]
+        _main_api_key = _bundle["api_key"]
+        _main_base_url = _bundle["base_url"]
+
+        main_runtime = _auxiliary_main_runtime(_bundle, _main_model)
+
+        ensure_agent_runtime_current()
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            aux_client, aux_model = get_text_auxiliary_client(
+                "compression",
+                main_runtime=main_runtime,
+            )
+            if aux_client is not None and aux_model:
+                response = aux_client.chat.completions.create(
+                    model=aux_model,
+                    messages=messages,
+                )
+                return str(response.choices[0].message.content or "").strip()
+        except Exception as _e:
+            logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
+
+        AIAgent = require_ai_agent_class()
+
+        agent = AIAgent(
+            model=_main_model,
+            provider=_main_provider,
+            base_url=_main_base_url,
+            api_key=_main_api_key,
+            platform="webui",
+            quiet_mode=True,
+            enabled_toolsets=[],
+            session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+            **_agent_bundle_kwargs(AIAgent, _bundle),
+        )
+        result = agent.run_conversation(
+            user_message=user_prompt,
+            system_message=system_prompt,
+            conversation_history=[],
+            task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+        )
+        return str(result.get("final_response") or "").strip()
+
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
@@ -14895,6 +15324,12 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.stage("process_complete_ack_deprecated")
         try:
+            # The 410 runs before the stale tab's JSON body is read;
+            # close-and-advertise so those unread bytes can't corrupt the next
+            # pooled request -- but a body-less ack has none, and closing then
+            # just kills keep-alive (on the wire: 410 + `Connection: close` with
+            # no `Content-Length`, pipelined follow-up dropped).
+            arm_connection_close_if_body_pending(handler)
             j(
                 handler,
                 {
@@ -15209,7 +15644,9 @@ def handle_post(handler, parsed) -> bool:
         ):
             workspace_prev_session_id = None
         try:
-            workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
+            workspace = _resolve_new_session_workspace(
+                body, workspace_prev_session_id, profile=body.get("profile") or None
+            )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None
@@ -15238,7 +15675,17 @@ def handle_post(handler, parsed) -> bool:
                 from api.worktrees import create_worktree_for_workspace
                 base_workspace = workspace
                 if not base_workspace:
-                    base_workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                    _new_profile = body.get("profile") or None
+                    try:
+                        _lw = get_last_workspace(profile=_new_profile)
+                    except TypeError:
+                        _lw = get_last_workspace()
+                    try:
+                        base_workspace = str(
+                            resolve_trusted_workspace(_lw, profile=_new_profile)
+                        )
+                    except TypeError:
+                        base_workspace = str(resolve_trusted_workspace(_lw))
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
             except (TypeError, ValueError) as e:
@@ -15803,7 +16250,7 @@ def handle_post(handler, parsed) -> bool:
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
         except ValueError as e:
             return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
@@ -15837,7 +16284,7 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
-        set_last_workspace(new_ws)
+        set_last_workspace(new_ws, profile=getattr(s, "profile", None))
         return j(
             handler,
             {"session": public_session_projection(s.compact() | {"messages": s.messages})},
@@ -17025,14 +17472,16 @@ def handle_post(handler, parsed) -> bool:
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
+                _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
                     title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
-                    workspace=get_last_workspace(),
+                    workspace=get_last_workspace(profile=_arch_profile),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
+                    profile=_arch_profile,
                 )
                 s.is_cli_session = is_cli_session_row(cli_meta)
                 s.source_tag = cli_meta.get("source_tag")
@@ -17317,99 +17766,6 @@ def handle_post(handler, parsed) -> bool:
 
         updates = body.get("updates") if isinstance(body, dict) else {}
         target = body.get("target") if isinstance(body, dict) else None
-
-        def _llm_update_summary(system_prompt: str, user_prompt: str) -> str:
-            from api import profiles as profiles_api
-
-            active_profile = profiles_api.get_active_profile_name() or "default"
-
-            with profiles_api.profile_env_for_background_worker(
-                active_profile,
-                "update summary",
-                logger_override=logger,
-            ):
-                from api.config import (
-                    get_effective_default_model,
-                    resolve_model_provider,
-                    resolve_custom_provider_connection,
-                )
-
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ]
-
-                _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
-                _main_api_key = None
-                try:
-                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                    from hermes_cli.runtime_provider import resolve_runtime_provider
-
-                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                        resolve_runtime_provider,
-                        requested=_main_provider,
-                    )
-                    _main_api_key = _rt.get("api_key")
-                    if not _main_provider:
-                        _main_provider = _rt.get("provider")
-                    if not _main_base_url:
-                        _main_base_url = _rt.get("base_url")
-                except Exception as _e:
-                    logger.debug("update summary runtime provider resolution failed: %s", _e)
-                if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
-                    _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
-                    if not _main_api_key and _cp_key:
-                        _main_api_key = _cp_key
-                    if not _main_base_url and _cp_base:
-                        _main_base_url = _cp_base
-
-                main_runtime = {
-                    "provider": _main_provider,
-                    "model": _main_model,
-                    "base_url": _main_base_url,
-                    "api_key": _main_api_key,
-                }
-
-                ensure_agent_runtime_current()
-                try:
-                    from agent.auxiliary_client import get_text_auxiliary_client
-
-                    # Update summaries are a short text-compression/summarization task.
-                    # Reuse the documented auxiliary.compression slot instead of
-                    # inventing a WebUI-only auxiliary task name that users cannot
-                    # discover in the Hermes Agent setup/config UI.
-                    aux_client, aux_model = get_text_auxiliary_client(
-                        "compression",
-                        main_runtime=main_runtime,
-                    )
-                    if aux_client is not None and aux_model:
-                        response = aux_client.chat.completions.create(
-                            model=aux_model,
-                            messages=messages,
-                        )
-                        return str(response.choices[0].message.content or "").strip()
-                except Exception as _e:
-                    logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
-
-                AIAgent = require_ai_agent_class()
-
-                agent = AIAgent(
-                    model=_main_model,
-                    provider=_main_provider,
-                    base_url=_main_base_url,
-                    api_key=_main_api_key,
-                    platform="webui",
-                    quiet_mode=True,
-                    enabled_toolsets=[],
-                    session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-                )
-                result = agent.run_conversation(
-                    user_message=user_prompt,
-                    system_message=system_prompt,
-                    conversation_history=[],
-                    task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-                )
-                return str(result.get("final_response") or "").strip()
 
         return j(handler, summarize_update_payload(updates, llm_callback=_llm_update_summary, target=target))
 
@@ -17710,6 +18066,9 @@ _STATIC_MIME = {
     "webp": "image/webp",
     "woff": "font/woff",
     "woff2": "font/woff2",
+    # Python's built-in MIME table does not include APK, and platform MIME
+    # databases are not consistent across Linux, macOS, and Windows.
+    "apk": "application/vnd.android.package-archive",
 }
 # MIME types that are text-based and should carry charset=utf-8
 _TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
@@ -17741,7 +18100,13 @@ def _serve_static(handler, parsed):
     if not static_file.exists() or not static_file.is_file():
         return j(handler, {"error": "not found"}, status=404)
     ext = static_file.suffix.lower()
-    ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
+    ct = _STATIC_MIME.get(ext.lstrip("."))
+    if ct is None:
+        guessed_type, content_encoding = mimetypes.guess_type(static_file.name)
+        # Encoded suffixes (for example .svgz/.tgz) need Content-Encoding
+        # semantics this route does not implement. Fail closed instead of
+        # advertising the decoded media type for still-compressed bytes.
+        ct = guessed_type if guessed_type and not content_encoding else "application/octet-stream"
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
 
     # Look up or populate the per-file cache (raw, optional gzip, ETag).
@@ -18009,15 +18374,26 @@ def _handle_list_dir(handler, parsed):
         except Exception:
             return bad(handler, "Session not found", 404)
     try:
+        _list_profile = getattr(webui_session, "profile", None)
         if webui_session is None:
-            workspace = resolve_trusted_workspace(workspace)
+            try:
+                workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
+            except TypeError:
+                workspace = resolve_trusted_workspace(workspace)
             recovered = False
         else:
             stored_workspace = workspace
-            workspace, recovered = resolve_implicit_workspace_with_recovery(
-                stored_workspace,
-                get_last_workspace,
-            )
+            try:
+                workspace, recovered = resolve_implicit_workspace_with_recovery(
+                    stored_workspace,
+                    get_last_workspace,
+                    profile=_list_profile,
+                )
+            except TypeError:
+                workspace, recovered = resolve_implicit_workspace_with_recovery(
+                    stored_workspace,
+                    get_last_workspace,
+                )
             if recovered:
                 persisted = persist_recovered_workspace_binding(
                     webui_session,
@@ -18380,6 +18756,8 @@ def _replay_run_journal(
         max_seq=max_seq,
     )
     for entry in journal.get("events") or []:
+        if not journal_replay_visible(entry):
+            continue
         _sse_with_id(
             handler,
             entry.get("event") or entry.get("type") or "message",
@@ -18833,14 +19211,14 @@ def _handle_sse_stream(handler, parsed):
                 continue
             if len(item) >= 3:
                 event, data, queued_event_id = item[0], item[1], item[2]
+                event_id = queued_event_id
             else:
                 event, data = item
-                queued_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+                event_id = STREAM_LAST_EVENT_ID.get(stream_id)
             # Stage-364: emit `id:` from STREAM_LAST_EVENT_ID side-channel so
             # the frontend's `_lastRunJournalSeq` cursor advances during live
             # streaming. Without this, mid-stream error→replay would arrive
             # with after_seq=0 and double-render every journaled event.
-            event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(stream_id)
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
                 continue
@@ -18915,6 +19293,8 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
     def emit_replay(events, stream_id, cutoff_seq):
         for entry in events:
+            if not journal_replay_visible(entry):
+                continue
             event_id = str(entry.get("event_id") or "")
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if cutoff_seq is not None and event_seq is not None and event_seq > cutoff_seq:
@@ -18981,10 +19361,10 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                     continue
                 if len(item) >= 3:
                     event, data, queued_event_id = item[0], item[1], item[2]
+                    event_id = queued_event_id
                 else:
                     event, data = item
-                    queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
-                event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
+                    event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
                 _is_terminal = event in SSE_RELAY_CLOSE_EVENTS
                 _already_sent = (
@@ -19059,7 +19439,7 @@ def _handle_terminal_start(handler, body):
                 },
                 status=400,
             )
-        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "")
+        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "", profile=getattr(session, "profile", None))
         from api.terminal import start_terminal
         term = start_terminal(
             sid,
@@ -19886,7 +20266,22 @@ def _handle_tts(handler, parsed):
         voice = data.get("voice") or voice
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
-        engine = (data.get("engine") or "edge").strip().lower()
+        request_engine = data.get("engine")
+        if "engine" not in data or (
+            isinstance(request_engine, str) and not request_engine.strip()
+        ):
+            persisted_engine = (load_settings() or {}).get("tts_engine")
+            if isinstance(persisted_engine, str):
+                persisted_engine = persisted_engine.strip().lower()
+            else:
+                persisted_engine = ""
+            engine = (
+                persisted_engine
+                if persisted_engine in {"edge", "elevenlabs", "openai"}
+                else "edge"
+            )
+        else:
+            engine = (request_engine or "edge").strip().lower()
     except Exception:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid request body", 400)
@@ -20236,6 +20631,16 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
 
 
 _MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+# #7680 re-gate (9/22): two-pass scan.
+#   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
+#      the wrapping backticks so the bare-token pass below sees a
+#      plain ``MEDIA:path`` and the closing backtick is not consumed
+#      as part of the path.
+#   2. ``MEDIA:[^\s\)\]]+`` (bare, no backtick in the exclusion
+#      class) so a filename that legally contains a backtick
+#      (``report`final.png``) is captured in full instead of being
+#      truncated at the first backtick.
+_BACKTICK_MEDIA_RE = re.compile(r"`MEDIA:([^`\s]+)`")
 
 
 def _message_content_text(content) -> str:
@@ -20277,9 +20682,28 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         role = str(message.get("role") or "").strip().lower()
         if role == "user":
             continue
-        text = _message_content_text(message.get("content"))
+        # #7565: also inspect typed public assistant commentary carried in
+        # ``codex_message_items`` (Agent phase: "commentary"). The
+        # concatenated text below is the union of the existing
+        # top-level extraction and the new commentary-only helper, so
+        # the existing exact-path, owning-session, safe-MIME, URL,
+        # hard-denied, and symlink guards are unchanged. The
+        # commentary helper is fail-closed (outer role must be
+        # assistant; item type/role/phase all constrained; only
+        # textual output_text parts are read).
+        from api.media_snapshots import codex_commentary_text
+        text = "\n".join(
+            fragment for fragment in (
+                _message_content_text(message.get("content")),
+                codex_commentary_text(message),
+            ) if fragment
+        )
         if "MEDIA:" not in text:
             continue
+        # #7680 re-gate: strip backtick wrappers first so the bare
+        # class below captures the full path even when the filename
+        # itself contains a backtick.
+        text = _BACKTICK_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
         for ref in _MEDIA_TOKEN_RE.findall(text):
             if "://" in ref:
                 continue
@@ -20585,7 +21009,12 @@ def _handle_media(handler, parsed):
         "video/mp4", "video/quicktime", "video/webm", "video/ogg",
         "application/pdf",
     }
-    _SESSION_MEDIA_TOKEN_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | {"text/html"}
+    # Archives are download-only: never added to the inline-preview sets below,
+    # so they always get Content-Disposition: attachment.
+    _ARCHIVE_TYPES = {"application/zip"}
+    _SESSION_MEDIA_TOKEN_TYPES = (
+        _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | _ARCHIVE_TYPES | {"text/html"}
+    )
     session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
         target,
@@ -21467,6 +21896,99 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
+            def _custom_provider_models_discover_is_false(_cp):
+                """True when ``discover_models`` is an explicit ``false`` opt-out.
+
+                Mirrors ``api.config._provider_discover_allowed`` / Hermes
+                Agent ``model_switch_providers._discover_flag``: ``discover_models``
+                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
+                (case-insensitive) mean False.  Used to decide whether a
+                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
+                when discovery is off) rather than per-model metadata.
+                """
+                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
+                if isinstance(_discover, str):
+                    return _discover.strip().lower() in {"false", "no", "0"}
+                return not bool(_discover)
+
+            def _custom_provider_allowlist_ids(_cp):
+                """Plural ``models`` list only — the explicit allowlist signal.
+
+                The singular ``model`` field is sticky/default metadata, NOT an
+                allowlist: it must not gate live-catalog filtering, otherwise a
+                provider configured with only ``model: assistant`` (no ``models``
+                list) would be collapsed to a single model.  Only an explicit
+                ``models`` allowlist expresses "show exactly these models".
+
+                An auto-discovered catalog is NOT an allowlist: when Hermes
+                persisted discovery results back into config (``models: {...}``
+                plus ``models_discovered: true``), that mapping is a snapshot
+                of what the gateway exposed at discovery time.  Gating on it
+                would permanently pin the live catalog to the first-discovery
+                set, silently dropping any model the user pulls in later
+                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+                is the shared predicate the ``/api/models`` path already uses;
+                when it says "discovered", return no allowlist and let the
+                live probe win.  An explicit ``discover_models: false`` opt-out
+                re-pins the catalog (the predicate accounts for it), so a
+                hand-pinned discovered catalog still filters.
+
+                A dict-shaped ``models`` mapping that is NOT marked discovered is
+                *per-model metadata* written by the Hermes Agent setup flow
+                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+                not a catalog narrow: treating its keys as an allowlist would
+                collapse the live picker to the single saved default (keyless
+                Ollama) while the CLI live-probe shows the full catalog.  Only an
+                explicit ``discover_models: false`` opts into treating the dict
+                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+                shapes remain plain allowlists.
+
+                The plural value is decoded through ``_parse_config_string_list()``
+                because ``hermes config set`` / JSON-mode editor saves persist
+                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+                made a serialized allowlist fall through to ``[]``, which the
+                caller reads as "no allowlist configured" and floods the picker
+                with the full upstream catalog — the same class of bug as the
+                ``skills.disabled`` regression (#7120 / #7134).
+                """
+                from api.config import _provider_models_are_discovered_catalog
+
+                if _provider_models_are_discovered_catalog(_cp):
+                    return []
+                _ids = []
+                _models = _cp.get("models")
+                # Serialized shapes only: ``hermes config set`` / JSON-mode
+                # editor saves persist lists as quoted JSON-array strings
+                # (``'["chat-a","chat-b"]'``) or Python literals
+                # (``"['chat-a']"``).  Decode those through the shared helper so
+                # they are honored; native dict/list values are walked below so
+                # dict *entries* keep their id|model|name metadata (the decoder
+                # str()-ifies list members, which would mangle them).
+                if isinstance(_models, str):
+                    _models = _parse_config_string_list(_models)
+                if isinstance(_models, dict):
+                    # A dict-shaped ``models`` is per-model metadata written by
+                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+                    # ``discover_models: false`` opt-out treats the dict keys as a
+                    # pinned allowlist; otherwise return the empty allowlist so the
+                    # live probe returns the full catalog.
+                    if not _custom_provider_models_discover_is_false(_cp):
+                        return []
+                    for _mid in _models:
+                        if isinstance(_mid, str) and _mid.strip():
+                            _ids.append(_mid.strip())
+                elif isinstance(_models, (list, tuple)):
+                    for _item in _models:
+                        if isinstance(_item, str) and _item.strip():
+                            _ids.append(_item.strip())
+                        elif isinstance(_item, dict):
+                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                            if _mid and str(_mid).strip():
+                                _ids.append(str(_mid).strip())
+                return _ids
+
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
@@ -21475,11 +21997,13 @@ def _handle_live_models(handler, parsed):
             # Collect config-specified model IDs separately so they don't
             # prevent the live fetch below from running (#3718).
             _config_ids = []
+            _allowlist_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
                     _config_ids.extend(_custom_provider_model_ids(_cp))
+                    _allowlist_ids.extend(_custom_provider_allowlist_ids(_cp))
             
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL
@@ -21550,15 +22074,39 @@ def _handle_live_models(handler, parsed):
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
-                # If live fetch succeeded, merge with config entries (live takes
-                # priority).  If live fetch failed, fall back to config-only list.
+                # If live fetch succeeded, filter the live catalog down to the
+                # config-declared models allowlist first, then append any
+                # allowlisted models the live endpoint didn't return.  Custom
+                # providers (esp. New-API-style gateways) expose their ENTIRE
+                # catalog via /v1/models — including image/audio models that
+                # are not chat models.  The picker must not surface models the
+                # user never declared in config.yaml.  Only a NON-EMPTY explicit
+                # ``models`` allowlist gates the filter — a provider configured
+                # with just a singular ``model`` (no ``models`` list) keeps the
+                # unfiltered live catalog.  When no allowlist is configured,
+                # return the live list as-is (preserves the pre-filter
+                # discovery behaviour).
+                #
+                # An empty allowlist (``models: []``, ``models: "[]"``, or a
+                # value that decodes to no usable ids) is deliberately treated
+                # as "not configured", NOT as "allow nothing".  Gating on
+                # declared-ness instead would emit an EMPTY picker and make the
+                # provider unselectable — a harder failure than surfacing a few
+                # extra models, and unrecoverable from the UI because
+                # ``custom_providers`` is hand-edited in config.yaml (the WebUI
+                # has no write path for it).  ``[]`` in practice means a
+                # leftover/placeholder key, not an intentional deny-all, and no
+                # deny-all use case exists: a provider the user wants hidden is
+                # removed from ``custom_providers`` outright.
                 if ids:
-                    _live_set = set(ids)
-                    for _cid in _config_ids:
-                        if _cid not in _live_set:
-                            ids.append(_cid)
+                    if _allowlist_ids:
+                        _allowlist_set = set(_allowlist_ids)
+                        ids = [m for m in ids if m in _allowlist_set] or []
+                        for _aid in _allowlist_ids:
+                            if _aid not in ids:
+                                ids.append(_aid)
                 else:
-                    ids = list(_config_ids)
+                    ids = list(_allowlist_ids or _config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
@@ -22043,10 +22591,11 @@ def _memory_project_context_workspace(parsed) -> Path | None:
             # fall through to Path("").resolve(), which returns the server's own
             # CWD and would surface the install's AGENTS.md/HERMES.md as if it
             # were the user's project context.
-            ws = (get_session(sid).workspace or "").strip()
+            session = get_session(sid)
+            ws = (session.workspace or "").strip()
             if not ws:
                 return None
-            return Path(ws).expanduser().resolve()
+            return _resolve_path(ws, profile=getattr(session, "profile", None))
         except Exception:
             return None
 
@@ -22054,7 +22603,7 @@ def _memory_project_context_workspace(parsed) -> Path | None:
     if not raw_workspace:
         return None
     try:
-        return Path(resolve_trusted_workspace(raw_workspace)).expanduser().resolve()
+        return resolve_trusted_workspace(raw_workspace)
     except Exception:
         logger.debug("Skipping project context for untrusted workspace %s", raw_workspace, exc_info=True)
         return None
@@ -22614,6 +23163,54 @@ def _prepare_chat_start_session_for_stream(
         s.save()
 
 
+def _cleanup_chat_start_launch_failure(session, stream_id: str) -> None:
+    """Release state registered before a worker thread successfully starts."""
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    unregister_stream_owner(stream_id)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    STREAM_GOAL_RELATED.pop(stream_id, None)
+    # The session-field reset needs the same concurrency discipline as the
+    # registry half: hold the per-session lock and re-resolve the canonical
+    # session before clearing anything. Mutating the passed-in stale object
+    # could wipe a concurrent successor turn's pending fields, and saving it
+    # could resurrect a session deleted while the launch was failing. Same
+    # pattern as the #1533 race fix (routes.py:3077) and the anchor-scene
+    # write guard (routes.py:5140).
+    #
+    # This runs while the original launch failure is being handled, so it must
+    # never raise. Lock acquisition and session resolution can fail on their own
+    # (I/O, deserialization), and an escaping error here would mask the launch
+    # failure the caller is about to report while leaving the reset half done.
+    try:
+        with _get_session_agent_lock(session.session_id):
+            try:
+                canonical = get_session(session.session_id)
+            except KeyError:
+                return  # session deleted while the thread launch was failing
+            if getattr(canonical, "active_stream_id", None) != stream_id:
+                return  # a successor turn already owns the session
+            canonical.active_stream_id = None
+            canonical.pending_user_message = None
+            canonical.pending_attachments = []
+            canonical.pending_started_at = None
+            canonical.pending_user_source = None
+            try:
+                canonical.save()
+            except Exception:
+                logger.debug(
+                    "Failed to persist chat-start cleanup after worker launch failure for %s",
+                    stream_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.debug(
+            "Failed to reset session state after worker launch failure for %s",
+            stream_id,
+            exc_info=True,
+        )
+
+
 def _is_hidden_empty_session(s) -> bool:
     return (
         getattr(s, "title", "Untitled") == "Untitled"
@@ -22824,7 +23421,7 @@ def _start_regeneration_stream_locked(
         save_attempted = True
         s.save()
         accepted = True
-        set_last_workspace(workspace)
+        set_last_workspace(workspace, profile=getattr(s, "profile", None))
         release_worker.set()
     except Exception as exc:
         abort_worker.set()
@@ -23163,7 +23760,7 @@ def _start_chat_stream_for_session(
     except Exception:
         logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
+    set_last_workspace(workspace, profile=getattr(s, "profile", None))
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
     register_stream_owner(stream_id, s.session_id)
@@ -23197,6 +23794,7 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        _cleanup_chat_start_launch_failure(s, stream_id)
         raise
     response = {
         "stream_id": stream_id,
@@ -23728,6 +24326,17 @@ def _handle_session_compression_recovery_start(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     if not _session_visible_to_active_profile(getattr(source, "profile", None), handler):
+        # #7710: same contract as the detail-load endpoint — 409
+        # ``session_profile_mismatch`` for a known other profile,
+        # 404 only for the None-profile self-heal path.
+        _recovery_session_profile = getattr(source, "profile", None)
+        if _recovery_session_profile:
+            return j(handler, {
+                "error": "Session belongs to a different profile",
+                "code": "session_profile_mismatch",
+                "session_id": sid,
+                "profile": _recovery_session_profile,
+            }, status=409)
         return bad(handler, "Session not found", 404)
     recovery = compression_recovery_payload_for_session(source)
     if not recovery:
@@ -23876,7 +24485,7 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -23945,7 +24554,7 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
             except ValueError as e:
                 return bad(handler, str(e))
         if model is None:
@@ -24127,8 +24736,29 @@ def _handle_chat_start(handler, body, diag=None):
                 # Empty placeholders can still be retagged when the
                 # requested profile matches the active request profile.
                 s.profile = requested_profile
+            elif session_profile:
+                # #7710: known other profile → 409 ``session_profile_mismatch``
+                # so the client can offer to switch to it (#5419).
+                # 404 is preserved only for the None-profile
+                # (unknown/legacy) self-heal case.
+                return j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": body.get("session_id", ""),
+                    "profile": session_profile,
+                }, status=409)
             else:
                 return bad(handler, "Session not found", 404)
+        # Resolve durable rotations before any workspace/model/pending mutation.
+        # GET navigation adopts the tip; POST never silently replays a user turn.
+        from api.compression_continuation import durable_compression_continuation
+        sealed, continuation = durable_compression_continuation(s)
+        if sealed:
+            return j(handler, {
+                "error": "This session was compressed. Open its continuation before sending.",
+                "code": "session_rotated",
+                "continuation_session_id": continuation,
+            }, status=409)
         regeneration = None
         if body.get("regenerate") is True:
             if any(key in body for key in ("message", "attachments", "keep_count", "prompt", "prompt_index")):
@@ -24326,14 +24956,25 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
+    _session_profile = getattr(s, "profile", None)
     explicit = requested_workspace not in (None, "")
     if explicit:
-        return str(resolve_trusted_workspace(requested_workspace))
+        try:
+            return str(resolve_trusted_workspace(requested_workspace, profile=_session_profile))
+        except TypeError:
+            return str(resolve_trusted_workspace(requested_workspace))
     stored_workspace = getattr(s, "workspace", None)
-    workspace, recovered = resolve_implicit_workspace_with_recovery(
-        stored_workspace,
-        get_last_workspace,
-    )
+    try:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+            profile=_session_profile,
+        )
+    except TypeError:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+        )
     if not recovered:
         return str(workspace)
     persisted = persist_recovered_workspace_binding(
@@ -24346,12 +24987,23 @@ def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
 
 def _resolve_chat_workspace_for_regeneration(s, requested_workspace) -> str:
     """Resolve regeneration's workspace without persisting before start acceptance."""
+    _session_profile = getattr(s, "profile", None) or None
     if requested_workspace not in (None, ""):
-        return str(resolve_trusted_workspace(requested_workspace))
-    workspace, _recovered = resolve_implicit_workspace_with_recovery(
-        getattr(s, "workspace", None),
-        get_last_workspace,
-    )
+        try:
+            return str(resolve_trusted_workspace(requested_workspace, profile=_session_profile))
+        except TypeError:
+            return str(resolve_trusted_workspace(requested_workspace))
+    try:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            getattr(s, "workspace", None),
+            get_last_workspace,
+            profile=_session_profile,
+        )
+    except TypeError:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            getattr(s, "workspace", None),
+            get_last_workspace,
+        )
     return str(workspace)
 
 
@@ -24397,7 +25049,10 @@ def _handle_chat_sync(handler, body):
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        try:
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
+        except TypeError:
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
@@ -24428,16 +25083,14 @@ def _handle_chat_sync(handler, body):
         AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
-            from api.config import (
-                resolve_model_provider,
-                resolve_custom_provider_connection,
-            )
+            from api.config import resolve_model_provider
 
             _model, _provider, _base_url = resolve_model_provider(
                 model_with_provider_context(s.model, getattr(s, "model_provider", None))
             )
             # Resolve API key via Hermes runtime provider (matches gateway behaviour)
             _api_key = None
+            _rt = None
             try:
                 from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                 from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -24457,12 +25110,35 @@ def _handle_chat_sync(handler, body):
                     f"[webui] WARNING: resolve_runtime_provider failed: {_e}",
                     flush=True,
                 )
-            if isinstance(_provider, str) and _provider.startswith("custom:"):
-                _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
-                if not _api_key and _cp_key:
-                    _api_key = _cp_key
-                if not _base_url and _cp_base:
-                    _base_url = _cp_base
+            # Apply the named custom provider's OWN record atomically, as one
+            # COMPLETE bundle. The fill-only form this replaced kept a truthy
+            # runtime value, so a slug present in BOTH custom_providers[] and
+            # providers: sent the list row's URL with the keyed row's API key;
+            # the connection-only view that followed still truncated the record's
+            # api_mode / credential_pool / ACP transport before the constructor.
+            try:
+                _bundle = _resolve_agent_connection_bundle(
+                    _provider, _api_key, _base_url, _rt
+                )
+            except api_config.CustomProviderRouteError as _route_err:
+                # The named route resolved no usable connection. Constructing
+                # AIAgent with the incomplete pair would send this turn through
+                # ``_routed_client_kwargs()`` to whatever provider init resolves
+                # next, so answer with the actionable cause instead. 400, not
+                # 500: it is a user-fixable provider misconfiguration, exactly
+                # like the ambiguous-slug collision.
+                logger.warning(
+                    "Chat blocked by unroutable custom provider: %s", _route_err.message
+                )
+                return j(handler, {
+                    "error": _route_err.message,
+                    "type": "custom_provider_unroutable",
+                    "reason": _route_err.reason,
+                    "hint": _route_err.hint,
+                }, status=400)
+            _provider = _bundle["provider"]
+            _api_key = _bundle["api_key"]
+            _base_url = _bundle["base_url"]
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -24474,6 +25150,7 @@ def _handle_chat_sync(handler, body):
                 quiet_mode=True,
                 enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
+                **_agent_bundle_kwargs(AIAgent, _bundle),
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
@@ -24753,7 +25430,17 @@ def _handle_cron_update(handler, body):
                 updates[k] = v
     except ValueError as e:
         return bad(handler, str(e))
-    job = update_job(body["job_id"], updates)
+    # #7352: ``update_job`` re-parses the updated schedule through
+    # ``cron.jobs.parse_schedule``, which raises ``ValueError`` for
+    # display-form input like ``"once at 2026-08-28 16:05"`` (or any other
+    # user-typed garbage). That exception previously escaped to a 500
+    # because the earlier normalization try block didn't cover it. Return
+    # 400 with the parser message so the WebUI can surface a real
+    # validation error instead of an opaque Internal Server Error.
+    try:
+        job = update_job(body["job_id"], updates)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
     if not job:
         return bad(handler, "Job not found", 404)
     return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
@@ -25041,7 +25728,6 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         from api.config import (
             get_effective_default_model,
             model_with_provider_context,
-            resolve_custom_provider_connection,
             resolve_model_provider,
         )
 
@@ -25054,6 +25740,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         )
         _main_model, _main_provider, _main_base_url = resolve_model_provider(model_for_resolution)
         _main_api_key = None
+        _rt = None
         try:
             from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
             from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -25069,23 +25756,21 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
                 _main_base_url = _rt.get("base_url")
         except Exception as _e:
             logger.debug("git commit message runtime provider resolution failed: %s", _e)
-        if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
-            _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
-            if not _main_api_key and _cp_key:
-                _main_api_key = _cp_key
-            if not _main_base_url and _cp_base:
-                _main_base_url = _cp_base
+        # Atomic custom-provider authority (see the /api/chat note): the record
+        # that supplies the endpoint must also supply the credential — and the
+        # wire protocol, credential pool and ACP transport that go with it.
+        _bundle = _resolve_agent_connection_bundle(
+            _main_provider, _main_api_key, _main_base_url, _rt
+        )
+        _main_provider = _bundle["provider"]
+        _main_api_key = _bundle["api_key"]
+        _main_base_url = _bundle["base_url"]
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        main_runtime = {
-            "provider": _main_provider,
-            "model": _main_model,
-            "base_url": _main_base_url,
-            "api_key": _main_api_key,
-        }
+        main_runtime = _auxiliary_main_runtime(_bundle, _main_model)
         ensure_agent_runtime_current()
         try:
             from agent.auxiliary_client import get_text_auxiliary_client
@@ -25114,6 +25799,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             quiet_mode=True,
             enabled_toolsets=[],
             session_id=f"git-commit-message-{uuid.uuid4().hex[:8]}",
+            **_agent_bundle_kwargs(AIAgent, _bundle),
         )
         result = agent.run_conversation(
             user_message=user_prompt,
@@ -25780,38 +26466,49 @@ def _handle_workspace_add(handler, body):
     # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
     # still register cleanly.
     try:
-        candidate = Path(path_str).expanduser().resolve()
+        from api.workspace import _remote_terminal_workspace_candidate, _resolve_path
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        remote_candidate = _remote_terminal_workspace_candidate(path_str, profile=active_profile)
+        candidate = _resolve_path(path_str, profile=active_profile)
     except (ValueError, OSError, RuntimeError) as e:
         # Invalid path (e.g. embedded null byte) — fail closed with a clean 400
         # instead of letting .resolve() raise an uncaught 500.
         return bad(handler, f"Invalid path: {_sanitize_error(e)}")
-    if _is_blocked_system_path(candidate):
-        # Home-directory carve-out, mirroring the validators
-        # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
-        # at or under the active user's home must stay allowed even when that
-        # home lives under an otherwise-blocked root (e.g. systemd-homed
-        # /var/home/<user>/...). Without this the route rejects valid
-        # /var/home workspaces before validate_workspace_to_add()'s carve-out
-        # can run.
-        _home = _home_path()
-        if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
-            return bad(handler, f"Path points to a system directory: {candidate}")
-    # Now safe to create the directory if requested
-    if auto_create:
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-        except (OSError, PermissionError) as e:
-            return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
+    if remote_candidate is None:
+        if _is_blocked_system_path(candidate):
+            # Home-directory carve-out, mirroring the validators
+            # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
+            # at or under the active user's home must stay allowed even when that
+            # home lives under an otherwise-blocked root (e.g. systemd-homed
+            # /var/home/<user>/...). Without this the route rejects valid
+            # /var/home workspaces before validate_workspace_to_add()'s carve-out
+            # can run.
+            _home = _home_path()
+            if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
+                return bad(handler, f"Path points to a system directory: {candidate}")
+        # Now safe to create the directory if requested
+        if auto_create:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except (OSError, PermissionError) as e:
+                return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
     # Full validation (exists, is_dir) — should pass now that dir exists
     try:
-        p = validate_workspace_to_add(path_str)
+        p = validate_workspace_to_add(path_str, profile=active_profile)
     except ValueError as e:
         return bad(handler, str(e))
-    wss = load_workspaces()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     if any(w["path"] == str(p) for w in wss):
         return bad(handler, "Workspace already in list")
     wss.append({"path": str(p), "name": name or p.name})
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25819,9 +26516,17 @@ def _handle_workspace_remove(handler, body):
     path_str = body.get("path", "").strip()
     if not path_str:
         return bad(handler, "path is required")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     wss = [w for w in wss if w["path"] != path_str]
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25830,14 +26535,22 @@ def _handle_workspace_rename(handler, body):
     name = body.get("name", "").strip()
     if not path_str or not name:
         return bad(handler, "path and name are required")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     for w in wss:
         if w["path"] == path_str:
             w["name"] = name
             break
     else:
         return bad(handler, "Workspace not found", 404)
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25851,7 +26564,12 @@ def _handle_workspace_reorder(handler, body):
     paths = body.get("paths", [])
     if not paths or not isinstance(paths, list):
         return bad(handler, "paths is required and must be a list")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     by_path = {w["path"]: w for w in wss}
     # Build reordered list: given order first, then any omitted entries
     reordered = []
@@ -25865,7 +26583,11 @@ def _handle_workspace_reorder(handler, body):
     for w in wss:
         if w["path"] not in seen:
             reordered.append(w)
-    save_workspaces(reordered)
+    try:
+        save_workspaces(reordered, profile=active_profile)
+    except TypeError:
+        # Legacy signature (test doubles with single-arg lambdas, older forks).
+        save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
@@ -25881,7 +26603,6 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
     found_target = False
     gateway_keys = []
     local_gateway_approval_id = ""
-    gateway_head_matches_target = False
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
@@ -25953,9 +26674,6 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
                 gw_data = getattr(gw_entry, "data", None) or {}
                 gw_approval_id = str(gw_data.get("approval_id") or "").strip()
                 gw_run_id = str(gw_data.get("run_id") or "").strip()
-                gateway_head_matches_target = bool(
-                    run_id and gw_approval_id == approval_id and gw_run_id == run_id
-                )
                 if gw_approval_id == approval_id and (not run_id or gw_run_id == run_id):
                     local_gateway_approval_id = approval_id
                 elif not run_id and found_target and pending:
@@ -26016,8 +26734,10 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
         local_gateway_resolved, _head, _total = resolve_gateway_pending_local(
             sid, local_gateway_approval_id, choice
         )
-    elif approval_id and found_target and run_id and gateway_head_matches_target:
-        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    elif approval_id and found_target and run_id:
+        gateway_resolved, _head, _total = resolve_gateway_pending_run(
+            sid, approval_id, run_id, choice
+        )
     elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     # Keep the historical no-id response path truthy for old clients/tests while
@@ -27097,6 +27817,7 @@ def _handle_session_compress(handler, body):
         )
 
         resolved_api_key = None
+        _rt = None
         try:
             _rt = resolve_runtime_provider_with_anthropic_env_lock(
                 _runtime_provider.resolve_runtime_provider,
@@ -27110,12 +27831,16 @@ def _handle_session_compress(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for compression: %s", _e)
 
-        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
-            if not resolved_api_key and _cp_key:
-                resolved_api_key = _cp_key
-            if not resolved_base_url and _cp_base:
-                resolved_base_url = _cp_base
+        # Atomic custom-provider authority: the deterministic list-row URL must
+        # not be paired with a keyed/runtime API key (see the /api/chat note),
+        # and the record's own api_mode / credential_pool / ACP transport must
+        # reach the constructor with it rather than being truncated away.
+        _bundle = _resolve_agent_connection_bundle(
+            resolved_provider, resolved_api_key, resolved_base_url, _rt
+        )
+        resolved_provider = _bundle["provider"]
+        resolved_api_key = _bundle["api_key"]
+        resolved_base_url = _bundle["base_url"]
 
         if not resolved_api_key:
             return bad(handler, "No provider configured -- cannot compress.")
@@ -27144,6 +27869,7 @@ def _handle_session_compress(handler, body):
             quiet_mode=True,
             enabled_toolsets=_resolve_cli_toolsets(),
             session_id=sid,
+            **_agent_bundle_kwargs(AIAgent, _bundle),
         )
         compressed = agent.context_compressor.compress(
             original_messages,
@@ -27772,7 +28498,7 @@ def _handle_handoff_summary(handler, body):
             # of the resolve_model_provider fix). model_with_provider_context
             # encodes it as @custom:A:model so the resolver honors the session's
             # endpoint; base_url is backfilled from that provider's own custom
-            # entry by the resolve_custom_provider_connection block below.
+            # entry by the custom-provider authority block below.
             session_model_provider = getattr(s_obj, "model_provider", None)
         except Exception:
             pass
@@ -27783,6 +28509,7 @@ def _handle_handoff_summary(handler, body):
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(model_for_resolution)
 
         resolved_api_key = None
+        _rt = None
         try:
             _rt = resolve_runtime_provider_with_anthropic_env_lock(
                 _runtime_provider.resolve_runtime_provider,
@@ -27796,12 +28523,16 @@ def _handle_handoff_summary(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for handoff summary: %s", _e)
 
-        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
-            if not resolved_api_key and _cp_key:
-                resolved_api_key = _cp_key
-            if not resolved_base_url and _cp_base:
-                resolved_base_url = _cp_base
+        # Atomic custom-provider authority (see the /api/chat note): the session's
+        # own custom_providers[] row owns BOTH the endpoint and the credential,
+        # plus the api_mode / credential_pool / ACP transport that travel with
+        # them as one constructor bundle.
+        _bundle = _resolve_agent_connection_bundle(
+            resolved_provider, resolved_api_key, resolved_base_url, _rt
+        )
+        resolved_provider = _bundle["provider"]
+        resolved_api_key = _bundle["api_key"]
+        resolved_base_url = _bundle["base_url"]
 
         if not resolved_api_key:
             summary_text = _fallback_handoff_summary(msgs)
@@ -27832,6 +28563,7 @@ def _handle_handoff_summary(handler, body):
             quiet_mode=True,
             enabled_toolsets=[],
             session_id=sid,
+            **_agent_bundle_kwargs(AIAgent, _bundle),
         )
 
         summary_system_prompt = (
@@ -28243,6 +28975,16 @@ def _handle_session_import_cli(handler, body):
             if requested_profile and not _profiles_match(existing_profile, requested_profile):
                 return bad(handler, "Session not found in CLI store", 404)
         elif not _session_visible_to_active_profile(existing_profile, handler):
+            # #7710: same contract as the detail-load endpoint —
+            # 409 ``session_profile_mismatch`` for a known other
+            # profile, 404 only for the None-profile self-heal path.
+            if existing_profile:
+                return j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": existing_profile,
+                }, status=409)
             return bad(handler, "Session not found in CLI store", 404)
         refresh_profile = requested_profile or existing_profile
         cli_meta = _resolve_cli_import_metadata(
@@ -28381,7 +29123,7 @@ def _handle_session_import_cli(handler, body):
         session_payload = {
             "session_id": sid,
             "title": title,
-            "workspace": str(get_last_workspace()),
+            "workspace": str(get_last_workspace(profile=profile)),
             "model": model,
             "message_count": len(msgs),
             "created_at": created_at,
@@ -28551,7 +29293,8 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
     is unavailable, fall back to an empty map so the API remains safe.
     """
     try:
-        from tools.mcp_tool import get_mcp_status
+        from api.agent_compat import agent_attr
+        get_mcp_status = agent_attr("tools.mcp_tool", "get_mcp_status", "tools.mcp_tool_discovery")
         statuses = get_mcp_status()
     except Exception:
         return {}

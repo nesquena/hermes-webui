@@ -1507,6 +1507,44 @@ function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);
 }
+function _cronScheduleForEdit(job){
+  // #7352: when the user opens an existing job for edit or duplicate, the
+  // editable field must hold the canonical Agent-parseable schedule, not
+  // the human-readable ``schedule_display`` ("once at ..."). The Agent
+  // parser at cron/jobs.py rejects the display form with ValueError and
+  // the resulting round-trip has been failing with HTTP 500 since the
+  // initial WebUI release.
+  if(!job) return '';
+  const sched = job.schedule;
+  // Only the "once at ..." label is unparseable; every other schedule_display
+  // form the Agent emits (`every monday 9am`, `every 30m`, ...) round-trips
+  // through parse_schedule() AND is what the user actually typed. Prefer it
+  // over the canonical `expr`, otherwise editing or duplicating a
+  // natural-language recurring job silently rewrites it to raw cron
+  // (`every monday 9am` -> `0 9 * * 1`) — the Agent rebuilds schedule_display
+  // from whatever we submit, so the rewrite sticks.
+  const display = job.schedule_display;
+  const displayIsParseable = Boolean(display) && !/^\s*once at\s+/i.test(display);
+  if(sched && typeof sched === 'object'){
+    // One-shot: schedule_display is purely presentation; run_at is what the
+    // parser accepts.
+    if(sched.kind === 'once' && sched.run_at) return sched.run_at;
+    if(displayIsParseable) return display;
+    // Recurring cron: the current Agent schema is ``expr``; some legacy
+    // payloads still expose ``expression`` — accept either.
+    if(sched.expr) return sched.expr;
+    if(sched.expression) return sched.expression;
+    if(sched.run_at) return sched.run_at;
+  }
+  // Final fallback: only use schedule_display if it isn't the "once at ..."
+  // presentation label (which the parser rejects). For any other text
+  // (e.g. interval/every-30m) the display form is also a valid input.
+  if(displayIsParseable){
+    return display;
+  }
+  return '';
+}
+
 function duplicateCurrentCron(){
   if (!_currentCronDetail) return;
   const job = _currentCronDetail;
@@ -1529,7 +1567,7 @@ function duplicateCurrentCron(){
   }
   _renderCronForm({
     name: dupName,
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleForEdit(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
@@ -1590,7 +1628,7 @@ function openCronEdit(job){
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
   _renderCronForm({
     name: job.name || '',
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleForEdit(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
@@ -7070,6 +7108,15 @@ async function switchToProfile(name) {
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
+    // #7509: the slash-skill caches hold the previous profile's disabled-filtered
+    // /api/skills payload, so drop them once the switch has actually succeeded —
+    // otherwise a skill that is enabled in the new profile stays hidden behind the
+    // old payload. Invalidating here (rather than before the POST) also kills any
+    // response still in flight, so the previous profile's reply can't repopulate
+    // the caches after this point (see invalidateSlashSkillCaches in commands.js).
+    if (typeof window !== 'undefined' && typeof window.invalidateSlashSkillCaches === 'function') {
+      window.invalidateSlashSkillCaches();
+    }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
@@ -9286,8 +9333,17 @@ async function loadSettingsPanel(){
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
+    // #7622 (round 3): the settings payload's `settings.language` is
+    // absent (None) for a fresh install, so an explicit non-empty
+    // value is the user's genuine saved choice.  The browser
+    // navigator hint is now read via the guarded
+    // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+    // a throwing `navigator` accessor can no longer abort settings
+    // hydration before model, provider, plugin and extension sections
+    // are populated.  The fallback ternary preserves the pre-#7622
+    // settings-modal behaviour when neither helper is in scope.
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
-      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
+      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
     if(typeof setLocale==='function'){
@@ -9784,31 +9840,31 @@ async function loadSettingsPanel(){
 // ── Extensions panel (browser-origin diagnostics + local enable controls) ──
 
 function _extensionStatusLabel(value){
-  return value ? 'Enabled' : 'Disabled';
+  return value ? t('plugins_enabled') : t('plugins_disabled');
 }
 
 function _extensionBooleanBadge(value){
   const cls=value?'extension-status-badge-on':'extension-status-badge-off';
-  return `<span class="extension-status-badge ${cls}">${value?'true':'false'}</span>`;
+  return `<span class="extension-status-badge ${cls}">${value?t('ext_status_true'):t('ext_status_false')}</span>`;
 }
 
 function _extensionAssetList(urls){
   if(!Array.isArray(urls)||urls.length===0){
-    return '<div class="extension-url-empty">None</div>';
+    return '<div class="extension-url-empty">'+t('ext_none')+'</div>';
   }
   return '<ul class="extension-url-list">'+urls.map(url=>`<li><code>${esc(url)}</code></li>`).join('')+'</ul>';
 }
 
 function _extensionWarningList(warnings){
   if(!Array.isArray(warnings)||warnings.length===0){
-    return '<div class="extension-url-empty">No warnings.</div>';
+    return '<div class="extension-url-empty">'+t('ext_no_warnings')+'</div>';
   }
   return '<ul class="extension-warning-list">'+warnings.map(item=>{
     const rawCode=(item&&item.code)||'unknown_warning';
     const code=esc(rawCode);
     const source=esc((item&&item.source)||'unknown');
     const hint=rawCode==='extension_state_unknown_ids'
-      ? '<span>Some saved disabled-extension overrides no longer match the current manifest; re-added extensions with the same id may stay disabled.</span>'
+      ? '<span>'+t('ext_state_unknown_ids_hint')+'</span>'
       : '';
     return `<li><code>${code}</code><span>${source}</span>${hint}</li>`;
   }).join('')+'</ul>';
@@ -9908,8 +9964,8 @@ function _extensionConfigureButton(entry,surface){
 function _extensionInstalledList(extensions,extensionDirConfigured,surface){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
-    if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
-    return '<div class="extension-url-empty">No manifest extensions are installed in the configured bundle.</div>';
+    if(!extensionDirConfigured) return '<div class="extension-url-empty">'+t('settings_extensions_no_dir')+'</div>';
+    return '<div class="extension-url-empty">'+t('settings_extensions_installed_empty')+'</div>';
   }
   return `<div class="extension-installed-list">${list.map(entry=>{
     const id=(entry&&entry.id)||'';
@@ -10053,23 +10109,23 @@ function _extensionSidecarCard(sidecars){
       </div>
       <div class="extension-sidecar-meta">${esc(meta)}</div>
       <div class="extension-sidecar-fields">
-        <div><span>Origin</span><code>${esc(origin)}</code></div>
-        <div><span>Health path</span><code>${esc(healthPath)}</code></div>
-        <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
-        <div><span>Proxy</span><code>${esc(proxyStatus)}</code></div>
-        <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
+        <div><span>${esc(t('ext_sidecar_origin'))}</span><code>${esc(origin)}</code></div>
+        <div><span>${esc(t('ext_sidecar_health_path'))}</span><code>${esc(healthPath)}</code></div>
+        <div><span>${esc(t('ext_sidecar_health_url'))}</span><code>${esc(healthUrl)}</code></div>
+        <div><span>${esc(t('ext_sidecar_proxy'))}</span><code>${esc(proxyStatus)}</code></div>
+        <div><span>${esc(t('ext_sidecar_proxy_path'))}</span><code>${esc(proxyPath)}</code></div>
       </div>
       <div class="extension-sidecar-actions">${proxyButton}</div>
       ${proxyWarning}
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
-  }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
+  }).join('')}</div>`:'<div class="extension-url-empty">'+t('ext_sidecars_none')+'</div>';
   return `
     <div class="provider-card extension-sidecars-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Loopback sidecars</div>
-          <div class="provider-card-meta">Declared local companions; health is checked directly from this browser with WebUI credentials omitted.</div>
+          <div class="provider-card-name">${esc(t('ext_sidecars_title'))}</div>
+            <div class="provider-card-meta">${esc(t('ext_sidecars_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
@@ -10162,35 +10218,35 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-status-card ${statusClass}">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Extension runtime</div>
-          <div class="provider-card-meta">Status from /api/extensions/status; toggles persist a local override for installed manifest entries.</div>
+          <div class="provider-card-name">${esc(t('settings_extensions_runtime_title'))}</div>
+          <div class="provider-card-meta">${esc(t('settings_extensions_runtime_status_from'))}</div>
         </div>
         <span class="provider-card-badge ${data&&data.enabled?'':'plugin-card-badge-disabled'}">${_extensionStatusLabel(!!(data&&data.enabled))}</span>
       </div>
       <div class="provider-card-body extension-card-body">
         <div class="extension-summary-grid">
-          <div><span>Extension dir configured</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
-          <div><span>Extension dir valid</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
-          <div><span>Manifest configured</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
-          <div><span>Manifest loaded</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
-          <div><span>Manifest status</span><code>${esc(manifest.status||'unknown')}</code></div>
-          <div><span>Manifest entries inspected</span><code>${Number(manifest.entry_count)||0}</code></div>
-          <div><span>Manifest script count</span><code>${Number(manifest.script_count)||0}</code></div>
-          <div><span>Manifest stylesheet count</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
-          <div><span>Manifest sidecar count</span><code>${Number(manifest.sidecar_count)||0}</code></div>
-          <div><span>Final script count</span><code>${scriptCount}</code></div>
-          <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
-          <div><span>Loopback sidecar count</span><code>${sidecarCount}</code></div>
-          <div><span>Installed manifest extensions</span><code>${manifestExtensionCount}</code></div>
-          <div><span>User-disabled extensions</span><code>${userDisabledCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_extension_dir_configured'))}</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
+          <div><span>${esc(t('settings_extensions_diag_extension_dir_valid'))}</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_configured'))}</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_loaded'))}</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_status'))}</span><code>${esc(manifest.status||'unknown')}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_entries'))}</span><code>${Number(manifest.entry_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_scripts'))}</span><code>${Number(manifest.script_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_stylesheets'))}</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_sidecars'))}</span><code>${Number(manifest.sidecar_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_final_scripts'))}</span><code>${scriptCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_final_stylesheets'))}</span><code>${styleCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_loopback_sidecars'))}</span><code>${sidecarCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_installed_extensions'))}</span><code>${manifestExtensionCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_user_disabled'))}</span><code>${userDisabledCount}</code></div>
         </div>
       </div>
     </div>
     <div class="provider-card extension-installed-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Installed manifest extensions</div>
-          <div class="provider-card-meta">Enable or disable already-present local extensions. Reload WebUI to apply injected asset changes to this browser tab.</div>
+          <div class="provider-card-name">${esc(t('settings_extensions_installed_section_title'))}</div>
+          <div class="provider-card-meta">${esc(t('settings_extensions_installed_section_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
@@ -10200,14 +10256,14 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-assets-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Final public asset URLs</div>
-          <div class="provider-card-meta">Same-origin URLs that may be injected into the app shell.</div>
+          <div class="provider-card-name">${esc(t('ext_assets_title'))}</div>
+          <div class="provider-card-meta">${esc(t('ext_assets_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        <div class="provider-card-label">Scripts</div>
+        <div class="provider-card-label">${esc(t('ext_assets_scripts'))}</div>
         ${_extensionAssetList(scripts)}
-        <div class="provider-card-label extension-section-label">Stylesheets</div>
+        <div class="provider-card-label extension-section-label">${esc(t('ext_assets_styles'))}</div>
         ${_extensionAssetList(styles)}
       </div>
     </div>
@@ -10215,8 +10271,8 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-warnings-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Sanitized warnings</div>
-          <div class="provider-card-meta">Codes and coarse sources only; paths and rejected values are not shown.</div>
+          <div class="provider-card-name">${esc(t('ext_warnings_title'))}</div>
+          <div class="provider-card-meta">${esc(t('ext_warnings_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">

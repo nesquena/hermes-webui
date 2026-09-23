@@ -123,12 +123,17 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
         Since issue #772 these are passed defensively via inspect-guarded kwargs
         so the WebUI degrades gracefully against older hermes-agent builds.
+
+        They are read from the resolved connection bundle rather than straight
+        off the runtime provider dict: a named custom provider owns none of them,
+        so the bundle clears them and forwarding ``_rt`` directly would send the
+        ambient provider's transport/protocol/pool to a custom endpoint.
         """
         for snippet in (
-            "_agent_kwargs['api_mode'] = _rt.get('api_mode')",
-            "_agent_kwargs['acp_command'] = _rt.get('command')",
-            "_agent_kwargs['acp_args'] = _rt.get('args')",
-            "_agent_kwargs['credential_pool'] = _rt.get('credential_pool')",
+            "_agent_kwargs['api_mode'] = _runtime_bundle['api_mode']",
+            "_agent_kwargs['acp_command'] = _runtime_bundle['acp_command']",
+            "_agent_kwargs['acp_args'] = _runtime_bundle['acp_args']",
+            "_agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']",
         ):
             self.assertIn(
                 snippet,

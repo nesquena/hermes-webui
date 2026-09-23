@@ -1059,9 +1059,9 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
         "_resolve_chat_workspace_with_recovery",
         lambda current, _requested: current.workspace,
     )
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: value)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
-    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 
