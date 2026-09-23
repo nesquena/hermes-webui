@@ -390,6 +390,10 @@ def _fsync_sidecar_directory(directory: Path) -> None:
         os.close(fd)
 
 
+class SidecarPublicationDurabilityError(OSError):
+    """The create-only publication happened, but directory durability failed."""
+
+
 def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
     """Publish *source* only when *destination* is still absent.
 
@@ -400,15 +404,20 @@ def _publish_sidecar_no_replace(source: Path, destination: Path) -> None:
     """
     try:
         os.link(str(source), str(destination))
-        _fsync_sidecar_directory(destination.parent)
-        return
     except FileExistsError:
         raise
     except OSError:
         if os.name != "nt":
             raise
         os.rename(source, destination)
+    # Do not confuse a failed durability step with a failed create (or retry
+    # the already-created destination through the Windows fallback).
+    try:
         _fsync_sidecar_directory(destination.parent)
+    except OSError as exc:
+        raise SidecarPublicationDurabilityError(
+            exc.errno, exc.strerror or str(exc)
+        ) from exc
 
 
 _BACKUP_SNAPSHOT_DOMINANCE_MAX_FIELDS = 512
@@ -2589,7 +2598,34 @@ class Session:
                     parsed={"_sidecar_generation_v1": next_sidecar_generation},
                 )
             )
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, SidecarPublicationDurabilityError):
+                # The link/rename completed, but the directory entry was not
+                # confirmed durable. Track only the *visible* exact payload so
+                # this owner may retry; never report this save as successful.
+                intended = _sidecar_revision_from_bytes(
+                    self.session_id,
+                    payload.encode('utf-8'),
+                    parsed={"_sidecar_generation_v1": next_sidecar_generation},
+                )
+                try:
+                    published = _read_sidecar_revision(self.path, self.session_id)
+                except OSError:
+                    published = None
+                if published == intended:
+                    self._sidecar_revisions[self.session_id] = _sidecar_revision_record(
+                        intended
+                    )
+                else:
+                    _invalidate_cached_session_generation(self.session_id)
+                    self._sidecar_revisions[self.session_id] = _sidecar_revision_record(
+                        SidecarRevision(
+                            sid=self.session_id,
+                            state="INVALIDATED",
+                            generation=-1,
+                            digest_sha256=None,
+                        )
+                    )
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:

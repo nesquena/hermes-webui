@@ -423,6 +423,7 @@ def _recover_session_owned(
 ) -> dict:
     """Run one recovery while holding the cross-process SID authority."""
     from api.models import (
+        SidecarPublicationDurabilityError,
         _fsync_sidecar_directory,
         _invalidate_cached_session_generation,
         _publish_sidecar_no_replace,
@@ -496,6 +497,11 @@ def _recover_session_owned(
             _fsync_sidecar_directory(session_path.parent)
         _invalidate_cached_session_generation(session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
+        if isinstance(exc, SidecarPublicationDurabilityError):
+            # The live entry may already be visible despite the failed fsync.
+            # Do not leave an absent-generation cache owner behind, and do not
+            # call this restoration durable until a later successful write.
+            _invalidate_cached_session_generation(session_path.stem)
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
         try:
             tmp_path.unlink(missing_ok=True)
@@ -747,7 +753,12 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
 
 def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
     """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
-    from api.models import _publish_sidecar_no_replace, _session_sidecar_authority
+    from api.models import (
+        SidecarPublicationDurabilityError,
+        _invalidate_cached_session_generation,
+        _publish_sidecar_no_replace,
+        _session_sidecar_authority,
+    )
 
     rows = _read_state_db_missing_sidecar_rows(session_dir, state_db_path)
     materialized = 0
@@ -814,7 +825,13 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                             )
                             handle.flush()
                             os.fsync(handle.fileno())
-                        _publish_sidecar_no_replace(tmp, target)
+                        try:
+                            _publish_sidecar_no_replace(tmp, target)
+                        except SidecarPublicationDurabilityError:
+                            # The entry exists, but no durable success was
+                            # confirmed. Fence the absent-generation owner.
+                            _invalidate_cached_session_generation(sid)
+                            raise
                         materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.

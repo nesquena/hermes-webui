@@ -904,6 +904,80 @@ def test_new_instance_expected_absent_never_overwrites_existing_sid(
     assert persisted["messages"] == first.messages
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication")
+def test_first_save_directory_fsync_failure_keeps_owner_retryable(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    session = models.Session(
+        session_id="published-without-fsync",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "keep this turn"}],
+    )
+    with models.LOCK:
+        models.SESSIONS[session.session_id] = session
+    original_fsync = models._fsync_sidecar_directory
+    attempts = 0
+
+    def fail_once(directory):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EIO, "directory fsync failed after link")
+        original_fsync(directory)
+
+    monkeypatch.setattr(models, "_fsync_sidecar_directory", fail_once)
+    with pytest.raises(OSError, match="directory fsync failed after link"):
+        session.save(skip_index=True)
+
+    first = models._read_sidecar_revision(session.path, session.session_id)
+    assert first.state == "PRESENT" and first.generation == 1
+    assert json.loads(session.path.read_text(encoding="utf-8"))["messages"] == session.messages
+    with models.LOCK:
+        assert models.SESSIONS[session.session_id] is session
+    assert models._coerce_sidecar_revision(
+        session._sidecar_revisions[session.session_id], session.session_id
+    ) == first
+
+    session.messages.append({"role": "assistant", "content": "retry kept the turn"})
+    session.save(skip_index=True)
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    assert persisted["_sidecar_generation_v1"] == 2
+    assert persisted["messages"] == session.messages
+    assert attempts == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication")
+def test_first_save_fsync_failure_with_mismatched_payload_fences_owner(tmp_path, monkeypatch):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    session = models.Session(
+        session_id="published-but-replaced",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "local turn"}],
+    )
+    with models.LOCK:
+        models.SESSIONS[session.session_id] = session
+
+    def replace_before_error(_directory):
+        payload = json.loads(session.path.read_text(encoding="utf-8"))
+        payload["messages"] = [{"role": "user", "content": "foreign turn"}]
+        session.path.write_text(json.dumps(payload), encoding="utf-8")
+        raise OSError(errno.EIO, "fsync failed after foreign replace")
+
+    monkeypatch.setattr(models, "_fsync_sidecar_directory", replace_before_error)
+    with pytest.raises(OSError, match="fsync failed after foreign replace"):
+        session.save(skip_index=True)
+    with models.LOCK:
+        assert session.session_id not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        session.save(skip_index=True)
+    assert json.loads(session.path.read_text(encoding="utf-8"))["messages"][0]["content"] == "foreign turn"
+
+
 def test_create_only_publish_fails_closed_without_atomic_primitive(
     tmp_path, monkeypatch
 ):
@@ -1041,6 +1115,48 @@ def test_recovery_expected_absent_uses_create_or_fail(tmp_path, monkeypatch):
     assert result["restored"] is False
     assert result["stale_generation"] is True
     assert json.loads(session_path.read_text(encoding="utf-8")) == competing
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication")
+def test_missing_backup_recovery_fsync_failure_eviction_and_reload(tmp_path, monkeypatch):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "missing-backup-fsync"
+    alias = models.Session(session_id=sid, workspace=str(tmp_path))
+    with models.LOCK:
+        models.SESSIONS[sid] = alias
+    alias.path.with_suffix(".json.bak").write_text(
+        json.dumps({"session_id": sid, "workspace": str(tmp_path),
+                    "messages": [{"role": "user", "content": "recover me"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_recovery, "_state_db_has_session", lambda *_: True)
+    original_fsync = models._fsync_sidecar_directory
+    attempts = 0
+
+    def fail_once(directory):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EIO, "directory fsync failed after link")
+        original_fsync(directory)
+
+    monkeypatch.setattr(models, "_fsync_sidecar_directory", fail_once)
+    result = session_recovery.recover_session(alias.path)
+    assert result["restored"] is False and "error" in result
+    assert attempts == 1
+    assert json.loads(alias.path.read_text(encoding="utf-8"))["messages"][0]["content"] == "recover me"
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        alias.save(skip_index=True)
+    reloaded = models.Session.load(sid)
+    assert reloaded is not None and reloaded.messages[0]["content"] == "recover me"
+    reloaded.messages.append({"role": "assistant", "content": "safe retry"})
+    reloaded.save(skip_index=True)
+    assert json.loads(alias.path.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 2
 
 
 def test_recovery_invalidates_cached_alias_and_publishes_generation(
@@ -1958,6 +2074,61 @@ def test_orphan_recovery_rechecks_delete_tombstone_under_authority(
     assert result["restored"] is False
     assert result.get("deleted") is True
     assert not session_path.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication")
+def test_state_db_materialization_fsync_failure_invalidates_absent_owner(tmp_path, monkeypatch):
+    from api import models, session_recovery
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    sid = "state-db-publish-fsync"
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, "
+            "model TEXT, started_at REAL, message_count INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+            "role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, 'webui', 'recovered', 'model', 1, 1)",
+            (sid,),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (1, ?, 'user', 'canonical turn', 1)",
+            (sid,),
+        )
+    alias = models.Session(session_id=sid, workspace=str(tmp_path))
+    with models.LOCK:
+        models.SESSIONS[sid] = alias
+    original_fsync = models._fsync_sidecar_directory
+    attempts = 0
+
+    def fail_once(directory):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EIO, "directory fsync failed after link")
+        original_fsync(directory)
+
+    monkeypatch.setattr(models, "_fsync_sidecar_directory", fail_once)
+    result = session_recovery.recover_missing_sidecars_from_state_db(session_dir, db_path)
+    assert result["materialized"] == 0
+    assert result["details"][0]["materialized"] is False
+    assert "error" in result["details"][0]
+    assert attempts == 1
+    assert "canonical turn" in (session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+    with pytest.raises(models.StaleSessionGenerationError):
+        alias.save(skip_index=True)
+    reloaded = models.Session.load(sid)
+    assert reloaded is not None
+    reloaded.save(skip_index=True)
+    assert json.loads(reloaded.path.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 2
 
 
 def test_state_db_materialization_rechecks_delete_inside_authority(
