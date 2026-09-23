@@ -56,6 +56,17 @@ from api.compression_recovery import (
     compression_recovery_payload_for_session,
     is_generic_continuation_intent,
 )
+from api.idempotency import (
+    IdempotencyConflict,
+    IdempotencyInFlight,
+    IdempotencyKeyExpired,
+    IdempotencyKeyMissing,
+    build_response_payload as _idem_build_response_payload,
+    compute_request_fingerprint as _idem_compute_fingerprint,
+    extract_key as _idem_extract_key,
+    get_idempotency_store,
+    validate_key as _idem_validate_key,
+)
 from api.session_events import (
     add_session_list_changed_listener,
     publish_session_list_changed,
@@ -24615,6 +24626,86 @@ def _is_silent_control_message(message) -> bool:
 
 
 def _handle_chat_start(handler, body, diag=None):
+    # ── Idempotency claim (issue #7435) ────────────────────────────────────
+    # A caller-supplied key (header ``Idempotency-Key`` or body field
+    # ``idempotency_key``) lets external automation retry after a lost
+    # connection without re-admitting the same logical turn. The claim
+    # MUST happen before any state-mutating work (session materialization,
+    # pending-state writes, the worker thread) and BEFORE the agent
+    # execution that ``_start_run`` triggers. Without a key the route keeps
+    # its current behavior.
+    idem_key = _idem_extract_key(handler, body)
+    idem_claim_record = None  # filled in only if a key was supplied
+    idem_validated_key: str | None = None
+    idem_completed = False  # flipped True only after a successful start
+    if idem_key:
+        try:
+            idem_validated_key = _idem_validate_key(idem_key)
+        except IdempotencyKeyMissing as exc:
+            return bad(handler, str(exc), 400)
+        try:
+            fingerprint = _idem_compute_fingerprint(body)
+        except Exception:
+            fingerprint = ""
+        try:
+            store = get_idempotency_store()
+        except Exception:
+            store = None
+        if store is not None:
+            try:
+                idem_claim_record = store.claim(idem_validated_key, fingerprint)
+            except IdempotencyConflict as exc:
+                return j(handler, {
+                    "error": str(exc),
+                    "code": "idempotency_conflict",
+                    "idempotency_key": idem_validated_key,
+                }, status=409)
+            except IdempotencyInFlight as exc:
+                return j(handler, {
+                    "error": str(exc),
+                    "code": "idempotency_in_flight",
+                    "idempotency_key": idem_validated_key,
+                    "retry_after_seconds": 1,
+                }, status=409)
+            except IdempotencyKeyExpired as exc:
+                return j(handler, {
+                    "error": str(exc),
+                    "code": "idempotency_key_expired",
+                    "idempotency_key": idem_validated_key,
+                }, status=410)
+            except Exception as exc:  # corrupt store / disk error
+                # Don't admit silently; refuse explicitly so the caller
+                # can retry rather than risk a duplicate turn.
+                logger.warning(
+                    "idempotency: claim failed for key %r: %s",
+                    idem_validated_key, exc,
+                )
+                return j(handler, {
+                    "error": "idempotency store unavailable; retry",
+                    "code": "idempotency_store_unavailable",
+                    "idempotency_key": idem_validated_key,
+                }, status=503)
+            if idem_claim_record.status == "complete":
+                # Replay the original acceptance. This short-circuits
+                # BEFORE any session lookup, pending-state write, or
+                # worker thread start — a lost-response retry does not
+                # even touch disk.
+                payload = _idem_build_response_payload(idem_claim_record)
+                status = int(idem_claim_record.response_status or 200)
+                if diag is not None:
+                    diag.stage("idempotency_replay")
+                    diag.finish()
+                if status < 200 or status >= 400:
+                    # Treat any non-2xx stored result as a stale failure;
+                    # release so the caller can retry with the same key
+                    # and (presumably) a different network.
+                    store.release(idem_validated_key)
+                    return j(handler, {
+                        "error": "previous attempt did not complete; retry",
+                        "code": "idempotency_replay_unavailable",
+                        "idempotency_key": idem_validated_key,
+                    }, status=503)
+                return j(handler, payload, status=status)
     try:
         diag.stage("validate_session_id") if diag else None
         try:
@@ -24947,10 +25038,54 @@ def _handle_chat_start(handler, body, diag=None):
             if restore_err is not None:
                 return bad(handler, f"failed to restore compression recovery: {_sanitize_error(restore_err)}", 500)
         diag.stage("response_write") if diag else None
+        # Idempotency: a 2xx with a stream_id is a real started turn. Mark
+        # the claim complete so a retry after a lost response replays the
+        # original identity instead of admitting a second turn. Anything
+        # else (4xx/5xx) is a refused start; the finally block below
+        # releases the claim so the caller can retry.
+        if (
+            idem_claim_record is not None
+            and idem_validated_key is not None
+            and status < 400
+            and response.get("stream_id")
+        ):
+            try:
+                get_idempotency_store().complete(
+                    idem_validated_key,
+                    session_id=response.get("session_id") or body.get("session_id", ""),
+                    stream_id=response.get("stream_id") or "",
+                    turn_id=response.get("turn_id") or "",
+                    response_status=status,
+                    response_payload=response,
+                )
+                idem_completed = True
+            except Exception as exc:
+                logger.warning(
+                    "idempotency: complete() failed for key %r: %s",
+                    idem_validated_key, exc,
+                )
         return j(handler, response, status=status)
     finally:
         if diag:
             diag.finish()
+        # Release a still-pending claim if the request didn't make it to
+        # acceptance (validation rejection, exception, or non-2xx from
+        # _start_run). The contract says "fail explicitly; no stale claim"
+        # so a follow-up with the SAME key + same fingerprint can be
+        # retried without an IdempotencyInFlight error.
+        if (
+            idem_claim_record is not None
+            and not idem_completed
+            and idem_claim_record.status == "pending"
+            and idem_validated_key is not None
+        ):
+            try:
+                get_idempotency_store().release(idem_validated_key)
+            except Exception as exc:
+                logger.debug(
+                    "idempotency: release() failed for key %r: %s",
+                    idem_validated_key, exc,
+                )
 
 
 
