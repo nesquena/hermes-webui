@@ -185,8 +185,26 @@ def _async_delegation_event(**overrides):
     return evt
 
 
+def _install_live_origin_lineage(monkeypatch):
+    """These routing fixtures represent materialized, durably live sessions."""
+    from api import compression_continuation, routes
+
+    monkeypatch.setattr(
+        routes, "_get_or_materialize_session",
+        lambda sid, **kwargs: types.SimpleNamespace(
+            session_id=sid, profile="default", pre_compression_snapshot=False,
+        ),
+    )
+    monkeypatch.setattr(
+        compression_continuation,
+        "durable_compression_continuation",
+        lambda session: (False, None),
+    )
+
+
 def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypatch):
     _reset_wakeup_state()
+    _install_live_origin_lineage(monkeypatch)
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
@@ -323,6 +341,7 @@ def test_background_unmapped_legacy_event_is_requeued_best_effort(monkeypatch):
 
 def test_background_wakeup_releases_claim_when_dispatch_fails(monkeypatch):
     _reset_wakeup_state()
+    _install_live_origin_lineage(monkeypatch)
     _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
@@ -376,6 +395,7 @@ def test_background_active_turn_does_not_consume_durable_delivery_attempts(monke
 def test_background_busy_legacy_completion_retries_until_session_is_idle(monkeypatch):
     """A pre-durable core must not discard a completion after one busy retry."""
     _reset_wakeup_state()
+    _install_live_origin_lineage(monkeypatch)
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_legacy_delivery_api(monkeypatch)
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "webui-session-1"
@@ -1187,6 +1207,7 @@ def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):
     whose origin_ui_session_id is A must start the wakeup turn in A (origin
     wins), and still take exactly one durable claim + one ack."""
     _reset_wakeup_state()
+    _install_live_origin_lineage(monkeypatch)
     _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     # The session-key index would route to session "B" ...
@@ -1219,6 +1240,7 @@ def test_origin_only_completion_without_session_key_routes_and_acks(monkeypatch)
     """A completion with no session_key at all but a valid origin_ui_session_id
     survives the drop-paths (origin is a sufficient route) and delivers+acks."""
     _reset_wakeup_state()
+    _install_live_origin_lineage(monkeypatch)
     _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     started: list[str] = []
