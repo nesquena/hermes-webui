@@ -1883,9 +1883,10 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 ### Sprint 15: Session Projects
 - Click "+" in project bar to create a project. Type name, Enter.
 - Click a project chip to filter sessions.
-- Hover a session → click folder icon → assign to project via picker.
+- Session ⋮ menu → Move to project (long-press the row on touch) → assign via picker.
 - With a long project list, verify the picker stays within the visible viewport
-  at desktop and narrow widths, and scroll to reach `+ New project`.
+  at desktop and narrow widths; `+ New project` stays pinned at the bottom edge
+  while the list scrolls inside the picker.
 - Keep the picker open while resizing the window or changing the mobile visual
   viewport (keyboard/browser chrome/zoom). Verify both horizontal edges and the
   height cap follow the visible area, including nonzero viewport offsets.
