@@ -23296,7 +23296,7 @@ def _restore_chat_start_backup_provenance(provenance, *, compensation_succeeded:
     """Restore the backup state that existed before rejected admission."""
     if provenance is None:
         return
-    _sidecar_path, sidecar_bytes, backup_path, had_backup, backup_bytes = provenance
+    _sidecar_path, sidecar_bytes, backup_path, had_backup, backup_bytes, _sidecar_unknown = provenance
     try:
         if had_backup:
             if backup_bytes is not None:
@@ -23316,7 +23316,9 @@ def _restore_chat_start_backup_provenance(provenance, *, compensation_succeeded:
 
 def _restore_chat_start_entry_sidecar(provenance) -> None:
     """Restore the entry sidecar before saving when backup bytes are unknown."""
-    sidecar_path, sidecar_bytes, _backup_path, _had_backup, _backup_bytes = provenance
+    sidecar_path, sidecar_bytes, _backup_path, _had_backup, _backup_bytes, sidecar_unknown = provenance
+    if sidecar_unknown:
+        raise OSError("chat-start entry sidecar bytes are unavailable")
     if sidecar_bytes is None:
         sidecar_path.unlink(missing_ok=True)
     else:
@@ -23921,7 +23923,18 @@ def _start_chat_stream_for_session(
                 if sidecar_path is not None:
                     sidecar_path = Path(sidecar_path)
                     backup_path = sidecar_path.with_suffix(".json.bak")
-                    sidecar_bytes = sidecar_path.read_bytes() if sidecar_path.exists() else None
+                    sidecar_bytes = None
+                    sidecar_unknown = False
+                    if sidecar_path.exists():
+                        try:
+                            sidecar_bytes = sidecar_path.read_bytes()
+                        except OSError:
+                            sidecar_unknown = True
+                            logger.debug(
+                                "Failed to capture chat-start entry sidecar %s",
+                                sidecar_path,
+                                exc_info=True,
+                            )
                     backup_exists = backup_path.exists()
                     backup_bytes = None
                     if backup_exists:
@@ -23939,6 +23952,7 @@ def _start_chat_stream_for_session(
                         backup_path,
                         backup_exists,
                         backup_bytes,
+                        sidecar_unknown,
                     )
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)

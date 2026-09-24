@@ -282,6 +282,32 @@ def test_accepted_start_allows_unreadable_entry_backup_and_preserves_bytes(
     assert backup_path.read_bytes() == entry_backup
 
 
+def test_accepted_start_allows_unreadable_entry_sidecar(
+    issue7193_env, monkeypatch
+):
+    session = _saved_retry_session(issue7193_env)
+    real_read_bytes = Path.read_bytes
+    failed = False
+
+    def fail_entry_sidecar_read(path):
+        nonlocal failed
+        if path == session.path and not failed:
+            failed = True
+            raise OSError("sidecar read unavailable")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(routes.Path, "read_bytes", fail_entry_sidecar_read)
+
+    response = _start(
+        session,
+        workspace=issue7193_env / "workspace",
+        msg="new unreadable sidecar prompt",
+    )
+
+    assert response["session_id"] == session.session_id
+    assert session.pending_user_message == "new unreadable sidecar prompt"
+
+
 def test_rejected_start_with_unreadable_entry_backup_restores_session_and_backup(
     issue7193_env, monkeypatch
 ):
@@ -679,6 +705,7 @@ def test_compression_recovery_restore_retries_failed_sidecar_compensation(
         backup_path,
         True,
         None,
+        False,
     )
     session.compression_recovery = {}
     session.recommended_recovery_action = None
