@@ -3289,23 +3289,48 @@ async function _ensureMessagesLoaded(sid, opts) {
   // the flag for compatibility with mixed-version deployments.
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   // Paginated responses shorten large hidden tool rows, even when the window
-  // includes every visible row. A same-session replacement must not overwrite
-  // a complete tool result with that shortened projection.
+  // includes every visible row. Retry only when the clipped row is the same
+  // tool result that this same-session refresh already held in full.
   const reloadHint=_sameSessionForceReloadHint;
   const previousMessages=(Array.isArray(_pendingCarryForwardSnapshot)&&_pendingCarryForwardSnapshot.length)
     ? _pendingCarryForwardSnapshot : (S.messages||[]);
-  const preserveFullToolRows=!!(boundedReloadLimit && reloadHint && reloadHint.session_id===sid
-    && (!reloadHint.truncated || previousMessages.some(m=>m&&m.role==='tool'&&!m._content_truncated)));
+  const toolRowIdentity=(m)=>String(m&&(m.tool_call_id||m.tool_use_id||m.call_id||m.tid||m.id||m.row_id||'')||'').trim();
+  const previousFullToolRowsById=new Map();
+  if(boundedReloadLimit && reloadHint && reloadHint.session_id===sid){
+    for(const m of previousMessages){
+      if(!m||m.role!=='tool'||m._content_truncated) continue;
+      const id=toolRowIdentity(m);
+      if(!id) continue;
+      // Duplicate explicit identities are ambiguous, so neither may authorize
+      // an unbounded retry or overwrite the bounded response.
+      previousFullToolRowsById.set(id,previousFullToolRowsById.has(id)?null:m);
+    }
+  }
+  const previousFullToolRow=(m)=>m&&m.role==='tool'&&m._content_truncated
+    ? previousFullToolRowsById.get(toolRowIdentity(m)) : null;
   const sessionUrl=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
   let data;
   try {
     data = await api(`${sessionUrl}${reloadLimitParam}${expandParam}`, {timeoutMs:120000});
-    if(_ownsLoad() && preserveFullToolRows && data && data.session
-      && Array.isArray(data.session.messages)
-      && data.session.messages.some(m=>m&&m.role==='tool'&&m._content_truncated)){
-      // Retry before mutating S.messages or its render caches. The bare path
-      // returns full tool rows; the generation guard also fences this retry.
-      data = await api(sessionUrl, {timeoutMs:120000});
+    if(_ownsLoad() && data && data.session && Array.isArray(data.session.messages)
+      && data.session.messages.some(previousFullToolRow)){
+      // The bare retry is an optional fidelity upgrade. If it fails, the
+      // bounded response remains usable and its matching tool rows are restored
+      // from the complete copies already held by the browser.
+      try {
+        const fullData=await api(sessionUrl, {timeoutMs:120000});
+        if(fullData&&fullData.session&&Array.isArray(fullData.session.messages)) data=fullData;
+      } catch(_) {}
+      if(data&&data.session&&Array.isArray(data.session.messages)){
+        data={...data,session:{...data.session,messages:data.session.messages.map(m=>{
+          const previous=previousFullToolRow(m);
+          if(!previous) return m;
+          const restored={...m,content:previous.content};
+          delete restored._content_truncated;
+          delete restored._content_original_chars;
+          return restored;
+        })}};
+      }
     }
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
