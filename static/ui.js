@@ -11057,21 +11057,24 @@ function _setComposerPrimaryButtonIcon(btn,action){
     stop:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>',
     disabled:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
   };
-  const next=icons[action]||icons.send;
-  if(btn.innerHTML!==next) btn.innerHTML=next;
-  // #1804: surface a short text label next to the icon for busy-mode
-  // actions so the user can see the current mode without relying on
-  // the hover tooltip. The label is read via ``t()`` so non-English
-  // locales get the translated name. ``data-label`` is consumed by
-  // the CSS ::after pseudo-element.
+  // #1804 re-gate 9/24: surface a short text label next to the icon for
+  // busy-mode actions so the user can see the current mode without
+  // relying on the hover tooltip. The label is a real <span
+  // class="send-btn-label"> child (not a ::after pseudo-element) so it
+  // does not collide with the .has-tooltip::after rule that owns the
+  // hover tooltip. The text is resolved through t() so non-English
+  // locales get the translated name.
   const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  let _fullInner=icons[action]||icons.send;
   if(_labelKeys[action]){
     const _key=_labelKeys[action];
     const _val=(typeof t==='function')?t(_key):_key;
-    btn.dataset.label=_val||_key;
-  }else{
-    delete btn.dataset.label;
+    const _text=_val||_key;
+    // Escape for safe innerHTML injection of translator-controlled text.
+    const _esc=String(_text).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+    _fullInner+='<span class="send-btn-label">'+_esc+'</span>';
   }
+  if(btn.innerHTML!==_fullInner) btn.innerHTML=_fullInner;
 }
 
 function updateSendBtn(){
