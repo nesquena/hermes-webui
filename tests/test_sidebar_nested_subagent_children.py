@@ -43,6 +43,36 @@ def test_nested_subagent_child_with_known_filtered_parent_is_not_orphaned():
     assert out["topLevel"] == []
 
 
+def test_search_keeps_matching_nested_child_when_parent_does_not_match():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _preamble(js) + f"""
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_sessionSearchAddIdCandidate'));
+eval(extractFunc('_sessionSearchCleanUrlToken'));
+eval(extractFunc('_sessionSearchSessionIdCandidates'));
+eval(extractFunc('_sessionSearchDirectSessionMatches'));
+eval(extractFunc('_sessionSearchDirectAndTitleMatches'));
+eval(extractFunc('_sessionSearchMergeMatches'));
+global._activeProject = null;
+global._showArchived = false;
+global._sessionSourceFilter = 'webui';
+const query = 'matching_nested';
+const parent = {{ session_id:'subagent_parent', title:'Unrelated parent', raw_source:'subagent',
+  source_tag:'subagent', session_source:'other', message_count:12 }};
+const child = {{ ...{_NESTED_CHILD}, title:'matching_nested' }};
+const searchMatches = _sessionSearchMergeMatches([parent, child], query, []);
+const part = _partitionSidebarSessionRows(searchMatches, null);
+const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, part.webuiReferenceRaw, Boolean(query));
+console.log(JSON.stringify({{
+  matches: searchMatches.map(r=>r.session_id),
+  topLevel: rows.map(r=>({{sid:r.session_id, orphan:!!r._orphan_child_session}})),
+}}));
+"""
+    out = json.loads(_run_node(source))
+    assert out["matches"] == ["nested_subagent_child"]
+    assert out["topLevel"] == [{"sid": "nested_subagent_child", "orphan": True}]
+
+
 def test_nested_subagent_child_with_parent_outside_import_window_still_orphans():
     child = (
         "{ session_id:'windowed_subagent_child', title:'Subagent Session', parent_session_id:'old_parent',"

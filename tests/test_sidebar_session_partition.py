@@ -31,11 +31,11 @@ def test_render_uses_single_pass_partition_helper():
     render_body = _function_block("renderSessionListFromCache")
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
-    assert "_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)])" in render_body
+    assert "_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)], searchActive)" in render_body
     assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
     assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
-    assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length" in render_body
-    assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)]).length" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)], searchActive).length" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)], searchActive).length" in render_body
     assert ": null;" in render_body
     assert "null is a deliberate \"not computed\" sentinel" in render_body
     assert "const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
@@ -72,11 +72,11 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "cliSessionsRaw," in _partition_block()
     assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
     assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
-    assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length" in render_body
-    assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)]).length" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)], searchActive).length" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)], searchActive).length" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
-    assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){" in SESSIONS_JS
-    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows)" in SESSIONS_JS
+    assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, searchActive=false){" in SESSIONS_JS
+    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, searchActive)" in SESSIONS_JS
 
 
 def test_archive_load_more_uses_source_wide_loaded_count_and_hides_under_filters():
