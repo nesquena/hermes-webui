@@ -243,9 +243,31 @@ const kiloSelect = {
   set value(value) {},
 };
 
+// Non-OpenRouter custom provider with @preset/... must NOT be stripped (#6946):
+const customGroup = {tagName: 'OPTGROUP', dataset: {provider: 'custom:acme'}};
+const customPreset = {
+  value: 'custom:acme/@preset/blue',
+  textContent: 'custom:acme/@preset/blue',
+  dataset: {},
+  parentElement: customGroup,
+};
+const customSelect = {
+  id: 'modelSelect',
+  options: [customPreset],
+  querySelectorAll() { return []; },
+  get selectedOptions() { return [customPreset]; },
+  get value() { return customPreset.value; },
+  set value(value) {},
+};
+
 process.stdout.write(JSON.stringify({
   preset: _modelStateForSelect(select, 'openrouter/@preset/deepseek-v4-flash'),
   vendorPrefixed: _modelStateForSelect(kiloSelect, 'kilo/minimax/minimax-m3'),
+  customPreset: _modelStateForSelect(customSelect, 'custom:acme/@preset/blue'),
+  restCustom: _providerQualifiedPresetRest('custom:acme/@preset/blue', 'custom:acme'),
+  restAlias: _providerQualifiedPresetRest('openrouter/@alias/foo', 'openrouter'),
+  restEmpty: _providerQualifiedPresetRest('openrouter/@preset/', 'openrouter'),
+  restValid: _providerQualifiedPresetRest('openrouter/@preset/blue', 'openrouter'),
 }));
 """
 
@@ -274,6 +296,15 @@ def test_openrouter_preset_entry_strips_provider_prefix_from_model_id():
         "model": "kilo/minimax/minimax-m3",
         "model_provider": "kilo/minimax",
     }
+    # #6946 finding 1: non-OpenRouter custom provider must NOT be stripped.
+    assert payload["customPreset"] == {
+        "model": "custom:acme/@preset/blue",
+        "model_provider": "custom:acme",
+    }
+    assert payload["restCustom"] is None
+    assert payload["restAlias"] is None
+    assert payload["restEmpty"] is None
+    assert payload["restValid"] == "@preset/blue"
 
 
 # Full #6936 round-trip (production-shaped): the user selects the RAW catalog

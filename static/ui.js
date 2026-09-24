@@ -3019,12 +3019,15 @@ function _providerQualifiedPresetRest(modelId, providerId){
   const value=String(modelId||'');
   const provider=String(providerId||'').trim();
   if(!value||!provider) return null;
+  if(provider.toLowerCase()!=='openrouter') return null;
   const slashAt=value.indexOf('/');
   if(slashAt<=0) return null;
   const valuePrefix=value.slice(0,slashAt);
   const valueRest=value.slice(slashAt+1);
-  if(!valuePrefix||!valueRest.startsWith('@')) return null;
-  if(valuePrefix.toLowerCase()!==provider.toLowerCase()) return null;
+  if(valuePrefix.toLowerCase()!=='openrouter') return null;
+  if(!valueRest.startsWith('@preset/')) return null;
+  const presetName=valueRest.slice('@preset/'.length).trim();
+  if(!presetName) return null;
   return valueRest;
 }
 // Canonical identity used by the model-picker lookup, dedup and selected-row
