@@ -353,13 +353,15 @@ function $(id) {
 }
 const window = { _configuredModelBadges: payload.configuredBadges || {} };
 const document = { createElement(tag) { return makeNode(tag); } };
-function esc(v) { return String(v || ''); }
+const escSource = ui.match(/^const esc=(.*);$/m);
+if (!escSource) throw new Error('production esc helper not found');
+const esc = eval(escSource[1]);
 function t(key, ...args) {
   if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
   return key;
 }
 function li() { return 'x'; }
-function getModelLabel(v) { return String(v || ''); }
+function getModelLabel(v) { return (payload.labels || {})[v] || String(v || ''); }
 function _providerFromModelValue(v) {
   const value = String(v || '');
   if (value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
@@ -390,23 +392,37 @@ for (const name of [
   eval(extractFunc(name));
 }
 
+const initialSelection=_modelStateForSelect(modelSelect,modelSelect.value);
 renderModelDropdown();
-const backupRow=findInTree(dropdown,node=>String(node._innerHTML||'').includes('@custom:backup:model-a'));
+const backupRow=findInTree(dropdown,node=>String(node._innerHTML||'').includes('<span class="model-opt-id">@custom:backup:model-a</span>'));
 if(!backupRow||typeof backupRow.onclick!=='function') throw new Error('backup row not rendered');
 backupRow.onclick();
+const backupPicked=window.__picked;
+const catalogRow=findInTree(dropdown,node=>String(node._innerHTML||'').includes('<span class="model-opt-id">gpt-6-sol</span>'));
+if(!catalogRow||typeof catalogRow.onclick!=='function') throw new Error('catalog row not rendered');
+catalogRow.onclick();
+const catalogPicked=window.__picked;
 process.stdout.write(JSON.stringify({
-  picked:window.__picked,
+  initialSelection,
+  backupPicked,
+  catalogPicked,
+  rows:snapshot(dropdown).filter(row=>String(row.className||'').split(/\s+/).includes('model-opt')).map(row=>row.html),
   options:modelSelect.options.map(o=>({value:o.value,provider:_getOptionProviderId(o)})),
 }));
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path):
+def test_configured_picker_keeps_friendly_title_and_exact_selection_routing(tmp_path):
     driver = tmp_path / "rendered_click_driver.js"
     driver.write_text(_RENDERED_CLICK_DRIVER, encoding="utf-8")
     payload = {
         "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai",
+                "models": [{"id": "gpt-6-sol", "label": "R&D <safe>"}],
+            },
             {
                 "provider": "Primary",
                 "provider_id": "custom:primary",
@@ -414,12 +430,14 @@ def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path)
             }
         ],
         "configuredBadges": {
+            "gpt-6-sol": {"role": "primary", "label": "Primary", "provider": "openai"},
             "@custom:backup:model-a": {
                 "role": "fallback",
                 "label": "Fallback 1",
                 "provider": "custom:backup",
             }
         },
+        "labels": {"@custom:backup:model-a": "model-a"},
         "selectedValue": "model-a",
     }
     assert NODE is not None
@@ -432,7 +450,33 @@ def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path)
     assert result.returncode == 0, result.stderr
     actual = json.loads(result.stdout)
 
-    assert actual["picked"] == {
+    assert actual["initialSelection"] == {
+        "model": "model-a",
+        "model_provider": "custom:primary",
+    }
+    catalog_row = next(
+        row for row in actual["rows"]
+        if '<span class="model-opt-id">gpt-6-sol</span>' in row
+    )
+    assert '<span class="model-opt-name">R&amp;D &lt;safe&gt;</span>' in catalog_row, (
+        "configured catalog title was not escaped exactly once"
+    )
+    assert '&amp;amp;' not in catalog_row
+    assert '<span class="model-opt-badge model-opt-badge--primary">gpt-6-sol (openai)</span>' in catalog_row
+    assert actual["catalogPicked"] == {
+        "model": "gpt-6-sol",
+        "model_provider": "openai",
+    }
+    fallback_row = next(
+        row for row in actual["rows"]
+        if '<span class="model-opt-id">@custom:backup:model-a</span>' in row
+    )
+    assert '<span class="model-opt-name">model-a</span>' in fallback_row
+    assert (
+        '<span class="model-opt-badge model-opt-badge--fallback">'
+        '@custom:backup:model-a (backup)</span>' in fallback_row
+    )
+    assert actual["backupPicked"] == {
         "model": "model-a",
         "model_provider": "custom:backup",
     }
