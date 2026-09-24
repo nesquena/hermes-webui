@@ -750,6 +750,54 @@ def test_compression_recovery_restore_retries_failed_sidecar_compensation(
     assert backup_path.read_bytes() == entry_backup
 
 
+def test_compression_recovery_restore_repairs_failed_readable_sidecar_compensation(
+    issue7193_env,
+):
+    from api.compression_recovery import stamp_compression_exhausted_recovery
+
+    session, backup_path, entry_backup = _saved_session_with_recovery_backup(issue7193_env)
+    stamp_compression_exhausted_recovery(session, message="Context length exceeded.")
+    session.save(touch_updated_at=False)
+    provenance = (
+        session.path,
+        session.path.read_bytes(),
+        backup_path,
+        True,
+        entry_backup,
+        False,
+    )
+    entry_messages = copy.deepcopy(session.messages)
+    session.messages = entry_messages + [
+        {"role": "user", "content": "rejected prompt"},
+    ]
+    session.context_messages = copy.deepcopy(session.messages)
+    session.save(touch_updated_at=False)
+    session.messages = entry_messages
+    session.context_messages = copy.deepcopy(entry_messages)
+    recovery = copy.deepcopy(session.compression_recovery)
+    session.compression_recovery = {}
+    session.recommended_recovery_action = None
+
+    cleanup_result = {
+        "backup_provenance": provenance,
+        "backup_unknown": False,
+        "sidecar_restored": False,
+    }
+    assert (
+        routes._restore_chat_start_compression_recovery(
+            session,
+            recovery,
+            cleanup_result,
+        )
+        is None
+    )
+
+    assert cleanup_result["sidecar_restored"] is True
+    assert Session.load(session.session_id).messages == entry_messages
+    assert Session.load(session.session_id).compression_recovery == recovery
+    assert backup_path.read_bytes() == entry_backup
+
+
 def test_journal_append_failure_is_best_effort(issue7193_env, monkeypatch):
     import api.turn_journal as turn_journal
 

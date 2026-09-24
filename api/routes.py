@@ -23383,6 +23383,7 @@ def _cleanup_chat_start_launch_failure(
         try:
             canonical.save(touch_updated_at=False)
             compensation_succeeded = True
+            cleanup_result["sidecar_restored"] = True
         except Exception:
             logger.debug(
                 "Failed to persist chat-start cleanup after chat-start failure for %s",
@@ -24905,10 +24906,11 @@ def _restore_chat_start_compression_recovery(session, recovery, cleanup_result=N
     """Restore recovery metadata without replacing an unreadable backup."""
     session.compression_recovery = recovery
     session.recommended_recovery_action = recovery.get("recommended_action")
-    if cleanup_result and cleanup_result.get("backup_unknown"):
+    if cleanup_result and cleanup_result.get("backup_provenance") is not None:
         if not cleanup_result.get("sidecar_restored"):
             try:
                 _restore_chat_start_entry_sidecar(cleanup_result["backup_provenance"])
+                cleanup_result["sidecar_restored"] = True
             except Exception:
                 logger.debug(
                     "Skipped compression recovery save because sidecar restore failed for %s",
