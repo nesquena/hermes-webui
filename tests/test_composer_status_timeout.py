@@ -138,6 +138,7 @@ def test_messages_wires_all_timed_composer_statuses_through_shared_owner():
     assert reconnected_calls == [
         "setComposerStatus('Reconnected',1000);",
         "setComposerStatus('Reconnected',1000);",
+        "setComposerStatus('Reconnected',1000);",
     ]
     assert "setComposerStatus('Reconnected');" not in MESSAGES_JS
     assert (

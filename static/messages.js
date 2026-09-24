@@ -2309,7 +2309,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
   let assistantText='';
   let reasoningText='';
-  if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+  const _liveTurn=reconnecting&&typeof document!=='undefined'&&typeof document.getElementById==='function'
+    ? document.getElementById('liveAssistantTurn')
+    : null;
+  const _restoredAnchorScene=!!(_liveTurn&&typeof _liveTurn.getAttribute==='function'&&
+    typeof isLiveAnchorActivitySceneOwner==='function'&&isLiveAnchorActivitySceneOwner(streamId)&&
+    String(_liveTurn.getAttribute('data-anchor-stream-id')||'')===String(streamId));
+  if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function'&&!_restoredAnchorScene) ensureLiveWorklogShell();
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
@@ -7457,7 +7463,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     finishAttach:_finishAttach,
     statusDecision:(status)=>{
       if(status&&status.active){
-        setComposerStatus('Reconnected');
+        setComposerStatus('Reconnected',1000);
         return {shouldConnect:true,replayOnly:false};
       }
       if(status&&status.replay_available) return {shouldConnect:true,replayOnly:true};

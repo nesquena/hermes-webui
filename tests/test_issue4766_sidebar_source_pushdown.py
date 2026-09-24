@@ -613,13 +613,14 @@ console.log(JSON.stringify({{
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_purge_stale_inflight_preserves_active_session_with_coherent_ownership():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     script = f"""
 global._allSessions = [{{ session_id: 'webui-other', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
 global._allSessionsScope = {{}};
 global._sessionListSourceById = new Map();
 global._sendInProgress = false;
 global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
 global.INFLIGHT = {{
   'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
 }};
@@ -645,13 +646,14 @@ console.log(JSON.stringify({{
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_purge_stale_inflight_removes_absent_active_session_when_not_busy():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     script = f"""
 global._allSessions = [{{ session_id: 'webui-other', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
 global._allSessionsScope = {{}};
 global._sessionListSourceById = new Map();
 global._sendInProgress = false;
 global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
 global.INFLIGHT = {{
   'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
 }};
@@ -677,13 +679,14 @@ console.log(JSON.stringify({{
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_purge_stale_inflight_prunes_background_entry_when_row_absent():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     script = f"""
 global._allSessions = [{{ session_id: 'webui-active', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
 global._allSessionsScope = {{}};
 global._sessionListSourceById = new Map();
 global._sendInProgress = false;
 global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
 global.INFLIGHT = {{
   'webui-active': {{ streamId: 'stream-active', lastAssistantText: 'active' }},
   'webui-bg': {{ streamId: 'stream-bg', lastAssistantText: 'bg' }},
@@ -710,13 +713,14 @@ console.log(JSON.stringify({{
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_purge_stale_inflight_prunes_absent_active_session_when_stream_ownership_conflicts():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     script = f"""
 global._allSessions = [{{ session_id: 'webui-other', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: true }}];
 global._allSessionsScope = {{}};
 global._sessionListSourceById = new Map();
 global._sendInProgress = false;
 global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
 global.INFLIGHT = {{
   'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
 }};
@@ -742,13 +746,14 @@ console.log(JSON.stringify({{
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_purge_stale_inflight_purges_present_idle_row_even_if_client_fields_stale():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     script = f"""
 global._allSessions = [{{ session_id: 'active-1', source_tag: 'webui', raw_source: 'webui', session_source: 'webui', is_streaming: false }}];
 global._allSessionsScope = {{}};
 global._sessionListSourceById = new Map();
 global._sendInProgress = false;
 global._sendInProgressSid = null;
+global.LIVE_STREAMS = {{}};
 global.INFLIGHT = {{
   'active-1': {{ streamId: 'stream-1', lastAssistantText: 'working' }},
 }};

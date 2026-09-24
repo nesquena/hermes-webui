@@ -2309,7 +2309,6 @@ async function loadSession(sid){
       }
     };
     const restoreLiveSurfaceForActiveInflight=()=>{
-      if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
       const anchorSceneRenderResult=activeStreamId&&typeof window!=='undefined'
         ? (
           (typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid)) ||
