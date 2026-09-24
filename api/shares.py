@@ -120,8 +120,9 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 # Excludes MEDIA: followed by http/https URLs so external images pass
 # through unchanged.  file:// references are NOT matched here — they are
 # always rejected at the public-share boundary (absolute, un-scoped).
+# Recognises wrapped `MEDIA:...` and bare MEDIA:... tokens (#7359).
 _SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
+    r"`MEDIA:(?!https?://)([^`\r\n\s\)>]+)`|MEDIA:(?!https?://)([^\s\)\]>]+)"
 )
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
@@ -290,7 +291,7 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         return None
 
     def _replace_ref(m: re.Match) -> str:
-        raw = (m.group(1) or "").strip()
+        raw = (m.group(1) or m.group(2) or "").strip()
         if not raw:
             return m.group(0)
 

@@ -690,6 +690,24 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     )
                 )
 
+    def test_session_media_token_allows_bare_path_with_literal_backtick(self):
+        # #7359: bare MEDIA:<path> containing a literal backtick must not be
+        # truncated at the backtick.
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report`final.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"see MEDIA:{html} below"}]
+            )
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"text/html"}
+                    )
+                )
+
     def test_session_media_token_rejects_user_authored_html_path(self):
         from api import routes
 

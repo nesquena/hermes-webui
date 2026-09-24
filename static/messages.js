@@ -4801,8 +4801,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=new RegExp('^MEDIA:(' + MEDIA_REF_CLASS + '+)$').exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
+    const m=new RegExp('^MEDIA:(' + MEDIA_REF_CLASS + '+)$|^`MEDIA:([^`\\r\\n\\s\\)\\]]+)`$').exec(String(chunk));
+    const ref = m ? (m[1] || m[2]) : null;
+    const emitted=!!(ref && entry && entry.parent && _smdAppendMediaNode(entry.parent, ref));
     if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
   function _smdMediaTailFlush(parser){
@@ -4849,16 +4850,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
-    const re=new RegExp('MEDIA:(' + MEDIA_REF_CLASS + '+)', 'g');
+    const re=new RegExp('`MEDIA:([^`\\r\\n\\s\\)\\]]+)`|(?<!`)MEDIA:(' + MEDIA_REF_CLASS + '+)', 'g');
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
       const matchEnd = m.index + m[0].length;
+      const ref = m[1] || m[2];
+      const isWrapped = !!m[1];
+      m[1] = ref;
       if(m.index>last){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      if(matchEnd===combined.length && !isWrapped && !_smdMediaRefHasReliableBoundary(m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
@@ -4868,14 +4872,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      if(!_smdAppendMediaNode(parent, ref)) writeCurrent(m[0]);
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = new RegExp('MEDIA:'+MEDIA_REF_CLASS+'*$').exec(rest);
+      const tailMatch = new RegExp('`MEDIA:[^`\\r\\n\\s\\)\\]]*$|(?<!`)MEDIA:'+MEDIA_REF_CLASS+'*$').exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){

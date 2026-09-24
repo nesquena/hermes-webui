@@ -67,12 +67,33 @@ logger = logging.getLogger("hermes.webui")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 # MEDIA:<ref> token shape — single source of truth shared with api/routes.py
-# (allowlist) so the two backends cannot drift (#7359). The capture class
-# excludes whitespace plus the markdown delimiters ` ) ] so a token wrapped in
-# inline-code backticks or link parens/brackets never captures the closing
-# delimiter into the path (a trailing backtick used to reach
-# /api/media?path=...%60 and 404).
-MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]`]+)")
+# (allowlist) so the two backends cannot drift (#7359). The pattern explicitly
+# recognizes the wrapped form `MEDIA:<path>` and bare form MEDIA:<path>, stripping
+# only the closing wrapper backtick without truncating real paths containing literal
+# backticks.
+class _MediaTokenPattern:
+    def __init__(self):
+        self._pattern = re.compile(r"`MEDIA:([^`\r\n\s\)\]]+)`|MEDIA:([^\s\)\]]+)")
+        self.pattern = self._pattern.pattern
+        self.flags = self._pattern.flags
+
+    def findall(self, string: str) -> list[str]:
+        return [m.group(1) or m.group(2) for m in self._pattern.finditer(string)]
+
+    def finditer(self, string: str):
+        return self._pattern.finditer(string)
+
+    def search(self, string: str, *args, **kwargs):
+        return self._pattern.search(string, *args, **kwargs)
+
+    def match(self, string: str, *args, **kwargs):
+        return self._pattern.match(string, *args, **kwargs)
+
+    def sub(self, repl, string: str, *args, **kwargs):
+        return self._pattern.sub(repl, string, *args, **kwargs)
+
+
+MEDIA_TOKEN_RE = _MediaTokenPattern()
 
 # Default caps.  Overridable via env var for operators with unusual disks.
 DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024          # 50 MB per snapshot
@@ -185,7 +206,7 @@ def resolve_media_ref(raw_ref: str) -> Path | None:
 
             try:
                 parsed = urlparse(ref)
-                ref = unquote(parsed.path or "")
+                ref = unquote(parsed.path or parsed.netloc or "")
             except Exception:
                 ref = ref[len("file://"):]
         else:

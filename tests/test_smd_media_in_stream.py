@@ -93,7 +93,7 @@ def _run_real_smd_media_cases() -> dict:
         "globalThis.requestAnimationFrame = cb => cb();\n"
         "const _MEDIA_TAIL_MAX = 4096;\n"
         "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
-        "const MEDIA_REF_CLASS = '[^\\\\s\\\\)\\\\]`]';\n"
+        "const MEDIA_REF_CLASS = '[^\\\\s\\\\)\\\\]]';\n"
         "const _SMD_MEDIA_TAIL = new WeakMap();\n"
         "const __SMD_PARSER_FALLBACK = {};\n"
         "const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\\/|#|\\?|\\.|api|session\\/)/i;\n"
@@ -198,7 +198,7 @@ def _run_real_smd_media_cases() -> dict:
         "const refSplit=renderModes(['MEDIA:C:/tmp/li', 've.png ']);\n"
         "const finalExtensionless=renderModes(['MEDIA:https://fal.media/generated']);\n"
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
-        "const backtickRaw=(()=>{\n"
+        "const wrappedBacktick=(()=>{\n"
         "  const root=document.createElement('div');\n"
         "  const baseRenderer=_safeSmdRenderer(root);\n"
         "  const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);\n"
@@ -208,14 +208,46 @@ def _run_real_smd_media_cases() -> dict:
         "  root.appendChild(parent);\n"
         "  const data={nodes:[parent], index:0};\n"
         "  const writeText=(p,d,t)=>{ p.appendChild(document.createTextNode(String(t||''))); };\n"
-        "  _smdMediaAwareAddText((d,t)=>{}, parent, data, 'MEDIA:C:/tmp/live.png`', _SMD_MEDIA_TAIL, parser, writeText);\n"
+        "  _smdMediaAwareAddText((d,t)=>{}, parent, data, '`MEDIA:C:/tmp/live.png`', _SMD_MEDIA_TAIL, parser, writeText);\n"
+        "  _smdMediaTailFlush(parser);\n"
+        "  _smdMediaTailClear(parser);\n"
+        "  return { html: root.outerHTML, text: root.textContent };\n"
+        "})();\n"
+        "const bareWithBacktick=(()=>{\n"
+        "  const root=document.createElement('div');\n"
+        "  const baseRenderer=_safeSmdRenderer(root);\n"
+        "  const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);\n"
+        "  const parser=smd.parser(renderer);\n"
+        "  _smdBindParserIdentity(renderer, parser, root);\n"
+        "  const parent=document.createElement('p');\n"
+        "  root.appendChild(parent);\n"
+        "  const data={nodes:[parent], index:0};\n"
+        "  const writeText=(p,d,t)=>{ p.appendChild(document.createTextNode(String(t||''))); };\n"
+        "  _smdMediaAwareAddText((d,t)=>{}, parent, data, 'MEDIA:C:/tmp/report`final.png', _SMD_MEDIA_TAIL, parser, writeText);\n"
+        "  _smdMediaTailFlush(parser);\n"
+        "  _smdMediaTailClear(parser);\n"
+        "  return { html: root.outerHTML, text: root.textContent };\n"
+        "})();\n"
+        "const splitWrapped=(()=>{\n"
+        "  const root=document.createElement('div');\n"
+        "  const baseRenderer=_safeSmdRenderer(root);\n"
+        "  const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);\n"
+        "  const parser=smd.parser(renderer);\n"
+        "  _smdBindParserIdentity(renderer, parser, root);\n"
+        "  const parent=document.createElement('p');\n"
+        "  root.appendChild(parent);\n"
+        "  const data={nodes:[parent], index:0};\n"
+        "  const writeText=(p,d,t)=>{ p.appendChild(document.createTextNode(String(t||''))); };\n"
+        "  const baseAddText=(d,t)=>{};\n"
+        "  _smdMediaAwareAddText(baseAddText, parent, data, '`MEDIA:C:/tmp/live.png', _SMD_MEDIA_TAIL, parser, writeText);\n"
+        "  _smdMediaAwareAddText(baseAddText, parent, data, '` and done', _SMD_MEDIA_TAIL, parser, writeText);\n"
         "  _smdMediaTailFlush(parser);\n"
         "  _smdMediaTailClear(parser);\n"
         "  return { html: root.outerHTML, text: root.textContent };\n"
         "})();\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, backtickRaw, falsePrefix, crossParent}));\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, wrappedBacktick, bareWithBacktick, splitWrapped, falsePrefix, crossParent}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -589,18 +621,28 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 self.assertGreaterEqual(result["postProcessCalls"], 1)
                 self.assertGreaterEqual(result["playbackCalls"], 1)
 
-    def test_real_smd_parser_backtick_wrapped_token_strips_backtick(self):
-        # #7359: when a raw inline-code backtick reaches the streaming
-        # interceptor (`MEDIA:C:/tmp/live.png`), the captured ref must never
-        # include the closing backtick — it used to produce
-        # /api/media?path=...%60 → 404 download. The interceptor must emit a
-        # media node with the clean ref and leave the backtick as plain text.
-        result = self.cases["backtickRaw"]
+    def test_real_smd_parser_wrapped_token_strips_backticks(self):
+        # #7359: `MEDIA:/path` wrapped in inline-code backticks must strip
+        # both wrapper backticks and emit the clean ref in the media node.
+        result = self.cases["wrappedBacktick"]
         self.assertIn('class="media-node"', result["html"])
         self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
         self.assertNotIn('data-ref="C:/tmp/live.png`"', result["html"])
         self.assertNotIn("MEDIA:", result["text"])
-        self.assertIn("`", result["text"])
+
+    def test_real_smd_parser_bare_token_preserves_literal_backtick(self):
+        # #7359: bare MEDIA:/path`name.png with internal backtick must not be truncated
+        result = self.cases["bareWithBacktick"]
+        self.assertIn('class="media-node"', result["html"])
+        self.assertIn('data-ref="C:/tmp/report`final.png"', result["html"])
+        self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_split_wrapped_tail_buffers_until_closing_backtick(self):
+        # #7359: streaming chunks splitting `MEDIA:/path and ` must buffer the partial tail
+        result = self.cases["splitWrapped"]
+        self.assertIn('class="media-node"', result["html"])
+        self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
+        self.assertIn("and done", result["text"])
 
     def test_real_smd_parser_false_prefix_plain_prose_keeps_fade(self):
         result = self.cases["falsePrefix"]["fade"]

@@ -55,6 +55,22 @@ def test_valid_workspace_image_is_embedded(sandbox):
     assert shares._PLACEHOLDER not in out
 
 
+def test_backtick_wrapped_media_embeds_cleanly(sandbox):
+    # #7359: `MEDIA:<path>` wrapped in backticks embeds without trailing backtick
+    out = _embed("`MEDIA:ok.png`", [sandbox["ws"]])
+    assert "base64," in out
+    assert "`" not in out
+    assert shares._PLACEHOLDER not in out
+
+
+def test_bare_media_with_literal_backtick_in_name_embeds_cleanly(sandbox):
+    # #7359: bare MEDIA:<path> containing literal backtick must not be truncated
+    _write_png(sandbox["ws"] / "report`final.png")
+    out = _embed("MEDIA:report`final.png", [sandbox["ws"]])
+    assert "base64," in out
+    assert shares._PLACEHOLDER not in out
+
+
 def test_relative_path_traversal_is_blocked(sandbox):
     out = _embed("MEDIA:../secret/creds.txt", [sandbox["ws"]])
     assert out == shares._PLACEHOLDER
