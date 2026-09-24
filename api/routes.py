@@ -13076,66 +13076,69 @@ def _saved_prompts_backup_path(p: "Path | None" = None) -> "Path":
     return p.with_name(p.name + _SAVED_PROMPTS_BACKUP_SUFFIX)
 
 
+from api.paths import _atomic_write_text
+
+
 def _write_text_atomic(path: "Path", text: str) -> None:
-    """Write *text* to *path* via temp file + fsync + os.replace.
-
-    `Path.write_text` truncates in place, so a crash or full disk mid-write
-    leaves the file truncated and the next `_load_saved_prompts()` (which
-    swallows parse errors and returns `[]`) silently drops every saved prompt.
-    Same tempfile+fsync+os.replace pattern as
-    `api.config._atomic_write_settings_text` and
-    `webui_session_db.WebUIJsonSessionDB._atomic_write`.
-    """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+    """Atomic write wrapper delegating to api.paths._atomic_write_text (tempfile + fsync + os.replace)."""
+    _atomic_write_text(path, text)
 
 
-def _save_saved_prompts(prompts: list, *, backup_required: bool = False) -> None:
+def _save_saved_prompts(
+    prompts: list,
+    *,
+    backup_required: bool = False,
+    backup_content: "str | None" = None,
+) -> None:
     """Persist the saved-prompt list, atomically and with one backup generation.
 
     Two durability guarantees, both added for #7644:
 
-    * the write is atomic (temp file + fsync + os.replace), so a crash mid-write
-      can no longer truncate a store holding up to 200 prompts;
+    * the write is atomic via _write_text_atomic / api.paths._atomic_write_text,
+      preserving permissions, ownership, symlink targets, and directory constraints;
     * the previous generation is copied to `saved_prompts.json.bak` *before* the
-      rewrite, so a DELETE — which used to be total and silent — can be undone
-      by copying the backup back over the store.
+      rewrite, preserving the source's mode/ownership, so a DELETE can be undone.
 
     With ``backup_required=True`` (the DELETE path, #7647) a backup failure is
     raised instead of logged: the caller must abort the destructive operation
-    and leave the live store untouched, because proceeding would delete the
-    prompt with no recovery copy anywhere. Non-destructive writers (POST)
-    keep the best-effort behaviour: they log and continue, since the live
-    store still holds every prompt.
+    and leave the live store untouched. If ``backup_content`` is passed, it is
+    used directly rather than re-reading the store from disk. Non-destructive
+    writers (POST) keep best-effort behaviour: they log and continue.
     """
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        previous = p.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        previous = None
-    if previous:
+
+    source_stat = None
+    source_mode = None
+    if p.exists():
+        try:
+            source_stat = p.stat()
+            source_mode = _stat.S_IMODE(source_stat.st_mode)
+        except OSError:
+            pass
+
+    if backup_content is None and p.is_file():
+        try:
+            backup_content = p.read_text(encoding="utf-8")
+        except Exception as exc:
+            if backup_required:
+                raise OSError(f"could not read saved prompts for backup: {exc}") from exc
+            backup_content = None
+
+    if backup_content:
         backup = _saved_prompts_backup_path(p)
         try:
-            _write_text_atomic(backup, previous)
+            _write_text_atomic(backup, backup_content)
+            if source_mode is not None:
+                try:
+                    backup.chmod(source_mode)
+                except OSError:
+                    pass
         except OSError as exc:
             if backup_required:
-                # Abort before the store is rewritten: the recovery backup is
-                # the whole point of letting a prompt be deleted (#7644).
                 raise
-            # Never let a backup failure block the write itself; the caller
-            # (POST) still succeeds, but the loss of recovery is loud.
             logger.warning("saved prompts: could not write backup %s: %s", backup, exc)
+
     _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
 
@@ -18080,8 +18083,17 @@ def handle_delete(handler, parsed) -> bool:
         pid = str(body.get("id") or "").strip()
         if not pid:
             return bad(handler, "id is required")
-        before = _load_saved_prompts()
-        prompts = [p for p in before if p.get("id") != pid]
+        p = _saved_prompts_path()
+        try:
+            source_raw = p.read_text(encoding="utf-8") if p.exists() else "[]"
+            before = json.loads(source_raw)
+            if not isinstance(before, list):
+                raise ValueError("saved prompts file does not contain a list")
+        except Exception as exc:
+            logger.error("saved prompt delete aborted: cannot read or verify prompts store: %s", exc)
+            return bad(handler, "could not verify saved prompts before deletion", status=500)
+
+        prompts = [item for item in before if item.get("id") != pid]
         if len(prompts) == len(before):
             # #7647: repeat DELETE for an id that is already gone. Rewriting
             # the store here would rotate .bak onto a generation that no
@@ -18098,7 +18110,7 @@ def handle_delete(handler, parsed) -> bool:
             # The recovery backup is committed atomically (tmp + fsync +
             # rename) BEFORE the store is rewritten; if it cannot be written
             # the delete aborts here with the live store untouched (#7647).
-            _save_saved_prompts(prompts, backup_required=True)
+            _save_saved_prompts(prompts, backup_required=True, backup_content=source_raw)
         except OSError as exc:
             logger.error("saved prompt delete aborted: recovery backup failed: %s", exc)
             return bad(

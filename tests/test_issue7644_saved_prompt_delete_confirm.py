@@ -311,3 +311,18 @@ def test_store_write_is_atomic_and_backs_up_before_replacing(prompt_store):
         {"id": "gone", "label": "gone", "text": "the prompt the reporter lost", "created_at": 2.0},
     ]
     assert [p["id"] for p in json.loads(prompt_store.read_text(encoding="utf-8"))] == ["keepme"]
+
+
+def test_delete_aborts_when_store_corrupted_or_unreadable(prompt_store, monkeypatch):
+    """Corrupt JSON in saved prompts store must abort DELETE with 500 without modifying file."""
+    prompt_store.write_text("{corrupted-json: invalid", encoding="utf-8")
+    captured: dict = {}
+    _wire_delete(monkeypatch, captured, "keepme")
+
+    assert routes.handle_delete(_FakeHandler(), urlparse("/api/prompts")) is True
+    assert "payload" not in captured
+    assert captured.get("bad", (None, None))[1] == 500
+    assert prompt_store.read_text(encoding="utf-8") == "{corrupted-json: invalid"
+    backup = prompt_store.with_name(BACKUP_NAME)
+    assert not backup.exists()
+
