@@ -23044,26 +23044,41 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             )
 
             sid = p.stem
-            with _session_sidecar_authority(sid):
-                revision, payload = _read_sidecar_snapshot(p, sid)
-                messages = payload.get("messages")
-                if messages is None:
-                    messages = []
-                if not isinstance(messages, list):
-                    continue
-                title = payload.get("title", "Untitled")
-                should_delete = not messages and (
-                    zero_only or title == "Untitled"
-                )
-                if not should_delete:
-                    continue
-                phase1_delete_candidate_ids.add(sid)
-                if not _delete_session_sidecar_artifacts_locked(
-                    sid,
-                    expected_revision=revision,
-                ):
-                    continue
-                cleaned += 1
+            # Chat-start and worker persistence use this lock before sidecar
+            # authority. Keep the same order so an empty durable transcript
+            # cannot be deleted between pending-turn publication and reply save.
+            with _get_session_agent_lock(sid):
+                with _session_sidecar_authority(sid):
+                    revision, payload = _read_sidecar_snapshot(p, sid)
+                    if payload.get("active_stream_id") or payload.get(
+                        "pending_user_message"
+                    ):
+                        continue
+                    with LOCK:
+                        cached = SESSIONS.get(sid)
+                    if cached is not None and (
+                        getattr(cached, "active_stream_id", None)
+                        or getattr(cached, "pending_user_message", None)
+                    ):
+                        continue
+                    messages = payload.get("messages")
+                    if messages is None:
+                        messages = []
+                    if not isinstance(messages, list):
+                        continue
+                    title = payload.get("title", "Untitled")
+                    should_delete = not messages and (
+                        zero_only or title == "Untitled"
+                    )
+                    if not should_delete:
+                        continue
+                    phase1_delete_candidate_ids.add(sid)
+                    if not _delete_session_sidecar_artifacts_locked(
+                        sid,
+                        expected_revision=revision,
+                    ):
+                        continue
+                    cleaned += 1
         except Exception:
             logger.debug("Failed to clean up session file %s", p, exc_info=True)
 
@@ -28324,14 +28339,22 @@ def _handle_session_compress(handler, body):
             s.truncation_boundary = compress_watermark
             s.compression_anchor_mode = "manual"
             s.last_prompt_tokens = new_tokens
+            from api.models import _read_sidecar_revision, _retire_backup_if_owned
+
+            backup_path = s.path.with_suffix(".json.bak")
+            existing_backup_receipt = _read_sidecar_revision(
+                backup_path,
+                s.session_id,
+            )
+            if existing_backup_receipt.state != "PRESENT":
+                existing_backup_receipt = None
             backup_receipt = s.save()
             # Drop stale backups that would undo an intentional manual compress.
             try:
-                from api.models import _read_sidecar_revision, _retire_backup_if_owned
                 _retire_backup_if_owned(
                     s.session_id,
-                    s.path.with_suffix(".json.bak"),
-                    backup_receipt,
+                    backup_path,
+                    backup_receipt or existing_backup_receipt,
                     _read_sidecar_revision(s.path, s.session_id),
                 )
             except OSError:

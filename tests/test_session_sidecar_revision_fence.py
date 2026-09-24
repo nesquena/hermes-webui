@@ -758,6 +758,99 @@ def test_empty_session_cleanup_fences_writer_between_check_and_delete(
     assert sid in models._load_webui_deleted_session_tombstone()
 
 
+def test_empty_session_cleanup_waits_for_live_turn_and_preserves_reply(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models, routes
+
+    session_dir = tmp_path / "sessions"
+    _patch_store(monkeypatch, models, session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+    monkeypatch.setattr(routes, "LOCK", models.LOCK)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload: payload)
+    sid = "cleanup-live-pending-turn"
+    session = models.Session(
+        session_id=sid,
+        title="Untitled",
+        workspace=str(tmp_path),
+        messages=[],
+    )
+    session.save(skip_index=True)
+
+    lock_attempted = threading.Event()
+    authority_entered = threading.Event()
+    real_get_agent_lock = routes._get_session_agent_lock
+    real_authority = models._session_sidecar_authority
+
+    def observed_get_agent_lock(candidate_sid):
+        if (
+            candidate_sid == sid
+            and threading.current_thread().name == "cleanup-live-session"
+        ):
+            lock_attempted.set()
+        return real_get_agent_lock(candidate_sid)
+
+    @contextmanager
+    def observed_authority(candidate_sid, *args, **kwargs):
+        if (
+            candidate_sid == sid
+            and threading.current_thread().name == "cleanup-live-session"
+        ):
+            authority_entered.set()
+        with real_authority(candidate_sid, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", observed_get_agent_lock)
+    monkeypatch.setattr(models, "_session_sidecar_authority", observed_authority)
+    result = {}
+
+    def cleanup():
+        result["payload"] = routes._handle_sessions_cleanup(object(), {})
+
+    agent_lock = routes._get_session_agent_lock(sid)
+    assert agent_lock.acquire(timeout=1)
+    cleanup_thread = threading.Thread(
+        target=cleanup,
+        name="cleanup-live-session",
+        daemon=True,
+    )
+    try:
+        cleanup_thread.start()
+        assert lock_attempted.wait(timeout=1), (
+            "cleanup did not use the live turn's agent lock"
+        )
+        assert not authority_entered.is_set(), (
+            "cleanup reached durable deletion while the live turn owned the agent lock"
+        )
+
+        session.active_stream_id = "stream-cleanup-race"
+        session.pending_user_message = "keep this live request"
+        session.pending_started_at = time.time()
+        session.save(skip_index=True)
+        session.messages.extend(
+            [
+                {"role": "user", "content": "keep this live request"},
+                {"role": "assistant", "content": "reply survived cleanup"},
+            ]
+        )
+        session.active_stream_id = None  # type: ignore[assignment]
+        session.pending_user_message = None  # type: ignore[assignment]
+        session.pending_started_at = None
+        session.save(skip_index=True)
+    finally:
+        agent_lock.release()
+
+    cleanup_thread.join(timeout=5)
+    assert not cleanup_thread.is_alive()
+    assert result["payload"] == {"ok": True, "cleaned": 0}
+    loaded = models.Session.load(sid)
+    assert loaded is not None
+    assert loaded.messages[-1]["content"] == "reply survived cleanup"
+
+
 def test_empty_session_cleanup_does_not_count_partial_delete_as_index_ghost(
     tmp_path,
     monkeypatch,
