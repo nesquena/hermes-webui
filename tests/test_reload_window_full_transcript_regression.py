@@ -372,7 +372,14 @@ def test_ceiling_is_read_from_server_metadata():
     assert got["resolved"] == 120
 
 
-def _tool_result_reload_harness(stale=False, clipped=True, stale_on_retry=False, truncated_hint=False) -> str:
+def _tool_result_reload_harness(
+    stale=False,
+    clipped=True,
+    stale_on_retry=False,
+    truncated_hint=False,
+    unrelated_clipped=False,
+    reject_retry=False,
+) -> str:
     """Exercise the actual reload + UI snippet with a bounded server tool result.
 
     The server's msg_limit path marks oversized tool rows _content_truncated
@@ -394,8 +401,12 @@ let _sameSessionForceReloadHint={{session_id:'s', loaded_renderable_count:2,
 const fullTool={{role:'tool',tool_call_id:'call-1',content:JSON.stringify({{
   metadata:'x'.repeat(16000),output:'VISIBLE RESULT'
 }})}};
+const newTool={{role:'tool',tool_call_id:'call-2',content:JSON.stringify({{
+  metadata:'y'.repeat(16000),output:'NEW RESULT'
+}})}};
+const appendedMessage={str("newTool" if unrelated_clipped else "{role:'user',content:'new'}")};
 const allMessages=[{{role:'assistant',content:'calling'}}, fullTool,
-  {{role:'assistant',content:'done'}},{{role:'user',content:'new'}}];
+  {{role:'assistant',content:'done'}},appendedMessage];
 let S={{session:{{session_id:'s',message_count:4}},messages:allMessages.slice(0,3),lastUsage:{{}}}};
 const oldMessages=S.messages;
 const calls=[];
@@ -409,8 +420,10 @@ async function api(url){{
   calls.push(url);
   if({str(stale).lower()} && calls.length===1){{_loadSessionGeneration=2;}}
   if({str(stale_on_retry).lower()} && calls.length===2){{_loadSessionGeneration=2;}}
+  if({str(reject_retry).lower()} && calls.length===2){{throw new Error('full retry failed');}}
   const bounded=url.includes('msg_limit=');
-  const messages=allMessages.map(m=>m===fullTool&&bounded&&{str(clipped).lower()} ? {{...m,
+  const clippedTool={str("newTool" if unrelated_clipped else "fullTool")};
+  const messages=allMessages.map(m=>m===clippedTool&&bounded&&{str(clipped).lower()} ? {{...m,
     content:m.content.slice(0,12000)+'\\n[Tool output truncated in paginated session response]',
     _content_truncated:true}} : m);
   return {{session:{{session_id:'s',message_count:4,messages,
@@ -425,7 +438,9 @@ async function api(url){{
 (async()=>{{
   await _ensureMessagesLoaded('s',{{force:true,loadGeneration:1}});
   console.log(JSON.stringify({{calls,wasReplaced:S.messages!==oldMessages,
-    snippet:_cliToolResultSnippet(S.messages[1].content)}}));
+    snippet:_cliToolResultSnippet(S.messages[1].content),
+    finalCount:S.messages.length,
+    appendedToolTruncated:!!S.messages.find(m=>m&&m.tool_call_id==='call-2')?._content_truncated}}));
 }})().catch(err=>{{console.error(err);process.exit(1);}});
 """
 
@@ -457,6 +472,28 @@ def test_unclipped_tool_result_uses_one_bounded_request():
     assert len(got["calls"]) == 1
     assert "msg_limit=" in got["calls"][0]
     assert got["snippet"] == "VISIBLE RESULT"
+
+
+def test_unrelated_complete_tool_row_does_not_trigger_full_retry():
+    """Only the same tool-call identity can justify an unbounded retry."""
+    got = json.loads(
+        _run_node(_tool_result_reload_harness(unrelated_clipped=True))
+    )
+    assert len(got["calls"]) == 1, got
+    assert "msg_limit=" in got["calls"][0]
+    assert got["wasReplaced"] is True
+    assert got["appendedToolTruncated"] is True
+
+
+def test_failed_full_retry_keeps_bounded_transcript_and_previous_full_tool_result():
+    """A failed optional retry must not turn a successful refresh into an error."""
+    got = json.loads(_run_node(_tool_result_reload_harness(reject_retry=True)))
+    assert len(got["calls"]) == 2, got
+    assert "msg_limit=" in got["calls"][0]
+    assert "msg_limit=" not in got["calls"][1]
+    assert got["wasReplaced"] is True
+    assert got["finalCount"] == 4, "the successful bounded transcript must still win"
+    assert got["snippet"] == "VISIBLE RESULT", got
 
 
 def test_generation_change_during_full_retry_does_not_replace_messages():
