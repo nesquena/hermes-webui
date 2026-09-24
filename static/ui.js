@@ -6218,14 +6218,15 @@ function _normalizeReasoningEffort(eff){
 }
 
 function _formatReasoningEffortLabel(effort){
-  if(effort==='none') return t('reasoning_effort_none');
-  if(!effort) return t('reasoning_effort_default');
-  if(effort==='minimal') return t('reasoning_effort_minimal');
-  if(effort==='low') return t('reasoning_effort_low');
-  if(effort==='medium') return t('reasoning_effort_medium');
-  if(effort==='high') return t('reasoning_effort_high');
-  if(effort==='xhigh') return t('reasoning_effort_xhigh');
-  if(effort==='max') return t('reasoning_effort_max');
+  const _t=(typeof t==='function')?t:(k=>({reasoning_effort_none:'None',reasoning_effort_default:'Default',reasoning_effort_minimal:'Minimal',reasoning_effort_low:'Low',reasoning_effort_medium:'Medium',reasoning_effort_high:'High',reasoning_effort_xhigh:'Extra High',reasoning_effort_max:'Max'}[k]||k));
+  if(effort==='none') return _t('reasoning_effort_none');
+  if(!effort) return _t('reasoning_effort_default');
+  if(effort==='minimal') return _t('reasoning_effort_minimal');
+  if(effort==='low') return _t('reasoning_effort_low');
+  if(effort==='medium') return _t('reasoning_effort_medium');
+  if(effort==='high') return _t('reasoning_effort_high');
+  if(effort==='xhigh') return _t('reasoning_effort_xhigh');
+  if(effort==='max') return _t('reasoning_effort_max');
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
@@ -6329,7 +6330,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText=t('reasoning_effort_aria_label',text);
+    const labelText=(typeof t==='function')?t('reasoning_effort_aria_label',text):('Reasoning effort: '+text);
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -6485,7 +6486,7 @@ document.addEventListener('click',function(e){
           // — display 'Default' rather than an empty toast.
           const display=(st&&st.reasoning_effort)||effort||'';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('\ud83e\udde0 '+t('reasoning_effort_aria_label',_formatReasoningEffortLabel(display)));
+          showToast('\ud83e\udde0 '+((typeof t==='function')?t('reasoning_effort_aria_label',_formatReasoningEffortLabel(display)):('Reasoning effort: '+_formatReasoningEffortLabel(display))));
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
