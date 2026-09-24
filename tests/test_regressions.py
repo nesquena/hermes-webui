@@ -850,9 +850,10 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
-    pending_block = src[pending_idx:pending_idx+500]
-    assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
-        "pending-user merge should dedupe only against the current active-turn user row"
+    pending_block = src[pending_idx:src.index("function _currentTurnAssistantText", pending_idx)]
+    assert "tailUser._pending===true&&_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
+        "pending-user merge should dedupe only a locally pending active-turn row, "
+        "not a historical same-text user row"
     )
     assert "messages.some(" not in pending_block, (
         "pending-user merge must not scan historical user rows by normalized content"

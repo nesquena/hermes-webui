@@ -3923,9 +3923,10 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
 // row — or, when there is none, appending — therefore drops the user's own
 // message underneath the output it triggered.
 //
-// The authoritative boundary is `pending_started_at`: every row belonging to a
-// PREVIOUS turn carries a timestamp strictly older than it. So scan backwards
-// for the newest definitively-older row; the active turn starts right after it.
+// `pending_started_at` gives a placement boundary for ordinary chronological
+// transcripts, not proof of a row's turn identity: imported history or clock
+// skew can put an earlier turn's timestamp after that boundary. Scan backwards
+// for the newest definitively-older row and place the pending bubble after it.
 // There is no text/proximity exception: visible text and timestamp closeness are
 // not turn identity, so even a same-text row 0.4s earlier remains history.
 //
@@ -3956,6 +3957,10 @@ function _activeTurnInsertionIndex(messages,session){
     if(ts===null) return -1;
     sawSettledRow=true;
     if(ts<startedAt) return i+1;
+    // A prior imported user row may carry a later timestamp than this turn.
+    // With no stream identity the proposed insertion point is ambiguous.
+    if(msg.role==='user'&&msg._pending!==true&&msg._active_turn_user!==true
+      &&!(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session))) return -1;
   }
   // Every settled row is demonstrably at/after the boundary: the whole visible
   // window belongs to the active turn, so the prompt precedes all of it.
@@ -3972,18 +3977,19 @@ function _mergePendingSessionMessage(session,messages){
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
   if(!pendingMsg) return false;
-  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  const tailUser=_currentTailUserMessage(currentTurnMessages);
+  if(tailUser&&tailUser._pending===true&&_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
   const boundaryIdx=typeof _activeTurnInsertionIndex==='function'
     ? _activeTurnInsertionIndex(messages,session)
     : -1;
   if(boundaryIdx>=0){
-    // A same-text user row at/after the boundary IS this turn's own row: rows
-    // from earlier turns are strictly older than `pending_started_at` and thus
-    // strictly above the boundary. This is boundary-scoped identity, not text
-    // proximity, so a legitimate repeat of the same prompt in a PREVIOUS turn
-    // still yields its own bubble instead of being swallowed.
+    // Placement after the time boundary does not make a same-text row this
+    // turn's row. Only the active stream's token (or server-owned public marker)
+    // can authorize adoption; otherwise preserve both prompts and attachments.
     const existingIdx=messages.findIndex((m,idx)=>
       idx>=boundaryIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+      &&(m._active_turn_user===true
+        ||(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(m,session)))
     );
     if(existingIdx>=0){
       const existing=messages[existingIdx];
@@ -4005,7 +4011,8 @@ function _mergePendingSessionMessage(session,messages){
   }
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>
-      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+      idx>liveAssistantIdx&&m&&m.role==='user'&&m._pending===true
+      &&_sameTranscriptMessage(m,pendingMsg)
     );
     if(misplacedIdx>=0){
       const [misplacedUser]=messages.splice(misplacedIdx,1);
