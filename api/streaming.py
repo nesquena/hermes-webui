@@ -2106,7 +2106,8 @@ def _active_turn_checkpoint_candidate(message, identity, expected_text):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
     token = message.get('_active_turn_token')
-    if token and token != identity.get('token'):
+    current_token = identity.get('token') if isinstance(identity, dict) else None
+    if token and token != current_token:
         return False
     return (
         not is_lcm_context_recovery_marker(message)
@@ -9199,10 +9200,9 @@ def _append_result_partial_on_error(
                 (
                     index
                     for index, row in enumerate(current_turn_rows)
-                    if isinstance(row, dict)
-                    and row.get('role') == 'user'
-                    and _normalize_user_text(_message_text(row.get('content')))
-                    == normalized_msg_text
+                    if _active_turn_checkpoint_candidate(
+                        row, active_turn_identity, msg_text
+                    )
                 ),
                 None,
             )

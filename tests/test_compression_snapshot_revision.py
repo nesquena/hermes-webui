@@ -478,6 +478,66 @@ def test_append_only_partial_does_not_skip_foreign_same_text_user_turn():
     assert session.messages == baseline
 
 
+def test_append_only_partial_rejects_foreign_same_text_user_after_baseline():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    session = Session(session_id="append-only-foreign-partial", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": "current prompt", "_active_turn_token": "t2"},
+            {"role": "assistant", "content": "historical answer", "_active_turn_token": "t2"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity={"token": "t1"}
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_rejects_lcm_marker_after_baseline():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    marker = "[Recent Summary (d0, node 418)]"
+    session = Session(session_id="append-only-lcm-partial", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": marker},
+            {"role": "assistant", "content": "historical answer"},
+        ],
+    }
+    assert streaming.is_lcm_context_recovery_marker(result["messages"][1])
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, marker, active_turn_identity={"token": "t1"}
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_accepts_current_token_user_after_baseline():
+    baseline = [{"role": "user", "content": "earlier request"}]
+    session = Session(session_id="append-only-current-partial", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": "current prompt", "_active_turn_token": "t1"},
+            {"role": "assistant", "content": "current partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity={"token": "t1"}
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+    assert session.messages[-1]["_active_turn_token"] == "t1"
+
+
 def test_stale_non_prefix_partial_uses_token_and_stops_at_next_user():
     session = Session(
         session_id="stale-partial-token-boundary",
