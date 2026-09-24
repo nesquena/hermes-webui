@@ -9174,7 +9174,16 @@ def _append_result_partial_on_error(
             and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
             == normalized_msg_text
         )
-        if not baseline_has_current_user:
+        if baseline_has_current_user:
+            leading_row = current_turn_rows[0] if current_turn_rows else None
+            if (
+                isinstance(leading_row, dict)
+                and leading_row.get('role') == 'user'
+                and _normalize_user_text(_message_text(leading_row.get('content')))
+                == normalized_msg_text
+            ):
+                current_turn_rows = current_turn_rows[1:]
+        else:
             current_user_index = next(
                 (
                     index

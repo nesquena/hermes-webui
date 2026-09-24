@@ -428,6 +428,28 @@ def test_stale_partial_requires_authoritative_current_turn_boundary():
     assert not any(message.get("_partial") for message in session.messages)
 
 
+def test_append_only_partial_skips_one_current_user_echo_and_stops_at_next_user():
+    session = Session(session_id="append-only-partial-boundary", messages=[], context_messages=[])
+    baseline = [{"role": "user", "content": "current prompt"}]
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": " current\n prompt "},
+            {"role": "assistant", "content": "current partial"},
+            {"role": "user", "content": "later turn"},
+            {"role": "assistant", "content": "later answer"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt"
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+    assert [message["content"] for message in session.messages] == ["current partial"]
+
+
 def test_stale_non_prefix_partial_uses_token_and_stops_at_next_user():
     session = Session(
         session_id="stale-partial-token-boundary",
