@@ -386,7 +386,10 @@ class TestSmdMediaInStream(unittest.TestCase):
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
         self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
-        self.assertIn("matchEnd===combined.length", block)
+        # #7708: the scan now runs over `normalized` (backtick-wrapped refs
+        # rewritten to bare form first); the chunk-end boundary guard is the
+        # same check against that string.
+        self.assertIn("matchEnd===normalized.length", block)
         self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
         self.assertIn("unmatchedTail = candidate", block)
 

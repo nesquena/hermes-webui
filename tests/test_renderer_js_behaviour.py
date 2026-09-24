@@ -898,3 +898,135 @@ class TestBareFileUrlMediaRendering:
         # Labeled anchors keep the normal link path (routed to /api/media as a link,
         # not auto-loaded as an <img>).
         assert "<img" not in out
+
+
+class TestMarkdownTableCellLineBreaks:
+    """<br> inside markdown table cells must be preserved and not split cells across lines."""
+
+    def test_table_cell_with_br_renders_intact(self, driver_path):
+        src = (
+            "| Feature | Description |\n"
+            "| :--- | :--- |\n"
+            "| Item 1 | Line one<br>Line two |\n"
+            "| Item 2 | Another row |"
+        )
+        out = _render(driver_path, src)
+        assert "<table>" in out
+        assert "Line one<br>Line two" in out or "Line one<br/>Line two" in out
+        assert "Item 2" in out
+        assert out.count("<tr>") == 3  # 1 header + 2 data rows
+
+
+class TestBulletListItalicCollision:
+    """Asterisk bullet lists followed by italic words must not collide or escape tags."""
+
+    def test_bullet_list_with_italic_does_not_swallow_tags(self, driver_path):
+        src = "* **Label:** Normal text with *italic* words."
+        out = _render(driver_path, src)
+        assert "&lt;strong&gt;" not in out
+        assert "<strong>Label:</strong>" in out
+        assert "<em>italic</em>" in out
+
+
+class TestRendererGateRegressions7618:
+    """Regressions for the two defects the release gate found in the #7618 fix.
+
+    Both were SILENT: they produced wrong output with no error, and neither was
+    covered by the PR's own tests.
+    """
+
+    def test_literal_br_sentinel_in_prose_is_not_rewritten(self, driver_path):
+        """A user typing the sentinel must not have it turned into a <br>.
+
+        The first implementation stashed table-row <br> as a fixed \\x00BR\\x00
+        token and unconditionally rewrote that token back to <br> afterwards, so
+        attacker/user-supplied text containing the literal token was corrupted.
+        """
+        out = _render(driver_path, "literal \x00BR\x00 text")
+        assert "<br>" not in out
+        assert "\x00BR\x00" in out
+
+    def test_literal_br_sentinel_inside_link_does_not_corrupt_anchor(self, driver_path):
+        """The sentinel inside a URL must not break out of the href attribute."""
+        out = _render(driver_path, '[x](https://example.test/\x00BR\x00tail)')
+        # The anchor must stay well-formed: no attribute text leaking into the body.
+        assert 'target="_blank"</a>' not in out
+        assert '>tail" target=' not in out
+
+    def test_literal_br_sentinel_in_table_cell_stays_literal(self, driver_path):
+        src = "| a | b |\n|---|---|\n| \x00BR\x00 | c |"
+        out = _render(driver_path, src)
+        assert "<table>" in out
+        assert "<br>" not in out
+
+    def test_html_em_with_boundary_whitespace_still_italicises(self, driver_path):
+        """`<em> x </em>` must stay emphasis.
+
+        The stricter italic regex (which correctly stops `a * b * c` from
+        italicising) also rejected the `* x *` that the HTML pre-pass produced
+        for `<em> x </em>`, degrading supported emphasis into literal asterisks
+        — and into a bullet list when it started a line.
+        """
+        out = _render(driver_path, "<em> italic </em>")
+        assert "<em>italic</em>" in out
+        assert "<ul>" not in out
+        assert "<li>" not in out
+
+    def test_html_i_with_boundary_whitespace_still_italicises(self, driver_path):
+        out = _render(driver_path, "<i> spaced </i>")
+        assert "<em>spaced</em>" in out
+        assert "<ul>" not in out
+
+    def test_spaced_asterisks_still_not_italicised(self, driver_path):
+        """The original #7618 fix must survive the boundary-whitespace repair."""
+        out = _render(driver_path, "2 * 3 * 4 = 24")
+        assert "<em>" not in out
+        assert "2 * 3 * 4 = 24" in out
+
+    def test_pipe_wrapped_prose_keeps_heading_rendering(self, driver_path):
+        """`| note<br># heading |` is NOT a table — it must keep heading rendering.
+
+        The table-row guard must use the same grammar as the downstream table
+        parser (a pipe-line run whose SECOND line is a separator). A naive
+        per-line "looks pipe-wrapped" test silently stripped heading/list
+        rendering from pipe-delimited prose.
+        """
+        out = _render(driver_path, "| prose<br># heading |")
+        assert "<h1>" in out
+
+    def test_pipe_wrapped_prose_keeps_list_rendering(self, driver_path):
+        out = _render(driver_path, "| prose<br>- item |")
+        assert "<ul>" in out and "<li>" in out
+
+    def test_pipe_rows_without_separator_are_not_treated_as_table(self, driver_path):
+        """Two pipe lines with no separator row are prose, so <br> still converts."""
+        out = _render(driver_path, "| a | b |\n| c | d |")
+        assert "<table>" not in out
+
+    def test_multi_row_table_preserves_br_in_every_data_row(self, driver_path):
+        src = (
+            "| Feature | Notes | Status |\n"
+            "|---|---|---|\n"
+            "| Auth | OAuth<br>API keys<br>tokens | shipped |\n"
+            "| Cache | LRU<br>60s TTL | in review |"
+        )
+        out = _render(driver_path, src)
+        assert out.count("<tr>") == 3
+        assert "OAuth<br>API keys<br>tokens" in out
+        assert "LRU<br>60s TTL" in out
+
+    def test_row_with_trailing_text_after_closing_pipe_matches_master(self, driver_path):
+        """Pins parity with master for a malformed row that has text past the last pipe.
+
+        The downstream table regex lacks an end-of-line anchor, so it accepts a
+        prefix the physical-line guard rejects. Master does NOT render this as a
+        table either, so preserving prose here is parity, not a regression. Pinned
+        so a future table-guard change has to make a deliberate decision about it.
+        """
+        out = _render(driver_path, "| h<br>x | n |\n|---|---| trailing")
+        assert "<table>" not in out
+
+    def test_indented_and_padded_table_still_preserves_br(self, driver_path):
+        out = _render(driver_path, "  | a | b |\n  |---|---|\n  | x<br>y | z |")
+        assert "<table>" in out
+        assert "x<br>y" in out

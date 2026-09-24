@@ -592,7 +592,7 @@
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
+        <textarea id="msg" rows="1" enterkeyhint="enter" placeholder="Message Hermes…"></textarea>
         <div id="composerWorkspaceContext" class="sr-only"></div>
         <div class="composer-footer">
           <div class="composer-left">
@@ -1504,7 +1504,7 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title" data-i18n="settings_tab_extensions">Extensions</div>
-                <div class="settings-section-meta">Browse, install, and manage WebUI extensions.</div>
+                <div class="settings-section-meta" data-i18n="settings_extensions_meta">Browse, install, and manage WebUI extensions.</div>
               </div>
             </div>
             <div class="extensions-tab-bar" role="tablist">
@@ -1528,20 +1528,20 @@
             </div>
             <div data-extensions-pane="installed" hidden>
               <div id="extensionsInstalled" class="extensions-gallery" aria-live="polite">
-                <div class="extensions-loading">Loading installed extensions…</div>
+                <div class="extensions-loading" data-i18n="settings_extensions_installed_loading">Loading installed extensions…</div>
               </div>
             </div>
             <div data-extensions-pane="diagnostics" hidden>
               <div class="settings-section-head" style="padding-top:8px">
                 <div></div>
-                <button class="sm-btn extensions-copy-diagnostics-btn" id="extensionsCopyDiagnosticsBtn" type="button" onclick="copyExtensionsDiagnostics()" disabled>Copy diagnostics</button>
+                <button class="sm-btn extensions-copy-diagnostics-btn" id="extensionsCopyDiagnosticsBtn" type="button" onclick="copyExtensionsDiagnostics()" disabled><span data-i18n="settings_extensions_copy_diagnostics">Copy diagnostics</span></button>
               </div>
               <div class="settings-field extensions-trust-note" id="extensionsTrustModel">
-                <label>Trust model</label>
-                <div>Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Settings and extension-owned storage are browser-local and not for secrets. Only load trusted local extension directories; disabling an extension takes effect after reload for already-injected assets.</div>
+                <label data-i18n="settings_extensions_trust_model_label">Trust model</label>
+                <div data-i18n="settings_extensions_trust_model_text">Extensions run in the WebUI browser origin and can access the same authenticated APIs as this session. Settings and extension-owned storage are browser-local and not for secrets. Only load trusted local extension directories; disabling an extension takes effect after reload for already-injected assets.</div>
               </div>
               <div id="extensionsDiagnostics" class="extensions-diagnostics" aria-live="polite">
-                <div class="extensions-loading">Loading extension diagnostics…</div>
+                <div class="extensions-loading" data-i18n="settings_extensions_installed_loading">Loading extension diagnostics…</div>
               </div>
             </div>
           </div>
