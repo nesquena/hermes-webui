@@ -100,8 +100,166 @@ def test_eager_rejected_before_stream_registration_retry_reload_has_one_new_prom
     ]
 
 
+def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
+    issue7193_env, monkeypatch
+):
+    session = _saved_retry_session(issue7193_env)
+    stream_creation_started = threading.Event()
+    release_stream_creation = threading.Event()
+    writer_started = threading.Event()
+    writer_saved = threading.Event()
+    admission_raised = threading.Event()
+    events = []
+
+    def pause_stream_creation():
+        stream_creation_started.set()
+        assert release_stream_creation.wait(2)
+        raise RuntimeError("stream registration rejected")
+
+    def write_draft():
+        writer_started.set()
+        with routes._get_session_agent_lock(session.session_id):
+            session.composer_draft = {"text": "draft saved during admission"}
+            session.save(touch_updated_at=False)
+            events.append("writer_save")
+            writer_saved.set()
+
+    monkeypatch.setattr(routes, "create_stream_channel", pause_stream_creation)
+    admission_error = []
+
+    def start_chat():
+        try:
+            _start(session, workspace=issue7193_env / "workspace")
+        except RuntimeError as exc:
+            admission_error.append(exc)
+            events.append("admission_error")
+            admission_raised.set()
+
+    admission_thread = threading.Thread(target=start_chat)
+    admission_thread.start()
+    assert stream_creation_started.wait(2)
+
+    writer_thread = threading.Thread(target=write_draft)
+    writer_thread.start()
+    assert writer_started.wait(2)
+    assert not writer_saved.wait(0.2)
+
+    release_stream_creation.set()
+    admission_thread.join(2)
+    writer_thread.join(2)
+
+    assert admission_error and str(admission_error[0]) == "stream registration rejected"
+    assert admission_raised.is_set()
+    assert writer_saved.is_set()
+    assert events.index("admission_error") < events.index("writer_save")
+    reloaded = Session.load(session.session_id)
+    assert reloaded.composer_draft == {"text": "draft saved during admission"}
+    assert [row["content"] for row in _user_rows(reloaded)] == ["retry me"]
+
+
+def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
+    issue7193_env, monkeypatch
+):
+    session = _saved_retry_session(issue7193_env)
+    stream_creation_started = threading.Event()
+    release_stream_creation = threading.Event()
+    writer_started = threading.Event()
+    writer_saved = threading.Event()
+    events = []
+
+    def pause_stream_creation():
+        stream_creation_started.set()
+        assert release_stream_creation.wait(2)
+        raise RuntimeError("stream registration rejected")
+
+    def write_metadata():
+        writer_started.set()
+        with routes._get_session_agent_lock(session.session_id):
+            session.model = "prepared-model"
+            session.model_provider = "prepared-provider"
+            session.save(touch_updated_at=False)
+            events.append("writer_save")
+            writer_saved.set()
+
+    monkeypatch.setattr(routes, "create_stream_channel", pause_stream_creation)
+    admission_error = []
+
+    def start_chat():
+        try:
+            _start(
+                session,
+                workspace=issue7193_env / "workspace",
+                model="prepared-model",
+                model_provider="prepared-provider",
+            )
+        except RuntimeError as exc:
+            admission_error.append(exc)
+            events.append("admission_error")
+
+    admission_thread = threading.Thread(target=start_chat)
+    admission_thread.start()
+    assert stream_creation_started.wait(2)
+
+    writer_thread = threading.Thread(target=write_metadata)
+    writer_thread.start()
+    assert writer_started.wait(2)
+    assert not writer_saved.wait(0.2)
+
+    release_stream_creation.set()
+    admission_thread.join(2)
+    writer_thread.join(2)
+
+    assert admission_error and str(admission_error[0]) == "stream registration rejected"
+    assert writer_saved.is_set()
+    assert events.index("admission_error") < events.index("writer_save")
+    reloaded = Session.load(session.session_id)
+    assert reloaded.model == "prepared-model"
+    assert reloaded.model_provider == "prepared-provider"
+    assert [row["content"] for row in _user_rows(reloaded)] == ["retry me"]
+
+
+def test_rejected_start_preserves_entry_recovery_backup_bytes(
+    issue7193_env, monkeypatch
+):
+    from api.session_recovery import inspect_session_recovery_status
+
+    session = new_session(workspace=str(issue7193_env.parent), profile="profile-a")
+    session.title = "Recoverable session"
+    six_messages = [
+        {"role": "user", "content": f"prompt {index}", "timestamp": float(index)}
+        for index in range(1, 4)
+    ] + [
+        {"role": "assistant", "content": "answer 1", "timestamp": 4.0},
+        {"role": "user", "content": "prompt 4", "timestamp": 5.0},
+        {"role": "assistant", "content": "answer 2", "timestamp": 6.0},
+    ]
+    session.messages = copy.deepcopy(six_messages)
+    session.context_messages = copy.deepcopy(six_messages)
+    session.save(touch_updated_at=False)
+    four_messages = copy.deepcopy(six_messages[:4])
+    session.messages = four_messages
+    session.context_messages = copy.deepcopy(four_messages)
+    session.save(touch_updated_at=False)
+    backup_path = session.path.with_suffix(".json.bak")
+    entry_backup = backup_path.read_bytes()
+    assert inspect_session_recovery_status(session.path)["recommend"] == "restore"
+
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    assert backup_path.read_bytes() == entry_backup
+    status = inspect_session_recovery_status(session.path)
+    assert status["recommend"] == "restore"
+    assert status["bak_messages"] == 6
+
+
 @pytest.mark.parametrize("existing_session", [True, False], ids=["existing", "hidden-empty"])
-def test_rejected_eager_start_is_not_revived_by_startup_recovery(
+def test_rejected_eager_start_keeps_existing_recovery_contract(
     issue7193_env, monkeypatch, existing_session
 ):
     from api.session_recovery import (
@@ -115,6 +273,8 @@ def test_rejected_eager_start_is_not_revived_by_startup_recovery(
         else new_session(workspace=str(issue7193_env.parent), profile="profile-a")
     )
     original_messages = copy.deepcopy(session.messages)
+    backup_path = session.path.with_suffix(".json.bak")
+    entry_backup = backup_path.read_bytes() if backup_path.exists() else None
     monkeypatch.setattr(
         routes,
         "create_stream_channel",
@@ -128,10 +288,11 @@ def test_rejected_eager_start_is_not_revived_by_startup_recovery(
     assert [row["content"] for row in _user_rows(live)] == (
         ["retry me"] if existing_session else []
     )
-    assert live.intentional_shrink_generation
+    assert not live.intentional_shrink_generation
     status = inspect_session_recovery_status(live.path)
-    assert status["recommend"] == "no_action"
-    assert status["intentional_message_shrink"] is True
+    assert status["recommend"] == ("restore" if entry_backup is not None else "no_backup")
+    if entry_backup is not None:
+        assert backup_path.read_bytes() == entry_backup
 
     recovery = recover_all_sessions_on_startup(issue7193_env)
 
@@ -160,10 +321,7 @@ def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monk
         _start(session, workspace=issue7193_env / "workspace")
 
     state = copy.deepcopy(session.__dict__)
-    assert state.pop("intentional_shrink_generation")
-    expected_state = copy.deepcopy(before)
-    expected_state.pop("intentional_shrink_generation")
-    assert state == expected_state
+    assert state == before
     reloaded = Session.load(session.session_id)
     for field in (
         "title",
@@ -183,7 +341,6 @@ def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monk
         assert getattr(reloaded, field) == before[field]
     persisted = json.loads(session.path.read_text(encoding="utf-8"))
     expected_persisted = json.loads(before_sidecar.decode("utf-8"))
-    expected_persisted["intentional_shrink_generation"] = session.intentional_shrink_generation
     assert persisted == expected_persisted
     assert config.session_writeback_owner(session.session_id) is None
     assert not config.STREAM_SESSION_OWNERS
@@ -271,12 +428,15 @@ def test_accepted_eager_and_deferred_modes_keep_current_sidecar_contract(issue71
 
 def test_rollback_save_failure_preserves_original_initialization_error(issue7193_env, monkeypatch):
     session = _saved_retry_session(issue7193_env)
+    before_sidecar = session.path.read_bytes()
+    backup_path = session.path.with_suffix(".json.bak")
     real_save = models.Session.save
     save_calls = []
 
     def fail_compensation(self, *args, **kwargs):
         save_calls.append(kwargs)
         if len(save_calls) == 2:
+            real_save(self, *args, **kwargs)
             raise OSError("rollback save failed")
         return real_save(self, *args, **kwargs)
 
@@ -292,6 +452,8 @@ def test_rollback_save_failure_preserves_original_initialization_error(issue7193
 
     assert len(save_calls) == 2
     assert save_calls[1].get("touch_updated_at") is False
+    assert backup_path.exists()
+    assert json.loads(backup_path.read_bytes()) == json.loads(before_sidecar)
 
 
 def test_journal_append_failure_is_best_effort(issue7193_env, monkeypatch):

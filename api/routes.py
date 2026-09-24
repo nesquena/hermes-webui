@@ -23272,7 +23272,56 @@ def _prepare_chat_start_session_for_stream(
         s.save()
 
 
-def _cleanup_chat_start_launch_failure(session, stream_id: str, snapshot) -> None:
+def _atomic_write_chat_start_bytes(path: Path, payload: bytes) -> None:
+    """Replace one chat-start recovery file without exposing a partial write."""
+    tmp = path.with_suffix(
+        f"{path.suffix}.restore.tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    try:
+        with open(tmp, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        from api.models import _safe_replace
+
+        _safe_replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _restore_chat_start_backup_provenance(provenance, *, compensation_succeeded: bool) -> None:
+    """Restore the backup state that existed before rejected admission."""
+    if provenance is None:
+        return
+    _sidecar_path, sidecar_bytes, backup_path, had_backup, backup_bytes = provenance
+    try:
+        if had_backup:
+            if backup_bytes is not None:
+                _atomic_write_chat_start_bytes(backup_path, backup_bytes)
+            return
+        elif compensation_succeeded:
+            backup_path.unlink(missing_ok=True)
+        elif sidecar_bytes is not None:
+            _atomic_write_chat_start_bytes(backup_path, sidecar_bytes)
+    except Exception:
+        logger.debug(
+            "Failed to restore chat-start recovery backup %s",
+            backup_path,
+            exc_info=True,
+        )
+
+
+def _cleanup_chat_start_launch_failure(
+    session,
+    stream_id: str,
+    snapshot,
+    *,
+    backup_provenance=None,
+    lock_held: bool = False,
+) -> None:
     """Release state registered before a worker thread successfully starts."""
     try:
         clear_session_writeback_owner_if_owned(session.session_id, stream_id)
@@ -23286,46 +23335,43 @@ def _cleanup_chat_start_launch_failure(session, stream_id: str, snapshot) -> Non
             stream_id,
             exc_info=True,
         )
-    # The session-field reset needs the same concurrency discipline as the
-    # registry half: hold the per-session lock and re-resolve the canonical
-    # session before clearing anything. Mutating the passed-in stale object
-    # could wipe a concurrent successor turn's pending fields, and saving it
-    # could resurrect a session deleted while the launch was failing. Same
-    # pattern as the #1533 race fix (routes.py:3077) and the anchor-scene
-    # write guard (routes.py:5140).
-    #
-    # This runs while the original launch failure is being handled, so it must
-    # never raise. Lock acquisition and session resolution can fail on their own
-    # (I/O, deserialization), and an escaping error here would mask the launch
-    # failure the caller is about to report while leaving the reset half done.
-    try:
-        with _get_session_agent_lock(session.session_id):
-            try:
-                canonical = get_session(session.session_id)
-            except KeyError:
-                return  # session deleted while the thread launch was failing
-            if getattr(canonical, "active_stream_id", None) != stream_id:
-                return  # a successor turn already owns the session
-            from api.session_ops import (
-                _stamp_intentional_shrink_generation,
-                restore_session_state,
-            )
+    def restore_locked() -> None:
+        # Re-resolve the canonical session before clearing anything. Mutating
+        # the passed-in object could wipe a successor turn or resurrect a
+        # session deleted while the launch was failing.
+        try:
+            canonical = get_session(session.session_id)
+        except KeyError:
+            return
+        if getattr(canonical, "active_stream_id", None) != stream_id:
+            return
+        from api.session_ops import restore_session_state
 
-            prepared_message_count = len(getattr(canonical, "messages", None) or [])
-            restore_session_state(canonical, snapshot)
-            _stamp_intentional_shrink_generation(
-                canonical,
-                prepared_message_count,
-                len(getattr(canonical, "messages", None) or []),
+        restore_session_state(canonical, snapshot)
+        compensation_succeeded = False
+        try:
+            canonical.save(touch_updated_at=False)
+            compensation_succeeded = True
+        except Exception:
+            logger.debug(
+                "Failed to persist chat-start cleanup after chat-start failure for %s",
+                stream_id,
+                exc_info=True,
             )
-            try:
-                canonical.save(touch_updated_at=False)
-            except Exception:
-                logger.debug(
-                    "Failed to persist chat-start cleanup after chat-start failure for %s",
-                    stream_id,
-                    exc_info=True,
-                )
+        _restore_chat_start_backup_provenance(
+            backup_provenance,
+            compensation_succeeded=compensation_succeeded,
+        )
+
+    # This runs while the original launch failure is being handled, so it must
+    # never raise. Lock acquisition and session resolution can fail on their own,
+    # and an escaping error here would mask the launch failure.
+    try:
+        if lock_held:
+            restore_locked()
+        else:
+            with _get_session_agent_lock(session.session_id):
+                restore_locked()
     except Exception:
         logger.debug(
             "Failed to reset session state after worker launch failure for %s",
@@ -23798,51 +23844,66 @@ def _start_chat_stream_for_session(
     diag.stage("session_lock_wait") if diag else None
     snapshot = None
     stream_id = None
+    backup_provenance = None
     was_hidden_empty_session = False
     journal_event = {}
-    try:
-        while True:
-            with session_lock:
-                locked_stream_id = getattr(s, "active_stream_id", None)
-                if locked_stream_id:
-                    if _active_stream_blocks_chat_start(s, locked_stream_id):
-                        diag.stage("response_write") if diag else None
-                        return {
-                            "error": "session already has an active stream",
-                            "active_stream_id": locked_stream_id,
-                            "_status": 409,
-                        }
-                    needs_stale_cleanup = True
-                else:
-                    blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
-                    if blocking_run_stream_id:
-                        diag.stage("response_write") if diag else None
-                        return {
-                            "error": "session already has an active stream",
-                            "active_stream_id": blocking_run_stream_id,
-                            "_status": 409,
-                        }
-                    needs_stale_cleanup = False
-                    if regeneration is not None:
-                        return _start_regeneration_stream_locked(
-                            s,
-                            turn=regeneration,
-                            workspace=workspace,
-                            model=model,
-                            model_provider=model_provider,
-                            normalized_model=normalized_model,
-                            diag=diag,
-                            goal_related=goal_related,
-                            source=source,
-                            moa_config=moa_config,
-                            backend_is_gateway=backend_is_gateway,
-                        )
-                    stream_id = uuid.uuid4().hex
-                    from api.session_ops import snapshot_session_state
+    while True:
+        with session_lock:
+            locked_stream_id = getattr(s, "active_stream_id", None)
+            if locked_stream_id:
+                if _active_stream_blocks_chat_start(s, locked_stream_id):
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": locked_stream_id,
+                        "_status": 409,
+                    }
+                needs_stale_cleanup = True
+            else:
+                blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
+                if blocking_run_stream_id:
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": blocking_run_stream_id,
+                        "_status": 409,
+                    }
+                needs_stale_cleanup = False
+                if regeneration is not None:
+                    return _start_regeneration_stream_locked(
+                        s,
+                        turn=regeneration,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        normalized_model=normalized_model,
+                        diag=diag,
+                        goal_related=goal_related,
+                        source=source,
+                        moa_config=moa_config,
+                        backend_is_gateway=backend_is_gateway,
+                    )
+                stream_id = uuid.uuid4().hex
+                from api.session_ops import snapshot_session_state
 
-                    snapshot = snapshot_session_state(s)
-                    diag.stage("save_pending_state") if diag else None
-                    was_hidden_empty_session = _is_hidden_empty_session(s)
+                snapshot = snapshot_session_state(s)
+                sidecar_path = getattr(s, "path", None)
+                if sidecar_path is not None:
+                    sidecar_path = Path(sidecar_path)
+                    backup_path = sidecar_path.with_suffix(".json.bak")
+                    sidecar_bytes = sidecar_path.read_bytes() if sidecar_path.exists() else None
+                    backup_exists = backup_path.exists()
+                    backup_bytes = backup_path.read_bytes() if backup_exists else None
+                    backup_provenance = (
+                        sidecar_path,
+                        sidecar_bytes,
+                        backup_path,
+                        backup_exists,
+                        backup_bytes,
+                    )
+                diag.stage("save_pending_state") if diag else None
+                was_hidden_empty_session = _is_hidden_empty_session(s)
+                try:
                     _prepare_chat_start_session_for_stream(
                         s,
                         msg=msg,
@@ -23853,86 +23914,98 @@ def _start_chat_stream_for_session(
                         stream_id=stream_id,
                         source=source,
                     )
-                    break
-            if needs_stale_cleanup:
-                diag.stage("stale_stream_cleanup") if diag else None
-                cleared = _clear_stale_stream_state(s)
-                if not cleared and getattr(s, "active_stream_id", None):
-                    diag.stage("response_write") if diag else None
-                    return {
-                        "error": "session already has an active stream",
-                        "active_stream_id": getattr(s, "active_stream_id", None),
-                        "_status": 409,
-                    }
-        if was_hidden_empty_session:
+                    diag.stage("turn_journal_submitted") if diag else None
+                    try:
+                        from api.turn_journal import append_turn_journal_event
+
+                        journal_event = append_turn_journal_event(
+                            s.session_id,
+                            {
+                                "event": "submitted",
+                                "stream_id": stream_id,
+                                "role": "user",
+                                "content": msg,
+                                "attachments": attachments,
+                                "workspace": workspace,
+                                "model": model,
+                                "model_provider": model_provider,
+                                "created_at": s.pending_started_at,
+                            },
+                        )
+                    except Exception:
+                        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+                    diag.stage("stream_registration") if diag else None
+                    stream = create_stream_channel()
+                    register_stream_owner(stream_id, s.session_id)
+                    with STREAMS_LOCK:
+                        STREAMS[stream_id] = stream
+                    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
+                    if goal_related:
+                        STREAM_GOAL_RELATED[stream_id] = True
+                    diag.stage("worker_thread_start") if diag else None
+                    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+                    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+                    if moa_config and not backend_is_gateway:
+                        worker_kwargs["moa_config"] = moa_config
+                    if backend_is_gateway:
+                        from api.gateway_chat import _mark_gateway_run_starting
+
+                        _mark_gateway_run_starting(stream_id)
+                    thr = threading.Thread(
+                        target=worker_target,
+                        args=(s.session_id, msg, model, workspace, stream_id, attachments),
+                        kwargs=worker_kwargs,
+                        daemon=True,
+                    )
+                    thr.start()
+                except Exception:
+                    if backend_is_gateway and stream_id:
+                        try:
+                            from api.gateway_chat import _finish_gateway_run_starting
+                            from api.gateway_chat import _clear_gateway_run_starting
+
+                            _finish_gateway_run_starting(stream_id)
+                            _clear_gateway_run_starting(stream_id)
+                        except Exception:
+                            logger.debug(
+                                "Failed to record gateway run-start failure for stream %s",
+                                stream_id,
+                                exc_info=True,
+                            )
+                    if snapshot is not None and stream_id:
+                        _cleanup_chat_start_launch_failure(
+                            s,
+                            stream_id,
+                            snapshot,
+                            backup_provenance=backup_provenance,
+                            lock_held=True,
+                        )
+                    raise
+                break
+        if needs_stale_cleanup:
+            diag.stage("stale_stream_cleanup") if diag else None
+            cleared = _clear_stale_stream_state(s)
+            if not cleared and getattr(s, "active_stream_id", None):
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "session already has an active stream",
+                    "active_stream_id": getattr(s, "active_stream_id", None),
+                    "_status": 409,
+                }
+    if was_hidden_empty_session:
+        try:
             publish_session_list_changed(
                 "session_new",
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        diag.stage("turn_journal_submitted") if diag else None
-        try:
-            from api.turn_journal import append_turn_journal_event
-
-            journal_event = append_turn_journal_event(
-                s.session_id,
-                {
-                    "event": "submitted",
-                    "stream_id": stream_id,
-                    "role": "user",
-                    "content": msg,
-                    "attachments": attachments,
-                    "workspace": workspace,
-                    "model": model,
-                    "model_provider": model_provider,
-                    "created_at": s.pending_started_at,
-                },
-            )
         except Exception:
-            logger.warning("Failed to append submitted turn journal event", exc_info=True)
-        diag.stage("set_last_workspace") if diag else None
+            logger.debug("Failed to publish session_new after chat start", exc_info=True)
+    diag.stage("set_last_workspace") if diag else None
+    try:
         set_last_workspace(workspace, profile=getattr(s, "profile", None))
-        diag.stage("stream_registration") if diag else None
-        stream = create_stream_channel()
-        register_stream_owner(stream_id, s.session_id)
-        with STREAMS_LOCK:
-            STREAMS[stream_id] = stream
-        # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
-        if goal_related:
-            STREAM_GOAL_RELATED[stream_id] = True
-        diag.stage("worker_thread_start") if diag else None
-        worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-        worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
-        if moa_config and not backend_is_gateway:
-            worker_kwargs["moa_config"] = moa_config
-        if backend_is_gateway:
-            from api.gateway_chat import _mark_gateway_run_starting
-
-            _mark_gateway_run_starting(stream_id)
-        thr = threading.Thread(
-            target=worker_target,
-            args=(s.session_id, msg, model, workspace, stream_id, attachments),
-            kwargs=worker_kwargs,
-            daemon=True,
-        )
-        thr.start()
     except Exception:
-        if backend_is_gateway and stream_id:
-            try:
-                from api.gateway_chat import _finish_gateway_run_starting
-                from api.gateway_chat import _clear_gateway_run_starting
-
-                _finish_gateway_run_starting(stream_id)
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug(
-                    "Failed to record gateway run-start failure for stream %s",
-                    stream_id,
-                    exc_info=True,
-                )
-        if snapshot is not None and stream_id:
-            _cleanup_chat_start_launch_failure(s, stream_id, snapshot)
-        raise
+        logger.debug("Failed to persist last workspace after chat start", exc_info=True)
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,

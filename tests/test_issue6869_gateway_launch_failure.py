@@ -144,13 +144,16 @@ def test_gateway_launch_failure_cleanup_restores_snapshot_before_saving(monkeypa
         lambda sid, metadata_only=False: canonical,
     )
 
-    routes._cleanup_chat_start_launch_failure(canonical, "old-stream", snapshot)
+    with routes._get_session_agent_lock(canonical.session_id):
+        routes._cleanup_chat_start_launch_failure(
+            canonical,
+            "old-stream",
+            snapshot,
+            lock_held=True,
+        )
 
     restored = copy.deepcopy(canonical.__dict__)
-    assert restored.pop("intentional_shrink_generation")
-    expected = copy.deepcopy(snapshot)
-    expected.pop("intentional_shrink_generation", None)
-    assert restored == expected
+    assert restored == snapshot
     assert saved == [{"touch_updated_at": False}]
 
 
