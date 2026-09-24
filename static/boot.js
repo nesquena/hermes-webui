@@ -3646,6 +3646,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  S._legacyProfileResolved = activeProfileState.status === 'resolved';
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

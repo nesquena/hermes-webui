@@ -9576,13 +9576,14 @@ const TAB_ID_KEY = 'hermes-webui-tab-id';
 const TAB_ID_RELEASED_BASE = 'hermes-webui-tab-released';
 const _TAB_RELEASED_TTL_MS = 24 * 60 * 60 * 1000;
 // Oldest inflight marker/state either reader (checkInflightOnBoot,
-// loadInflightState) still accepts. Scoped copies older than this can never be
-// recovered by anyone, which is what lets the GC collect crash/discard orphans.
+// loadInflightState) still accepts. Expiry is a reader decision, not authority
+// for another document to delete mutable storage.
 const _INFLIGHT_ACCEPT_WINDOW_MS = 10 * 60 * 1000;
 const INFLIGHT_KEY_BASE = 'hermes-webui-inflight'; // scoped base; unsuffixed form is legacy/ownerless
 const INFLIGHT_STATE_KEY_BASE = 'hermes-webui-inflight-state';
 const ACTIVE_SESSION_KEY_LEGACY = 'hermes-webui-session';
 const ACTIVE_SESSION_TOMBSTONE_BASE = 'hermes-webui-session-none';
+const ACTIVE_SESSION_REJECTED_BASE = 'hermes-webui-rejected-sid';
 const TAB_ACTIVE_SESSION_MIRROR_KEY = 'hermes-webui-tab-active-session';
 const TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY = 'hermes-webui-tab-active-session-none';
 const TAB_INFLIGHT_MIRROR_KEY = 'hermes-webui-tab-inflight';
@@ -9620,54 +9621,10 @@ function _mirrorTabValue(key,value){
   }catch(_){}
 }
 
-// GC is based on an explicit, per-id pagehide record, plus an age backstop for
-// scoped inflight marker/state that no reader can accept any more. Each
-// release marker has its own key, so concurrent documents never perform a
-// shared-map read-modify-write. Missing or malformed markers fail closed and
-// retain state; elapsed heartbeats are never used as proof that a live/frozen
-// document died.
-//
-// Age backstop verdict per foreign owner. `true` only when every validated
-// inflight timestamp of that owner (marker `ts`, each state entry's
-// `updated_at`) is already older than the reader window, so neither
-// checkInflightOnBoot() nor loadInflightState() could ever accept the copies
-// again — including those of a crashed or discarded tab that never fired a
-// non-persisted pagehide. Marker and state are judged as one unit: a fresh
-// timestamp on either side (long-running stream still saving snapshots), or
-// any malformed/missing timestamp, pins the owner and both keys are retained.
-function _expiredInflightOwners(now,selfId){
-  const verdicts=new Map();
-  const note=(owner,expired)=>{
-    if(verdicts.get(owner)===false) return;
-    verdicts.set(owner,expired);
-  };
-  const stampExpired=(ts)=>(typeof ts==='number'&&Number.isFinite(ts)&&ts>0)
-    ? ((now-ts)>_INFLIGHT_ACCEPT_WINDOW_MS)
-    : false;
-  const markerPrefix=INFLIGHT_KEY_BASE+'::';
-  const statePrefix=INFLIGHT_STATE_KEY_BASE+'::';
-  for(let i=0;i<localStorage.length;i++){
-    const key=localStorage.key(i);
-    if(!key) continue;
-    let owner=null;
-    let isState=false;
-    if(key.indexOf(markerPrefix)===0) owner=key.slice(markerPrefix.length);
-    else if(key.indexOf(statePrefix)===0){ owner=key.slice(statePrefix.length); isState=true; }
-    if(!owner||owner===selfId) continue;
-    try{
-      const parsed=JSON.parse(localStorage.getItem(key));
-      if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)) throw new Error('malformed');
-      if(!isState){ note(owner,stampExpired(parsed.ts)); continue; }
-      // An empty map carries no timestamp: neutral, the marker decides.
-      for(const entry of Object.values(parsed)){
-        note(owner,!!entry&&typeof entry==='object'&&!Array.isArray(entry)&&stampExpired(entry.updated_at));
-      }
-    }catch(_){
-      note(owner,false);
-    }
-  }
-  return verdicts;
-}
+// A cached age verdict cannot authorize deletion: another document can save a
+// fresh marker/state between classification and removeItem(). Only the owner's
+// non-persisted pagehide release record authorizes GC of its scoped keys.
+// Missing/malformed release evidence retains even expired crash/discard state.
 function _gcOrphanTabKeys(){
   try{
     const now=Date.now();
@@ -9677,10 +9634,8 @@ function _gcOrphanTabKeys(){
       ACTIVE_SESSION_KEY_LEGACY+'::',
       ACTIVE_SESSION_TOMBSTONE_BASE+'::',
     ];
-    const inflightPrefixes=statePrefixes.slice(0,2);
     const releasePrefix=TAB_ID_RELEASED_BASE+'::';
     const selfId=(typeof window!=='undefined'&&window.__hermesTabId)||null;
-    const expiredInflight=_expiredInflightOwners(now,selfId);
     const doomed=[];
     for(let i=0;i<localStorage.length;i++){
       const key=localStorage.key(i);
@@ -9688,11 +9643,7 @@ function _gcOrphanTabKeys(){
       const prefix=statePrefixes.find(p=>key.indexOf(p)===0);
       if(!prefix) continue;
       const owner=key.slice(prefix.length);
-      if(!owner) continue;
-      if(inflightPrefixes.indexOf(prefix)!==-1&&expiredInflight.get(owner)===true){
-        doomed.push(key);
-        continue;
-      }
+      if(!owner||owner===selfId) continue;
       const releasedRaw=localStorage.getItem(releasePrefix+owner);
       if(releasedRaw==null) continue;
       const releasedAt=Number(releasedRaw);
@@ -9774,6 +9725,15 @@ function _inflightStateKey(){ return _scopedTabKey(INFLIGHT_STATE_KEY_BASE); }
 // tab 2 opened most recently.
 function _activeSessionKey(){ return _scopedTabKey(ACTIVE_SESSION_KEY_LEGACY); }
 function _activeSessionTombstoneKey(){ return _scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE); }
+function _legacyProfile(){
+  // S begins with a provisional 'default'. Boot must resolve the server's
+  // active profile before an ownerless fallback can be adopted or rejected.
+  return typeof S!=='undefined'&&S&&S._legacyProfileResolved&&typeof S.activeProfile==='string'&&S.activeProfile
+    ? S.activeProfile : null;
+}
+function _rejectedSessionKey(profile,sid){
+  return ACTIVE_SESSION_REJECTED_BASE+'::'+encodeURIComponent(profile)+'::'+encodeURIComponent(sid);
+}
 function _rememberActiveSession(sid){
   if(!sid) return;
   if(!_hermesTabId()) return;
@@ -9820,11 +9780,24 @@ function _rememberedActiveSession(){
     window.__hermesActiveSessionKnown=true;
     return null;
   }
+  const profile=_legacyProfile();
+  if(!profile){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
   let legacy=null;
   try{ legacy=localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY); }catch(_){
     window.__hermesActiveSession=null;
     window.__hermesActiveSessionKnown=true;
     return null;
+  }
+  // A rejected or foreign-profile SID remains in the ownerless slot for older
+  // clients, but this profile must not re-adopt it. The rejection lives in a
+  // distinct per-(profile,SID) key: no compare/remove race with a newer writer.
+  if(legacy){
+    try{ if(localStorage.getItem(_rejectedSessionKey(profile,legacy))) legacy=null; }
+    catch(_){ legacy=null; }
   }
   // One-shot adoption (upgrade path): copy the legacy value into this tab's
   // scoped slot so every later read/forget goes through tab-owned state and a
@@ -9851,19 +9824,14 @@ function _forgetActiveSession(expectedSid){
   try{ localStorage.setItem(_activeSessionTombstoneKey(), String(Date.now())); }catch(_){}
   _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,null);
   _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,String(Date.now()));
-  // The legacy key is shared, ownerless bootstrap state for brand-new and old
-  // clients, so forgetting document-local state alone never touches it: a
-  // matching value proves content equality, not deletion authority. The one
-  // exception is a caller that names the SID it has just PROVEN dead
-  // (404 / delete / profile-switch self-heal). Leaving that SID in the shared
-  // slot would make every later fresh document re-adopt it, 404 again and
-  // loop. Remove it only when the slot still holds exactly that SID, so a
-  // concurrent tab that already moved the slot on is never affected.
+  // The legacy slot is ownerless: even an exact matching read followed by a
+  // remove can erase a different tab's newer value. Reject a SID the caller
+  // explicitly invalidated (404/delete, failed boot restore, or a profile
+  // switch) on a separate, profile-scoped key instead.
   if(typeof expectedSid!=='string'||!expectedSid) return;
   try{
-    if(localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY)===expectedSid){
-      localStorage.removeItem(ACTIVE_SESSION_KEY_LEGACY);
-    }
+    const profile=_legacyProfile();
+    if(profile) localStorage.setItem(_rejectedSessionKey(profile,expectedSid),'1');
   }catch(_){}
 }
 if(typeof window!=='undefined'){
