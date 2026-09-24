@@ -3495,9 +3495,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // (defensive — the live can only ever be true here after the
     // round-4 guard, and the persisted map is also gated to ``true``
     // only, so the union is exactly the set of failed tools).
-    const _rowTid=(row&&(row.tool_call_id||(row.tool&&row.tool.id)))||'';
+    // #7358 (re-gate 9/24): the live verdict may only be copied when the
+    // row/live pair matched through the tool id. This helper is reached
+    // either from the per-id dedup path or from
+    // ``_anchorSceneMatchingContentToolRow``, whose name / invocation
+    // fallback can pair an older *successful* settled row with a newer
+    // *failed* live call; copying the verdict there would settle the older
+    // row as Failed. The per-tid persisted map lookup below is already
+    // id-keyed and is unchanged.
+    const _rowTid=String(
+      (row&&(row.tool_call_id||(row.tool&&(row.tool.id||row.tool.tid)))) || ''
+    ).trim();
+    const _liveTid=String((live&&(live.tid||live.id||live.tool_call_id||live.tool_use_id||live.call_id))||'').trim();
+    const _matchedById=!!_rowTid&&!!_liveTid&&_rowTid===_liveTid;
     const _persistedIsError=(_rowTid&&S&&S._settledToolIsErrorByTid&&S._settledToolIsErrorByTid[_rowTid])===true;
-    const _liveIsError=Boolean(live&&live.is_error===true);
+    const _liveIsError=_matchedById&&Boolean(live&&live.is_error===true);
     if((_liveIsError||_persistedIsError)&&tool.is_error!==true&&payload.is_error!==true){
       tool.is_error = true;
       payload.is_error = true;
@@ -4604,7 +4616,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return (rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
       const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
-      let matchEntry=tid?byTid.get(tid):null;
+      // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
+      // distinguishable. The one-way ``is_error`` upgrade below may only
+      // run off the id map: the name fallback can pair an older
+      // *successful* terminal call with a newer *failed* one, and the
+      // upgrade would then settle the older row as Failed. The name
+      // fallback stays name-matchable for the presentation-only keys
+      // (burst / duration / started_at).
+      const idMatchEntry=tid?byTid.get(tid):null;
+      let matchEntry=idMatchEntry;
       if(!matchEntry){
         const name=next.name||((next.function||{}).name)||'';
         const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
@@ -4623,7 +4643,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // session.tool_calls entry that already has ``is_error: true`` is
         // preserved (the spread above already copied it), so the only case
         // the live write matters is the missing-or-false summary.
-        if(live.is_error===true&&next.is_error!==true){
+        // #7358 (re-gate 9/24): the upgrade is gated on the id-map hit —
+        // a name-fallback match must not inherit another call's failure.
+        if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
           next.is_error=true;
         }
       }

@@ -19616,7 +19616,14 @@ function renderMessages(options){
     // only be upgraded to ``true``; an already-true row is never cleared.
     const _persistedIsErrorByTid=(S&&S._settledToolIsErrorByTid&&typeof S._settledToolIsErrorByTid==='object')?S._settledToolIsErrorByTid:null;
     const copyLiveToolMetadata=(next,name,tid)=>{
-      let matchEntry=tid?liveMetadataByTid.get(tid):null;
+      // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
+      // distinct — the one-way is_error upgrade below may only run off the
+      // id map. A name match can pair an older successful terminal call
+      // with a newer failed one, settling the older row as Failed. The
+      // name fallback stays name-matchable for the presentation-only keys
+      // (burst / duration / started_at).
+      const idMatchEntry=tid?liveMetadataByTid.get(tid):null;
+      let matchEntry=idMatchEntry;
       if(!matchEntry){
         const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
@@ -19627,8 +19634,10 @@ function renderMessages(options){
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
         }
-        // One-way is_error upgrade from the live mirror.
-        if(live.is_error===true&&next.is_error!==true){
+        // One-way is_error upgrade from the live mirror — id-map hit only
+        // (#7358 re-gate 9/24): a name-fallback match must not inherit
+        // another call's failure.
+        if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
           next.is_error=true;
         }
       }

@@ -31,9 +31,14 @@ def _slice_derived_rebuild() -> str:
     longer unique (the transparent-stream ordered path added its own at #4932).
     """
     start = UI_JS.index("const fallbackToolSources=[];")
-    # The region runs through the _partial_tool_calls derived push; bound it
-    # generously so all derived-push sites are included.
-    return UI_JS[start:start + 7000]
+    # The region runs through the _partial_tool_calls derived push. Bound on
+    # the last derived push rather than a fixed byte window: #7358's
+    # id-only-is_error upgrade added comments inside this block, and a byte
+    # window silently started excluding the last derived push whenever the
+    # comments shifted text past the bound.
+    end_anchor = "if(derived.length) S.toolCalls=derived;"
+    end = UI_JS.index(end_anchor, start)
+    return UI_JS[start:end]
 
 
 def test_persisted_snippet_lookup_is_built_from_session_tool_calls():

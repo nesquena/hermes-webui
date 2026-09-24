@@ -56,6 +56,13 @@ def _run_node_merge_enrichment(row, live):
     fn_body = src[start:end]
 
     driver = f"""
+// Stub S first: the is_error block reads S._settledToolIsErrorByTid (the
+// round-5 persisted-map fallback). The round-8 row shape resolves
+// "row.tool.tid" as a row id, so the row-id lookup no longer
+// short-circuits before S is read and S must exist. An empty map keeps
+// the round-4 contract: no persisted is_error, the live mirror is the
+// only source of the verdict.
+const S = {{}};
 // Minimal stubs for the two private helpers the production
 // merge body calls. These match the production contract for
 // the inputs the tests construct (string payloads and
