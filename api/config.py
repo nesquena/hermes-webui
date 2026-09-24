@@ -1070,6 +1070,7 @@ MIME_MAP = {
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
+    ".zip": "application/zip",
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",
@@ -5607,8 +5608,10 @@ def _lmstudio_model_reasoning_options(
         )
 
     try:
-        from hermes_cli.models import (
-            lmstudio_model_reasoning_options as _cli_lmstudio_model_reasoning_options,
+        from api.agent_compat import agent_attr
+
+        _cli_lmstudio_model_reasoning_options = agent_attr(
+            "hermes_cli.models", "lmstudio_model_reasoning_options", "hermes_cli.models_local"
         )
     except Exception:
         return _lmstudio_reasoning_probe_options_fallback(
@@ -8080,7 +8083,15 @@ _MODEL_ALIAS_ROUTE_PREFIX = "model-alias-"
 def _model_alias_route_provider(name: object) -> str:
     """Return a stable opaque provider lane for one profile-local alias name."""
     normalized = str(name or "").strip().lower()
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        profile_home = str(get_active_hermes_home().expanduser().resolve())
+    except Exception:
+        # The config path is the closest stable profile identity available during
+        # early imports and in reduced test environments.
+        profile_home = str(_get_config_path().expanduser().resolve().parent)
+    digest = hashlib.sha256(f"{profile_home}\0{normalized}".encode("utf-8")).hexdigest()
     return f"{_MODEL_ALIAS_ROUTE_PREFIX}{digest}"
 
 

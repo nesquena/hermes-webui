@@ -438,7 +438,7 @@ def _start_run_kwargs():
     }
 
 
-def test_legacy_dispatch_receives_resolved_alias_runtime_bundle(monkeypatch):
+def test_legacy_dispatch_keeps_opaque_alias_lane_for_worker_resolution(monkeypatch):
     from api import routes
 
     captured = {}
@@ -455,9 +455,32 @@ def test_legacy_dispatch_receives_resolved_alias_runtime_bundle(monkeypatch):
     routes._start_run(session, **_start_run_kwargs())
 
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "custom"
-    assert captured["runtime_base_url"] == "https://east.example.test/v1"
-    assert captured["runtime_api_key"] == "east-secret"
+    assert captured["model_provider"] == "model-alias-canonical"
+    assert "runtime_base_url" not in captured
+    assert "runtime_api_key" not in captured
+
+
+def test_local_alias_launch_kwargs_bind_real_worker_signature():
+    """The shared local launcher never passes kwargs the real worker rejects."""
+    import inspect
+
+    from api import routes
+
+    worker_kwargs = routes._local_agent_worker_kwargs(
+        model_provider="model-alias-canonical",
+        goal_related=False,
+        moa_config=None,
+    )
+
+    inspect.signature(routes._run_agent_streaming).bind(
+        "session-1",
+        "hello",
+        "shared-model",
+        "/tmp/workspace",
+        "stream-1",
+        [],
+        **worker_kwargs,
+    )
 
 
 def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatch):
@@ -479,8 +502,8 @@ def test_gateway_dispatch_uses_alias_identity_for_gateway_model_route(monkeypatc
     assert captured["external_runtime_owned"] is True
     assert captured["model"] == "east"
     assert captured["model_provider"] is None
-    assert captured["runtime_api_key"] is None
-    assert captured["runtime_base_url"] is None
+    assert "runtime_api_key" not in captured
+    assert "runtime_base_url" not in captured
 
 
 def test_runner_dispatch_uses_alias_identity_in_start_run_contract(monkeypatch):
@@ -596,8 +619,8 @@ def test_start_session_turn_gateway_wakeup_converts_alias_lane(monkeypatch):
     assert "east-secret" not in json.dumps(captured)
 
 
-def test_start_session_turn_legacy_wakeup_resolves_alias_runtime_bundle(monkeypatch):
-    """Without gateway ownership, dispatch carries the alias-owned bundle."""
+def test_start_session_turn_legacy_wakeup_keeps_opaque_alias_lane(monkeypatch):
+    """Without gateway ownership, the local worker resolves the alias lane."""
     monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
     routes_mod = _stub_start_session_turn(monkeypatch)
     captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
@@ -611,9 +634,9 @@ def test_start_session_turn_legacy_wakeup_resolves_alias_runtime_bundle(monkeypa
 
     assert resp["_status"] == 200
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "custom"
-    assert captured["runtime_base_url"] == "https://east.example.test/v1"
-    assert captured["runtime_api_key"] == "east-secret"
+    assert captured["model_provider"] == "model-alias-canonical"
+    assert "runtime_base_url" not in captured
+    assert "runtime_api_key" not in captured
     assert captured["external_runtime_owned"] is False
 
 
@@ -672,9 +695,9 @@ def test_start_run_explicit_gateway_flag_skips_ownership_detection(monkeypatch):
 
     assert captured["external_runtime_owned"] is False
     assert captured["model"] == "shared-model"
-    assert captured["model_provider"] == "custom"
-    assert captured["runtime_base_url"] == "https://east.example.test/v1"
-    assert captured["runtime_api_key"] == "east-secret"
+    assert captured["model_provider"] == "model-alias-canonical"
+    assert "runtime_base_url" not in captured
+    assert "runtime_api_key" not in captured
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1130,6 +1153,8 @@ def test_live_alias_lane_still_dispatches_after_the_refusal_check(monkeypatch):
     assert resp["stream_id"] == "gateway-live"
     assert captured["model"] == "east"
     assert captured["model_provider"] is None
+    assert captured["persisted_model"] == "shared-model"
+    assert captured["persisted_model_provider"] == _live_lane()
     assert "east-secret" not in json.dumps(captured)
 
 
@@ -1220,13 +1245,16 @@ def _restore_config_cache():
 
 def test_wakeup_alias_routing_follows_the_session_profile_config(monkeypatch, tmp_path):
     """A named profile's own config supplies both gateway ownership and the lane."""
-    _install_profile_home(monkeypatch, tmp_path, "work", _ALIAS_PROFILE_CONFIG)
-    routes_mod = _stub_start_session_turn(
-        monkeypatch, profile="work", provider=_live_lane(), real_config=True
-    )
-    captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
+    from api.profiles import profile_scope_for_detached_worker
 
+    _install_profile_home(monkeypatch, tmp_path, "work", _ALIAS_PROFILE_CONFIG)
     with _restore_config_cache():
+        with profile_scope_for_detached_worker("work", "test alias lane"):
+            lane = _live_lane()
+        routes_mod = _stub_start_session_turn(
+            monkeypatch, profile="work", provider=lane, real_config=True
+        )
+        captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
         resp = routes_mod.start_session_turn("sess-alias-wake", "wakeup")
 
     assert resp["_status"] == 200
@@ -1238,6 +1266,60 @@ def test_wakeup_alias_routing_follows_the_session_profile_config(monkeypatch, tm
     )
     assert captured["model_provider"] is None
     assert "east-secret" not in json.dumps(captured)
+
+
+def test_named_gateway_wakeup_skips_default_profile_runtime_barrier(monkeypatch, tmp_path):
+    """A gateway-owned named profile is not rejected by the local Agent barrier."""
+    from api.profiles import profile_scope_for_detached_worker
+
+    _install_profile_home(monkeypatch, tmp_path, "work", _ALIAS_PROFILE_CONFIG)
+    with _restore_config_cache():
+        with profile_scope_for_detached_worker("work", "test alias lane"):
+            lane = _live_lane()
+        routes_mod = _stub_start_session_turn(
+            monkeypatch, profile="work", provider=lane, real_config=True
+        )
+        captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
+        barrier_calls = []
+
+        def stale_default_profile_barrier(**kwargs):
+            barrier_calls.append(kwargs)
+            return {"type": "agent_runtime_stale", "error": "stale default runtime"}
+
+        monkeypatch.setattr(
+            routes_mod, "_agent_runtime_barrier_response", stale_default_profile_barrier
+        )
+        resp = routes_mod.start_session_turn("sess-alias-wake", "wakeup")
+
+    assert resp["_status"] == 200
+    assert captured["external_runtime_owned"] is True
+    assert barrier_calls == []
+
+
+def test_alias_lane_is_bound_to_the_owning_profile(monkeypatch, tmp_path):
+    """The same alias name in two profiles cannot resolve across that boundary."""
+    from api import config
+    from api.profiles import profile_scope_for_detached_worker
+
+    base = _install_profile_home(monkeypatch, tmp_path, "east-profile", _ALIAS_PROFILE_CONFIG)
+    west_home = base / "profiles" / "west-profile"
+    west_home.mkdir(parents=True)
+    (west_home / "config.yaml").write_text(
+        _ALIAS_PROFILE_CONFIG.replace("east.example.test", "west.example.test"),
+        encoding="utf-8",
+    )
+
+    with _restore_config_cache():
+        with profile_scope_for_detached_worker("east-profile", "mint east lane"):
+            east_lane = config._model_alias_route_provider("east")
+        with profile_scope_for_detached_worker("west-profile", "resolve east lane"):
+            west_lane = config._model_alias_route_provider("east")
+            cross_profile = config.resolve_model_alias_runtime(
+                east_lane, expected_model="shared-model"
+            )
+
+    assert east_lane != west_lane
+    assert cross_profile is None
 
 
 def test_wakeup_alias_lane_dead_in_the_session_profile_is_refused(monkeypatch, tmp_path):
@@ -1386,3 +1468,87 @@ def test_goal_kickoff_legacy_keeps_opaque_alias_lane(monkeypatch):
     assert started[0]["model"] == "shared-model"
     assert started[0]["model_provider"] == lane
     assert started[0]["external_runtime_owned"] is False
+
+
+def test_goal_kickoff_uses_runner_dispatch_for_alias(monkeypatch):
+    """A runner-owned goal kickoff follows the same alias contract as chat."""
+    _install_alias_cfg(monkeypatch)
+    lane = _live_lane()
+    routes, restored = _stub_goal_kickoff(
+        monkeypatch, provider=lane, gateway_owned=False
+    )
+    captured = []
+
+    class RunnerClient:
+        def update_goal(self, session_id, action, text):
+            assert session_id == "sid-goal-alias"
+            assert action == "set"
+            assert text == "ship it"
+            return {"ok": True, "action": "set", "kickoff_prompt": "ship it"}
+
+        def start_run(self, request):
+            captured.append(request)
+            return {
+                "run_id": "run-goal",
+                "stream_id": "stream-goal",
+                "session_id": request.session_id,
+            }
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: RunnerClient())
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda *_args, **_kwargs: pytest.fail("runner-owned goal used the local worker"),
+    )
+
+    result = routes._handle_goal_command(
+        object(), {"session_id": "sid-goal-alias", "args": "ship it"}
+    )
+
+    assert result["status"] == 200
+    assert len(captured) == 1
+    assert captured[0].model == "east"
+    assert captured[0].provider is None
+    assert captured[0].source == "webui"
+    assert captured[0].metadata["route"] == "/api/goal"
+    assert captured[0].metadata["goal_related"] is True
+    assert restored == []
+
+
+def test_goal_kickoff_runner_exception_restores_goal_state(monkeypatch):
+    """A transport failure cannot leave a goal set without a kickoff run."""
+    from api.runner_client import RunnerClientError
+
+    _install_alias_cfg(monkeypatch)
+    routes, restored = _stub_goal_kickoff(
+        monkeypatch, provider=_live_lane(), gateway_owned=False
+    )
+
+    runner_goal_calls = []
+
+    class FailingRunnerClient:
+        def update_goal(self, session_id, action, text):
+            runner_goal_calls.append((session_id, action, text))
+            return {"ok": True, "action": action, "kickoff_prompt": text}
+
+        def start_run(self, _request):
+            raise RunnerClientError("runner unavailable")
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
+    monkeypatch.setattr(
+        routes, "_runtime_runner_client_factory", lambda: FailingRunnerClient()
+    )
+
+    with pytest.raises(RunnerClientError, match="runner unavailable"):
+        routes._handle_goal_command(
+            object(), {"session_id": "sid-goal-alias", "args": "ship it"}
+        )
+
+    assert restored == []
+    assert runner_goal_calls == [
+        ("sid-goal-alias", "set", "ship it"),
+        ("sid-goal-alias", "clear", ""),
+    ]

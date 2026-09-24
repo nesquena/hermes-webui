@@ -23317,6 +23317,14 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
+def _local_agent_worker_kwargs(*, model_provider, goal_related: bool, moa_config) -> dict:
+    """Build kwargs shared by both launch sites for the in-process worker."""
+    kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if moa_config:
+        kwargs["moa_config"] = moa_config
+    return kwargs
+
+
 def _start_regeneration_stream_locked(
     s,
     *,
@@ -23330,8 +23338,8 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
-    runtime_base_url=None,
-    runtime_api_key=None,
+    persisted_model=None,
+    persisted_model_provider=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -23341,6 +23349,11 @@ def _start_regeneration_stream_locked(
         restore_regeneration_state,
         snapshot_regeneration_state,
     )
+
+    if persisted_model is None:
+        persisted_model = model
+    if persisted_model_provider is None:
+        persisted_model_provider = model_provider
 
     try:
         plan = plan_regeneration(
@@ -23370,17 +23383,20 @@ def _start_regeneration_stream_locked(
     worker_target = (
         _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     )
-    worker_kwargs = {
-        "model_provider": model_provider,
-        "goal_related": goal_related,
-    }
     if backend_is_gateway:
+        worker_kwargs = {
+            "model_provider": model_provider,
+            "persisted_model": persisted_model,
+            "persisted_model_provider": persisted_model_provider,
+            "goal_related": goal_related,
+        }
         worker_kwargs["regeneration"] = True
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
-    if not backend_is_gateway and (runtime_base_url is not None or runtime_api_key is not None):
-        worker_kwargs["runtime_base_url"] = runtime_base_url
-        worker_kwargs["runtime_api_key"] = runtime_api_key
+    else:
+        worker_kwargs = _local_agent_worker_kwargs(
+            model_provider=model_provider,
+            goal_related=goal_related,
+            moa_config=moa_config,
+        )
 
     def _gated_worker():
         release_worker.wait()
@@ -23441,8 +23457,8 @@ def _start_regeneration_stream_locked(
             msg=msg,
             attachments=attachments,
             workspace=workspace,
-            model=model,
-            model_provider=model_provider,
+            model=persisted_model,
+            model_provider=persisted_model_provider,
             stream_id=stream_id,
             source=turn.source,
             retained_user=retained_user,
@@ -23462,8 +23478,8 @@ def _start_regeneration_stream_locked(
                 "content": msg,
                 "attachments": attachments,
                 "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
+                "model": persisted_model,
+                "model_provider": persisted_model_provider,
                 "created_at": s.pending_started_at,
             },
         )
@@ -23686,6 +23702,8 @@ def _start_chat_stream_for_session(
     workspace: str,
     model: str,
     model_provider=None,
+    persisted_model=None,
+    persisted_model_provider=None,
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
@@ -23693,13 +23711,15 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
-    runtime_base_url=None,
-    runtime_api_key=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
+    if persisted_model is None:
+        persisted_model = model
+    if persisted_model_provider is None:
+        persisted_model_provider = model_provider
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -23770,14 +23790,14 @@ def _start_chat_stream_for_session(
                         workspace=workspace,
                         model=model,
                         model_provider=model_provider,
+                        persisted_model=persisted_model,
+                        persisted_model_provider=persisted_model_provider,
                         normalized_model=normalized_model,
                         diag=diag,
                         goal_related=goal_related,
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
-                        runtime_base_url=runtime_base_url,
-                        runtime_api_key=runtime_api_key,
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -23787,8 +23807,8 @@ def _start_chat_stream_for_session(
                     msg=msg,
                     attachments=attachments,
                     workspace=workspace,
-                    model=model,
-                    model_provider=model_provider,
+                    model=persisted_model,
+                    model_provider=persisted_model_provider,
                     stream_id=stream_id,
                     source=source,
                 )
@@ -23822,8 +23842,8 @@ def _start_chat_stream_for_session(
                 "content": msg,
                 "attachments": attachments,
                 "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
+                "model": persisted_model,
+                "model_provider": persisted_model_provider,
                 "created_at": s.pending_started_at,
             },
         )
@@ -23841,12 +23861,19 @@ def _start_chat_stream_for_session(
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
-    if not backend_is_gateway and (runtime_base_url is not None or runtime_api_key is not None):
-        worker_kwargs["runtime_base_url"] = runtime_base_url
-        worker_kwargs["runtime_api_key"] = runtime_api_key
+    if backend_is_gateway:
+        worker_kwargs = {
+            "model_provider": model_provider,
+            "persisted_model": persisted_model,
+            "persisted_model_provider": persisted_model_provider,
+            "goal_related": goal_related,
+        }
+    else:
+        worker_kwargs = _local_agent_worker_kwargs(
+            model_provider=model_provider,
+            goal_related=goal_related,
+            moa_config=moa_config,
+        )
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
@@ -23995,6 +24022,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
+    goal_related: bool = False,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -24014,6 +24042,10 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
+    # The external transport may need an alias name, but the durable session must
+    # retain its target model plus profile-bound opaque lane.
+    persisted_model = model
+    persisted_model_provider = model_provider
     if gateway_chat_enabled is None:
         # Server-initiated turn (start_session_turn): gateway ownership was not
         # computed by the caller, so resolve it — together with the alias lane —
@@ -24044,19 +24076,14 @@ def _start_run(
             getattr(s, "session_id", None),
         )
         return alias_refusal
-    runtime_base_url = None
-    runtime_api_key = None
     if alias_route is not None:
         if gateway_chat_enabled or runner_enabled:
             # External runtimes own their provider credentials. Their supported
             # request contract is the model-route alias, not WebUI's opaque lane.
             model = alias_route["alias"]
             model_provider = None
-        else:
-            model = alias_route["model"]
-            model_provider = alias_route["provider"]
-            runtime_base_url = alias_route.get("base_url") or None
-            runtime_api_key = alias_route.get("api_key") or None
+        # The in-process worker owns alias resolution. Keep the opaque lane so it
+        # can compose endpoint and credential authority at the final send seam.
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         if regeneration is not None and runner_enabled:
@@ -24069,14 +24096,15 @@ def _start_run(
                 workspace=request.workspace or workspace,
                 model=request.model or model,
                 model_provider=request.provider or model_provider,
+                persisted_model=persisted_model,
+                persisted_model_provider=persisted_model_provider,
                 normalized_model=normalized_model,
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
-                runtime_base_url=runtime_base_url,
-                runtime_api_key=runtime_api_key,
             )
 
         def _legacy_adapter_factory():
@@ -24099,7 +24127,10 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={
+                        "route": route,
+                        **({"goal_related": True} if goal_related else {}),
+                    },
                 )
             )
         except NotImplementedError as exc:
@@ -24113,14 +24144,15 @@ def _start_run(
         workspace=workspace,
         model=model,
         model_provider=model_provider,
+        persisted_model=persisted_model,
+        persisted_model_provider=persisted_model_provider,
         normalized_model=normalized_model,
         diag=diag,
         source=source,
         moa_config=moa_config,
+        goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
-        runtime_base_url=runtime_base_url,
-        runtime_api_key=runtime_api_key,
     )
 
 
@@ -24220,10 +24252,6 @@ def start_session_turn(
         }
     if not msg:
         return {"error": "message is required", "_status": 400}
-    stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
-    if stale_response is not None:
-        stale_response["_status"] = 409
-        return stale_response
     turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
     try:
         s = get_session(session_id)
@@ -24679,7 +24707,12 @@ def _handle_goal_command(handler, body):
             pass
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
-    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+    from api.runtime_adapter import (
+        LegacyJournalRuntimeAdapter,
+        build_runtime_adapter,
+        runtime_adapter_enabled,
+        runtime_adapter_runner_enabled,
+    )
 
     def _legacy_goal_update(session_id: str, _action: str, text: str) -> dict:
         return goal_command_payload(
@@ -24690,7 +24723,34 @@ def _handle_goal_command(handler, body):
         )
 
     goal_adapter_action = _runtime_adapter_goal_action(goal_args)
-    if runtime_adapter_enabled():
+    runner_goal_owned = runtime_adapter_runner_enabled()
+    goal_adapter = None
+    if runner_goal_owned:
+        goal_adapter = build_runtime_adapter(
+            legacy_adapter_factory=lambda: LegacyJournalRuntimeAdapter(
+                goal_delegate=_legacy_goal_update
+            ),
+            runner_client_factory=_runtime_runner_client_factory,
+        )
+        if goal_adapter is None:
+            return j(
+                handler,
+                {"ok": False, "error": "runner-local goal adapter is unavailable"},
+                status=501,
+            )
+        control_result = goal_adapter.update_goal(
+            s.session_id,
+            goal_adapter_action,
+            goal_args,
+        )
+        payload = dict(control_result.payload)
+        if not control_result.accepted and not payload:
+            payload = {
+                "ok": False,
+                "error": control_result.safe_message or "Runner rejected the goal update.",
+                "status": control_result.status,
+            }
+    elif runtime_adapter_enabled():
         adapter = LegacyJournalRuntimeAdapter(goal_delegate=_legacy_goal_update)
         control_result = adapter.update_goal(
             s.session_id,
@@ -24704,8 +24764,24 @@ def _handle_goal_command(handler, body):
     else:
         payload = _legacy_goal_update(s.session_id, goal_adapter_action, goal_args)
     if not payload.get("ok", True):
-        status = 409 if payload.get("error") == "agent_running" else 400
+        if runner_goal_owned and payload.get("status") == "unsupported":
+            status = 501
+        else:
+            status = 409 if payload.get("error") == "agent_running" else 400
         return j(handler, payload, status=status)
+
+    def _rollback_goal_after_failed_kickoff() -> None:
+        if runner_goal_owned and goal_adapter is not None:
+            try:
+                goal_adapter.update_goal(s.session_id, "clear", "")
+            except Exception:
+                logger.warning(
+                    "Failed to clear runner-owned goal after kickoff failure for %s",
+                    s.session_id,
+                    exc_info=True,
+                )
+            return
+        restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
 
     kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
     if kickoff_prompt:
@@ -24739,31 +24815,27 @@ def _handle_goal_command(handler, body):
             except Exception:
                 pass
         gateway_owned = webui_gateway_chat_enabled(get_config())
-        alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
-        alias_refusal = _unresolved_model_alias_lane_response(alias_route, model_provider)
-        if alias_refusal is not None:
-            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
-            payload.update({k: v for k, v in alias_refusal.items() if k != "_status"})
-            payload["ok"] = False
-            return j(handler, payload, status=alias_refusal["_status"])
-        if alias_route is not None and gateway_owned:
-            model = alias_route["alias"]
-            model_provider = None
-        stream_response = _start_chat_stream_for_session(
-            s,
-            msg=kickoff_prompt,
-            attachments=[],
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-            goal_related=True,
-            external_runtime_owned=gateway_owned,
-        )
+        try:
+            stream_response = _start_run(
+                s,
+                msg=kickoff_prompt,
+                attachments=[],
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                normalized_model=normalized_model,
+                source="webui",
+                route="/api/goal",
+                gateway_chat_enabled=gateway_owned,
+                goal_related=True,
+            )
+        except Exception:
+            _rollback_goal_after_failed_kickoff()
+            raise
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
         if status >= 400:
-            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+            _rollback_goal_after_failed_kickoff()
             payload["ok"] = False
             return j(handler, payload, status=status)
 
