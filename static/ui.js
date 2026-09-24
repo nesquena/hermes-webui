@@ -556,7 +556,24 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
+// Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
+// render cap, the burst remembers every window cycle key it has already seen.
+// An UNSEEN key means the window is still converging forward (A->B->C->settled
+// — content reflow, late fonts/images, dynamic height) and may proceed; a key
+// that REPEATS means the browser is oscillating (A->B->A->B) and the burst
+// terminates. Keys repeat only when geometry flaps, so legitimate convergence
+// is never capped while oscillation is always bounded.
+// Absolute per-burst ceiling (#6717 re-gate): the seen-key rule alone only
+// ends the burst on a REPEATED key, so a browser emitting a monotonically
+// changing geometry (A->B->C->D->... never repeating) would still loop without
+// limit — the #6654 CPU-runaway class under a different trigger — and the
+// seen-key collection would grow without bound (memory). A distinct-key
+// convergence realistically settles in a handful of frames, so this
+// conservative cap (the historical MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
+// was 2) ends the burst regardless of key novelty AND bounds the seen-key
+// memory to the cap. Reset through _resetMessageVirtualMeasurementBurst().
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=12;
+let _messageVirtualMeasurementSeenKeys=[];
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
@@ -567,7 +584,19 @@ let _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('defau
 let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
 let _messageVirtualMeasurementCycleKey='';
-let _messageVirtualMeasurementRetryCount=0;
+let _messageVirtualMeasurementBurstActive=false;
+// Provenance of the QUEUED virtualized render: 'internal' while the pending
+// rAF was requested by the internal measurement chain, 'external' for any
+// other trigger (user scroll / scroll-settle / message append / session
+// load). The origin lives on the QUEUED render itself, NOT in a global
+// consumable flag: when an internal and an external request coalesce into one
+// rAF, _scheduleMessageVirtualizedRender lets EXTERNAL win, so a render that
+// fires after any external trigger is never mis-attributed as internal
+// (#6717 re-gate). renderMessages() resets the burst on every UNMARKED
+// (externally initiated) render trigger, so an overlapping external render
+// always starts a fresh cycle even when an internal measurement callback is
+// still pending.
+let _messageVirtualRenderQueuedOrigin=null;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
@@ -614,7 +643,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
-  _messageVirtualMeasurementRetryCount=0;
+  _resetMessageVirtualMeasurementBurst();
   _messageVirtualScrollActive=false;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
@@ -742,6 +771,13 @@ function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
     windowMetrics.tailStart||0,
   ].join(':');
 }
+function _resetMessageVirtualMeasurementBurst(){
+  _messageVirtualMeasurementSeenKeys=[];
+  _messageVirtualMeasurementBurstActive=false;
+  // Strip any pending internal provenance: an external reset must never let
+  // an internal marker survive onto a render that fires later (#6717 re-gate).
+  _messageVirtualRenderQueuedOrigin=null;
+}
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
     _messageVirtualDeferredMeasurement=windowMetrics;
@@ -750,15 +786,55 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   const cycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   if(_messageVirtualMeasurementCycleKey!==cycleKey){
     _messageVirtualMeasurementCycleKey=cycleKey;
-    _messageVirtualMeasurementRetryCount=0;
   }
-  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;
-  _messageVirtualMeasurementRetryCount++;
-  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+  // Cycle-aware burst tracking (#6717 re-gate): the burst follows ONLY the
+  // internally measurement-scheduled chain (requestAnimationFrame ->
+  // _scheduleMessageVirtualizedRender -> renderMessages -> re-measure -> here).
+  // Within one burst we remember every cycle key already seen. An UNSEEN key
+  // (genuine forward convergence A->B->C->settled — content reflow, late
+  // fonts/images, dynamic height) may proceed, so convergence is never capped
+  // at a flat render count; a key that REPEATS (WebKit's A->B->A->B window
+  // oscillation) ends the burst, so the rAF/measure loop can never run forever
+  // (#6654). The burst starts fresh on every EXTERNALLY initiated render
+  // (session load, message append, real content change — see renderMessages)
+  // and on measurement settlement — never on a cycle-key change alone.
+  if(!_messageVirtualMeasurementBurstActive){
+    _messageVirtualMeasurementSeenKeys=[];
+    _messageVirtualMeasurementBurstActive=true;
+  }
+  // Absolute per-burst cap (#6717 re-gate): even an ALL-DISTINCT monotonic
+  // key sequence (A->B->C->D->... never repeating) must terminate — a repeated
+  // key is not the only way the burst can end. This also bounds the seen-key
+  // collection to the cap (memory). Distinct-key convergence settles in a
+  // handful of frames, so the cap is far above any legitimate multi-pass
+  // reflow while still closing the #6654 CPU-runaway class.
+  if(_messageVirtualMeasurementSeenKeys.length>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){
+    _resetMessageVirtualMeasurementBurst();
+    return;
+  }
+  const lastKey = _messageVirtualMeasurementSeenKeys.length ? _messageVirtualMeasurementSeenKeys[_messageVirtualMeasurementSeenKeys.length - 1] : null;
+  if(cycleKey !== lastKey && _messageVirtualMeasurementSeenKeys.includes(cycleKey)){
+    // Non-consecutive repeated key (A->B->A): the window is oscillating, not
+    // converging. End the burst (no further internal re-render is scheduled),
+    // so the next externally initiated cycle starts fresh instead of being
+    // starved of retries. A consecutive same-key pass (A->A) proceeds because
+    // heights changed while the window bounds did not (e.g. row shrink across
+    // two passes), still bounded by the absolute per-burst cap (#6717 re-gate).
+    _resetMessageVirtualMeasurementBurst();
+    return;
+  }
+  _messageVirtualMeasurementSeenKeys.push(cycleKey);
+  // The internal-measurement origin travels WITH the scheduled render request
+  // (threaded through BOTH rAF layers into renderMessages), so coalescing can
+  // never consume a stale global marker onto an unrelated render. When an
+  // external request coalesces into the queued rAF, EXTERNAL wins and the
+  // render that fires degrades to an unmarked (burst-resetting) render
+  // (#6717 re-gate).
+  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true,{origin:'internal'}); });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
-  _messageVirtualMeasurementRetryCount=0;
+  _resetMessageVirtualMeasurementBurst();
 }
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
@@ -1474,7 +1550,7 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     }
   }
 }
-function _scheduleMessageVirtualizedRender(force){
+function _scheduleMessageVirtualizedRender(force, request){
   const container=$('messages');
   const inner=$('msgInner');
   if(!container||!inner) return;
@@ -1486,9 +1562,28 @@ function _scheduleMessageVirtualizedRender(force){
     _messageVirtualWindowKey=nextKey;
     return;
   }
-  if(_messageVirtualScrollRaf) return;
+  // The request carries its own origin: the internal measurement chain passes
+  // {origin:'internal'} (see _scheduleMessageVirtualMeasurementRefresh);
+  // every other caller is external by default.
+  const requestOrigin=(request&&request.origin==='internal')?'internal':'external';
+  if(_messageVirtualScrollRaf){
+    // Coalescing into an already-queued rAF: the queued render is shared, so
+    // merge the provenance. EXTERNAL always wins — the render that actually
+    // fires must reset the burst, and an internal marker must never survive
+    // onto an external render (#6717 re-gate). An internal request joining a
+    // queued render never downgrades an already-external one.
+    if(requestOrigin==='external') _messageVirtualRenderQueuedOrigin='external';
+    return;
+  }
+  _messageVirtualRenderQueuedOrigin=requestOrigin;
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
+    // The provenance belongs to THIS queued render: it was set when the render
+    // was scheduled (and possibly flipped to 'external' by a coalesced
+    // external request). Consume it here — no global consumable flag that an
+    // unrelated render could steal (#6717 re-gate).
+    const internalMeasurement=_messageVirtualRenderQueuedOrigin==='internal';
+    _messageVirtualRenderQueuedOrigin=null;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
@@ -1496,14 +1591,14 @@ function _scheduleMessageVirtualizedRender(force){
     if(_scrollbarDragActive){
       _programmaticScroll=true;
       _programmaticScrollSetAt=performance.now();
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
       _deferClearProgrammaticScroll();
       _messageVirtualWindowKey=liveKey;
       return;
     }
     _msgNodeRecycleEnabled=true;
     try{
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
     }
     finally{ _msgNodeRecycleEnabled=false; }
   });
@@ -3011,12 +3106,54 @@ function _getOptionProviderId(opt){
     return group.dataset.provider;
   }
   const value=String(opt.value||'');
-  if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@') && value.includes(':')){
+    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    if(value.startsWith('@custom:')){
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
+      const firstColon=afterCustom.indexOf(':');
+      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
+      return 'custom:'+afterCustom;
+    }
+    // Other @provider:model — provider is up to first colon
+    return value.slice(1,value.indexOf(':'));
+  }
   return '';
 }
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
-  if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@')&&value.includes(':')){
+    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    if(value.startsWith('@custom:')){
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
+      const firstColon=afterCustom.indexOf(':');
+      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
+      return 'custom:'+afterCustom;
+    }
+    // Other @provider:model — provider is up to first colon
+    return value.slice(1,value.indexOf(':'));
+  }
   return '';
 }
 function _modelPickerOptionIdentity(modelId, providerId){
@@ -3027,9 +3164,19 @@ function _modelPickerOptionIdentity(modelId, providerId){
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
     }else if(value.startsWith('@custom:')){
-      const namedProvider=value.substring('@custom:'.length);
-      const splitAt=namedProvider.indexOf(':');
-      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      let splitAt=-1;
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          splitAt=parts[0].length + 1 + parts[1].length;
+        }
+      }
+      if(splitAt<0) splitAt=afterCustom.indexOf(':');
+      value=splitAt>=0 ? afterCustom.substring(splitAt+1) : afterCustom;
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -3088,7 +3235,25 @@ function _modelStateForSelect(sel, modelId){
     // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
-    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+    // Normally-rendered catalog options only carry the qualified
+    // @custom:<slug>:<model> value — data-model is set solely by the fallback
+    // injection path (_ensureModelOptionInDropdown). When it is missing, strip
+    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
+    // the model id (#6884). The prefix must come from the option metadata's
+    // authoritative provider (routedProvider), NOT from explicitProvider: the
+    // latter re-parses the value at its LAST colon, so a colon-bearing model
+    // id like @custom:backup:model-a:free would otherwise strip to just
+    // "free" (re-gate on the #6221 family). Only custom providers are
+    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
+    // provider namespace and must be preserved (#1771).
+    const effectiveProvider=routedProvider||explicitProvider;
+    const effectiveProviderLc=effectiveProvider.toLowerCase();
+    const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
+    const explicitPrefix=`@${effectiveProvider}:`;
+    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+      ?value.slice(explicitPrefix.length)
+      :value;
+    return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
@@ -4465,7 +4630,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  const _isSelectedModelRow=(m)=>{
+    const _rowModel=String((m&&m.value)||'');
+    const _rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const _stateModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const _stateProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    // Normalize both sides to the same model/provider identity. Catalog rows
+    // carry the qualified @custom:<slug>:<model> value while the outgoing
+    // state model is bare (#6884) — a raw string comparison would leave no
+    // row marked active/"Selected" after a restore. _modelPickerOptionIdentity
+    // is the same identity used for picker dedup, so the row that survives is
+    // exactly the one the send path resolves.
+    const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'
+      ?_modelPickerOptionIdentity(model,provider)
+      :String(model||'');
+    return _norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)
+      &&_rowProvider===_stateProvider;
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
@@ -10353,7 +10534,11 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    // Bounded tail (msg_limit=30) — a bare reload used to pull and re-redact
+    // the ENTIRE transcript on every offline/bfcache recovery (#7310/#7625).
+    // truncation signal + _oldestIdx are read below, so the Load-earlier
+    // paging gate still works after the windowed refresh.
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
     S.session = data.session;
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.messages = data.session.messages || [];
@@ -17126,6 +17311,8 @@ function _insertSegmentBlock(seg, html){
 }
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
+  // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
+  if(!(options&&options._internalMeasurement) && typeof _resetMessageVirtualMeasurementBurst==='function'){ _resetMessageVirtualMeasurementBurst(); }
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has

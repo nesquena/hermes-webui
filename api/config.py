@@ -98,10 +98,19 @@ STATE_DIR = (
     .resolve()
 )
 
+
+def _resolve_settings_file(state_dir: Path) -> Path:
+    """Resolve an optional per-instance settings file without splitting session state."""
+    configured = os.getenv("HERMES_WEBUI_SETTINGS_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return state_dir / "settings.json"
+
+
 SESSION_DIR = STATE_DIR / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
 SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
-SETTINGS_FILE = STATE_DIR / "settings.json"
+SETTINGS_FILE = _resolve_settings_file(STATE_DIR)
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
 
@@ -567,6 +576,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     # Remember the old mtime so we can tell whether config actually changed
     # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
     _old_cfg_mtime = _cfg_mtime
+    _old_cfg_path = _cfg_path
     _cfg_path = config_path
     _cfg_mtime = 0.0
     try:
@@ -623,10 +633,11 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
     # Only delete the disk cache when config has actually changed -- not on
-    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
-    # profile switch) -- preserving the disk cache so the next restart
+    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start) and not
+    # on a path change (per-client profile switch leaves the old profile's
+    # mtime) -- preserving the disk cache so the next restart
     # still hits the fast path without a cold run.
-    if _old_cfg_mtime != 0.0:
+    if _old_cfg_mtime != 0.0 and _old_cfg_path == config_path:
         _delete_models_cache_on_disk()
 
 
@@ -7597,7 +7608,7 @@ _MODELS_CACHE_SCHEMA_VERSION = 3
 _models_cache_path = STATE_DIR / "models_cache.json"
 
 
-def _get_models_cache_path() -> Path:
+def _get_models_cache_path(profile: str | None = None) -> Path:
     """Return the /api/models disk-cache path for the *active* profile (#3957).
 
     WebUI profile switching is per-client/cookie scoped (issue #798), but the
@@ -7621,12 +7632,13 @@ def _get_models_cache_path() -> Path:
     The named-profile path is derived from ``_models_cache_path`` (the
     module-level default), not from ``STATE_DIR`` directly, so the path stays
     correct if the default is repointed (e.g. tests monkeypatch
-    ``_models_cache_path`` to an isolated tmp file).
+    ``_models_cache_path`` to an isolated tmp file). Pass *profile* to get
+    another profile's path (profile delete/create).
     """
     try:
         from api.profiles import get_active_profile_name, _is_root_profile
 
-        name = (get_active_profile_name() or "").strip()
+        name = (profile or get_active_profile_name() or "").strip()
         if not name or _is_root_profile(name):
             return _models_cache_path
         # Defensive filename sanitization: the cookie-derived profile name is
@@ -7913,6 +7925,96 @@ def _auth_store_semantic_fingerprint(path: Path) -> dict:
     return fp
 
 
+def _active_profile_home() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        return _gah()
+    except ImportError:
+        return _DEFAULT_HERMES_HOME
+
+
+def _models_cache_env_fingerprint(path: Path) -> list:
+    """``[key, HMAC(value)]`` per non-empty ``.env`` entry, parsed like provider detection.
+
+    Values are keyed-hashed with the WebUI signing key so the cache file never holds a secret.
+    """
+    import hmac
+    from api.auth import _signing_key
+    from api.providers import _load_env_file
+
+    key = _signing_key()
+    return [
+        [k, hmac.new(key, v.encode("utf-8"), hashlib.sha256).hexdigest()]
+        for k, v in sorted(_load_env_file(Path(path).expanduser()).items())
+        if v
+    ]
+
+
+def _declares_model_provider_kind(plugin_dir: Path) -> bool:
+    # Same parse as the agent's providers._declares_model_provider_kind: PyYAML, then a line scan.
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        if not manifest.is_file():
+            continue
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        try:
+            import yaml as _yaml
+
+            data = _yaml.safe_load(text)
+            if isinstance(data, dict):
+                return str(data.get("kind", "")).strip() == "model-provider"
+        except Exception:
+            pass
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            if key.strip() == "kind":
+                return value.strip().strip("\"'") == "model-provider"
+        return False
+    return False
+
+
+def _models_cache_plugin_fingerprint(home: Path) -> list:
+    """``[dir, file stamps]`` per model-provider plugin, discovered like providers._scan_home_layer."""
+    found = []
+    plugins_root = Path(home).expanduser() / "plugins"
+    for base, flat in ((plugins_root / "model-providers", False), (plugins_root, True)):
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith(("_", ".")):
+                continue
+            if flat and (child.name == "model-providers" or not _declares_model_provider_kind(child)):
+                continue
+            found.append([str(child.relative_to(plugins_root)), _plugin_tree_stamps(child)])
+    return found
+
+
+def _plugin_tree_stamps(plugin_dir: Path) -> list:
+    # The loader execs __init__.py, which may import siblings or read data files; skip bytecode.
+    stamps = []
+    for root, dirs, files in os.walk(plugin_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
+        for name in sorted(files):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            stamps.append([os.path.relpath(path, plugin_dir), st.st_mtime_ns, st.st_size])
+    return stamps
+
+
 def _models_cache_source_fingerprint() -> dict:
     """Return the current config/auth/catalog fingerprint for /api/models cache.
 
@@ -7924,9 +8026,12 @@ def _models_cache_source_fingerprint() -> dict:
     mtime/size fingerprint because it is only rewritten on deliberate user
     edits (which can change anything) and does not churn on a timer.
     """
+    home = _active_profile_home()
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
+        "env": _models_cache_env_fingerprint(home / ".env"),
+        "plugins": _models_cache_plugin_fingerprint(home),
         "catalog": _models_cache_catalog_fingerprint(),
     }
 
@@ -8080,10 +8185,10 @@ def _load_stale_models_cache_from_disk() -> dict | None:
     The main cache loader enforces metadata stamps for a full cold-path cache hit.
     This helper intentionally does not apply that stricter policy, so we can still
     recover a useful fallback payload when the strict loader rejected cache because
-    metadata or fingerprint fields are stale. It DOES still enforce the schema
-    version: a cross-schema cache can have an incompatible groups/badge shape, so
-    serving it to the picker could surface a broken catalog — schema mismatch is a
-    hard reject even on the fallback path.
+    the WebUI version stamp is stale. It DOES still enforce the schema version (a
+    cross-schema cache can have an incompatible groups/badge shape) and the source
+    fingerprint: a snapshot built from other config/auth/.env/plugin sources is a
+    wrong catalog, not merely an old one, so it is never served.
     """
     try:
         import json as _j
@@ -8096,6 +8201,8 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
+            return None
+        if cache.get("_source_fingerprint") != _models_cache_source_fingerprint():
             return None
         aliases = cache.get("aliases")
         if not isinstance(aliases, dict):
@@ -8187,7 +8294,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     return None
 
 
-def invalidate_models_cache():
+def invalidate_models_cache(*, delete_disk: bool = True):
     """Force the TTL cache for get_available_models() to be cleared.
 
     Call this after modifying config.cfg in-memory (e.g. in tests) so
@@ -8200,6 +8307,8 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    ``delete_disk=False`` keeps the fingerprint-guarded disk snapshot (profile switch).
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
@@ -8218,7 +8327,8 @@ def invalidate_models_cache():
         _CREDENTIAL_POOL_CACHE.clear()
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
-    _delete_models_cache_on_disk()
+    if delete_disk:
+        _delete_models_cache_on_disk()
     try:
         from api.plugin_providers import invalidate_plugin_model_provider_cache
 
@@ -11483,7 +11593,13 @@ _SETTINGS_DEFAULTS = {
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
     "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
-    "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
+    # #7622 (round 3): language is intentionally absent from the defaults so
+    # `load_settings()` reports `None` for a fresh install.  This lets the
+    # client distinguish "no preference" from an explicit saved choice,
+    # so a user who genuinely picked English (and has `language: "en"`
+    # persisted on disk) is no longer overridden by the browser hint on
+    # their first hydration.  When a user picks a locale in the Settings
+    # modal the value is written here and the field is set explicitly.
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
@@ -11723,6 +11839,16 @@ def load_settings() -> dict:
             settings["default_model_provider"] = str(model_cfg.get("provider"))
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
+    # #7622/#7730 (round 4): keep the tri-state signal explicit.  `language`
+    # is intentionally absent from `_SETTINGS_DEFAULTS` (see above), so
+    # without this line a fresh install's returned dict would OMIT the key
+    # entirely and the API payload would carry no `language` field.  Emit an
+    # explicit `None` (serialized as JSON `null`) so the client receives the
+    # three-way signal it trusts: `null` = no preference, "en" = explicitly
+    # saved English, any other code = explicitly chosen locale.  Stored
+    # values (including a legacy English pick written before this change)
+    # win via the merge above and are never touched here.
+    settings.setdefault("language", None)
     return settings
 
 
@@ -11730,6 +11856,15 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
     "simplified_tool_calling",
+} | {
+    # #7622 (round 3): `language` is intentionally absent from
+    # `_SETTINGS_DEFAULTS` so a fresh install returns `None` for
+    # `settings["language"]` and the client can distinguish "no
+    # preference" from an explicit saved choice.  But the user
+    # MUST still be able to pick a locale in the Settings modal,
+    # so we add it back to the explicit allow-list here.  The
+    # existing BCP-47 validation at save-time still applies.
+    "language",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},

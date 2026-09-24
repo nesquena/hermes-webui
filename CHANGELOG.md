@@ -5,6 +5,13 @@
 
 ### Added
 
+- **The settings file can live outside the state directory.** `HERMES_WEBUI_SETTINGS_FILE` points one
+  instance at its own `settings.json`, while sessions, workspaces and projects stay in the state
+  directory. It is read once at startup, so restart after changing it. (#6433 by @futureworld678-create)
+- **Full-session resolve concurrency is configurable.** `HERMES_WEBUI_MAX_SESSION_RESOLVE` sets how
+  many full-transcript session resolves may run at once (default 2, a positive integer up to 64;
+  zero, negative, non-numeric or out-of-range values fall back to 2). It is process-wide, so a
+  profile's `.env` cannot override it. (#7421, #7656 by @happy5318)
 - **The sidebar's recent-session window is configurable.** `HERMES_WEBUI_VISIBLE_SESSION_LIMIT` sets
   how many recent sessions the sidebar lists (default 20). It also bounds how many delegated subagent
   children can nest at once, so raise it for wide fan-outs. Invalid or non-positive values fall back to
@@ -13,6 +20,14 @@
 
 ### Performance
 
+- **Reconnect, settle, cancel and undo no longer re-download the whole transcript.** Six recovery
+  paths (offline/bfcache refresh, stream-end settle, cancel sync, `/compress` preflight, `/retry` and
+  `/undo`) sent a bare `GET /api/session` that re-walked, re-redacted and re-serialized every row. The
+  author measured 4–15 s and 28 MB on a 5,003-row session, against 7 ms and 80 KB for the bounded tail.
+  They now request the 30-row tail. The two views that address rows by absolute index (outline jump,
+  jump-to-start) opt into the full transcript with the new `?msg_limit=all`, and session-level
+  `tool_calls` are windowed whenever the returned messages were actually truncated. A bare request
+  keeps its full-transcript contract. (#7310, #7625, #7628 by @happy5318)
 - **Opening a session while its task is still running is much faster.** Rebuilding the live
   snapshot from the run journal parsed the journal twice, walked every metering row and grew the
   reasoning text with repeated string concatenation, which is quadratic on long runs. The journal
@@ -21,9 +36,188 @@
   rebuild going from 4.34 s to 0.49 s with a byte-identical snapshot. The interim-echo check now matches a
   compact-equivalent suffix without a fixed window, so an echo stretched by interior whitespace is
   no longer shown twice. (#7310, #7569 by @happy5318)
+- **Long transcripts with virtualization on stop re-measuring rows in a loop.** When the rendered
+  window switched back and forth between two positions, each switch reset the measurement retry
+  budget, so opt-in transcript virtualization could keep re-measuring rows instead of settling. The
+  budget now resets only when the window reaches a position it hasn't just visited. (#6654, #6717 by
+  @webtecnica)
 
 ### Fixed
 
+- **Gateway-backend turns survive a WebUI restart.** With the Gateway runs API enabled
+  (`HERMES_WEBUI_CHAT_BACKEND=gateway` + `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`), the Gateway
+  runs the turn, but restarting the WebUI still marked it interrupted, because the Gateway `run_id`
+  only lived in process memory. The run is now saved on the session as soon as the Gateway admits
+  it, with an `Idempotency-Key` so the Gateway keeps a durable record. On startup the WebUI
+  reattaches: it follows `GET /v1/runs/{id}` until the run settles and writes the real final
+  answer back. Text streamed before the restart isn't replayed; the settled answer replaces it.
+  Stop on a reattached turn goes to the Gateway that owns the run. Thanks @carlotestor. (#7785)
+
+- **Fewer self-inflicted console errors: git badge on CLI/subagent sessions, pollers after a
+  profile switch, and the PWA startup preload.** Three separate sources of noise in DevTools, all
+  caused by the WebUI itself. `/api/git-info` returned 404 for any session without a WebUI sidecar
+  (delegated subagents and CLI/TUI sessions), because it only looked up the sidecar. It now falls
+  back to the session's state.db metadata, and only for a workspace inside the trusted workspace
+  root. When another tab switched the shared profile cookie, an open session's approval and clarify
+  pollers kept re-requesting and getting `409 session_profile_mismatch` every few seconds. They now
+  pause after the first mismatch and re-arm when the tab regains focus or visibility (one retry
+  covers a switch-back that happened mid-request). The `pwa-startup.js` preload is gone: the
+  browser resolved it before the page's `<base href>` was written, so on `/session/<id>` it
+  fetched a wrong URL that was never used. Thanks @carlotestor. (#7789)
+
+- **CLI sessions you moved into a project stay in that project.** CLI sessions were cut to the
+  recent-session limit before project assignment was checked, so a CLI conversation you'd moved
+  into a project vanished from its project chip once enough newer sessions existed. The
+  assignment was still saved; only the row was gone. The recent limit now applies to unassigned
+  conversations only. Assigned ones stay in the payload (hidden from the main list once the recent
+  window is full) so the project chips can show them. Assigned rows have their own bound
+  (`CLI_PROJECT_ASSIGNED_CAP`, 200 across all projects, shared fairly so one busy project can't
+  take every slot), and a compressed CLI conversation keeps its project through its whole
+  continuation chain. Thanks @rodrigogs. (#6659)
+
+- **Two open WebUI windows no longer overwrite each other's unread state.** Two clients on the
+  same origin (for example the desktop PWA and a browser tab) share one `localStorage`, but each
+  kept its own in-memory copy of which sessions had been viewed. When one wrote, it replaced the
+  other's newer record, so read chats came back as unread or new completions lost their dot. Each
+  write now merges with what is on disk, keeps the newer record per session, and remembers
+  deletions and cleared completion dots so they don't come back. (#7577 by @snoyberg)
+- **Switching profiles no longer rebuilds the model list from scratch.** A profile switch used to
+  delete the saved models cache, so the next model-list load re-queried every provider. Each
+  profile now keeps its own cached model list across switches. The cache is still thrown away when
+  that profile's `config.yaml`, `.env` values, or model-provider plugins change, and when the
+  profile is deleted or recreated. (#7632 by @carlotestor)
+- **Picking a model from a named custom provider sends the right model name.** Choosing a model
+  that belongs to a non-default custom provider (for example `@custom:my-server:model-x`) sent
+  the whole picker id, prefix included, to the provider, which rejected the request. The
+  `@custom:<slug>:` prefix is now stripped before sending and the provider is routed from the
+  slug. Endpoint-style slugs such as `custom:localhost:11434` keep their host and port.
+  (#6895 by @webtecnica, fixes #6884)
+- **A gateway reset or tool conversation no longer disappears into the parent session.** When a
+  session ended by compression, the sidebar also treated a gateway reset child (stamped
+  `_reset_from`) as its continuation, so that separate conversation vanished from the list and its
+  transcript was stitched into the parent's. Reset and tool children now stay separate, matching
+  Hermes Agent's own continuation rule; a real compression continuation still joins the chain. A
+  lineage marker that can't be read is treated as a boundary, which keeps the row visible rather
+  than merging it. A change to a session's lineage markers alone now also refreshes the sidebar.
+  (#6565 by @ruizanthony)
+- **A background tab stops polling a session that's gone, and still recovers after a profile
+  switch in another tab.** A hidden tab polling a deleted session used to loop on 404s every six
+  seconds. It now stops after three consecutive 404s but keeps the session as its resume target,
+  so if the 404 came from switching profile in another tab and you switch back, the tab reattaches
+  when you return to it. A queued poll response can no longer stop a replacement poll for the same
+  session. (#7301, @laitekin; completes the #7299 fix)
+
+- **An image turn's provider context stays out of your message bubble, and Edit/Undo no longer
+  brings a removed image turn back.** When an image turn was mirrored into the Agent's state.db,
+  its rich provider payload could appear in the user bubble, and after Edit or Undo a removed
+  image-turn row could come back in the full, paginated and model-context reads. The bubble now
+  shows what you typed, the payload stays in model context only, and removed rows stay removed,
+  including a same-timestamp duplicate row and a reply that exists only in state.db after an
+  edited checkpoint. (#7754, @starship-s)
+
+- **MCP status, tool inventory and `/reload-mcp` follow the profile you're using.** With several
+  profiles in one WebUI, a chat turn mirrored its profile into the process environment, so the Agent
+  saw every profile as the launch profile. The MCP panel could then show another profile's servers,
+  and `/reload-mcp` could restart them. Status, tool listing and reload now resolve through the
+  request's profile, and a reload in one profile leaves another profile's live MCP connections and
+  in-flight tool calls alone. This needs the Agent's `pin_process_hermes_home` (hermes-agent #120103).
+  On an older Agent the panel says live status is unavailable while a turn runs, and `/reload-mcp`
+  refuses, rather than guessing. (#7720 by @tancou, fixes #7721)
+- **On a phone, Enter in the composer inserts a newline.** Some iPhones report a fine pointer to the
+  browser, so the phone-keyboard check fell through and plain Enter sent the message mid-sentence.
+  Phones (iPhone, iPod, and Android phones) now always get a newline on Enter; Ctrl/Cmd+Enter and
+  the Send button still send, and the Send-key setting still wins. Tablets and touch laptops keep
+  the existing check, so an iPad with a Magic Keyboard or an Android tablet with a Bluetooth
+  keyboard still sends on Enter (#3076). The saved Send-key preference is also read before the
+  first keypress, so the first Enter after a slow page load no longer sends. (#6746 by @happy5318)
+- **Sessions archived in the CLI stay archived in the WebUI.** A cron, webhook, Kanban or CLI
+  session archived from the CLI came back as active in the sidebar whenever it had no WebUI sidecar,
+  because the projection treated a missing sidecar as "not archived". A missing sidecar now means no
+  opinion, so the state.db `archived` flag applies; archiving or unarchiving in the WebUI still wins.
+  In all-profiles mode, a CLI archive in another profile now refreshes the cached session list.
+  (#7548, #7798 by @webtecnica)
+
+- **Approval and clarify prompts send a browser notification whenever you aren't looking at them.**
+  A card that surfaced through the normal prompt path never produced a notification, and the
+  visibility gate muted cards in a tab that was visible but unfocused. Now every approval or clarify
+  surfacing notifies unless it belongs to the session open in the pane and the tab is both visible
+  and focused. Notifications from other sessions still arrive while you work. When permission is
+  still undecided, the browser is asked at most once per page load, so a pending prompt's 1.5 s
+  re-surfacing no longer repeats the permission request or the "notifications denied" toast. (#7493 by
+  @CharlesMcquade)
+- **Delegated subagent sessions show inside their parent's project.** With a project selected in the
+  sidebar, subagent sessions disappeared because `state.db` never gives them a `project_id`. Only
+  subagent rows now inherit their parent's project, resolved once per lineage, so forks keep their
+  own "No project" assignment and deep lineages stay fast. (#7765 by @carlotestor)
+- **Saving a cron job with the model picker at "Default" keeps its provider-only pin.** Editing a job
+  pinned to a provider with no model (the usual shape for a self-hosted OpenAI-compatible router)
+  sent `provider: null` and wiped the pin. The editor now preserves a provider-only pin when the
+  model picker is left at Default. (#7779 by @cushingw)
+- **A consumed mid-turn `/steer` no longer leaves its out-of-band wrapper in the settled chat (#7600).**
+  A `/steer` reaches the agent as an `[OUT-OF-BAND USER MESSAGE …]` block appended to the turn's
+  last tool result. After the turn settled, that wrapper stayed visible in the chat transcript. The
+  settled-transcript writeback now scrubs the consumed wrapper from the rows it is built from.
+  (#7610 by @webtecnica)
+- **Saving a very large session no longer reads and parses the whole file just to count messages.**
+  The #1558 backup safeguard in `Session.save()` needs the on-disk message count; it obtained it by
+  loading the entire sidecar. On a real 203 MB / 266,940-message session that made every save
+  expensive. The count is now taken without a full parse, and the shrink-backup behaviour is
+  unchanged. (#7578 by @rodrigogs)
+- **A cancelled or recovered turn no longer duplicates an answer that was already saved (#6366).**
+  When a completed assistant turn had been persisted and a later cancel/recovery path ran for the
+  same pending turn, recovery could append a duplicate user turn plus a `_partial` clone of the
+  journal. Recovery now stops once the transcript has already advanced past the pending turn.
+  (#7682 by @happy5318)
+
+- **The live stream reports which model actually served the turn.** A new additive `runtime_model`
+  SSE event carries the model (and provider, when known) that the Agent reported while producing
+  output, separately from the model that was requested. It is journaled for replay, is exposed as
+  `runtime_journal_snapshot.runtime_model`, never falls back to the configured selection when
+  unknown, and never changes the model requested for the next turn. Existing clients ignore it.
+  (#7767 by @ruizanthony)
+- **Reconnecting to a new turn no longer resumes from the previous turn's replay cursor.** A new
+  turn copies the full transcript into the in-flight state, so the previous turn's assistant reply
+  could seed the replay floor and the reattached stream skipped the current reply's early events.
+  Replay now seeds only from the current live assistant row, and falls back to a full replay that
+  rebuilds the assistant body when a cursor outlives its live state. (#7651 by @happy5318)
+- **Context-length lookup keeps the configured base URL for ownerless and underscore-named
+  providers.** The #7535 ownership guard also dropped the global `model.base_url` for a `model:`
+  section with a `base_url` but no `provider`, and for provider IDs written with an underscore
+  (`opencode_go` vs `opencode-go`), so those sessions could resolve the wrong context window. Both
+  now keep the URL, while a different declared owner still does not leak its endpoint.
+  (#7743 by @webtecnica)
+- **A session deleted during a restart no longer produces a spurious recovery warning.** When
+  WebUI startup recovery re-attached background processes, a session that had vanished between
+  enumeration and rebind raised a `KeyError` that was logged as a warning. It now follows the
+  existing skip path, confined to the session lookup, so the vanished owner is skipped, live owners
+  still rebind, and registry errors still warn. (#7753, #7774 by @happy5318)
+
+- **Waiting on the Agent's session lease is shown as a warning instead of looking stuck.** When
+  another Hermes process (gateway, CLI or cron) holds the session's turn lease, the Agent's
+  "another Hermes process is using this session" notices now reach the chat as a warning status
+  instead of being dropped, and the status clears when the run ends. Classification keys on the Agent
+  status kind (`lifecycle` / `warn`), so user-authored text can never be promoted to a warning.
+  (#7760 by @ruizanthony)
+- **A stale in-flight projection can no longer reach a gateway watcher after its last subscriber
+  leaves.** Final unsubscribe and queue eviction now invalidate the cache and fence projections that
+  were already in flight, without holding the lock across database reads or SSE writes, so a client
+  that re-subscribes gets a fresh snapshot instead of a stale one. (#7761 by @ruizanthony)
+- **A burst of "session busy" refusals no longer drops a background-task completion.** When
+  `start_session_turn()` refused a completion wake-up with a transient 409 (Agent runtime stale,
+  process wake-ups paused, or the session busy with another turn), the bridge released the durable
+  claim as a plain failure, so a few refusals in a row could terminally drop a completion whose
+  session was alive and waiting. Transient refusals now return the claim as retryable, while hard
+  failures still use up the attempt budget. (#7758 by @ruizanthony)
+- **A first visit now uses the browser's language.** The server stores "no preference" as `null`
+  instead of defaulting to `"en"`, so a first-time visitor gets `navigator.language` while an
+  explicitly saved language (including English) still wins, and legacy `settings.json` files that
+  already hold `"en"` keep English. Reading the browser language is guarded, so an environment where
+  `navigator` throws falls back cleanly. (#7622, #7730 by @happy5318)
+- **The live model list for a custom provider respects its `models:` allowlist, without treating
+  per-model metadata as one.** `/api/models/live` filters a custom provider's live catalog to its
+  configured `models:` when that is a list, or when it is a mapping with `discover_models: false`.
+  A mapping of per-model settings (the shape `hermes setup` writes) keeps the full live catalog, as
+  the Agent does. (#7165 by @happy5318)
 - **`MEDIA:` links wrapped in inline code no longer 404.** Every `MEDIA:` capture site (renderer,
   streaming parser, TTS stripper, session-media authorization and snapshot capture, seven in all)
   swallowed the closing backtick of `` `MEDIA:/path` `` into the path, so the file lookup and the

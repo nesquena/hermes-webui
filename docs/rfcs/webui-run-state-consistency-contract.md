@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-08-22
+- **Updated:** 2026-09-15
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -138,6 +138,7 @@ and 5; it does not mark every run-state boundary implemented.
 | Compression summary / handoff | Gives the agent recovery context after automatic compression | Must remain agent-facing recovery material unless explicitly rendered as history | Pollute the active turn or become implicit current user intent |
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
 | Sidebar/session metadata | Helps the user find active and recent sessions | Must reflect meaningful user or assistant activity | Treat background cleanup as a fresh user-facing update |
+| Client-side unread stores (`localStorage`) | Backs the sidebar unread dot for every client on the origin | Converges counts/markers across clients and stores clear ordering independently per session | Let one client's stale cache lower a count or resurrect a cleared marker |
 
 ## Core Invariants
 
@@ -171,7 +172,41 @@ and 5; it does not mark every run-state boundary implemented.
    do not conflict, and the pairing is unambiguous. Keep the rich sidecar row;
    if any requirement is missing or contradictory, preserve both rows rather
    than deduplicating. Literal scalar `[screenshot]` text alone is not identity
-   evidence.
+   evidence. A WebUI-submitted native-image turn has a separate display owner:
+   keep its exact submitted text and attachment in the visible session row,
+   while the Agent's expanded multipart row remains in `context_messages` for
+   model replay. While the turn is active, the WebUI may hide an Agent user row
+   from display only after its worker confirms that the active stream's exact
+   `pending_started_at` value was passed to the Agent as
+   `persist_user_timestamp`; persist that private proof with the session and
+   validate it against the pending stream, source, and timestamp after reload.
+   Never include the proof in public session payloads. This applies to
+   native-image and scalar text-attachment rows, and never changes model
+   context. If multiple user rows share that timestamp, omit the whole
+   ambiguous display bucket until the turn settles; keep all rows in model
+   context. Do not identify the row by its text. If a stream dies before
+   settlement, state.db self-heal must save the submitted prompt and attachments
+   as a visible sidecar row before clearing pending metadata only when there is
+   genuine state.db output beyond that submitted turn. Otherwise, leave pending
+   state intact for journaled partial-output and interruption-marker recovery.
+   The Agent row remains available in model context. A partial continuation
+   must use one consistent parent snapshot when projecting a conflicting
+   provider payload onto its sidecar-owned display row.
+   Match settled native-image scalar projections only with trusted turn and
+   durable-row identity, never the marker alone. A durable row ID proves row
+   identity, not provider-payload freshness: when the sidecar and state.db have
+   conflicting nonempty `api_content`, preserve both versions for model-context
+   replay without mutating either. For visible display, a marked mirror may
+   share the existing sidecar bubble only when its valid durable row ID, exact
+   timestamp, and exact visible user content match; keep the sidecar-owned row
+   and its display metadata. Distinct row IDs, ambiguous or invalid identities,
+   and different visible user text remain separate only while eligible under
+   the existing edit/undo truncation watermark and checkpoint-order rules;
+   removed rows must not reappear in display or model replay. Fill a missing
+   payload from the other copy; repeated reconciliation must remain bounded
+   and idempotent.
+   Agent state.db alone cannot restore the original attachment if the WebUI
+   sidecar is lost.
    Sidecar-lineage traversal may avoid loading a truncate-to-empty snapshot
    ancestor only when metadata proves its complete older fold contributes no
    rows: the ancestor and every snapshot above it, up to the chain end, must
@@ -187,10 +222,10 @@ and 5; it does not mark every run-state boundary implemented.
    booleans, negative values, non-finite values, missing values, and other
    malformed metadata fail closed. The immediate parent is then fully loaded
    and the prefix return is kept, exactly as in the full traversal.
-   metadata-only loads construct a session whose defaults can mask fields that
-   occur after the `messages` stop key, every field used by the older-fold proof
-   must also be materially present in the parsed prefix. Missing proof fields
-   are unknown, not false/empty values, and force the same full traversal.
+   Metadata-only loads construct a session whose defaults can mask fields that
+   occur after the `messages` stop key, so every field used by the older-fold
+   proof must also be materially present in the parsed prefix. Missing proof
+   fields are unknown, not false/empty values, and force the same full traversal.
    Because skipped ancestry lacks complete provenance, shortcut results remain
    excluded from the lineage display cache and must serialize identically to the
    unoptimized traversal.
@@ -255,6 +290,94 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+## Client-side unread persistence (sidebar layer)
+
+The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.
+Both live in `localStorage` under the origin, so every WebUI client on the same
+origin/profile (a PWA window and a browser tab, for example) shares them while each
+client also caches them in module state. They are projections of the sidebar layer
+above; the rules below describe what stays coherent when more than one client
+writes.
+
+| Store | Key | Semantics |
+|---|---|---|
+| Viewed counts | `hermes-session-viewed-counts` | `sid -> {message_count, transcript_generation}`, meaning "seen up to N messages in this transcript generation" |
+| Completion markers | `hermes-session-completion-unread` | `sid -> {message_count, completed_at, ...}` behind the visible dot |
+
+- **Viewed counts are generation-scoped.** Session mutation routes increment the
+  persisted `transcript_generation` whenever edit, regenerate, retry, undo, clear,
+  or truncate reduces the visible transcript, and record the retained count as
+  `transcript_generation_baseline`. Both fields survive the bounded `/api/sessions`
+  projection for visible and sidebar-reference rows, including cached responses.
+  A newer generation replaces an older one even
+  when its count is lower; counts are monotonic only within one generation and
+  merge by maximum there. A client first observing a newer generation acknowledges
+  only that retained baseline, so messages added after the shrink remain unread
+  even when the shrink and later growth arrive in one coalesced sidebar refresh.
+  Legacy numeric records are generation zero and migrate to the structured
+  representation on their next save. This prevents an old pre-truncate high-water
+  mark from masking messages added after a transcript reset. A deletion records
+  its own key under
+  `hermes-session-viewed-counts:deleted:v1:<encoded-sid>`; merges drop any count
+  whose session has a live deletion record, so a client that still caches the
+  acknowledgement prunes it instead of writing it back. List membership cannot
+  decide this, because the sidebar filters by profile, project, and source, so an
+  absent row is not evidence of deletion. Deletion records expire on the same
+  7-day policy as clear records, so a tab left open longer than that can re-add a
+  count for a session deleted more than seven days earlier. That consequence is
+  bounded and invisible: the session is no longer listed, so the retained entry
+  produces no indicator, and it is re-examined only on the next deletion or clear.
+- **Completion markers are ordered by logical stamps, not wall clock.**
+  Markers are add/remove and cannot be max-ordered, so each clear records a stamp
+  under `hermes-session-completion-unread-cleared:v1:<encoded-sid>:<stamp>`.
+  Independent immutable keys mean clients clearing different sessions—or clearing
+  the same session in an interleaved operation—cannot replace newer ordering
+  facts, and a reader folds the maximum per session. Markers carry
+  `unread_order`: the greatest stamp the marker's creator had observed (its own
+  clear state, its cached and stored markers) plus one. A marker whose stamp does
+  not exceed its session's clear stamp loses, so a clear wins the tie when a
+  marker was prepared before it but written after; a completion that happens after
+  the clear observes it and stamps higher, so it still wins. Milliseconds are not
+  used for ordering: a clear and a genuine later completion can share one tick, and
+  a single observed clock cannot order them.
+- **The previous clear representation is migrated once, then dropped.** The
+  unsuffixed `hermes-session-completion-unread-cleared` whole map is read, its
+  facts are imported as independent records, and the key is removed. Keeping it
+  would retain both of the defects it caused: concurrent clears could replace one
+  another in the shared blob, and the blob grew with every session ever cleared.
+  A client still running the previous revision therefore does not observe clears
+  recorded after the migration; that reload boundary is deliberate, because a
+  dual write cannot make the shared blob concurrency-safe. Versioned records are
+  pruned by age (7 days), or when a newer ordering fact for that session was
+  successfully persisted — never by an in-memory-only superseding clear and never
+  by session existence, because the sidebar list is filtered by profile, project,
+  and source, so an absent row may simply be hidden. They are never part of the
+  marker map consumers read. A clear order is retained in module memory even when
+  storage quota prevents allocating its versioned key; the client still attempts
+  the smaller write that removes the marker from the existing marker map, so a user
+  can dismiss unread state under storage pressure. The failed allocation also
+  leaves any older durable clear record in place so reload does not lose the last
+  persisted ordering fact. Logical clear order and retention time are separate:
+  records compare markers using their order stamp,
+  but the 7-day cap uses the wall-clock time at which the record was written, so
+  a future logical stamp cannot extend retention indefinitely. The in-memory
+  fallback lasts until reload, while successfully persisted records retain the
+  same 7-day policy.
+- **Cross-client repair, not cache invalidation.** The `storage` listener routes a
+  changed unread key (including any per-session clear key) back through the same
+  merge instead of only dropping the local cache. A client that still holds an
+  acknowledgement re-asserts it after the other client's write, the loser sees a
+  value it cannot beat and stops, and repair converges instead of ping-ponging
+  storage events.
+- **Whole-map facts converge; clear ordering does not share a map.** Viewed counts
+  and completion markers still use read-modify-write maps, so interleaved writes
+  can transiently lose an entry. Their monotonic cache merge and storage-event
+  repair re-assert held facts. Clear ordering is different: each session has its
+  own atomic `localStorage` write, so concurrent clears of different sessions
+  cannot clobber each other. A viewed-count advance records its clear even when a
+  competing client has prepared but not yet persisted the older completion
+  marker; repeated observations at the same count do not refresh the tombstone.
+
 ## Review Checklist
 
 Use this checklist for PRs that touch run state, streaming, replay, compression,
@@ -277,6 +400,10 @@ context reconstruction, or session metadata:
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
+- Does this change write one of the client-side unread stores
+  (`hermes-session-viewed-counts`, `hermes-session-completion-unread`,
+  `hermes-session-completion-unread-cleared`), and does it keep the merge and
+  tombstone rules in the client-side unread persistence section?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

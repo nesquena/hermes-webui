@@ -30,6 +30,16 @@ def test_recovered_prefix_survives_regeneration_truncation():
     assert [row["content"] for row in session.messages] == ["old", "old answer", "latest"]
 
 
+def test_regeneration_advances_transcript_generation_when_it_shrinks():
+    session = _session()
+    session.transcript_generation = 7
+    plan = plan_regeneration(session)
+
+    assert apply_regeneration_plan(session, plan)
+
+    assert session.transcript_generation == 8
+
+
 def test_stale_revision_rejects_without_mutation():
     session = _session()
     before = copy.deepcopy(session.__dict__)

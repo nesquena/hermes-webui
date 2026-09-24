@@ -1020,6 +1020,29 @@ def _record_async_delegation_accepted(
         )
 
 
+def _wakeup_refusal_is_transient(resp: dict | None, status: int) -> bool:
+    """True when the target refused the wake-up for a reason it will recover from.
+
+    Such refusals are not delivery failures of the completion itself, so they
+    must not consume its bounded durable delivery budget. Otherwise a burst of
+    refusals (e.g. ``agent_runtime_stale`` answers while the Agent runtime is
+    being replaced) terminally drops a completion whose origin session is alive:
+
+    * any payload that explicitly says ``retryable: True`` (stale runtime);
+    * the paused-wakeup contract (``process_wakeup_paused``);
+    * a session busy with another turn (``active_stream_id`` on a 409).
+    """
+    if not isinstance(resp, dict):
+        return False
+    if resp.get("retryable") is True:
+        return True
+    if status != 409:
+        return False
+    if resp.get("error") == "process_wakeup_paused":
+        return True
+    return bool(resp.get("active_stream_id"))
+
+
 def _start_async_delegation_wakeup_turn(
     session_id: str,
     wakeup_prompt: str,
@@ -1059,7 +1082,11 @@ def _start_async_delegation_wakeup_turn(
                 )
                 return
 
-            release_async_delegation_delivery(evt, claim)
+            transient = _wakeup_refusal_is_transient(resp, status)
+            if transient:
+                release_async_delegation_delivery(evt, claim, retryable=True)
+            else:
+                release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
                 process_registry, evt, keep_legacy_retrying=True
             )
@@ -1067,6 +1094,14 @@ def _start_async_delegation_wakeup_turn(
                 logger.info(
                     "async delegation wakeup paused for session %s; delivery remains retryable",
                     session_id,
+                )
+            elif transient:
+                logger.info(
+                    "async delegation wakeup refused transiently for session %s "
+                    "(status=%s err=%r); attempt refunded, durable retry scheduled",
+                    session_id,
+                    status,
+                    (resp or {}).get("error"),
                 )
             else:
                 logger.debug(
@@ -1848,7 +1883,22 @@ def recover_processes_for_webui(process_registry=None, get_session_fn=None) -> i
             try:
                 proc_session = process_registry.get(process_id)
                 session_key = str(getattr(proc_session, "session_key", "") or "")
-                if not session_key or get_session_fn(session_key, metadata_only=True) is None:
+                if not session_key:
+                    continue
+                # The session resolver (``api.models._resolve_session_once``)
+                # raises ``KeyError(sid)`` for a missing session — that is its
+                # documented contract for the "owner gone" outcome, not a
+                # fault. Treat it identically to a ``None`` return: skip the
+                # process without logging, and let a neighbouring live
+                # process still rebind. The narrow ``except KeyError`` lives
+                # INSIDE the outer try so an unrelated ``KeyError`` from
+                # ``process_registry.get()`` (or any routing-index work) still
+                # surfaces in the existing warning path.
+                try:
+                    resolved = get_session_fn(session_key, metadata_only=True)
+                except KeyError:
+                    continue
+                if resolved is None:
                     continue
             except Exception:
                 logger.warning(

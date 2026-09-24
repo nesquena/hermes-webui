@@ -669,6 +669,7 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
+    from api.gateway_chat import resume_gateway_runs_after_restart; resume_gateway_runs_after_restart()  # bound, not yet serving
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'

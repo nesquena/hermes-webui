@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
@@ -130,7 +131,7 @@ def _get_cached_summary(path: Path) -> dict | None:
             _SUMMARY_CACHE.pop(key, None)
             return None
         _SUMMARY_CACHE.move_to_end(key)
-        return dict(summary)
+        return deepcopy(summary)
 
 
 def _cache_summary(
@@ -147,7 +148,7 @@ def _cache_summary(
         return
     key = str(path)
     with _SUMMARY_CACHE_LOCK:
-        _SUMMARY_CACHE[key] = (signature, dict(summary))
+        _SUMMARY_CACHE[key] = (signature, deepcopy(summary))
         _SUMMARY_CACHE.move_to_end(key)
         while len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ENTRIES:
             _SUMMARY_CACHE.popitem(last=False)
@@ -534,6 +535,37 @@ def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
     )
 
 
+def runtime_model_from_events(session_id: str, stream_id: str, events: Iterable[dict]) -> dict | None:
+    """Project only observed serving identity for this journal owner.
+
+    A fallback warning or malformed later observation invalidates old evidence;
+    the configured selection and free-text status never supply serving identity.
+    """
+    observed = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("session_id") != session_id or event.get("run_id") != stream_id:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            if event.get("event") == "runtime_model":
+                observed = None
+            continue
+        if event.get("event") == "warning" and payload.get("type") == "fallback":
+            observed = None
+        elif event.get("event") == "runtime_model":
+            observed = None
+            if (payload.get("session_id") != session_id or payload.get("stream_id") != stream_id
+                or not isinstance(payload.get("model"), str) or not payload["model"].strip()
+                or not isinstance(payload.get("fallback_active"), bool)
+                or payload.get("phase") not in ("observed_output", "route_observed")):
+                continue
+            observed = {key: payload[key] for key in (
+                "session_id", "stream_id", "model", "fallback_active", "phase")}
+            if isinstance(payload.get("provider"), str) and payload["provider"].strip():
+                observed["provider"] = payload["provider"]
+    return observed
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
@@ -549,6 +581,7 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
         "terminal": bool(terminal),
         "terminal_state": status,
         "last_event": (last or {}).get("event"),
+        "runtime_model": runtime_model_from_events(session_id, run_id, ordered),
     }
 
 
