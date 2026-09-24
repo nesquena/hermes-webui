@@ -350,12 +350,63 @@ def _sidecar_revision_from_bytes(
 
 
 def _read_sidecar_revision(path: Path, sid: str | None = None) -> SidecarRevision:
+    """Hash the exact file in bounded memory; parse only its metadata prefix.
+
+    A prefix-only CAS cannot detect an out-of-band body rewrite at the same
+    generation. Never substitute inode/size/mtime or a cached count for the
+    digest: even a same-length in-place rewrite must fence the stale owner.
+    """
     resolved_sid = sid or path.stem
     try:
-        raw = path.read_bytes()
+        with open(path, "rb") as source:
+            digest = hashlib.sha256()
+            prefix = b""
+            stop = None
+            stage = min(_METADATA_PREFIX_FIRST_STAGE_BYTES, _METADATA_PREFIX_MAX_BYTES)
+            while len(prefix) < _METADATA_PREFIX_MAX_BYTES:
+                chunk = source.read(min(stage, _METADATA_PREFIX_MAX_BYTES - len(prefix)))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                prefix += chunk
+                decoded = prefix.decode("utf-8", errors="ignore")
+                stop = _find_top_level_json_key(decoded, "messages")
+                scenes_stop = _find_top_level_json_key(decoded, "anchor_activity_scenes")
+                if scenes_stop is not None and (stop is None or scenes_stop < stop):
+                    stop = scenes_stop
+                if stop is not None:
+                    break
+                stage *= 2
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
     except FileNotFoundError:
         return SidecarRevision.absent(resolved_sid)
-    return _sidecar_revision_from_bytes(resolved_sid, raw)
+
+    if stop is None:
+        # Legacy layouts without a bounded metadata stop still need their exact
+        # generation. This is the exceptional compatibility path, not a hot save.
+        return _sidecar_revision_from_bytes(resolved_sid, path.read_bytes())
+    metadata = decoded[:stop].rstrip()
+    if metadata.endswith(","):
+        metadata = metadata[:-1].rstrip()
+    try:
+        parsed = json.loads(f"{metadata}\n}}")
+    except (json.JSONDecodeError, ValueError):
+        parsed = None
+    raw_generation = (
+        parsed.get("_sidecar_generation_v1") if isinstance(parsed, dict) else None
+    )
+    if raw_generation is None:
+        # Recovery/legacy writers may append the generation after messages.
+        # Those files must be parsed fully once; a normal Session.save rewrites
+        # the generation into the bounded metadata prefix.
+        return _sidecar_revision_from_bytes(resolved_sid, path.read_bytes())
+    return SidecarRevision(
+        sid=resolved_sid,
+        state="PRESENT",
+        generation=raw_generation if type(raw_generation) is int and raw_generation >= 0 else 0,
+        digest_sha256=digest.hexdigest(),
+    )
 
 
 def _read_sidecar_snapshot(path: Path, sid: str) -> tuple[SidecarRevision, dict]:
@@ -673,6 +724,8 @@ def _archive_incomparable_backup(
     session_id: str,
     backup_path: Path,
     backup_receipt: SidecarRevision,
+    *,
+    archive_name: str | None = None,
 ) -> Path:
     """Preserve an incomparable primary backup before promoting a newer one."""
     if (
@@ -684,7 +737,7 @@ def _archive_incomparable_backup(
             f"Cannot archive unverified recoverable backup for {session_id!r}"
         )
     archive_path = backup_path.with_name(
-        f"{backup_path.name}.archive-{backup_receipt.digest_sha256}"
+        f"{archive_name or backup_path.name}.archive-{backup_receipt.digest_sha256}"
     )
     if not archive_path.exists():
         archive_tmp = backup_path.parent / (
@@ -2594,6 +2647,7 @@ class Session:
             ) from exc
 
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        replace_started = False
         try:
             with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(payload)
@@ -2609,6 +2663,7 @@ class Session:
                     ) from exc
                 tmp.unlink(missing_ok=True)
             else:
+                replace_started = True
                 _safe_replace(tmp, self.path)
                 _fsync_sidecar_directory(self.path.parent)
             self._sidecar_revisions[self.session_id] = _sidecar_revision_record(
@@ -2619,10 +2674,9 @@ class Session:
                 )
             )
         except Exception as exc:
-            if isinstance(exc, SidecarPublicationDurabilityError):
-                # The link/rename completed, but the directory entry was not
-                # confirmed durable. Track only the *visible* exact payload so
-                # this owner may retry; never report this save as successful.
+            if isinstance(exc, SidecarPublicationDurabilityError) or replace_started:
+                # Link or replacement may have landed before a durability error.
+                # Adopt only the exact visible bytes; never call this save durable.
                 intended = _sidecar_revision_from_bytes(
                     self.session_id,
                     payload.encode('utf-8'),

@@ -156,9 +156,11 @@ def test_empty_active_snapshot_is_still_refused(session_store, monkeypatch):
     no signature to trust and refusing may cost today's single full read --
     never more, and it must still refuse."""
     _make(session_store, "r1", 5)
-    empty = M.Session(session_id="r1", title="T", workspace=str(session_store.parent),
-                      model="glm", messages=[], active_stream_id="a" * 32,
-                      pending_user_message="still typing")
+    empty = M.Session.load("r1")
+    assert empty is not None
+    empty.messages = []
+    empty.active_stream_id = "a" * 32
+    empty.pending_user_message = "still typing"
     calls = _spy_full_reads(monkeypatch, empty.path)
 
     empty.save()
@@ -185,8 +187,9 @@ def test_legacy_sidecar_without_message_count_still_backs_up_on_shrink(session_s
     parse and keep the safeguard. Silently treating "no count" as "no shrink"
     would reopen #1558."""
     _write_legacy_without_count(session_store, "l1", 5)
-    s = M.Session(session_id="l1", title="Legacy", workspace=str(session_store.parent),
-                  model="glm", messages=_msgs(3))
+    s = M.Session.load("l1")
+    assert s is not None
+    s.messages = _msgs(3)
 
     s.save()
 
@@ -208,6 +211,12 @@ def test_file_changed_on_disk_since_last_save_falls_back_and_still_backs_up(sess
     s.path.write_text(json.dumps(external, indent=2), encoding="utf-8")
 
     s.messages = _msgs(4)
+    with pytest.raises(M.StaleSessionGenerationError):
+        s.save()
+    assert json.loads(s.path.read_text(encoding="utf-8"))["messages"] == _msgs(6)
+    s = M.Session.load("x1")
+    assert s is not None
+    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -225,6 +234,12 @@ def test_file_changed_on_disk_without_a_count_still_backs_up_on_shrink(session_s
                 "messages": _msgs(6)}
     s.path.write_text(json.dumps(external, indent=2), encoding="utf-8")
 
+    s.messages = _msgs(4)
+    with pytest.raises(M.StaleSessionGenerationError):
+        s.save()
+    assert json.loads(s.path.read_text(encoding="utf-8"))["messages"] == _msgs(6)
+    s = M.Session.load("x2")
+    assert s is not None
     s.messages = _msgs(4)
     s.save()
 
@@ -253,6 +268,12 @@ def test_unmarked_stale_count_from_a_foreign_writer_still_backs_up_on_shrink(ses
     s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
 
     s.messages = _msgs(4)
+    with pytest.raises(M.StaleSessionGenerationError):
+        s.save()
+    assert json.loads(s.path.read_text(encoding="utf-8"))["messages"] == _msgs(6)
+    s = M.Session.load("x3")
+    assert s is not None
+    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -271,6 +292,12 @@ def test_wrong_marker_version_still_backs_up_on_shrink(session_store):
     s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
 
     s.messages = _msgs(4)
+    with pytest.raises(M.StaleSessionGenerationError):
+        s.save()
+    assert json.loads(s.path.read_text(encoding="utf-8"))["messages"] == _msgs(6)
+    s = M.Session.load("x4")
+    assert s is not None
+    s.messages = _msgs(4)
     s.save()
 
     bak = s.path.with_suffix(".json.bak")
@@ -288,7 +315,10 @@ def test_first_save_remarks_the_file_and_the_fast_path_resumes(session_store, mo
     s.path.write_text(json.dumps(foreign, indent=2), encoding="utf-8")
 
     s.messages = _msgs(6)
-    s.save()  # equal-count save; unmarked prefix count ignored, full parse, no shrink
+    with pytest.raises(M.StaleSessionGenerationError):
+        s.save()
+    s = M.Session.load("x5")
+    s.save()  # authorized legacy file becomes marked; no shrink
 
     assert json.loads(s.path.read_text(encoding="utf-8"))["_mc_v"] == M._MESSAGE_COUNT_MARKER
 
@@ -377,6 +407,11 @@ def test_same_length_in_place_rewrite_inside_one_mtime_tick_still_backs_up(sessi
         "premise: the rewrite must be invisible to (inode, size, mtime_ns)"
     assert len(loaded.messages) == 2, "premise: this object remembers 2 messages"
 
+    loaded.messages = _msgs(3)
+    with pytest.raises(M.StaleSessionGenerationError):
+        loaded.save()
+    assert json.loads(p.read_text(encoding="utf-8"))["messages"] == _msgs(5)
+    loaded = M.Session.load("i1")
     loaded.messages = _msgs(3)
     loaded.save()
 

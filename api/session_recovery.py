@@ -461,6 +461,7 @@ def _recover_session_owned(
     tmp_path = session_path.with_suffix(
         f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
     )
+    replace_started = False
     try:
         backup = json.loads(bak_path.read_text(encoding='utf-8'))
         if not isinstance(backup, dict):
@@ -500,14 +501,15 @@ def _recover_session_owned(
                 return {**status, "restored": False, "stale_generation": True}
             tmp_path.unlink(missing_ok=True)
         else:
+            replace_started = True
             _safe_replace(tmp_path, session_path)
             _fsync_sidecar_directory(session_path.parent)
         _invalidate_cached_session_generation(session_path.stem)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        if isinstance(exc, SidecarPublicationDurabilityError):
-            # The live entry may already be visible despite the failed fsync.
-            # Do not leave an absent-generation cache owner behind, and do not
-            # call this restoration durable until a later successful write.
+        if isinstance(exc, SidecarPublicationDurabilityError) or replace_started:
+            # A create or replace may be visible despite failed directory fsync.
+            # Recovery has no live owner to adopt: evict only the prior alias,
+            # then require a fresh load before any subsequent write.
             _invalidate_cached_session_generation(
                 session_path.stem,
                 expected_revision=expected_live_revision,

@@ -5660,33 +5660,50 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     if not old_path.exists():
         return
     try:
-        existing_text = old_path.read_text(encoding='utf-8')
+        from api.models import (
+            Session, _archive_incomparable_backup, _sidecar_revision_from_bytes,
+            _sidecar_revision_record,
+        )
+        existing_raw = old_path.read_bytes()
+        malformed_revision = None
         try:
-            existing = json.loads(existing_text)
+            existing = json.loads(existing_raw)
+            if not isinstance(existing, dict):
+                raise ValueError("parent sidecar is not an object")
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
-            # from the in-memory pre-compression messages below. That is safer
-            # than leaving an unreadable recovery snapshot behind.
+            # from the in-memory pre-compression messages, but preserve the raw
+            # generation before replacing it. Session.load cannot parse it.
+            existing = {}
             existing_msgs = -1
-            existing_snapshot = False
+            malformed_revision = _sidecar_revision_from_bytes(old_sid, existing_raw)
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
-            from api.models import Session
-
-            owned_old = Session.load(old_sid)
-            if owned_old is None:
-                return
+            if malformed_revision is None:
+                owned_old = Session.load(old_sid)
+                if owned_old is None:
+                    return
+                revisions = dict(owned_old._sidecar_revisions)
+            else:
+                # Archive with the same artifact family as backup generations;
+                # do not destroy malformed bytes if this repair cannot commit.
+                _archive_incomparable_backup(
+                    old_sid, old_path, malformed_revision,
+                    archive_name=f"{old_path.name}.bak",
+                )
+                revisions = {old_sid: _sidecar_revision_record(malformed_revision)}
             snapshot = copy.copy(s)
-            snapshot._sidecar_revisions = dict(owned_old._sidecar_revisions)
+            snapshot._sidecar_revisions = revisions
             snapshot.session_id = old_sid
             snapshot.parent_session_id = existing.get(
                 'parent_session_id',
                 getattr(s, 'parent_session_id', None),
             )
+            if snapshot.parent_session_id == old_sid:
+                snapshot.parent_session_id = None
             snapshot.pre_compression_snapshot = True
             snapshot.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
