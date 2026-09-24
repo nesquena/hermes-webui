@@ -278,14 +278,17 @@ function _setWorkspacePanelMode(mode){
 function syncWorkspacePanelState(){
   const hasPreview=_hasWorkspacePreviewVisible();
   if(hasPreview){
-    // #6709 (gate certification): this is a reopen entry point like any other, so it
-    // must honour the RECORDED OWNER instead of assuming `preview`. A resize, mobile
-    // keyboard/URL-bar reflow or session-load sync between a browse-owned collapse and
-    // the X would otherwise reopen as `preview`, and the X would close the drawer
-    // instead of returning the reader to the still-open tree — the very symptom the
-    // owner value exists to prevent. With no recorded owner the historical default
-    // (`preview`) still applies.
-    if(_workspacePanelMode==='closed'&&_workspacePanelRetainedMode==='browse') _setWorkspacePanelMode('browse');
+    // #6709 (re-gate): a sync must NOT undo a deliberate collapse. Reopening is an
+    // explicit user action, so a panel that is closed while a RETAINED owner is
+    // recorded — the fingerprint of closeWorkspacePanel(), since clearPreview() and an
+    // openFile() while closed both clear it — stays closed here; the UI is merely
+    // re-synced. Without that record there is no deliberate collapse to respect and the
+    // historical behaviour (reopen as `preview`) still applies.
+    //
+    // This also subsumes the earlier owner-honouring branch: a sync that never reopens
+    // the panel cannot reopen it in the wrong mode, so the round-7 RED case is gone by
+    // construction rather than by picking the right mode.
+    if(_workspacePanelMode==='closed'&&_workspacePanelRetainedMode) syncWorkspacePanelUI();
     else if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
     else syncWorkspacePanelUI();
     return;

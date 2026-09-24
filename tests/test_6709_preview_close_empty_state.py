@@ -1793,33 +1793,58 @@ def test_a_scroll_snapshot_is_never_restored_onto_another_directory_or_session()
 
 _SYNC_DRIVER = r"""
 (() => {
-  // browse-owned collapse, then a sync-based reopen (resize / reflow / session load)
+  // A DELIBERATE collapse (browse-owned), then an ordinary resize / reflow / session-load
+  // sync. Reopening is an explicit user action, so the sync must leave the panel closed
+  // and merely re-sync the chrome — otherwise dragging the window (or, on a phone, the
+  // keyboard/URL-bar reflow) brings back a panel the user just dismissed.
   _previewCurrentPath='A.txt'; _workspacePanelMode='browse';
   closeWorkspacePanel();
+  const retained = _workspacePanelRetainedMode;
   syncWorkspacePanelState();
-  const afterBrowse = _workspacePanelMode;
-  // and the ordinary preview-owned case still reopens as preview
+  const afterBrowseCollapse = _workspacePanelMode;
+  // ...and the explicit reopen still restores the recorded owner
+  openWorkspacePanel('preview');
+  const afterExplicitReopen = _workspacePanelMode;
+
+  // A preview-owned deliberate collapse behaves the same way.
   _workspacePanelMode='closed'; _workspacePanelRetainedMode='preview';
   syncWorkspacePanelState();
-  const afterPreview = _workspacePanelMode;
-  // with no recorded owner the historical default applies
+  const afterPreviewCollapse = _workspacePanelMode;
+
+  // With NO recorded owner there is no deliberate collapse to respect, so the
+  // historical behaviour (reopen as preview) still applies.
   _workspacePanelMode='closed'; _workspacePanelRetainedMode=null;
   syncWorkspacePanelState();
   const afterNone = _workspacePanelMode;
-  console.log(JSON.stringify({ afterBrowse, afterPreview, afterNone }));
+  console.log(JSON.stringify({ retained, afterBrowseCollapse, afterExplicitReopen,
+                               afterPreviewCollapse, afterNone }));
 })();
 """
 
 
-def test_sync_reopen_honours_the_recorded_owner():
-    """Test-honesty finding: syncWorkspacePanelState() is a real reopen entry point
-    (resize, mobile reflow, session-load sync) and must consult the recorded owner."""
+def test_a_sync_does_not_undo_a_deliberate_collapse():
+    """Re-gate: a resize / reflow / session-load sync must not reopen a panel the user
+    deliberately collapsed — reopening stays an explicit action. Reproduced on master
+    too, but this PR makes "collapsed with a kept preview" a deliberate state."""
     proc = _run_node(_gate_harness(_SYNC_DRIVER))
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert out["afterBrowse"] == "browse", (
-        f"a sync reopen ignored the recorded browse owner, so a resize/reflow would "
-        f"reopen as `preview` and the X would close the drawer (gate): {out}"
+    assert out["retained"] == "browse", (
+        f"precondition: the collapse must record an owner, which is what marks it as "
+        f"deliberate: {out}"
     )
-    assert out["afterPreview"] == "preview", out
-    assert out["afterNone"] == "preview", f"no recorded owner keeps the default: {out}"
+    assert out["afterBrowseCollapse"] == "closed", (
+        f"a resize/reflow sync reopened a deliberately collapsed panel; on a phone the "
+        f"drawer would come back over the chat as soon as the keyboard appears "
+        f"(re-gate): {out}"
+    )
+    # …while an explicit reopen still restores the recorded owner
+    assert out["afterExplicitReopen"] == "browse", (
+        f"the explicit reopen must still honour the recorded owner: {out}"
+    )
+    assert out["afterPreviewCollapse"] == "closed", (
+        f"a preview-owned deliberate collapse must also survive a sync: {out}"
+    )
+    assert out["afterNone"] == "preview", (
+        f"with no recorded owner the historical reopen behaviour must still apply: {out}"
+    )
