@@ -1126,6 +1126,192 @@ def test_directory_creation_failure_returns_503(idem_env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed sweep (round 2): the review named READ failures, unbound
+# completions, and the release cleanup path alongside the write paths.
+# ---------------------------------------------------------------------------
+
+
+def test_unreadable_store_file_fails_closed(idem_env):
+    """Finding 1, read side: an unreadable durable store must not start
+    empty. "Starting empty" forgets every durable claim, so a retry of a
+    completed key would execute the turn again instead of replaying it."""
+    from api import idempotency as idem_mod
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "unreadable-key"
+
+    # First admit and complete a turn so the durable file has a record.
+    s1, p1 = idem_env.run_handler(body, key_header=key)
+    assert s1 == 200
+    assert len(idem_env.recorder.calls) == 1
+    assert idem_env.store.path.exists()
+
+    # Simulate an I/O error on the store file (permissions, EIO, a
+    # truncated/renamed file) by making read_text fail. Force the failure
+    # at the source so it is deterministic for any test user.
+    def boom_read_text(self, *a, **kw):
+        raise OSError("simulated: cannot read store file")
+
+    import pathlib
+    real_read_text = pathlib.Path.read_text
+    pathlib.Path.read_text = boom_read_text
+    try:
+        # The store must REFUSE to serve, not start empty: silently
+        # starting empty is what forgets durable claims and re-admits the
+        # turn.
+        with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+            idem_env.store.reload_from_disk()
+    finally:
+        pathlib.Path.read_text = real_read_text
+
+    # The route path: the durable record still exists, so replay still
+    # works — the store never claimed to be empty.
+    rec = idem_env.store.lookup(key)
+    assert rec is not None and rec.status == "complete"
+    s2, p2 = idem_env.run_handler(body, key_header=key)
+    assert s2 == 200
+    assert p2["stream_id"] == p1["stream_id"]
+    assert len(idem_env.recorder.calls) == 1
+
+
+def test_corrupt_store_file_fails_closed(idem_env):
+    """Finding 1, read side: a corrupt (unparseable) store file must
+    raise, not silently load as empty. An empty load forgets durable
+    claims and re-admits the turn on the next retry."""
+    from api import idempotency as idem_mod
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "corrupt-key"
+
+    s1, p1 = idem_env.run_handler(body, key_header=key)
+    assert s1 == 200
+
+    # Corrupt the durable file the way a torn write would.
+    idem_env.store.path.write_text("{ not json at all", encoding="utf-8")
+
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_env.store.reload_from_disk()
+
+    # The store must not have converted to an "empty" success state.
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_env.store.lookup(key)
+
+
+def test_complete_without_durable_claim_is_refused(idem_env):
+    """Finding 1, completion side: ``complete()`` with no durable claim
+    must refuse rather than synthesize a record with an unproven
+    (empty) fingerprint. A synthesized record would let an unrelated
+    retry either collide as a bogus 409 or replay a result whose request
+    we never verified."""
+    from api import idempotency as idem_mod
+
+    key = "unbound-complete-key"
+
+    # complete() called without a preceding claim().
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_env.store.complete(
+            key,
+            session_id="idem-session",
+            stream_id="stream-1",
+            turn_id="turn-1",
+            response_status=200,
+            response_payload={"x": 1},
+        )
+
+    # No record was written in memory or on disk, so nothing can replay.
+    stored = idem_env.store.lookup_stored(
+        idem_mod.build_storage_key(key)
+    )
+    assert stored is None
+    if idem_env.store.path.exists():
+        import json as _json
+        on_disk = _json.loads(idem_env.store.path.read_text(encoding="utf-8"))
+        assert on_disk.get("records") in (None, [])
+    assert len(idem_env.recorder.calls) == 0
+
+
+def test_release_persist_failure_retains_inflight_guard(idem_env, monkeypatch):
+    """Finding 1, cleanup path: when the durable write behind
+    ``release()`` fails, the pending claim must be RETAINED. Dropping it
+    in memory while the durable file still holds the claim removes the
+    in-flight guard and lets the next request with the same key start a
+    second turn."""
+    from api import idempotency as idem_mod
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "release-fail-key"
+
+    # Seed a durable pending claim (claim() but no complete()).
+    idem_env.store.claim(key, idem_mod.compute_request_fingerprint(body))
+    assert idem_env.store.lookup(key).status == "pending"
+
+    # Fail the release's own durable write.
+    def boom_persist():
+        raise idem_mod.IdempotencyStoreUnavailable("simulated: disk gone")
+    monkeypatch.setattr(idem_env.store, "_persist_locked", boom_persist)
+
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_env.store.release(key)
+
+    # The pending claim survives in memory: a retry is refused, not
+    # re-admitted.
+    rec = idem_env.store.lookup(key)
+    assert rec is not None, "pending claim was dropped on release failure"
+    assert rec.status == "pending"
+
+
+def test_unresolvable_profile_scope_fails_closed(idem_env, monkeypatch):
+    """Finding 3, resolution side: when the server-resolved active
+    profile cannot be determined, the key must NOT be filed under a
+    guessed namespace. A ``"default"`` fallback would file a request under
+    a namespace we never proved it belongs to, so two profiles could
+    collide on one record (or a claim could land in the wrong profile's
+    namespace and be invisible to its owner). Refuse with 503 instead."""
+    from api import idempotency as idem_mod
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "no-profile-key"
+
+    # Store-level contract: resolution failure raises rather than
+    # silently defaulting the namespace. Patch the lookup the way the
+    # module itself does (lazy import from api.routes) so the real
+    # conversion-to-typed-error path is what gets exercised.
+    def _boom_profile():
+        raise RuntimeError("simulated: profile registry unavailable")
+    monkeypatch.setattr(
+        idem_env.routes, "_get_active_profile_name", _boom_profile
+    )
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_mod.build_storage_key(key)
+
+    # An empty / non-string active profile name is equally unresolvable.
+    monkeypatch.setattr(
+        idem_env.routes, "_get_active_profile_name", lambda: "   "
+    )
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_mod.build_storage_key(key)
+    monkeypatch.setattr(
+        idem_env.routes, "_get_active_profile_name", lambda: None
+    )
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        idem_mod.build_storage_key(key)
+
+    # Route-level: the unreachable namespace surfaces as 503, and no
+    # turn is admitted under a guessed namespace.
+    monkeypatch.setattr(
+        idem_env.routes, "_idem_resolve_active_profile",
+        lambda: (_ for _ in ()).throw(
+            idem_mod.IdempotencyStoreUnavailable("unresolvable")
+        ),
+    )
+    s, p = idem_env.run_handler(body, key_header=key)
+    assert s == 503, f"expected 503 for unresolvable profile, got {s}: {p}"
+    assert p.get("code") == "idempotency_store_unavailable"
+    assert len(idem_env.recorder.calls) == 0
+    assert list(idem_env.store.keys()) == []
+
+
+# ---------------------------------------------------------------------------
 # Source invariants (defensive)
 # ---------------------------------------------------------------------------
 

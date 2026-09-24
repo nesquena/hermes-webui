@@ -24663,8 +24663,33 @@ def _handle_chat_start(handler, body, diag=None):
             fingerprint = _idem_compute_fingerprint(
                 body, profile=_idem_resolve_active_profile()
             )
-        except Exception:
-            fingerprint = ""
+        except IdempotencyStoreUnavailable as exc:
+            # The active profile could not be resolved, so the key has
+            # no provable namespace. Fail closed (503) rather than
+            # filing the claim under a namespace we never verified.
+            logger.warning(
+                "idempotency: cannot resolve profile scope for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
+        except Exception as exc:
+            # An unhashable / unserializable body still must not let the
+            # request through with an empty fingerprint: an empty
+            # fingerprint matches every later retry, which would turn a
+            # legitimate 409 conflict into a replay. Refuse instead.
+            logger.warning(
+                "idempotency: could not fingerprint request for key %r: %s",
+                idem_validated_key, exc,
+            )
+            return j(handler, {
+                "error": "idempotency store unavailable; retry",
+                "code": "idempotency_store_unavailable",
+                "idempotency_key": idem_validated_key,
+            }, status=503)
         try:
             store = get_idempotency_store()
         except Exception:
@@ -24732,7 +24757,19 @@ def _handle_chat_start(handler, body, diag=None):
                     # Treat any non-2xx stored result as a stale failure;
                     # release so the caller can retry with the same key
                     # and (presumably) a different network.
-                    store.release(idem_validated_key)
+                    try:
+                        store.release(idem_validated_key)
+                    except Exception as exc:
+                        # A stale (non-2xx) completion could not be
+                        # durably dropped. Keep the stored result: it is
+                        # already durable, so replaying it is fail-closed
+                        # — the caller cannot silently re-admit a turn the
+                        # durable store still remembers as attempted.
+                        logger.warning(
+                            "idempotency: could not release stale completion "
+                            "for key %r: %s",
+                            idem_validated_key, exc,
+                        )
                     return j(handler, {
                         "error": "previous attempt did not complete; retry",
                         "code": "idempotency_replay_unavailable",
@@ -25140,8 +25177,20 @@ def _handle_chat_start(handler, body, diag=None):
             try:
                 get_idempotency_store().release(idem_validated_key)
             except Exception as exc:
-                logger.debug(
-                    "idempotency: release() failed for key %r: %s",
+                # release() is fail-closed: it restores the pending claim
+                # when its own durable write fails, so the claim survives
+                # and a retry sees idempotency_in_flight (or 503) instead
+                # of a fresh claim that would admit a second turn. The
+                # in-flight guard must not be dropped just because we are
+                # on a cleanup path — that is precisely the duplicate-turn
+                # window this store exists to close. We cannot turn this
+                # into a 503 here (the response is already in flight on
+                # the success path), so the durable pending claim stands
+                # and the caller retries against it.
+                logger.warning(
+                    "idempotency: release() could not durably drop the claim "
+                    "for key %r: %s; the pending claim is retained so a retry "
+                    "is refused rather than re-admitted",
                     idem_validated_key, exc,
                 )
 
