@@ -9176,11 +9176,22 @@ def _append_result_partial_on_error(
         )
         if baseline_has_current_user:
             leading_row = current_turn_rows[0] if current_turn_rows else None
+            leading_token = (
+                leading_row.get('_active_turn_token')
+                if isinstance(leading_row, dict)
+                else None
+            )
+            current_token = (
+                active_turn_identity.get('token')
+                if isinstance(active_turn_identity, dict)
+                else None
+            )
             if (
                 isinstance(leading_row, dict)
                 and leading_row.get('role') == 'user'
                 and _normalize_user_text(_message_text(leading_row.get('content')))
                 == normalized_msg_text
+                and (not leading_token or leading_token == current_token)
             ):
                 current_turn_rows = current_turn_rows[1:]
         else:

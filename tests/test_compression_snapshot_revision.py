@@ -450,6 +450,34 @@ def test_append_only_partial_skips_one_current_user_echo_and_stops_at_next_user(
     assert [message["content"] for message in session.messages] == ["current partial"]
 
 
+def test_append_only_partial_does_not_skip_foreign_same_text_user_turn():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    session = Session(
+        session_id="append-only-foreign-partial-boundary",
+        messages=list(baseline),
+        context_messages=[],
+    )
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": " current\n prompt ", "_active_turn_token": "t2"},
+            {"role": "assistant", "content": "foreign partial", "_active_turn_token": "t2"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        result,
+        baseline,
+        "current prompt",
+        active_turn_identity=identity,
+    )
+
+    assert appended is None
+    assert session.messages == baseline
+
+
 def test_stale_non_prefix_partial_uses_token_and_stops_at_next_user():
     session = Session(
         session_id="stale-partial-token-boundary",
