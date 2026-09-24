@@ -4427,6 +4427,17 @@ function closeSessionActionMenu({restoreFocus=false}={}){
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
   if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
+  // Drain a sidebar repaint the project picker deferred while this menu was
+  // blocking renders (picker dismissed by opening another row's ⋮ menu). Next
+  // tick, so a menu action that opens the picker re-arms the guard first.
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+    setTimeout(()=>{
+      if(!_sessionListRepaintDeferredByPicker||_sessionActionMenu) return;
+      if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null) return;
+      _sessionListRepaintDeferredByPicker=false;
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    },0);
+  }
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -9440,7 +9451,11 @@ function _showProjectPicker(session, anchorEl){
       setTimeout(()=>{
         // A replacement picker opened in the meantime inherits the deferral and
         // replays it when it closes; keep the flag set until someone replays it.
+        // The ⋮ action menu blocks renders too, so if one is open now (e.g. the
+        // picker was dismissed by opening another row's menu), leave the flag
+        // for closeSessionActionMenu() to drain.
         if(_projectPickerTeardown!==null||!_sessionListRepaintDeferredByPicker) return;
+        if(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu) return;
         _sessionListRepaintDeferredByPicker=false;
         if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
       },0);

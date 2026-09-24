@@ -737,3 +737,67 @@ console.log(JSON.stringify({underReplacement, stillDeferred, afterClose: repaint
     assert data["stillDeferred"] is True
     assert data["afterClose"] == 1
     assert data["flagCleared"] is True
+
+
+def test_picker_dismissed_by_another_rows_menu_keeps_then_drains_the_deferral():
+    # Opening another row's ⋮ menu dismisses the picker, but the open menu also
+    # blocks sidebar renders. The picker's replay must leave the deferral for the
+    # menu to drain rather than clearing it into a blocked (dropped) render.
+    data = _run_picker_cases(_REPAINT_REPLAY_PREFIX + """
+let _sessionActionMenu = null;
+openPicker(260);
+_sessionListRepaintDeferredByPicker = true;
+_sessionActionMenu = {remove(){}};              // another row's menu opens...
+docEmitter.dispatch('click', {target: {}});     // ...which dismisses the picker
+flushTimers();
+console.log(JSON.stringify({repaintsWhileMenuOpen: repaints,
+  stillDeferred: _sessionListRepaintDeferredByPicker}));
+""")
+    assert data["repaintsWhileMenuOpen"] == 0
+    assert data["stillDeferred"] is True
+
+
+def _close_session_action_menu_source() -> str:
+    start = SESSIONS_JS.find("function closeSessionActionMenu(")
+    assert start >= 0, "closeSessionActionMenu not found in static/sessions.js"
+    end = SESSIONS_JS.find("\nfunction ", start + 1)
+    assert end > start
+    return SESSIONS_JS[start:end]
+
+
+def test_closing_the_action_menu_drains_a_picker_deferred_repaint():
+    assert NODE is not None
+    script = r"""
+const timers = [];
+const setTimeout = fn => { timers.push(fn); return timers.length; };
+let repaints = 0;
+function renderSessionListFromCache() { repaints += 1; }
+function _focusSessionActionMenuRestoreTarget() { return true; }
+let _sessionActionMenu = {remove(){}};
+let _sessionActionAnchor = null;
+let _sessionActionSessionId = 's1';
+let _sessionActionPreviousFocus = null;
+let _projectPickerTeardown = null;
+let _sessionListRepaintDeferredByPicker = true;
+""" + _close_session_action_menu_source() + r"""
+closeSessionActionMenu();
+timers.splice(0).forEach(fn => fn());
+const drained = {repaints, flagCleared: _sessionListRepaintDeferredByPicker === false};
+// Nothing deferred: closing the menu must not repaint.
+_sessionActionMenu = {remove(){}};
+closeSessionActionMenu();
+timers.splice(0).forEach(fn => fn());
+// Menu action that opens the picker (guard re-armed before the drain tick):
+_sessionListRepaintDeferredByPicker = true;
+_sessionActionMenu = {remove(){}};
+closeSessionActionMenu();
+_projectPickerTeardown = () => {};
+timers.splice(0).forEach(fn => fn());
+console.log(JSON.stringify({drained, repaintsAfterNoop: repaints,
+  keptForPicker: _sessionListRepaintDeferredByPicker === true}));
+"""
+    result = subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True, timeout=20)
+    data = json.loads(result.stdout)
+    assert data["drained"] == {"repaints": 1, "flagCleared": True}
+    assert data["repaintsAfterNoop"] == 1
+    assert data["keptForPicker"] is True
