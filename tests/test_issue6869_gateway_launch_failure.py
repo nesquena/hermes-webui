@@ -146,7 +146,11 @@ def test_gateway_launch_failure_cleanup_restores_snapshot_before_saving(monkeypa
 
     routes._cleanup_chat_start_launch_failure(canonical, "old-stream", snapshot)
 
-    assert canonical.__dict__ == snapshot
+    restored = copy.deepcopy(canonical.__dict__)
+    assert restored.pop("intentional_shrink_generation")
+    expected = copy.deepcopy(snapshot)
+    expected.pop("intentional_shrink_generation", None)
+    assert restored == expected
     assert saved == [{"touch_updated_at": False}]
 
 

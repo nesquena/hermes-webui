@@ -1,6 +1,7 @@
 """Regression coverage for rejected ordinary eager chat starts."""
 
 import copy
+import json
 import threading
 
 import pytest
@@ -99,6 +100,38 @@ def test_eager_rejected_before_stream_registration_retry_reload_has_one_new_prom
     ]
 
 
+def test_rejected_eager_start_is_not_revived_by_startup_recovery(issue7193_env, monkeypatch):
+    from api.session_recovery import (
+        inspect_session_recovery_status,
+        recover_all_sessions_on_startup,
+    )
+
+    session = _saved_retry_session(issue7193_env)
+    original_messages = copy.deepcopy(session.messages)
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    live = Session.load(session.session_id)
+    assert [row["content"] for row in _user_rows(live)] == ["retry me"]
+    assert live.intentional_shrink_generation
+    status = inspect_session_recovery_status(live.path)
+    assert status["recommend"] == "no_action"
+    assert status["intentional_message_shrink"] is True
+
+    recovery = recover_all_sessions_on_startup(issue7193_env)
+
+    assert recovery["restored"] == 0
+    reloaded = Session.load(session.session_id)
+    assert reloaded.messages == original_messages
+    assert reloaded.pending_user_message is None
+
+
 def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monkeypatch):
     session = _saved_retry_session(issue7193_env)
     before = copy.deepcopy(session.__dict__)
@@ -117,7 +150,11 @@ def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monk
     with pytest.raises(OSError, match="index publication failed"):
         _start(session, workspace=issue7193_env / "workspace")
 
-    assert session.__dict__ == before
+    state = copy.deepcopy(session.__dict__)
+    assert state.pop("intentional_shrink_generation")
+    expected_state = copy.deepcopy(before)
+    expected_state.pop("intentional_shrink_generation")
+    assert state == expected_state
     reloaded = Session.load(session.session_id)
     for field in (
         "title",
@@ -135,7 +172,10 @@ def test_save_replaces_sidecar_then_raises_restores_snapshot(issue7193_env, monk
         "truncation_boundary",
     ):
         assert getattr(reloaded, field) == before[field]
-    assert session.path.read_bytes() == before_sidecar
+    persisted = json.loads(session.path.read_text(encoding="utf-8"))
+    expected_persisted = json.loads(before_sidecar.decode("utf-8"))
+    expected_persisted["intentional_shrink_generation"] = session.intentional_shrink_generation
+    assert persisted == expected_persisted
     assert config.session_writeback_owner(session.session_id) is None
     assert not config.STREAM_SESSION_OWNERS
     assert not config.STREAMS

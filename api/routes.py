@@ -23306,9 +23306,18 @@ def _cleanup_chat_start_launch_failure(session, stream_id: str, snapshot) -> Non
                 return  # session deleted while the thread launch was failing
             if getattr(canonical, "active_stream_id", None) != stream_id:
                 return  # a successor turn already owns the session
-            from api.session_ops import restore_session_state
+            from api.session_ops import (
+                _stamp_intentional_shrink_generation,
+                restore_session_state,
+            )
 
+            prepared_message_count = len(getattr(canonical, "messages", None) or [])
             restore_session_state(canonical, snapshot)
+            _stamp_intentional_shrink_generation(
+                canonical,
+                prepared_message_count,
+                len(getattr(canonical, "messages", None) or []),
+            )
             try:
                 canonical.save(touch_updated_at=False)
             except Exception:
