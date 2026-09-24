@@ -201,15 +201,18 @@ def test_response_heading_only_inside_code_falls_back_to_raw():
     assert projection.context.startswith("Front-matter")
 
 
-def test_response_heading_deep_in_file_is_ignored():
-    """The probe cap must stop an unbounded scan of pathological input,
-    but it must NOT be so tight that a real artifact loses its boundary.
+def test_response_heading_deep_in_file_is_recognized():
+    """There is no line-count cap: the whole already-read artifact is
+    scanned, so a real artifact never loses its boundary.
 
     #7303's motivating artifact carries ~320 context lines before
-    ``## Response``; the previous 200-line cap made
-    ``has_response_boundary`` False for exactly that case, so the
-    response-first view silently fell back to raw-primary and the
-    feature did nothing. This test pins the real-artifact contract.
+    ``## Response``. A round of review then pinned the *old* cap with a
+    "beyond the cap is not taken" assertion; the 9/24 review found a real
+    run whose reply landed on line 2,001 and therefore lost its
+    boundary, regressing the collapsed preview from the reply to the
+    first 600 chars of front-matter. The scan is now unbounded by line
+    count — the fail-closed guards are the fence / <pre> tracking and
+    the exact heading match, which this test also re-checks.
     """
     # A boundary after 321 context lines must be found.
     padding = "\n".join("context line" for _ in range(321))
@@ -219,13 +222,20 @@ def test_response_heading_deep_in_file_is_ignored():
     assert projection.response == "The answer is 42."
     assert "Front-matter" in projection.context
 
-    # The cap still exists: a boundary beyond it is not taken.
-    from api.cron_output_parser import _MAX_PROBE_LINES
-
-    padding = "\n".join("padding line " * 3 for _ in range(_MAX_PROBE_LINES + 50))
-    text = f"front-matter\n\n{padding}\n\n## Response\n\nThis is too deep.\n"
+    # The motivating deep case: a reply on line 2,001 of a 2,050-line
+    # artifact must still be found.
+    deep_padding = "\n".join("tool dump line " * 3 for _ in range(2050))
+    text = (
+        f"front-matter\n\n{deep_padding}\n\n## Response\n\n"
+        "This is the reply after a very long tool dump.\n"
+    )
     projection = parse_cron_output(text)
-    assert projection.has_response_boundary is False
+    assert projection.has_response_boundary is True, (
+        "a reply past line 2,000 must not lose its boundary — the "
+        "line-count cap regressed the preview to front-matter"
+    )
+    assert projection.response.startswith("This is the reply")
+    assert "front-matter" in projection.context
 
 
 def test_similar_heading_is_not_a_boundary():
