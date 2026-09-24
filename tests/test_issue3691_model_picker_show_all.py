@@ -1526,11 +1526,16 @@ def test_runtime_picker_shows_generic_expander_and_searches_hidden_overflow(_dro
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "selected_model,sibling_model",
+    [
+        ("nex-agi/nex-n2.5-pro:free", "nex.agi/nex.n2.5.pro:free"),
+        ("nex.agi/nex.n2.5.pro:free", "nex-agi/nex-n2.5-pro:free"),
+    ],
+)
 def test_repeated_openrouter_colon_overflow_restoration_renders_one_routed_row(
-    _dropdown_driver_path,
+    _dropdown_driver_path, selected_model, sibling_model,
 ):
-    model = "nex-agi/nex-n2.5-pro:free"
-    dotted = "nex.agi/nex.n2.5.pro:free"
     payload = {
         "groups": [
             {
@@ -1538,43 +1543,43 @@ def test_repeated_openrouter_colon_overflow_restoration_renders_one_routed_row(
                 "provider_id": "openrouter",
                 "models": [{"id": "openrouter/visible", "label": "Visible"}],
                 "extra_models": [
-                    {"id": model, "label": "Nex N2.5 Pro Free"},
-                    {"id": dotted, "label": "Nex dotted N2.5 Pro Free"},
+                    {"id": "nex-agi/nex-n2.5-pro:free", "label": "Nex N2.5 Pro Free"},
+                    {"id": "nex.agi/nex.n2.5.pro:free", "label": "Nex dotted N2.5 Pro Free"},
                     {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
                 ],
             },
             {
                 "provider": "Backup",
                 "provider_id": "custom:backup",
-                "models": [{"id": model, "label": "Backup Nex N2.5 Pro Free"}],
+                "models": [{"id": selected_model, "label": "Backup Nex N2.5 Pro Free"}],
             },
         ],
         "selectedValue": "openrouter/visible",
-        "restoreModel": f"@openrouter:{model}",
+        "restoreModel": f"@openrouter:{selected_model}",
         "restoreProvider": "openrouter",
-        "searchTerm": model,
+        "searchTerm": "nex",
     }
     out = _run_dropdown_driver(_dropdown_driver_path, payload)
 
-    assert out["restoration"]["firstRestore"] == model, (
-        f"First restoration must prefer exact overflow ID {model}; got {out['restoration']['firstRestore']!r}."
+    assert out["restoration"]["firstRestore"] == selected_model, (
+        f"First restoration must prefer exact overflow ID {selected_model}; got {out['restoration']['firstRestore']!r}."
     )
-    assert out["restoration"]["secondRestore"] == model, (
-        f"Repeated restoration must keep exact overflow ID {model}; got {out['restoration']['secondRestore']!r}."
+    assert out["restoration"]["secondRestore"] == selected_model, (
+        f"Repeated restoration must keep exact overflow ID {selected_model}; got {out['restoration']['secondRestore']!r}."
     )
     assert out["restoration"]["selectedState"] == {
-        "model": model,
+        "model": selected_model,
         "model_provider": "openrouter",
     }
     assert out["restoration"]["selectedProvider"] == "openrouter"
-    assert out["restoration"]["selectedValue"] == model
-    for value, provider in ((model, "openrouter"), (model, "custom:backup")):
+    assert out["restoration"]["selectedValue"] == selected_model
+    for value, provider in ((selected_model, "openrouter"), (selected_model, "custom:backup")):
         assert out["restoration"]["options"].count({"value": value, "provider": provider}) == 1
 
     for phase in ("searched", "searchedAfterExpand"):
         rows = [
             row for row in out[phase]
-            if "model-opt" in row["className"].split() and model in row["html"]
+            if "model-opt" in row["className"].split() and selected_model in row["html"]
             and row["groupKey"] in {"openrouter", "__ungrouped__"}
         ]
         assert len(rows) == 1, (
@@ -1582,22 +1587,31 @@ def test_repeated_openrouter_colon_overflow_restoration_renders_one_routed_row(
             f"rendered {len(rows)} rows: {[row['groupKey'] for row in rows]}"
         )
         assert rows[0]["groupKey"] == "openrouter"
-        dotted_rows = [
+        assert "active" in rows[0]["className"].split()
+        assert "model-opt-badge--selected" in rows[0]["html"]
+        sibling_rows = [
             row for row in out[phase]
-            if "model-opt" in row["className"].split() and dotted in row["html"]
+            if "model-opt" in row["className"].split() and sibling_model in row["html"]
             and row["groupKey"] == "openrouter"
         ]
-        assert len(dotted_rows) == 1, "The dotted model is distinct and must remain selectable."
+        assert len(sibling_rows) == 1, "The punctuation-distinct model is distinct and must remain selectable."
+        assert "active" not in sibling_rows[0]["className"].split(), (
+            f"{phase} must not mark OpenRouter sibling {sibling_model!r} active when "
+            f"{selected_model!r} is selected; got {sibling_rows[0]['className']!r}."
+        )
+        assert "model-opt-badge--selected" not in sibling_rows[0]["html"]
         backup_rows = [
             row for row in out[phase]
-            if "model-opt" in row["className"].split() and model in row["html"]
+            if "model-opt" in row["className"].split() and selected_model in row["html"]
             and row["groupKey"] == "custom:backup"
         ]
         assert len(backup_rows) == 1, "The same ID from another provider must remain selectable."
+        assert "active" not in backup_rows[0]["className"].split()
+        assert "model-opt-badge--selected" not in backup_rows[0]["html"]
 
     initial_html = "\n".join(row["html"] for row in out["initial"])
     assert "Show all 2 models" in initial_html, (
-        "Restoration should consume only the selected entry and retain the dotted and :thinking siblings."
+        "Restoration should consume only the selected entry and retain the punctuation-distinct and :thinking siblings."
     )
     expanded_openrouter_rows = [
         row for row in out["expanded"]
@@ -1649,12 +1663,16 @@ def test_openrouter_missing_exact_spelling_does_not_restore_dotted_sibling(_drop
             and row["groupKey"] == "__ungrouped__"
         ]
         assert len(rows) == 1, f"{phase} must keep exactly one row for the uncatalogued hyphenated ID."
+        assert "active" in rows[0]["className"].split()
+        assert "model-opt-badge--selected" in rows[0]["html"]
         dotted_rows = [
             row for row in out[phase]
             if "model-opt" in row["className"].split() and dotted in row["html"]
             and row["groupKey"] == "openrouter"
         ]
         assert len(dotted_rows) == 1, f"{phase} must preserve the distinct dotted catalog ID."
+        assert "active" not in dotted_rows[0]["className"].split()
+        assert "model-opt-badge--selected" not in dotted_rows[0]["html"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

@@ -3064,6 +3064,10 @@ function _providerFromModelValue(modelId){
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
   const provider=String(providerId||'').trim();
+  if(provider.toLowerCase()==='openrouter'){
+    const prefix='@openrouter:';
+    return (value.toLowerCase().startsWith(prefix)?value.substring(prefix.length):value).toLowerCase();
+  }
   if(value.startsWith('@')&&value.includes(':')){
     const exactPrefix=provider ? `@${provider}:` : '';
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
@@ -3097,10 +3101,7 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     for(const opt of options){
       const provider=String(_getOptionProviderId(opt)||'').toLowerCase();
       const value=String(opt.value||'');
-      // OpenRouter can expose distinct upstream IDs that differ only by dash/dot spelling.
-      const identity=provider==='openrouter'
-        ?value.replace(/^@openrouter:/i,'').toLowerCase()
-        :_modelPickerOptionIdentity(value,provider);
+      const identity=_modelPickerOptionIdentity(value,provider);
       if(!identity) continue;
       if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
       byIdentity.get(identity).push(opt);
@@ -3880,25 +3881,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   // Keep existingNorm.has( within the #907 source slice.
-  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
-    ? (m,p)=>p&&String(p).trim().toLowerCase()==='openrouter'?String(m||'').replace(/^@openrouter:/i,'').toLowerCase():_modelPickerOptionIdentity(m,p)
-    : (modelId,providerId)=>{
-        let value=String(modelId||'');
-        const provider=String(providerId||'').trim();
-      if(value.startsWith('@')&&value.includes(':')){
-        const exactPrefix=provider ? `@${provider}:` : '';
-        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
-          value=value.substring(exactPrefix.length);
-        }else if(value.startsWith('@custom:')){
-          const namedProvider=value.substring('@custom:'.length);
-          const splitAt=namedProvider.indexOf(':');
-          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
-        }else{
-          value=value.substring(value.indexOf(':')+1);
-        }
-      }
-        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
-      };
+  const optionIdentity=_modelPickerOptionIdentity;
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
   let added=0;
   for(const m of models){
