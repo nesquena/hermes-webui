@@ -9983,8 +9983,8 @@ _LINEAGE_REPLAY_PROOF_FIELDS = frozenset({
 def _metadata_stub_has_lineage_replay_proof(parent_meta) -> bool:
     """Return whether a cheap stub materially carried every lineage proof field."""
     prefix_fields = getattr(parent_meta, "_metadata_prefix_fields", None)
-    return isinstance(prefix_fields, (set, frozenset)) and (
-        _LINEAGE_REPLAY_PROOF_FIELDS <= prefix_fields
+    return isinstance(prefix_fields, (tuple, list, set, frozenset)) and (
+        _LINEAGE_REPLAY_PROOF_FIELDS.issubset(prefix_fields)
     )
 
 

@@ -1571,8 +1571,9 @@ class Session:
             _raw_post_collapse_count
         )
         # Populated only by load_metadata_only() from the keys actually parsed
-        # before the messages stop key. Full Session objects keep the empty set.
-        self._metadata_prefix_fields = frozenset()
+        # before the messages stop key. Keep this JSON-serializable because a
+        # few legacy callers still persist Session.__dict__ directly.
+        self._metadata_prefix_fields = ()
 
     @property
     def path(self):
@@ -1931,7 +1932,7 @@ class Session:
             # correctness decisions from a metadata-only stub must be able to
             # distinguish "present with a false/empty value" from "not read
             # because this key followed messages in an older/foreign layout".
-            metadata_prefix_fields = frozenset(parsed)
+            metadata_prefix_fields = tuple(parsed)
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
