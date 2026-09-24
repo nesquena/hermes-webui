@@ -338,3 +338,88 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
         assert result["inflightAReattach"] is True, result
     finally:
         page.close()
+
+
+def test_new_chat_during_pending_load_keeps_its_own_stream(browser, base_url):
+    """New Chat started while loadSession(B) is still awaiting metadata.
+
+    newSession() must supersede the pending load: clear ``_loadingSessionId`` and
+    bump the load generation, so the new chat's stream registration is not
+    arbitrated against the abandoned B load (which would close it as soon as it
+    opens) and B's stale metadata can't replace the new chat.
+    """
+    page = browser.new_page(
+        viewport={"width": 1024, "height": 720},
+        bypass_csp=True,
+    )
+    try:
+        page.goto(base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true && "
+            "typeof attachLiveStream === 'function' && typeof newSession === 'function'",
+            timeout=15_000,
+        )
+        result = page.evaluate(
+            """
+            async () => {
+              class FakeEventSource {
+                static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+                static instances = [];
+                constructor(url) {
+                  this.url = String(url);
+                  this.readyState = FakeEventSource.OPEN;
+                  FakeEventSource.instances.push(this);
+                }
+                addEventListener() {}
+                close() { this.readyState = FakeEventSource.CLOSED; }
+              }
+              window.EventSource = FakeEventSource;
+              for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              const originalApi = window.api;
+              window.api = async (path, opts) => {
+                const p = String(path);
+                if (p.includes('/api/session/new')) {
+                  return {session:{session_id:'session-c', title:'Untitled', messages:[],
+                                   workspace:(S.session&&S.session.workspace)||'', model:''}};
+                }
+                if (p.includes('/api/chat/stream/status')) return {active:true};
+                return originalApi(path, opts);
+              };
+              const genBefore = _loadSessionGeneration;
+              try {
+                // loadSession('session-b') has named its target and is awaiting metadata.
+                _loadingSessionId = 'session-b';
+                await newSession(false, {worktree:false});
+                const afterNew = {
+                  loadingSessionId:_loadingSessionId,
+                  genBumped:_loadSessionGeneration > genBefore,
+                  sid:S.session && S.session.session_id,
+                };
+                // The first send in the new chat registers its stream.
+                S.activeStreamId = 'stream-c';
+                attachLiveStream('session-c', 'stream-c', []);
+                await new Promise(resolve => setTimeout(resolve, 0));
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const sourceC = FakeEventSource.instances.find(s => s.url.includes('stream-c'));
+                return {
+                  ...afterNew,
+                  sourceCOpened:!!sourceC,
+                  sourceCOpen:!!sourceC && sourceC.readyState === FakeEventSource.OPEN,
+                  liveKeys:Object.keys(LIVE_STREAMS).sort(),
+                };
+              } finally {
+                window.api = originalApi;
+                _loadingSessionId = null;
+                for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              }
+            }
+            """
+        )
+        assert result["sid"] == "session-c", result
+        assert result["loadingSessionId"] is None, result
+        assert result["genBumped"] is True, result
+        assert result["sourceCOpened"] is True, result
+        assert result["sourceCOpen"] is True, result
+        assert result["liveKeys"] == ["session-c"], result
+    finally:
+        page.close()

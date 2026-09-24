@@ -1523,6 +1523,12 @@ async function newSession(flash, options={}){
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
+    // A New Chat supersedes any in-flight loadSession(): bump its generation so a
+    // stale metadata fetch can't replace this chat, and clear its navigation target
+    // so the new chat's stream registration isn't arbitrated against the abandoned
+    // load (_registerLiveStream prefers _loadingSessionId as the foreground).
+    if(typeof _loadSessionGeneration!=='undefined') _loadSessionGeneration++;
+    if(typeof _loadingSessionId!=='undefined') _loadingSessionId=null;
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
