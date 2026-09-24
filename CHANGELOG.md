@@ -36,6 +36,11 @@
   rebuild going from 4.34 s to 0.49 s with a byte-identical snapshot. The interim-echo check now matches a
   compact-equivalent suffix without a fixed window, so an echo stretched by interior whitespace is
   no longer shown twice. (#7310, #7569 by @happy5318)
+- **Long transcripts with virtualization on stop re-measuring rows in a loop.** When the rendered
+  window switched back and forth between two positions, each switch reset the measurement retry
+  budget, so opt-in transcript virtualization could keep re-measuring rows instead of settling. The
+  budget now resets only when the window reaches a position it hasn't just visited. (#6654, #6717 by
+  @webtecnica)
 
 ### Fixed
 
