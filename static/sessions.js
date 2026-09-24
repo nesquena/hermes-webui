@@ -3288,12 +3288,25 @@ async function _ensureMessagesLoaded(sid, opts) {
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  // Paginated responses shorten large hidden tool rows, even when the window
+  // includes every visible row. A same-session replacement must not overwrite
+  // a complete tool result with that shortened projection.
+  const reloadHint=_sameSessionForceReloadHint;
+  const previousMessages=(Array.isArray(_pendingCarryForwardSnapshot)&&_pendingCarryForwardSnapshot.length)
+    ? _pendingCarryForwardSnapshot : (S.messages||[]);
+  const preserveFullToolRows=!!(boundedReloadLimit && reloadHint && reloadHint.session_id===sid
+    && (!reloadHint.truncated || previousMessages.some(m=>m&&m.role==='tool'&&!m._content_truncated)));
+  const sessionUrl=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
   let data;
   try {
-    data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
-      {timeoutMs:120000}
-    );
+    data = await api(`${sessionUrl}${reloadLimitParam}${expandParam}`, {timeoutMs:120000});
+    if(_ownsLoad() && preserveFullToolRows && data && data.session
+      && Array.isArray(data.session.messages)
+      && data.session.messages.some(m=>m&&m.role==='tool'&&m._content_truncated)){
+      // Retry before mutating S.messages or its render caches. The bare path
+      // returns full tool rows; the generation guard also fences this retry.
+      data = await api(sessionUrl, {timeoutMs:120000});
+    }
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }

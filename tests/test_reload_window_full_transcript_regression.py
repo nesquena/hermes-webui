@@ -34,6 +34,7 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
 SESSIONS_JS = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -60,21 +61,21 @@ def _run_node(source: str) -> str:
     return result.stdout.strip()
 
 
-def _slice_function(name: str) -> str:
+def _slice_function(name: str, source: str = SESSIONS_JS) -> str:
     """Return the source text of one top-level `function name(...)` block."""
-    start = SESSIONS_JS.index(f"function {name}(")
-    if SESSIONS_JS[max(0, start - len("async ")) : start] == "async ":
+    start = source.index(f"function {name}(")
+    if source[max(0, start - len("async ")) : start] == "async ":
         start -= len("async ")
     depth = 0
-    i = SESSIONS_JS.index("{", start)
-    for pos in range(i, len(SESSIONS_JS)):
-        ch = SESSIONS_JS[pos]
+    i = source.index("{", start)
+    for pos in range(i, len(source)):
+        ch = source[pos]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return SESSIONS_JS[start : pos + 1]
+                return source[start : pos + 1]
     raise AssertionError(f"unbalanced braces while slicing {name}")
 
 
@@ -369,3 +370,97 @@ def test_ceiling_is_read_from_server_metadata():
         ]
     )["low_ceiling"]
     assert got["resolved"] == 120
+
+
+def _tool_result_reload_harness(stale=False, clipped=True, stale_on_retry=False, truncated_hint=False) -> str:
+    """Exercise the actual reload + UI snippet with a bounded server tool result.
+
+    The server's msg_limit path marks oversized tool rows _content_truncated
+    (see test_session_tail_payload.py); its bare response keeps the whole row.
+    """
+    fn = _slice_function("_messageReloadLimitForSession")
+    ensure = _slice_function("_ensureMessagesLoaded")
+    ui_text = _slice_function("_cliToolResultText", UI_JS)
+    ui_clip = _slice_function("_clipCliToolSnippet", UI_JS)
+    ui_diff = _slice_function("_cliLooksLikePatchDiff", UI_JS)
+    ui_snippet = _slice_function("_cliToolResultSnippet", UI_JS)
+    return f"""
+const _INITIAL_MSG_LIMIT=30, _MSG_LIMIT_MAX=500;
+let _msgLimitMax=500, _messagesTruncated=false, _oldestIdx=0;
+let _loadingSessionId='s', _loadSessionGeneration=1;
+let _pendingCarryForwardSnapshot=null;
+let _sameSessionForceReloadHint={{session_id:'s', loaded_renderable_count:2,
+  loaded_message_count:3, message_count:3, truncated:{str(truncated_hint).lower()}}};
+const fullTool={{role:'tool',tool_call_id:'call-1',content:JSON.stringify({{
+  metadata:'x'.repeat(16000),output:'VISIBLE RESULT'
+}})}};
+const allMessages=[{{role:'assistant',content:'calling'}}, fullTool,
+  {{role:'assistant',content:'done'}},{{role:'user',content:'new'}}];
+let S={{session:{{session_id:'s',message_count:4}},messages:allMessages.slice(0,3),lastUsage:{{}}}};
+const oldMessages=S.messages;
+const calls=[];
+function _clearSameSessionForceReloadHint(sid){{if(_sameSessionForceReloadHint?.session_id===sid) _sameSessionForceReloadHint=null;}}
+function _syncToolCallsForLoadedMessages(){{}}
+function clearLiveToolCards(){{}}
+function clearVisibleMessageRowCache(){{}}
+function _isSessionActivelyViewedForList(){{return false;}}
+const window={{}};
+async function api(url){{
+  calls.push(url);
+  if({str(stale).lower()} && calls.length===1){{_loadSessionGeneration=2;}}
+  if({str(stale_on_retry).lower()} && calls.length===2){{_loadSessionGeneration=2;}}
+  const bounded=url.includes('msg_limit=');
+  const messages=allMessages.map(m=>m===fullTool&&bounded&&{str(clipped).lower()} ? {{...m,
+    content:m.content.slice(0,12000)+'\\n[Tool output truncated in paginated session response]',
+    _content_truncated:true}} : m);
+  return {{session:{{session_id:'s',message_count:4,messages,
+    _messages_truncated:false,_messages_offset:0,_msg_limit_max:500}}}};
+}}
+{fn}
+{ensure}
+{ui_text}
+{ui_clip}
+{ui_diff}
+{ui_snippet}
+(async()=>{{
+  await _ensureMessagesLoaded('s',{{force:true,loadGeneration:1}});
+  console.log(JSON.stringify({{calls,wasReplaced:S.messages!==oldMessages,
+    snippet:_cliToolResultSnippet(S.messages[1].content)}}));
+}})().catch(err=>{{console.error(err);process.exit(1);}});
+"""
+
+
+def test_same_session_reload_preserves_full_tool_card_result():
+    got = json.loads(_run_node(_tool_result_reload_harness()))
+    assert len(got["calls"]) == 2, "a clipped bounded tool row needs a bare retry"
+    assert "msg_limit=" in got["calls"][0]
+    assert "msg_limit=" not in got["calls"][1]
+    assert got["wasReplaced"] is True
+    assert got["snippet"] == "VISIBLE RESULT", got
+
+
+def test_stale_tool_result_retry_cannot_replace_newer_load():
+    got = json.loads(_run_node(_tool_result_reload_harness(stale=True)))
+    assert len(got["calls"]) == 1, "stale generation must not retry"
+    assert got["wasReplaced"] is False
+    assert got["snippet"] == "VISIBLE RESULT"
+
+
+def test_clipped_tool_result_in_expanded_tail_preserves_full_row():
+    got = json.loads(_run_node(_tool_result_reload_harness(truncated_hint=True)))
+    assert len(got["calls"]) == 2
+    assert got["snippet"] == "VISIBLE RESULT"
+
+
+def test_unclipped_tool_result_uses_one_bounded_request():
+    got = json.loads(_run_node(_tool_result_reload_harness(clipped=False)))
+    assert len(got["calls"]) == 1
+    assert "msg_limit=" in got["calls"][0]
+    assert got["snippet"] == "VISIBLE RESULT"
+
+
+def test_generation_change_during_full_retry_does_not_replace_messages():
+    got = json.loads(_run_node(_tool_result_reload_harness(stale_on_retry=True)))
+    assert len(got["calls"]) == 2
+    assert got["wasReplaced"] is False
+    assert got["snippet"] == "VISIBLE RESULT"

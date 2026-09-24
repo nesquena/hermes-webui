@@ -346,6 +346,7 @@ let _messageRenderWindowSize = 0;
 const _MSG_LIMIT_MAX = 500;
 let _msgLimitMax = _MSG_LIMIT_MAX;
 let _pendingCarryForwardSnapshot = null;
+let _sameSessionForceReloadHint = null;
 let _loadingSessionId = 'open';
 let _loadSessionGeneration = 0;
 const window = {{}};
