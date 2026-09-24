@@ -7324,41 +7324,24 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
    .msg-action-btn base so it lines up with the other icon buttons. */
 .msg-delete-btn:hover{color:var(--danger, #c0392b);background:var(--danger-bg, rgba(192,57,43,0.08));}
 
-/* ── Restore Checkpoint FAB (always visible when a session is active) ──
+/* ── Restore Checkpoint button (bottom-right corner) ──
    Long sessions have user-turn restore buttons above the lazy-load viewport
-   (top:-2125px etc.). The FAB is a fixed bottom-right button that opens a
-   modal listing every user turn in the currently-loaded transcript slice so
-   the operator can pick any checkpoint without scrolling the message list. */
-.restore-checkpoint-fab {
-  position: fixed;
-  right: 20px;
-  bottom: 90px;
-  z-index: 10000;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: var(--accent, #B8860B);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-pill, 999px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25), 0 2px 6px rgba(0, 0, 0, 0.15);
-  font: 600 13px/1 var(--font-ui, sans-serif);
-  cursor: pointer;
-  user-select: none;
-  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
-}
-.restore-checkpoint-fab:hover {
-  background: var(--accent-hover, #996F08);
-  transform: translateY(-1px);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.3), 0 3px 8px rgba(0, 0, 0, 0.2);
-}
-.restore-checkpoint-fab:active {
-  transform: translateY(0);
-}
-.restore-checkpoint-fab svg {
-  flex-shrink: 0;
-}
+   (top:-2125px etc.), so the picker needs a perch that stays on screen. It
+   sits in the bottom-right corner of the window — in the empty gutter right
+   of the composer box on wide screens — styled like the transcript's quiet
+   rail buttons (the accent stays reserved for the dialog's confirm action).
+   The `hidden` attribute (set by ui.js on every render) is authoritative:
+   the id rule below wins only while it is absent. */
+.restore-checkpoint-btn{position:fixed;right:20px;bottom:20px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,transform .12s;}
+#restoreCheckpointBtn:not([hidden]){display:flex;}
+.restore-checkpoint-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);transform:translateY(-1px);}
+.restore-checkpoint-btn svg{display:block;}
+/* Narrow windows/mobile: the composer box fills the gutter, so ui.js docks the
+   button just above the composer band (inline bottom) instead and flips
+   .restore-rail-above on <html>; the ↓ / ☰ controls step up one slot each so
+   the rail never overlaps. */
+html.restore-rail-above #restoreCheckpointBtn:not([hidden]) ~ .scroll-to-bottom-btn{bottom:60px;}
+html.restore-rail-above #restoreCheckpointBtn:not([hidden]) ~ #outlineToggleBtn{bottom:104px;}
 
 /* ── Restore Checkpoint Modal ── */
 .restore-checkpoint-modal {
@@ -7450,7 +7433,7 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 }
 .restore-checkpoint-modal__rowid {
   flex-shrink: 0;
-  font: 600 11px/1 ui-monospace, monospace;
+  font: 600 11px/1 var(--font-mono);
   color: var(--accent, #B8860B);
   background: var(--accent-bg, rgba(184,134,11,0.08));
   padding: 4px 8px;

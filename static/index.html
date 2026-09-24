@@ -431,6 +431,12 @@
     <div id="mainChat" class="main-view">
     <div class="messages-shell">
       <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
+      <button id="restoreCheckpointBtn" class="restore-checkpoint-btn" type="button" hidden
+        onclick="_openRestoreCheckpointPicker()"
+        title="Restore checkpoint"
+        aria-label="Restore checkpoint"
+        aria-haspopup="dialog"
+        data-i18n-title="restore_fab_title" data-i18n-aria-label="restore_fab_title"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 2.64-4.36L3 8"/></svg></button>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
       <button id="outlineToggleBtn" type="button" hidden
         onclick="toggleOutlinePanel()"

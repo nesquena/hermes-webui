@@ -491,7 +491,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];_bumpViewGeneration();syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -9854,9 +9854,10 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&restore_targets=1`);
     S.session = data.session;
     S.messages = data.session.messages || [];
+    _bumpViewGeneration();  // a refresh replaces the view: stale async completions must not apply
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     if (typeof _mergePendingSessionMessage !== 'function') {
@@ -19229,9 +19230,13 @@ async function deleteMessage(btn) {
   if(!target || typeof target.id !== 'string' || !target.id) return;
   const initialSid = S.session.session_id;
   // Confirmation: deleting a turn is destructive (pair scope drops the
-  // follow-up too). Ask before mutating. The native dialog is intentional
-  // — we want zero-dependency, zero-css reliance, and the action is rare.
-  if(!window.confirm(t('msg_delete_confirm'))) return;
+  // follow-up too). Ask before mutating using the themed app dialog —
+  // native browser confirmation is banned in static JS (tests/test_sprint33.py).
+  const _delOk = await showConfirmDialog({
+    title: t('msg_delete_confirm'), message: '',
+    confirmLabel: t('delete_message'), danger: true, focusCancel: true,
+  });
+  if(!_delOk) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
@@ -19268,6 +19273,20 @@ async function deleteMessage(btn) {
   } catch(e) { setStatus(t('msg_delete_failed') + e.message); }
 }
 
+// Themed confirmation for the restore flows (Desktop parity: "Restore to this
+// checkpoint?" with Cancel / Restore). Native browser confirmation is banned in static
+// JS — tests/test_sprint33.py scans every static/*.js for it.
+async function _restoreConfirmDialog(){
+  const parts = String(t('restore_title') || '').split('\n\n');
+  return await showConfirmDialog({
+    title: parts[0] || t('restore_fab_title'),
+    message: parts.slice(1).join('\n\n').trim(),
+    confirmLabel: t('restore_fab_label'),
+    danger: true,
+    focusCancel: true,
+  });
+}
+
 // Restore Checkpoint — parity with Hermes Desktop's "restoreToMessage". Every
 // user message is treated as a checkpoint: clicking the restore icon on a
 // user message truncates the transcript at that message, leaving the prefix
@@ -19288,6 +19307,42 @@ function _restoreMessageText(m){
   if(typeof m.text === 'string') return m.text.trim();
   return '';
 }
+
+// === Async view fence (PR #7075 review item #5) ===
+// Monotone generation for the DISPLAYED session view. Every settle point that
+// replaces what the user is looking at (session switch, refresh, new session,
+// clear) bumps it, so async flows can prove that the view they started from is
+// still on screen — a session id alone cannot (A→B→A switches compare equal).
+// FENCE-BLOCK-START — keep this block dependency-free (S only): the node test
+// tests/test_view_fence_node.mjs evals this exact source range.
+function _bumpViewGeneration(){
+  S.viewGen = (Number.isFinite(S.viewGen) ? S.viewGen : 0) + 1;
+  return S.viewGen;
+}
+function _viewToken(){
+  return {
+    sid: (S.session && S.session.session_id) || null,
+    gen: Number.isFinite(S.viewGen) ? S.viewGen : 0,
+  };
+}
+function _viewTokenMatches(tok){
+  // Null-session safe by design: a missing S.session can NEVER satisfy a
+  // token, so a stale completion cannot write into a cleared/blank view.
+  if(!tok || !tok.sid || !S.session) return false;
+  if(((S.session.session_id) || null) !== tok.sid) return false;
+  return (Number.isFinite(S.viewGen) ? S.viewGen : 0) === tok.gen;
+}
+function _restoreClaim(viewToken){
+  // Ticket ownership for S.restoreInFlight: only the claim holder releases it,
+  // so a stale flow's finally can never free a newer flow's slot.
+  S._restoreTicket = (Number.isFinite(S._restoreTicket) ? S._restoreTicket : 0) + 1;
+  S.restoreInFlight = { ticket: S._restoreTicket, sid: viewToken.sid, gen: viewToken.gen };
+  return S.restoreInFlight;
+}
+function _restoreRelease(claim){
+  if(S.restoreInFlight === claim) S.restoreInFlight = false;
+}
+// FENCE-BLOCK-END
 
 // Build the addressing payload for /api/session/checkpoint/restore. Returns
 // null when the row carries no addressable identity at all.
@@ -19338,29 +19393,39 @@ async function restoreToMessage(btn) {
     setStatus(t('restore_no_row_id'));
     return;
   }
+  // View token: captured BEFORE the (awaited) confirm dialog — the restore may
+  // only run against the view the target was resolved from.
+  const viewToken = _viewToken();
+  if(!viewToken.sid) return;
   // Confirm: spelled out exactly like Desktop to make the destructive
   // scope (drop everything from this row onward) obvious. The user can still
-  // Cancel.
-  if(!window.confirm(t('restore_title'))) return;
-  await _doRestoreCheckpoint(target, msg);
+  // Cancel. Themed dialog — see _restoreConfirmDialog above.
+  if(!(await _restoreConfirmDialog())) return;
+  await _doRestoreCheckpoint(target, msg, viewToken);
 }
 
-// === Restore Checkpoint global picker (FAB + modal) ===
+// === Restore Checkpoint global picker (rail button + modal) ===
 // Long sessions have user turns far above the lazy-load window — the inline
 // restore button on each message is therefore unreachable from the initial
-// scroll position. This FAB opens a modal that lists every user turn in the
-// currently-loaded messages slice (we list what's in S.messages — the
-// restored state will reload on success) so the operator can pick any
-// checkpoint without scrolling.
+// scroll position. The rail button (#restoreCheckpointBtn) opens a modal that
+// lists every user turn in the currently-loaded messages slice (we list what's
+// in S.messages — the restored state will reload on success) so the operator
+// can pick any checkpoint without scrolling.
 function _openRestoreCheckpointPicker() {
   if(!S.session){ setStatus(t('restore_no_session')); return; }
   if(S.restoreInFlight){ setStatus(t('restore_already_running')); return; }
 
+  // One view token + one transcript snapshot for the modal's whole lifetime:
+  // clicks resolve against the same view the rows were rendered from, never
+  // against whatever occupies S.messages later (stale-modal fence).
+  const openedToken = _viewToken();
+  const snapshot = Array.isArray(S.messages) ? S.messages : [];
+
   // Collect user turns from the currently loaded slice.
   const userTurns = [];
-  if(Array.isArray(S.messages)){
-    for(let i=0;i<S.messages.length;i++){
-      const m=S.messages[i];
+  {
+    for(let i=0;i<snapshot.length;i++){
+      const m=snapshot[i];
       if(m && m.role==='user'){
         // Server-resolved addressing: `_restore_ready` (api/checkpoint_map.py)
         // covers legacy rows without a stamp; `_row_id` keeps older payloads
@@ -19418,12 +19483,19 @@ function _openRestoreCheckpointPicker() {
     .addEventListener('click', close);
   wrap.querySelectorAll('.restore-checkpoint-modal__item').forEach(el=>{
     el.addEventListener('click', async ()=>{
+      // Stale-modal fence: a click after a session switch closes the modal and
+      // refuses — S.messages belongs to a different view now.
+      if(!_viewTokenMatches(openedToken)){
+        close();
+        setStatus(t('restore_stale_view'));
+        return;
+      }
       const rowIdAttr = el.getAttribute('data-row-id')||'';
       const rowId = rowIdAttr ? parseInt(rowIdAttr, 10) : null;
       const msgIdAttr = el.getAttribute('data-message-id')||'';
       const msgId = msgIdAttr ? msgIdAttr : null;
       const idx = parseInt(el.getAttribute('data-idx')||'-1', 10);
-      const msg = (Number.isFinite(idx) && S.messages) ? S.messages[idx] : null;
+      const msg = (Number.isFinite(idx) && snapshot) ? snapshot[idx] : null;
       const target = _restoreTargetFor(msg, idx) || {
         msgId: msgId, rowId: Number.isFinite(rowId) ? rowId : null,
         idx: Number.isFinite(idx) ? idx : null,
@@ -19431,8 +19503,8 @@ function _openRestoreCheckpointPicker() {
       };
       if(target.rowId===null && target.msgId===null && target.idx===null) return;
       close();
-      if(!window.confirm(t('restore_title'))) return;
-      await _doRestoreCheckpoint(target, msg);
+      if(!(await _restoreConfirmDialog())) return;
+      await _doRestoreCheckpoint(target, msg, openedToken);
     });
     el.addEventListener('keydown', async (ev)=>{
       if(ev.key==='Enter'||ev.key===' '){
@@ -19443,22 +19515,27 @@ function _openRestoreCheckpointPicker() {
   });
 }
 
-async function _doRestoreCheckpoint(target, msg) {
+async function _doRestoreCheckpoint(target, msg, expectedToken) {
   if(S.restoreInFlight) return;
-  // Capture the session id BEFORE the await: if the user switches sessions
-  // while the restore is in flight, applying the response to the (now
-  // different) S.messages/S.session would overwrite the newly loaded session
-  // with the old one's projection. The server-side restore itself is keyed to
-  // this captured id, so we only skip the local update — a reload reflects it.
-  const restoreSid = S.session && S.session.session_id;
-  if(!restoreSid) return;
+  // A live turn must not race the destructive call (the endpoint refuses too).
+  if(S.busy){ setStatus(t('restore_already_running')); return; }
+  // View fence: only the view the target was resolved against may be
+  // restored. The token carries the session id + view generation (A→B→A
+  // switches compare unequal via the generation) and requires a LIVE session —
+  // a null session can never satisfy it (no stale write into a blank view).
+  const token = expectedToken || _viewToken();
+  if(!_viewTokenMatches(token)){
+    setStatus(t('restore_stale_view'));
+    return;
+  }
   // Pending-turn guard (client side; the endpoint enforces it too): queued
   // input belongs to the branch about to be truncated.
   if(S.pendingUserMessage && S.pendingUserMessage.length){
     setStatus(t('restore_already_running'));
     return;
   }
-  S.restoreInFlight = true;
+  const restoreSid = token.sid;
+  const claim = _restoreClaim(token);
   try {
     const payload = { session_id: restoreSid };
     if(target){
@@ -19468,17 +19545,17 @@ async function _doRestoreCheckpoint(target, msg) {
       if(typeof target.ts === 'number') payload.message_ts = target.ts;
     }
     const body = JSON.stringify(payload);
-    const resp = await fetch('/api/session/checkpoint/restore', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body
-    });
-    if(!resp.ok){
-      const errText = await resp.text();
-      throw new Error(`HTTP ${resp.status}: ${errText}`);
-    }
-    const data = await resp.json();
-    // Session fence: the user may have switched while we awaited. Drop the
-    // local projection update (loadSession for the new session already owns S).
-    if(S.session && S.session.session_id !== restoreSid) return;
+    // api() strips the leading slash so the POST stays inside the current
+    // subpath mount; root-absolute /api/ fetches are banned in static JS
+    // (tests/test_subpath_frontend_routes.py). It returns parsed JSON and
+    // throws on HTTP errors.
+    const data = await api('/api/session/checkpoint/restore', {method:'POST', body});
+    if(!data){ return; }
+    // View fence (post-await): the user may have switched sessions or the
+    // view may have been refreshed while we awaited. Drop the local
+    // projection update — the server-side restore is keyed to restoreSid,
+    // so a reload reflects it; a stale projection must never land here.
+    if(!_viewTokenMatches(token)) return;
     if(data && data.session){
       S.messages = data.session.messages || [];
       if(typeof S.session === 'object' && S.session){
@@ -19507,57 +19584,71 @@ async function _doRestoreCheckpoint(target, msg) {
   } catch(e) {
     setStatus(t('restore_failed') + (e && e.message ? e.message : String(e)));
   } finally {
-    // The flag must clear even if renderMessages()/projection code throws —
-    // otherwise every future restore is dead until a page reload.
-    S.restoreInFlight = false;
+    // The claim must clear even if renderMessages()/projection code throws —
+    // otherwise every future restore is dead until a page reload. Release is
+    // ownership-checked: a stale flow never frees a newer flow's slot.
+    _restoreRelease(claim);
   }
 }
 
-// Wrap renderMessages so the Restore Checkpoint FAB appears whenever a
-// session is active. The FAB itself is idempotent (exits early if the DOM
-// node already exists), so calling it on every render is cheap. We also
-// remove the FAB when no session is active.
-(function _installRestoreFabHook(){
+// Wrap renderMessages so the Restore Checkpoint rail button reflects state on
+// every render: it shows whenever a session with at least one user turn is
+// open, and hides otherwise. The button element lives in index.html (messages
+// right rail, next to the scroll/jump/outline controls) — this hook only
+// toggles its `hidden` attribute, so there is no per-render DOM churn.
+(function _installRestoreButtonHook(){
   if (typeof window.renderMessages !== 'function') return;
   var _orig = window.renderMessages;
   var _wrapped = function(){
     var rv = _orig.apply(this, arguments);
-    try {
-      if (typeof S !== 'undefined' && S && S.session) {
-        _ensureRestoreCheckpointFab();
-      } else {
-        _removeRestoreCheckpointFab();
-      }
-    } catch (_) { /* swallow — UI hook, never crash render */ }
+    try { _syncRestoreCheckpointButton(); }
+    catch (_) { /* swallow — UI hook, never crash render */ }
     return rv;
   };
   window.renderMessages = _wrapped;
 })();
 
-function _ensureRestoreCheckpointFab() {
-  if(document.getElementById('restoreCheckpointFab')) return;
-  if(!S.session) return;  // Only show when a session is active
-  const btn = document.createElement('button');
-  btn.id = 'restoreCheckpointFab';
-  btn.type = 'button';
-  btn.className = 'restore-checkpoint-fab';
-  btn.title = t('restore_fab_title') || 'Restore checkpoint';
-  btn.setAttribute('aria-label', btn.title);
-  btn.innerHTML = `
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M3 12a9 9 0 1 0 9-9"/>
-      <path d="M3 4v5h5"/>
-      <path d="M12 7v5l3 2"/>
-    </svg>
-    <span class="restore-checkpoint-fab__label">${esc(t('restore_fab_label') || 'Restore')}</span>
-  `;
-  btn.addEventListener('click', _openRestoreCheckpointPicker);
-  document.body.appendChild(btn);
+function _syncRestoreCheckpointButton(){
+  const btn = document.getElementById('restoreCheckpointBtn');
+  if(!btn) return;
+  let hasUserTurn = false;
+  if(S.session && Array.isArray(S.messages)){
+    for(let i=0;i<S.messages.length;i++){
+      const m=S.messages[i];
+      if(m && m.role==='user'){ hasUserTurn = true; break; }
+    }
+  }
+  btn.hidden = !hasUserTurn;
+  _positionRestoreCheckpointButton();
 }
 
-function _removeRestoreCheckpointFab() {
-  const existing = document.getElementById('restoreCheckpointFab');
-  if(existing) existing.remove();
+// The button is fixed to the window's bottom-right corner (the cardinal FAB
+// spot). On narrow windows the composer box fills that gutter, so a fixed
+// 20/20 perch would cover the send button — measure the real free space and
+// dock the button just above the composer band instead. The
+// `.restore-rail-above` flag on <html> lets the ↓ / ☰ rail controls step up
+// one slot so nothing overlaps.
+function _positionRestoreCheckpointButton(){
+  try{
+    const btn = document.getElementById('restoreCheckpointBtn');
+    if(!btn) return;
+    const box = document.querySelector('.composer-box');
+    const wrap = document.querySelector('.composer-wrap');
+    const gap = box ? (window.innerWidth - box.getBoundingClientRect().right) : null;
+    const cornerFits = (gap === null) ? true : (gap >= 60);
+    const root = document.documentElement;
+    if(root && root.classList) root.classList.toggle('restore-rail-above', !cornerFits);
+    if(cornerFits){ btn.style.bottom=''; return; }
+    const h = wrap ? Math.round(wrap.getBoundingClientRect().height) : 116;
+    btn.style.bottom = (h + 16) + 'px';
+  }catch(_){ /* layout probe only — never crash a render */ }
+}
+if(typeof window!=='undefined' && window.addEventListener){
+  window.addEventListener('resize', _positionRestoreCheckpointButton);
+  window.addEventListener('orientationchange', _positionRestoreCheckpointButton);
+}
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', _positionRestoreCheckpointButton);
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll
@@ -21655,7 +21746,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];_bumpViewGeneration();syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -21688,7 +21779,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];_bumpViewGeneration();syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

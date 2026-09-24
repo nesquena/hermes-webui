@@ -12975,16 +12975,20 @@ def handle_get(handler, parsed) -> bool:
                 )
                 # Restore-checkpoint availability: resolve which served user
                 # rows can be restored and at which durable row their archive
-                # starts. Read-only; any failure degrades to "no annotations"
-                # (legacy stamp-only buttons) and must never fail session load.
-                try:
-                    from api.checkpoint_map import annotate_restore_targets
-                    _truncated_msgs = annotate_restore_targets(s, _all_msgs, _truncated_msgs)
-                except Exception as _restore_annotate_err:
-                    logger.debug(
-                        "restore-target annotation skipped for %s: %s",
-                        sid, _restore_annotate_err,
-                    )
+                # starts. Opt-in via ?restore_targets=1 so the DEFAULT payload
+                # shape stays byte-identical to the pre-feature contract
+                # (upstream tests compare session payloads exactly). Read-only;
+                # any failure degrades to "no annotations" (legacy stamp-only
+                # buttons) and must never fail session load.
+                if query.get("restore_targets", ["0"])[0] == "1":
+                    try:
+                        from api.checkpoint_map import annotate_restore_targets
+                        _truncated_msgs = annotate_restore_targets(s, _all_msgs, _truncated_msgs)
+                    except Exception as _restore_annotate_err:
+                        logger.debug(
+                            "restore-target annotation skipped for %s: %s",
+                            sid, _restore_annotate_err,
+                        )
             else:
                 _truncated_msgs = []
                 _messages_offset = 0
@@ -15415,12 +15419,27 @@ def handle_post(handler, parsed) -> bool:
         if scope not in ("single", "pair"):
             return bad(handler, "scope must be 'single' or 'pair'")
         try:
-            from api.session_ops import delete_message
+            from api.session_ops import (
+                CheckpointBusyError,
+                CheckpointStaleError,
+                delete_message,
+            )
             result = delete_message(body["session_id"], message_id, scope)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        except CheckpointBusyError as e:
+            # Agent transaction guard: live turn / compression owns the history.
+            return bad(handler, str(e), 409)
+        except CheckpointStaleError as e:
+            # Attribution/CAS refusal — the view is stale; reload and retry.
+            return bad(handler, str(e), 409)
         except ValueError as e:
             return bad(handler, str(e), 400)
+        except Exception as e:
+            # Durable-write or sidecar-publication failure: fail-closed (the
+            # durable store may already carry the commit; never a fake ok).
+            logger.error("message_delete %s failed: %s", body["session_id"], e)
+            return bad(handler, f"Message delete failed: {e}", 500)
         # Re-fetch the session post-mutation so the public projection reflects
         # the new messages list, not the snapshot we held at the start of the
         # call. mirrors the pattern in /api/session/truncate above.
@@ -15431,10 +15450,11 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         logger.info(
-            "message_delete %s: dropped ids=%s, context=%d, messages %d->%d",
+            "message_delete %s: dropped ids=%s, context=%d, messages %d->%d, durable=%s",
             body["session_id"], result["removed_message_ids"],
             result["removed_context_count"],
             result["old_message_count"], result["new_message_count"],
+            result.get("durable_synced"),
         )
         return j(
             handler,
@@ -15442,6 +15462,8 @@ def handle_post(handler, parsed) -> bool:
                 "ok": True,
                 "removed_message_ids": result["removed_message_ids"],
                 "removed_context_count": result["removed_context_count"],
+                "durable_synced": bool(result.get("durable_synced")),
+                "durable_removed_row_ids": result.get("durable_removed_row_ids") or [],
                 "session": public_session_projection(
                     s.compact() | {"messages": s.messages}
                 ),
@@ -15481,6 +15503,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "message_id must be a string or integer", 400)
         if raw_row_id is None and raw_message_id is None and raw_msg_idx is None:
             return bad(handler, "row_id, message_id or msg_idx is required", 400)
+        # Error classes for durable-path refusals (mapped to 409 below).
+        from api.session_ops import CheckpointBusyError, CheckpointStaleError
         try:
             if raw_message_id is None and raw_msg_idx is None:
                 from api.session_ops import restore_checkpoint_at_row_id
@@ -15498,12 +15522,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError as e:
             return bad(handler, str(e), 403)
+        except CheckpointBusyError as e:
+            # The Agent's transaction guard refused: a live turn lease or a
+            # compression lock owns the transcript. Retry after it finishes.
+            return bad(handler, str(e), 409)
+        except CheckpointStaleError as e:
+            # In-txn CAS / attribution refusal — the view is stale; reload.
+            return bad(handler, str(e), 409)
         except ValueError as e:
-            # Bad id / stale checkpoint / active turn — refused before any write.
+            # Bad id / unresolvable target — refused before any write.
             return bad(handler, str(e), 400)
         except Exception as e:
-            # Durable write failure: the restore aborted with the sidecar
-            # untouched (no partial success). Surface as 500, do NOT claim ok.
+            # Durable write or sidecar-publication failure: fail-closed (never
+            # reported as ok — see api/session_ops._publish_session_sidecar).
             logger.error("checkpoint_restore %s failed: %s", body["session_id"], e)
             return bad(handler, f"Checkpoint restore failed: {e}", 500)
         from api.config import _evict_session_agent
