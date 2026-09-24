@@ -5837,14 +5837,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Registration can follow an asynchronous status/replay probe. Re-arbitrate
     // after publishing so a late completion from a previously selected session
     // cannot retain background handlers that close over the foreground UI.
-    // During a pane switch loadSession() names its destination in
-    // _loadingSessionId before S.session is replaced, so prefer it: otherwise a
-    // registration landing inside that await keeps the session the user left.
-    const navigatingTo=(typeof _loadingSessionId!=='undefined'&&_loadingSessionId)
-      ?String(_loadingSessionId)
-      :'';
-    const foregroundSid=navigatingTo
-      ||((S&&S.session&&S.session.session_id)?String(S.session.session_id):activeSid);
+    const foregroundSid=(S&&S.session&&S.session.session_id)
+      ?String(S.session.session_id)
+      :activeSid;
     closeOtherLiveStreams(foregroundSid);
   }
 

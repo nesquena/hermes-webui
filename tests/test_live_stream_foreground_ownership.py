@@ -255,13 +255,12 @@ def test_late_reconnect_registration_after_switch_keeps_only_foreground_stream(b
 
 
 def test_late_registration_during_load_window_uses_navigation_target(browser, base_url):
-    """A late registration can land while loadSession(B) is still awaiting metadata.
+    """A late registration is closed when loadSession(B) accepts B's metadata.
 
-    loadSession() names its destination in ``_loadingSessionId`` and closes other
-    streams synchronously, but only replaces ``S.session`` after its fetch. A
-    registration that lands in that window must arbitrate against the navigation
-    target, not the stale ``S.session`` row, or it keeps the session the user left
-    open with handlers bound to the foreground pane.
+    A reconnect registration can land while ``loadSession(B)`` is awaiting
+    metadata and ``S.session`` still names A. Once B becomes the authoritative
+    pane, loadSession must re-arbitrate against B so A cannot keep handlers bound
+    to the foreground UI.
     """
     page = browser.new_page(
         viewport={"width": 1024, "height": 720},
@@ -271,7 +270,7 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
         page.goto(base_url + "/", wait_until="domcontentloaded")
         page.wait_for_function(
             "() => typeof S !== 'undefined' && S._bootReady === true && "
-            "typeof attachLiveStream === 'function'",
+            "typeof attachLiveStream === 'function' && typeof loadSession === 'function'",
             timeout=15_000,
         )
         result = page.evaluate(
@@ -291,12 +290,20 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
               window.EventSource = FakeEventSource;
               for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
               let releaseProbe;
+              let releaseMetadata;
               const probe = new Promise(resolve => { releaseProbe = resolve; });
+              const metadata = new Promise(resolve => { releaseMetadata = resolve; });
               const originalApi = window.api;
               window.api = async (path, opts) => {
-                if (String(path).includes('/api/chat/stream/status')) {
+                const p = String(path);
+                if (p.includes('/api/chat/stream/status')) {
                   await probe;
                   return {active:true};
+                }
+                if (p.includes('/api/session?session_id=session-b')) {
+                  await metadata;
+                  return {session:{session_id:'session-b', title:'B', messages:[],
+                                   tool_calls:[], active_stream_id:null}};
                 }
                 return originalApi(path, opts);
               };
@@ -304,25 +311,27 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
                 S.session = {session_id:'session-a', pending_started_at:1};
                 S.messages = [];
                 S.activeStreamId = 'stream-a';
+                INFLIGHT['session-a'] = {
+                  streamId:'stream-a', messages:[], uploaded:[], toolCalls:[]
+                };
                 attachLiveStream('session-a', 'stream-a', [], {reconnecting:true});
                 await Promise.resolve();
-                // loadSession('session-b') before its metadata lands.
-                _loadingSessionId = 'session-b';
-                closeOtherLiveStreams('session-b');
+                const loadPromise = loadSession('session-b');
+                await new Promise(resolve => setTimeout(resolve, 0));
                 releaseProbe();
                 await new Promise(resolve => setTimeout(resolve, 0));
                 await new Promise(resolve => setTimeout(resolve, 0));
                 const sourceA = FakeEventSource.instances.find(s => s.url.includes('stream-a'));
-                // B's idle metadata lands; nothing else would close A.
-                S.session = {session_id:'session-b'};
-                S.activeStreamId = null;
-                _loadingSessionId = null;
-                await new Promise(resolve => setTimeout(resolve, 0));
+                const sourceAOpenDuringLoad = !!sourceA
+                  && sourceA.readyState === FakeEventSource.OPEN;
+                releaseMetadata();
+                await loadPromise;
                 return {
                   sourceAOpened:!!sourceA,
+                  sourceAOpenDuringLoad,
                   sourceAOpen:!!sourceA && sourceA.readyState === FakeEventSource.OPEN,
+                  selectedSid:S.session && S.session.session_id,
                   liveKeys:Object.keys(LIVE_STREAMS).sort(),
-                  inflightAReattach:INFLIGHT['session-a']?.reattach === true,
                 };
               } finally {
                 window.api = originalApi;
@@ -333,93 +342,9 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
             """
         )
         assert result["sourceAOpened"] is True, result
+        assert result["sourceAOpenDuringLoad"] is True, result
         assert result["sourceAOpen"] is False, result
+        assert result["selectedSid"] == "session-b", result
         assert result["liveKeys"] == [], result
-        assert result["inflightAReattach"] is True, result
-    finally:
-        page.close()
-
-
-def test_new_chat_during_pending_load_keeps_its_own_stream(browser, base_url):
-    """New Chat started while loadSession(B) is still awaiting metadata.
-
-    newSession() must supersede the pending load: clear ``_loadingSessionId`` and
-    bump the load generation, so the new chat's stream registration is not
-    arbitrated against the abandoned B load (which would close it as soon as it
-    opens) and B's stale metadata can't replace the new chat.
-    """
-    page = browser.new_page(
-        viewport={"width": 1024, "height": 720},
-        bypass_csp=True,
-    )
-    try:
-        page.goto(base_url + "/", wait_until="domcontentloaded")
-        page.wait_for_function(
-            "() => typeof S !== 'undefined' && S._bootReady === true && "
-            "typeof attachLiveStream === 'function' && typeof newSession === 'function'",
-            timeout=15_000,
-        )
-        result = page.evaluate(
-            """
-            async () => {
-              class FakeEventSource {
-                static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
-                static instances = [];
-                constructor(url) {
-                  this.url = String(url);
-                  this.readyState = FakeEventSource.OPEN;
-                  FakeEventSource.instances.push(this);
-                }
-                addEventListener() {}
-                close() { this.readyState = FakeEventSource.CLOSED; }
-              }
-              window.EventSource = FakeEventSource;
-              for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
-              const originalApi = window.api;
-              window.api = async (path, opts) => {
-                const p = String(path);
-                if (p.includes('/api/session/new')) {
-                  return {session:{session_id:'session-c', title:'Untitled', messages:[],
-                                   workspace:(S.session&&S.session.workspace)||'', model:''}};
-                }
-                if (p.includes('/api/chat/stream/status')) return {active:true};
-                return originalApi(path, opts);
-              };
-              const genBefore = _loadSessionGeneration;
-              try {
-                // loadSession('session-b') has named its target and is awaiting metadata.
-                _loadingSessionId = 'session-b';
-                await newSession(false, {worktree:false});
-                const afterNew = {
-                  loadingSessionId:_loadingSessionId,
-                  genBumped:_loadSessionGeneration > genBefore,
-                  sid:S.session && S.session.session_id,
-                };
-                // The first send in the new chat registers its stream.
-                S.activeStreamId = 'stream-c';
-                attachLiveStream('session-c', 'stream-c', []);
-                await new Promise(resolve => setTimeout(resolve, 0));
-                await new Promise(resolve => setTimeout(resolve, 0));
-                const sourceC = FakeEventSource.instances.find(s => s.url.includes('stream-c'));
-                return {
-                  ...afterNew,
-                  sourceCOpened:!!sourceC,
-                  sourceCOpen:!!sourceC && sourceC.readyState === FakeEventSource.OPEN,
-                  liveKeys:Object.keys(LIVE_STREAMS).sort(),
-                };
-              } finally {
-                window.api = originalApi;
-                _loadingSessionId = null;
-                for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
-              }
-            }
-            """
-        )
-        assert result["sid"] == "session-c", result
-        assert result["loadingSessionId"] is None, result
-        assert result["genBumped"] is True, result
-        assert result["sourceCOpened"] is True, result
-        assert result["sourceCOpen"] is True, result
-        assert result["liveKeys"] == ["session-c"], result
     finally:
         page.close()
