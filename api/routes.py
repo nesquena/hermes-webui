@@ -15443,9 +15443,10 @@ def handle_post(handler, parsed) -> bool:
         backend = str(body.get("backend") or "")
         try:
             if parsed.path == "/api/vault/unlock":
-                result, status = vault_unlock.unlock(backend, str(body.get("master_password") or ""))
+                result, status = vault_unlock.unlock(backend, str(body.get("master_password") or ""), body.get("profile"))
                 return j(handler, result, status=status)
-            return j(handler, vault_unlock.lock(backend or None))
+            result, status = vault_unlock.lock(backend or None, body.get("profile"))
+            return j(handler, result, status=status)
         except vault_unlock.VaultUnavailable as exc:
             return j(handler, {"success": False, "error": str(exc)}, status=501)
         finally:

@@ -16,12 +16,17 @@
     return fetch(path, opts).then(function (r) { return r.json(); });
   }
 
-  var btn = null, panel = null, backends = [];
+  var btn = null, panel = null, backends = [], profile = null, seq = 0;
 
   function closePanel() { if (panel) { panel.remove(); panel = null; } }
 
   function refresh() {
+    var mine = ++seq;
     return api('api/vault/status').then(function (s) {
+      if (mine !== seq) return;  // a newer status request superseded this one
+      var p = (s && s.profile) || null;
+      if (p !== profile) closePanel();  // panel rows belong to the old profile
+      profile = p;
       backends = (s && s.backends) || [];
       btn.hidden = !backends.length;
       var allOpen = backends.length && backends.every(function (b) { return b.unlocked; });
@@ -45,7 +50,8 @@
       lockBtn.type = 'button';
       lockBtn.textContent = tr('vault_lock_btn', 'Lock');
       lockBtn.onclick = function () {
-        api('api/vault/lock', { backend: b.name }).then(function () { closePanel(); refresh(); });
+        api('api/vault/lock', { backend: b.name, profile: profile }).then(function () { closePanel(); refresh(); },
+          function () { closePanel(); refresh(); });
       };
       el.appendChild(lockBtn);
       return el;
@@ -69,8 +75,9 @@
       if (!pw) return;
       submit.disabled = true;
       msg.textContent = tr('vault_unlocking', 'Unlocking…');
-      api('api/vault/unlock', { backend: b.name, master_password: pw }).then(function (r) {
+      api('api/vault/unlock', { backend: b.name, master_password: pw, profile: profile }).then(function (r) {
         if (r && r.success) { closePanel(); refresh(); return; }
+        if (r && r.error && /profile changed/i.test(r.error)) { closePanel(); refresh(); return; }
         msg.textContent = (r && r.error) || tr('vault_unlock_failed', 'Unlock failed');
       }).catch(function () {
         msg.textContent = tr('vault_unlock_failed', 'Unlock failed');
@@ -84,6 +91,12 @@
 
   function togglePanel() {
     if (panel) { closePanel(); return; }
+    // Re-read status first so the rows always match the current profile.
+    refresh().then(openPanel);
+  }
+
+  function openPanel() {
+    if (panel || !backends.length) return;
     panel = document.createElement('div');
     panel.className = 'vault-unlock-panel';
     panel.setAttribute('role', 'dialog');
@@ -105,6 +118,14 @@
     if (reload) reload.parentNode.insertBefore(btn, reload);
     else document.body.appendChild(btn);
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closePanel(); });
+    // Profile switches do not reload the page. Watch the app's active
+    // profile and drop the panel as soon as it changes; the server also
+    // rejects actions carrying a stale profile (409).
+    window.addEventListener('focus', refresh);
+    setInterval(function () {
+      var cur = (typeof S !== 'undefined' && S && S.activeProfile) || null;
+      if (cur && profile && cur !== profile) { closePanel(); refresh(); }
+    }, 1000);
     refresh();
     setInterval(refresh, 60000);
   }

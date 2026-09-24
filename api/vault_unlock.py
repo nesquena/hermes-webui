@@ -49,9 +49,22 @@ def _unlockable_backends():
     return [b for b in enabled_backends() if getattr(b, "needs_unlock", False)]
 
 
+def _profile_name() -> str:
+    from api.profiles import get_active_profile_name
+    return get_active_profile_name() or "default"
+
+
+def _profile_mismatch(expected):
+    """Reject actions built from a panel rendered for another profile."""
+    if expected is not None and str(expected) != _profile_name():
+        return {"success": False, "error": "Active profile changed; reopen the panel"}, 409
+    return None
+
+
 def status() -> dict:
     with _profile_home():
         return {
+            "profile": _profile_name(),
             "backends": [
                 {
                     "name": b.name,
@@ -63,8 +76,11 @@ def status() -> dict:
         }
 
 
-def unlock(name: str, master: str) -> tuple[dict, int]:
+def unlock(name: str, master: str, profile=None) -> tuple[dict, int]:
     with _profile_home():
+        stale = _profile_mismatch(profile)
+        if stale:
+            return stale
         backend = next((b for b in _unlockable_backends() if b.name == name), None)
         if backend is None:
             return {"success": False, "error": "Unknown or disabled vault backend"}, 404
@@ -72,20 +88,24 @@ def unlock(name: str, master: str) -> tuple[dict, int]:
             return {"success": False, "error": "Master password is required"}, 400
         try:
             backend.unlock(master)
-        except Exception as exc:  # backend messages never include the password
-            msg = str(exc)[:300]
-            if master and master in msg:
-                msg = "Unlock failed"
-            return {"success": False, "error": msg}, 400
+        except Exception:
+            # Never relay backend exception text: it could embed (part of)
+            # the master password.
+            return {"success": False, "error": "Unlock failed"}, 400
         finally:
             master = ""
         return {"success": True, "backend": backend.name,
                 "unlocked": bool(backend.is_unlocked())}, 200
 
 
-def lock(name: str | None) -> dict:
+def lock(name: str | None, profile=None) -> tuple[dict, int]:
     with _profile_home():
-        from agent.vault_backends import unlock as _session
-
+        stale = _profile_mismatch(profile)
+        if stale:
+            return stale
+        try:
+            from agent.vault_backends import unlock as _session
+        except ImportError as exc:  # older hermes-agent without vault backends
+            raise VaultUnavailable("This hermes-agent version has no vault backends") from exc
         _session.lock(name or None)
-        return {"success": True}
+        return {"success": True}, 200

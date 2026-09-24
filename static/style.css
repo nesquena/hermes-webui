@@ -7328,7 +7328,12 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Password-manager unlock control (static/vault_unlock.js) */
 .vault-unlock-btn{font-size:14px;line-height:1}
 .app-titlebar .vault-unlock-btn{display:inline-flex}
-@media (min-width:901px){.app-titlebar .vault-unlock-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%)}}
+@media (min-width:901px){.app-titlebar .vault-unlock-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%)}
+}
+/* Standalone windows show the reload button too: keep the lock in the normal
+   flow next to it instead of pinning it to the same right edge. */
+.pwa-standalone .app-titlebar .vault-unlock-btn{position:static;transform:none}
+@media (display-mode: standalone),(display-mode: fullscreen){.app-titlebar .vault-unlock-btn{position:static;transform:none}}
 .vault-unlock-btn[hidden],.app-titlebar .vault-unlock-btn[hidden]{display:none}
 .vault-unlock-btn--floating{position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:900;width:36px;height:36px;border-radius:50%;border:1px solid var(--border);background:var(--surface);cursor:pointer}
 .vault-unlock-panel{position:fixed;right:12px;top:calc(48px + env(safe-area-inset-top));z-index:1000;min-width:240px;max-width:calc(100vw - 24px);padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);box-shadow:0 4px 16px rgba(0,0,0,.25);font-size:13px}
