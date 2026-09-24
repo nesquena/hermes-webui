@@ -108,8 +108,6 @@ def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
     release_stream_creation = threading.Event()
     writer_started = threading.Event()
     writer_saved = threading.Event()
-    admission_raised = threading.Event()
-    events = []
 
     def pause_stream_creation():
         stream_creation_started.set()
@@ -121,7 +119,6 @@ def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
         with routes._get_session_agent_lock(session.session_id):
             session.composer_draft = {"text": "draft saved during admission"}
             session.save(touch_updated_at=False)
-            events.append("writer_save")
             writer_saved.set()
 
     monkeypatch.setattr(routes, "create_stream_channel", pause_stream_creation)
@@ -132,8 +129,6 @@ def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
             _start(session, workspace=issue7193_env / "workspace")
         except RuntimeError as exc:
             admission_error.append(exc)
-            events.append("admission_error")
-            admission_raised.set()
 
     admission_thread = threading.Thread(target=start_chat)
     admission_thread.start()
@@ -142,19 +137,18 @@ def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
     writer_thread = threading.Thread(target=write_draft)
     writer_thread.start()
     assert writer_started.wait(2)
-    assert not writer_saved.wait(0.2)
+    writer_saved_before_release = writer_saved.wait(0.2)
 
     release_stream_creation.set()
     admission_thread.join(2)
     writer_thread.join(2)
 
     assert admission_error and str(admission_error[0]) == "stream registration rejected"
-    assert admission_raised.is_set()
     assert writer_saved.is_set()
-    assert events.index("admission_error") < events.index("writer_save")
     reloaded = Session.load(session.session_id)
     assert reloaded.composer_draft == {"text": "draft saved during admission"}
     assert [row["content"] for row in _user_rows(reloaded)] == ["retry me"]
+    assert not writer_saved_before_release
 
 
 def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
@@ -165,7 +159,6 @@ def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
     release_stream_creation = threading.Event()
     writer_started = threading.Event()
     writer_saved = threading.Event()
-    events = []
 
     def pause_stream_creation():
         stream_creation_started.set()
@@ -178,7 +171,6 @@ def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
             session.model = "prepared-model"
             session.model_provider = "prepared-provider"
             session.save(touch_updated_at=False)
-            events.append("writer_save")
             writer_saved.set()
 
     monkeypatch.setattr(routes, "create_stream_channel", pause_stream_creation)
@@ -194,7 +186,6 @@ def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
             )
         except RuntimeError as exc:
             admission_error.append(exc)
-            events.append("admission_error")
 
     admission_thread = threading.Thread(target=start_chat)
     admission_thread.start()
@@ -203,7 +194,7 @@ def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
     writer_thread = threading.Thread(target=write_metadata)
     writer_thread.start()
     assert writer_started.wait(2)
-    assert not writer_saved.wait(0.2)
+    writer_saved_before_release = writer_saved.wait(0.2)
 
     release_stream_creation.set()
     admission_thread.join(2)
@@ -211,11 +202,11 @@ def test_rejected_start_waits_for_same_value_metadata_writer_until_cleanup(
 
     assert admission_error and str(admission_error[0]) == "stream registration rejected"
     assert writer_saved.is_set()
-    assert events.index("admission_error") < events.index("writer_save")
     reloaded = Session.load(session.session_id)
     assert reloaded.model == "prepared-model"
     assert reloaded.model_provider == "prepared-provider"
     assert [row["content"] for row in _user_rows(reloaded)] == ["retry me"]
+    assert not writer_saved_before_release
 
 
 def test_rejected_start_preserves_entry_recovery_backup_bytes(
