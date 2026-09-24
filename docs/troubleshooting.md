@@ -229,7 +229,11 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 **Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
 config injection settings; disables checkout-controlled askpass and credential helpers; and forces
 SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
-remain available. A trusted user/system `core.sshCommand` is also retained with the batch option for
+remain available when declared directly in the primary system/global files. `include` and
+`includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
+included files may be checkout-controlled even when Git labels their scope global. Move these
+settings into the main user/system config if needed. The explicit scope reads also work on
+Git versions before 2.26. A trusted user/system `core.sshCommand` is retained with the batch option for
 its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
 as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
 to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
@@ -242,7 +246,7 @@ transport prefix names a helper command.
 python3 scripts/diagnose_update_git.py /path/to/checkout
 ```
 
-The diagnostic reads the origin, accepts only HTTP(S) and SSH remote forms, then probes the captured
+The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms, then probes the captured
 URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
 reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
 checkout paths, origin paths, URL credentials, tokens, and secret query values.
@@ -251,7 +255,10 @@ checkout paths, origin paths, URL credentials, tokens, and secret query values.
 an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
 it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
 commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
-and unknown transports fail closed because WebUI cannot establish a portable no-prompt option.
+fails closed. Custom-named commands get a five-second, stdin-disabled `-G` configuration probe;
+only a successful probe enables OpenSSH batch mode. Explicit interactive `BatchMode` options
+(including whitespace forms such as `-o 'BatchMode no'`) fail closed rather than relying on
+a later option to override OpenSSH's first-value semantics. Failed/unknown probes fail closed.
 
 **When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
 environment but the update check still fails, or if either path opens a credential prompt. Include

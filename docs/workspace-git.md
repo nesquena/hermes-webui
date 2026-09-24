@@ -98,5 +98,12 @@ Repository-local credential helpers, askpass commands, and SSH commands are disa
 Git operations. Generic and URL-scoped credential helpers from user and system Git config remain
 available for private HTTPS remotes. SSH remotes can use the inherited SSH agent and a user/system
 `core.sshCommand`; WebUI appends the SSH variant's batch option so unattended operations do not open password,
-passphrase, or host-key prompts. Unknown custom transports and Git's `simple` SSH variant fail closed
-because they do not expose a portable batch-mode option.
+passphrase, or host-key prompts. Custom-named commands are recognized with a bounded `-G`
+configuration probe; failed probes and Git's `simple` variant fail closed. Explicit interactive
+`BatchMode` options are rejected because OpenSSH keeps the first value.
+
+Credential helpers, `core.sshCommand`, and `ssh.variant` must be declared directly in the
+primary system/global Git config. Includes are not followed for these settings, because an
+included file can be checkout-controlled despite appearing to have global scope. Move included
+authentication settings to the main user/system config. Explicit scope reads preserve
+compatibility with Git versions before 2.26.

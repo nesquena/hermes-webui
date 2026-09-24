@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -87,7 +88,15 @@ def _scoped_git_config_values(
     key: str,
     *,
     executable: str,
+    trusted_only: bool = False,
 ) -> tuple[tuple[str, str], ...]:
+    if trusted_only:
+        return tuple(
+            (scope, value)
+            for scope, _key, value in _scoped_git_config_entries(
+                cwd, env, f"^{re.escape(key)}$", executable=executable,
+            )
+        )
     try:
         result = subprocess.run(
             [
@@ -99,6 +108,25 @@ def _scoped_git_config_values(
         )
     except (OSError, subprocess.TimeoutExpired):
         return ()
+    if result.returncode == 129:
+        # Git before 2.26 has no --show-scope. Explicit reads preserve the
+        # system/global/local/worktree order used for first-match gitProxy.
+        values = []
+        for scope in ("system", "global", "local", "worktree"):
+            try:
+                scoped = subprocess.run(
+                    [executable, "config", f"--{scope}", "--includes", "-z", "--get-all", key],
+                    cwd=str(cwd), shell=False, capture_output=True, timeout=10,
+                    env=env, creationflags=windows_hide_flags(),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if scoped.returncode == 0:
+                output = scoped.stdout or b""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                values.extend((scope, value) for value in output.removesuffix("\0").split("\0"))
+        return tuple(values)
     if result.returncode != 0:
         return ()
     raw_output = result.stdout or b""
@@ -120,40 +148,32 @@ def _scoped_git_config_entries(
     *,
     executable: str,
 ) -> tuple[tuple[str, str, str], ...]:
-    """Read ``(scope, key, value)`` triples matching a Git config regex."""
-    try:
-        result = subprocess.run(
-            [
-                executable, "config", "--includes", "--show-scope", "-z",
-                "--get-regexp", pattern,
-            ],
-            cwd=str(cwd), shell=False, capture_output=True, timeout=10,
-            env=env, creationflags=windows_hide_flags(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ()
-    if result.returncode != 0:
-        return ()
-    raw_output = result.stdout or b""
-    if isinstance(raw_output, str):
-        raw_output = raw_output.encode("utf-8", errors="replace")
-    raw_fields = raw_output.split(b"\0")
-    if raw_fields and raw_fields[-1] == b"":
-        raw_fields.pop()
-    if len(raw_fields) % 2:
-        return ()
+    """Read direct system/global entries, without Git 2.26's scope option.
+
+    Includes are intentionally disabled: their apparent scope does not establish
+    ownership of the included file. Executable settings must be in a primary
+    system/global config file, not in a checkout-selected include.
+    """
     entries = []
-    for raw_scope, raw_entry in zip(raw_fields[0::2], raw_fields[1::2], strict=True):
-        if b"\n" not in raw_entry:
-            return ()
-        raw_key, raw_value = raw_entry.split(b"\n", 1)
-        entries.append(
-            (
-                raw_scope.decode("utf-8", errors="replace"),
-                raw_key.decode("utf-8", errors="replace"),
-                raw_value.decode("utf-8", errors="replace"),
+    for scope in ("system", "global"):
+        try:
+            result = subprocess.run(
+                [executable, "config", f"--{scope}", "--no-includes", "-z",
+                 "--get-regexp", pattern],
+                cwd=str(cwd), shell=False, capture_output=True, timeout=10,
+                env=env, creationflags=windows_hide_flags(),
             )
-        )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode != 0:
+            continue
+        output = result.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        for entry in output.rstrip("\0").split("\0"):
+            key, separator, value = entry.partition("\n")
+            if separator:
+                entries.append((scope, key, value))
     return tuple(entries)
 
 
@@ -192,20 +212,25 @@ def noninteractive_git_env(
     trusted_commands = tuple(
         value
         for scope, value in _scoped_git_config_values(
-            cwd, env, "core.sshCommand", executable=executable,
+            cwd, env, "core.sshCommand", executable=executable, trusted_only=True,
         )
         if scope in {"system", "global"}
     )
     trusted_variants = tuple(
         value
         for scope, value in _scoped_git_config_values(
-            cwd, env, "ssh.variant", executable=executable,
+            cwd, env, "ssh.variant", executable=executable, trusted_only=True,
         )
         if scope in {"system", "global"}
     )
     ssh_command = trusted_commands[-1] if trusted_commands else "ssh"
     try:
-        command_words = shlex.split(ssh_command, posix=True)
+        lexer = shlex.shlex(ssh_command, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        if sys.platform == "win32":
+            lexer.escape = ""
+        command_words = list(lexer)
     except ValueError:
         command_words = []
     variant = trusted_variants[-1].strip().lower() if trusted_variants else "auto"
@@ -234,6 +259,28 @@ def noninteractive_git_env(
             "putty": "putty",
             "tortoiseplink": "tortoiseplink",
         }.get(executable_name, "unsupported")
+    if variant == "unsupported" and command_words:
+        # Like Git's auto detection, ask the trusted command to print its
+        # configuration, not connect. Never probe checkout-selected commands.
+        try:
+            with subprocess.Popen(
+                ["sh", "-c", f"{ssh_command} -G -oBatchMode=yes localhost"],
+                cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=(os.name != "nt"),
+                creationflags=windows_hide_flags(),
+            ) as probe:
+                try:
+                    if probe.wait(timeout=5) == 0:
+                        variant = "ssh"
+                except subprocess.TimeoutExpired:
+                    if os.name != "nt":
+                        os.killpg(probe.pid, signal.SIGKILL)
+                    else:
+                        probe.kill()
+                    probe.wait()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     if variant not in {"ssh", "plink", "putty", "tortoiseplink"}:
         # Git's "simple" variant and unknown custom transports have no general
         # non-interactive flag. Do not run one when the no-prompt invariant
@@ -248,19 +295,18 @@ def noninteractive_git_env(
             else "-oBatchMode=yes"
         )
     if variant == "ssh":
-        normalized_words = [word.lower().replace(" ", "") for word in command_words]
-        for index, word in enumerate(normalized_words):
-            if word in {"-obatchmode=no", "-obatchmode=false"}:
+        for index, word in enumerate(command_words):
+            option = ""
+            if word == "-o" and index + 1 < len(command_words):
+                option = command_words[index + 1]
+            elif word.startswith("-o"):
+                option = word[2:]
+            parts = re.split(r"[=\s]+", option.strip(), maxsplit=1)
+            if len(parts) == 2 and parts[0].lower() == "batchmode" and parts[1].lower() != "yes":
                 ssh_command = "git-ssh-command-disables-batch-mode"
                 variant = "simple"
                 batch_option = ""
                 break
-            if word == "-o" and index + 1 < len(normalized_words):
-                if normalized_words[index + 1] in {"batchmode=no", "batchmode=false"}:
-                    ssh_command = "git-ssh-command-disables-batch-mode"
-                    variant = "simple"
-                    batch_option = ""
-                    break
     if batch_option:
         ssh_command = f"{ssh_command} {batch_option}"
     configured = dict(env)
@@ -480,5 +526,5 @@ def is_safe_diagnostic_remote(remote: str) -> bool:
             _port = parsed.port
         except ValueError:
             return False
-        return bool(hostname) and parsed.scheme.lower() in {"http", "https", "ssh"}
+        return bool(hostname) and parsed.scheme.lower() in {"http", "https", "ssh", "git"}
     return _SCP_SSH_REMOTE_RE.match(value) is not None

@@ -101,7 +101,7 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
     def fake_run(cmd, **kwargs):
         assert cmd[0] == '/usr/bin/git'
         git_args = _git_command_args(cmd[1:])
-        if git_args[:2] == ['config', '--includes']:
+        if git_args[0] == 'config' and git_args[1] in {'--includes', '--system', '--global'}:
             return MagicMock(returncode=1, stdout=b'', stderr=b'')
         if git_args == ['fetch', 'origin', '--tags', '--force']:
             return MagicMock(returncode=0, stdout='', stderr='')

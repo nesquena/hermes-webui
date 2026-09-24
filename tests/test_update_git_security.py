@@ -11,7 +11,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -75,11 +74,13 @@ class _AuthenticatedGitHandler(SimpleHTTPRequestHandler):
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
 @pytest.mark.parametrize("helper_scope", ["generic", "url"])
+@pytest.mark.parametrize("old_git", [False, True])
 def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
     helper_scope: str,
+    old_git: bool,
 ) -> None:
     """Trusted user helpers must work while checkout-controlled helpers stay inert."""
     if os.name == "nt":
@@ -145,6 +146,18 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
         "credential.helper",
         f"!{sys.executable} -c 'from pathlib import Path; Path(\"{repo_marker}\").touch()'",
     )
+
+    if old_git:
+        real_git = shutil.which("git")
+        wrapper = tmp_path / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'for arg do [ "$arg" != "--show-scope" ] || exit 129; done\n'
+            f"exec {shlex.quote(real_git)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
 
     try:
         if caller == "updates":
@@ -259,7 +272,7 @@ def test_fetch_allows_git_protocol_without_applicable_repo_proxy(
     port = _unused_local_port()
     daemon = subprocess.Popen(
         [
-            "git", "daemon", "--reuseaddr", "--export-all",
+            "git", "daemon", "--verbose", "--reuseaddr", "--export-all",
             f"--base-path={origin.parent}", "--listen=127.0.0.1",
             f"--port={port}", str(origin.parent),
         ],
@@ -268,17 +281,18 @@ def test_fetch_allows_git_protocol_without_applicable_repo_proxy(
         text=True,
     )
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                    break
-            except OSError as exc:
-                if daemon.poll() is not None:
-                    raise AssertionError(daemon.stderr.read()) from exc
-                time.sleep(0.05)
-        else:
-            raise AssertionError("git daemon did not become ready")
+        ready = threading.Event()
+
+        def read_readiness():
+            for line in daemon.stderr:
+                if "Ready to rumble" in line:
+                    ready.set()
+                    return
+
+        reader = threading.Thread(target=read_readiness, daemon=True)
+        reader.start()
+        assert ready.wait(5), "git daemon did not become ready"
+        reader.join(timeout=1)
 
         repo = tmp_path / "workspace"
         repo.mkdir()
