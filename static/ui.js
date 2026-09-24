@@ -6123,16 +6123,20 @@ function _consumeScrollbarDragIntent(top){
   _scrollbarDragIntentUntil=-Infinity;
   return fresh;
 }
-// pointerup/pointercancel: re-stamp ONLY when the drag moved scrollTop past the
-// last position the scroll listener has already seen, i.e. the drag's own async
-// scroll event is still undelivered and must own the next classification. When
-// every drag movement was already delivered (and classified), clear the intent
-// instead of extending it: a fresh window would otherwise be consumed by the
-// NEXT scroll -- typically render/layout generated -- and unpin a reader who had
-// dragged back to the tail and was re-pinned.
-function _releaseScrollbarDragIntent(top){
+// pointerup/pointercancel: returning to the true bottom relinquishes both queued
+// and timestamped drag ownership. Otherwise re-stamp ONLY when the drag moved
+// scrollTop past the last position the listener saw, i.e. its async scroll event
+// is still undelivered. Prefer the live release position, with the last-delivered
+// position as a harness-safe fallback.
+function _releaseScrollbarDragIntent(top,trueBottomTop){
   const observed=_scrollbarDragObservedTop;
   _scrollbarDragObservedTop=null;
+  const releasedTop=typeof top==='number'?top:observed;
+  if(typeof releasedTop==='number'&&typeof trueBottomTop==='number'&&releasedTop>=trueBottomTop){
+    _scrollbarDragIntentQueued=false;
+    _scrollbarDragIntentUntil=-Infinity;
+    return;
+  }
   if(observed!==null&&typeof top==='number'&&top!==observed) _markScrollbarDragIntent();
   else _scrollbarDragIntentUntil=-Infinity;
 }
@@ -6501,13 +6505,13 @@ if(typeof window!=='undefined'){
     // `scroll` is async: the drag's own scroll event may only be dispatched
     // AFTER this release. Re-stamp only if that movement is still undelivered;
     // otherwise clear the intent so a later render scroll cannot consume it.
-    if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop);
+    if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop,el.scrollHeight-el.clientHeight);
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('pointercancel',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
-    if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop);
+    if(typeof _releaseScrollbarDragIntent==='function') _releaseScrollbarDragIntent(el.scrollTop,el.scrollHeight-el.clientHeight);
     _scheduleMessageVirtualizedRender(true);
   },{passive:true});
   window.addEventListener('blur',()=>{

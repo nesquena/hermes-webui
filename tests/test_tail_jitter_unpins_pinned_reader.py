@@ -207,6 +207,7 @@ eval(payload.listener);
 const snapshots={};
 const snapshot=(key)=>{snapshots[key]={
   dragActive:_scrollbarDragActive,
+  intentQueued:_scrollbarDragIntentQueued,
   intentUntil:_scrollbarDragIntentUntil,
   rafPending:rafs.size>0,
   pinned:_scrollPinned,
@@ -463,6 +464,57 @@ def test_render_nudge_after_drag_back_to_tail_keeps_reader_pinned(release):
     assert result["snapshots"]["released"]["intentUntil"] is None
     assert result["state"]["_scrollPinned"] is True
     assert result["state"]["_messageUserUnpinned"] is False
+
+
+def test_queued_drag_back_at_true_bottom_does_not_own_later_render_nudge():
+    """Maintainer regression (gate 7268, round 4): both drag scroll events are
+    delivered before release but their shared classification frame is still
+    queued. Returning to the true bottom must discard that queued ownership so
+    an 8px render nudge before rAF remains browser jitter, not reader intent."""
+    result = _run_drag_probe(
+        [
+            {"op": "pointerdown", "offsetX": 800},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "scrollTop", "value": 6500},
+            {"op": "scroll"},
+            {"op": "snapshot", "key": "backAtTailBeforeRelease"},
+            {"op": "pointerup"},
+            {"op": "snapshot", "key": "releasedAtTail"},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["backAtTailBeforeRelease"]["intentQueued"] is True
+    assert result["snapshots"]["releasedAtTail"]["intentQueued"] is False
+    assert result["state"]["_scrollPinned"] is True
+    assert result["state"]["_messageUserUnpinned"] is False
+
+
+def test_queued_drag_that_leaves_true_bottom_still_unpins():
+    """A final upward thumb move that is still awaiting its scroll event at
+    release remains genuine drag intent, even when the last delivered position
+    was the true bottom."""
+    result = _run_drag_probe(
+        [
+            {"op": "pointerdown", "offsetX": 800},
+            {"op": "scrollTop", "value": 6492},
+            {"op": "scroll"},
+            {"op": "scrollTop", "value": 6500},
+            {"op": "scroll"},
+            {"op": "scrollTop", "value": 6492},  # late movement, not delivered yet
+            {"op": "advance", "ms": 251},
+            {"op": "pointerup"},
+            {"op": "snapshot", "key": "releasedAboveTail"},
+            {"op": "scroll"},
+            {"op": "flush"},
+        ]
+    )
+    assert result["snapshots"]["releasedAboveTail"]["intentQueued"] is True
+    assert result["snapshots"]["releasedAboveTail"]["intentUntil"] == 1251 + 250
+    assert result["state"]["_scrollPinned"] is False
+    assert result["state"]["_messageUserUnpinned"] is True
 
 
 def test_scrollbar_click_without_movement_leaves_no_intent_for_render_nudge():
