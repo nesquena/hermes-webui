@@ -235,3 +235,43 @@ class TestPanelRendering:
         subprocess.run(
             ["node", "-e", script], cwd=REPO_ROOT, check=True, text=True, capture_output=True
         )
+
+    def test_composed_row_does_not_duplicate_default_badge(self):
+        """Review #7156: default profile with display_name must not render duplicate (default)."""
+        body = _function_body(PANELS_JS, "async function loadProfilesPanel()")
+        assert "!_profileDisplayLabel(p).endsWith(`(${p.name})`)" in body
+
+        dd_body = _function_body(PANELS_JS, "function renderProfileDropdown(data)")
+        assert "!_profileDisplayLabel(p).endsWith(`(${p.name})`)" in dd_body
+
+        helper = _function_body(PANELS_JS, "function _profileDisplayLabel(")
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            {helper}
+            function esc(s) {{ return s; }}
+            function t(k) {{ return k === 'profile_default_label' ? '(default)' : k; }}
+
+            function renderCardName(p) {{
+                const label = _profileDisplayLabel(p);
+                const defaultBadge = (p.is_default && !label.endsWith('(' + p.name + ')')) ? ' ' + t('profile_default_label') : '';
+                return label + defaultBadge;
+            }}
+
+            // Default profile with display_name: renders "Base Profile (default)" without extra "(default)"
+            const renamedDefault = {{ name: 'default', display_name: 'Base Profile', is_default: true }};
+            assert.strictEqual(renderCardName(renamedDefault), 'Base Profile (default)');
+
+            // Default profile without display_name: renders "default (default)"
+            const bareDefault = {{ name: 'default', display_name: '', is_default: true }};
+            assert.strictEqual(renderCardName(bareDefault), 'default (default)');
+
+            // Non-default profile with display_name: renders "Worker (worker)"
+            const nonDefault = {{ name: 'worker', display_name: 'Worker', is_default: false }};
+            assert.strictEqual(renderCardName(nonDefault), 'Worker (worker)');
+            """
+        )
+        subprocess.run(
+            ["node", "-e", script], cwd=REPO_ROOT, check=True, text=True, capture_output=True
+        )
+
