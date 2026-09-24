@@ -267,7 +267,7 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
         page.wait_for_timeout(200)
 
         metrics = []
-        for width in (260, 300):
+        for width in (180, 300):
             page.locator(".probe").evaluate("(el, width) => { el.style.width = width + 'px'; }", width)
             metrics.append(
                 page.locator(".session-item").evaluate(
@@ -282,8 +282,10 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
                       const titleStyle = getComputedStyle(title);
                       const shortTagStyle = getComputedStyle(shortTag);
                       const groupRect = group.getBoundingClientRect();
+                      const shortTagRect = shortTag.getBoundingClientRect();
                       const rowRect = titleRow.getBoundingClientRect();
                       return {
+                        probeWidth: row.closest('.probe').getBoundingClientRect().width,
                         titleWidth: title.getBoundingClientRect().width,
                         rowClientWidth: titleRow.clientWidth,
                         rowScrollWidth: titleRow.scrollWidth,
@@ -301,6 +303,9 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
                         ),
                         shortTagFlexShrink: shortTagStyle.flexShrink,
                         shortTagNotTruncated: shortTag.scrollWidth <= shortTag.clientWidth + 1,
+                        shortTagInsideGroup:
+                          shortTagRect.left >= groupRect.left - 1 &&
+                          shortTagRect.right <= groupRect.right + 1,
                         rowBoxShadow: rowStyle.boxShadow,
                         buttonOutlineStyle: titleStyle.outlineStyle,
                       };
@@ -311,16 +316,132 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
         browser.close()
 
     for result in metrics:
-        assert result["titleWidth"] >= 36
+        title_floor = 45 if result["probeWidth"] < 200 else 90
+        assert result["titleWidth"] >= title_floor
         assert result["rowScrollWidth"] <= result["rowClientWidth"] + 1
         assert result["groupInsideRow"] is True
         assert result["tagsSingleLine"] is True
         assert result["tagsFitRowHeight"] is True
         assert result["shortTagFlexShrink"] == "0"
         assert result["shortTagNotTruncated"] is True
+        assert result["shortTagInsideGroup"] is True
         assert "inset" in result["rowBoxShadow"]
         assert re.search(r"\b2px\b", result["rowBoxShadow"])
         assert result["buttonOutlineStyle"] == "none"
+
+
+def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar pointer-focus browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 1024, "height": 260})
+        page.set_content(
+            """
+            <!doctype html>
+            <html class="dark">
+              <body tabindex="-1">
+                <div class="probe">
+                  <div class="session-item" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <button type="button" class="session-title session-open-control">
+                            Pointer focus conversation
+                          </button>
+                        </div>
+                        <span class="session-time">now</span>
+                      </div>
+                    </div>
+                    <span class="session-attention-indicator is-attention-generic"></span>
+                    <div class="session-actions">
+                      <button type="button" class="session-actions-trigger">More</button>
+                    </div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(
+            content="""
+              body{margin:0}
+              .probe{margin:8px;width:300px}
+              .session-item,.session-actions,.session-attention-indicator{transition:none!important}
+            """
+        )
+
+        row = page.locator(".session-item")
+        control = page.locator(".session-open-control")
+        control.click()
+        page.mouse.move(500, 240)
+
+        pointer_state = row.evaluate(
+            """
+            row => {
+              const control = row.querySelector('.session-open-control');
+              const actions = row.querySelector('.session-actions');
+              const timestamp = row.querySelector('.session-time');
+              const attention = row.querySelector('.session-attention-indicator');
+              return {
+                activeControl: document.activeElement === control,
+                focusWithin: row.matches(':focus-within'),
+                focusVisible: control.matches(':focus-visible'),
+                actionsOpacity: getComputedStyle(actions).opacity,
+                actionsPointerEvents: getComputedStyle(actions).pointerEvents,
+                timestampVisible: getComputedStyle(timestamp).display !== 'none',
+                attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
+              };
+            }
+            """
+        )
+
+        page.locator("body").focus()
+        page.keyboard.press("Tab")
+        keyboard_state = row.evaluate(
+            """
+            row => {
+              const control = row.querySelector('.session-open-control');
+              const actions = row.querySelector('.session-actions');
+              const timestamp = row.querySelector('.session-time');
+              const attention = row.querySelector('.session-attention-indicator');
+              return {
+                activeControl: document.activeElement === control,
+                focusVisible: control.matches(':focus-visible'),
+                actionsOpacity: getComputedStyle(actions).opacity,
+                actionsPointerEvents: getComputedStyle(actions).pointerEvents,
+                timestampVisible: getComputedStyle(timestamp).display !== 'none',
+                attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
+              };
+            }
+            """
+        )
+        browser.close()
+
+    assert pointer_state == {
+        "activeControl": True,
+        "focusWithin": True,
+        "focusVisible": False,
+        "actionsOpacity": "0",
+        "actionsPointerEvents": "none",
+        "timestampVisible": True,
+        "attentionVisible": True,
+    }
+    assert keyboard_state == {
+        "activeControl": True,
+        "focusVisible": True,
+        "actionsOpacity": "1",
+        "actionsPointerEvents": "auto",
+        "timestampVisible": False,
+        "attentionVisible": False,
+    }
 
 
 def test_keyboard_focus_ring_contrast_and_attention_shadow_compose_in_browser():

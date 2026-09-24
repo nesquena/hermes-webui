@@ -1602,9 +1602,9 @@
      action button (.session-actions, position:absolute, 26x26 at right:6px)
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
-     menu-open / focus-within rule below. */
+     menu-open / keyboard-focus rule below. */
   .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),var(--session-reflow-offset,0),0);}
-  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:has(:focus-visible),.session-item.menu-open{padding-right:40px;}
   .session-item.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
   .session-item.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
   .session-item.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
@@ -1663,7 +1663,10 @@
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title-group{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:6ch;max-width:100%;overflow:hidden;}
   .session-title{flex:1 1 auto;min-width:6ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
-  .session-open-control{cursor:pointer;}
+  /* Conversation identity takes priority over secondary tag chips. At normal
+     widths the title keeps a readable 14ch floor; at the 180px minimum it owns
+     half the available group and the overflow-hidden wrapper clips tail tags. */
+  .session-open-control{cursor:pointer;min-width:min(50%,14ch);}
   .session-open-control:focus-visible{outline:none;}
   /* Session rows need an opaque, 3:1 keyboard indicator. The shared
      --focus-ring token is deliberately translucent for glow-style controls;
@@ -1689,7 +1692,7 @@
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
   .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);visibility:hidden;}
   .session-attention-indicator{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;z-index:1;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;}
-  .session-item:hover .session-attention-indicator,.session-item:focus-within .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
+  .session-item:hover .session-attention-indicator,.session-item:has(:focus-visible) .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
   .session-state-indicator.is-streaming,.session-state-indicator.is-unread,.session-state-indicator.is-attention-approval,.session-state-indicator.is-attention-clarify,.session-state-indicator.is-attention-generic{visibility:visible;}
   .session-state-indicator.is-attention-approval{color:var(--error);}
   .session-state-indicator.is-attention-clarify{color:var(--warning);}
@@ -1738,11 +1741,11 @@
     flex-shrink:0;
   }
   .session-time.is-hidden{display:none;}
-  .session-item:hover .session-time,.session-item:focus-within .session-time,.session-item.menu-open .session-time{display:none;}
+  .session-item:hover .session-time,.session-item:has(:focus-visible) .session-time,.session-item.menu-open .session-time{display:none;}
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
-  .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
-  .session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
+  .session-item:hover .session-actions,.session-item:has(:focus-visible) .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
+  .session-item.streaming:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
   .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
@@ -3248,7 +3251,7 @@
     .session-actions{display:none;}
     .session-item{padding-right:6px;}
     .session-item.streaming,.session-item.unread{padding-right:40px;}
-    .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
+    .session-item:has(:focus-visible),.session-item.menu-open{padding-right:6px;}
   }
 
   @media (max-width: 340px){
@@ -5667,8 +5670,8 @@ main.main > #mainPlugin{display:none;}
 .session-worktree-indicator svg{width:12px;height:12px;}
 .session-item:hover .session-branch-indicator,
 .session-item:hover .session-worktree-indicator,
-.session-item:focus-within .session-branch-indicator,
-.session-item:focus-within .session-worktree-indicator,
+.session-item:has(:focus-visible) .session-branch-indicator,
+.session-item:has(:focus-visible) .session-worktree-indicator,
 .session-item.menu-open .session-branch-indicator{
   opacity:.85;
   color:var(--text);
