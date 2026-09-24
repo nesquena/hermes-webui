@@ -2363,6 +2363,36 @@ _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
+def _picker_excludes_epoch() -> str:
+    """Return a stable token identifying the current picker-exclude policy.
+
+    #7507: an in-flight ``/api/models/live`` response that started BEFORE a
+    ``picker_excludes`` save carries a model list built under the OLD
+    policy. Publishing it to the cache afterwards makes the very next
+    request re-receive the just-excluded model, which is exactly what the
+    settings-save invalidation was supposed to prevent (Codex reproduced
+    this with a thread barrier).
+
+    The epoch is part of the live-cache key, so a policy change produces a
+    different key and the stale entry is simply never looked up again. It
+    must be cheap (no disk reads): the caller already invalidated the whole
+    live cache in the settings handler, so this is defense-in-depth for the
+    race where the response lands after that clear.
+    """
+    try:
+        from api.config import _picker_excludes_payload
+
+        payload = _picker_excludes_payload()
+    except Exception:
+        return ""
+    if not payload:
+        return ""
+    try:
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return ""
+
+
 def _active_profile_for_live_models_cache() -> str:
     try:
         from api.profiles import get_active_profile_name
@@ -2377,7 +2407,11 @@ def _active_profile_for_live_models_cache() -> str:
 
 
 def _live_models_cache_key(provider: str) -> tuple[str, str]:
-    return (_active_profile_for_live_models_cache(), provider)
+    # #7507: the picker-exclude policy is part of the cache identity. A
+    # response assembled before a policy change must not satisfy a
+    # request issued after it, so the epoch rides in the key and a
+    # policy change simply moves to a fresh key.
+    return (_active_profile_for_live_models_cache(), provider, _picker_excludes_epoch())
 
 
 def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
@@ -2390,12 +2424,20 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         if now - ts >= _LIVE_MODELS_CACHE_TTL:
             _LIVE_MODELS_CACHE.pop(key, None)
             return None
+        # #7507: reject a result that was built before a policy change even
+        # if it shares the current key (broadened key shape / legacy entry).
+        payload_epoch = payload.get("_picker_excludes_epoch")
+        if (payload_epoch or "") != key[2]:
+            _LIVE_MODELS_CACHE.pop(key, None)
+            return None
         return copy.deepcopy(payload)
 
 
 def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+    stamped = dict(payload)
+    stamped["_picker_excludes_epoch"] = key[2]
     with _LIVE_MODELS_CACHE_LOCK:
-        _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
+        _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(stamped))
 
 
 def _clear_live_models_cache() -> None:
@@ -25442,10 +25484,22 @@ def _handle_live_models(handler, parsed):
         cache_key = _live_models_cache_key(provider)
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
+            cached.pop("_picker_excludes_epoch", None)
             return j(handler, cached)
 
         def _finish(payload: dict):
+            # #7507: never publish a payload built under a superseded policy.
+            # The key already moved on a policy change, so a mismatch here
+            # means the fetch straddled a save — drop it instead of letting
+            # the next request re-receive an excluded model.
+            if payload.get("_picker_excludes_epoch", cache_key[2]) != cache_key[2]:
+                logger.debug(
+                    "discarding stale /api/models/live result for %s (policy changed mid-fetch)",
+                    provider,
+                )
+                return j(handler, {"provider": provider, "models": [], "count": 0})
             _set_cached_live_models(cache_key, payload)
+            payload.pop("_picker_excludes_epoch", None)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
