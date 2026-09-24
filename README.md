@@ -220,7 +220,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
-- Session projects -- named groups with colors for organizing sessions
+- Session projects -- named groups with colors for organizing sessions; delegated subagent sessions have no project of their own and follow their nearest ancestor's project in the project filter and the Unassigned chip; forks and other child sessions keep their own project, so a fork moved to "No project" stays Unassigned
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
@@ -291,6 +291,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
 - Background agent error alerts -- banner when a non-active session encounters an error
+- Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
@@ -396,6 +397,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
 | `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored. **Note (upgrade):** the default now follows `HERMES_HOME` — if you previously relocated `HERMES_HOME` to a non-default base **without** setting `HERMES_WEBUI_STATE_DIR`, your WebUI state now resolves to `$HERMES_HOME/webui` instead of the old platform-default `~/.hermes/webui`. To keep using the old location, set `HERMES_WEBUI_STATE_DIR` to it (or move the directory). Installs with `HERMES_HOME` unset or at the default base are unaffected. |
+| `HERMES_WEBUI_SETTINGS_FILE` | `<state dir>/settings.json` | Optional path for this instance's WebUI settings file (sessions, workspaces and projects stay in the state directory). Read once at startup, so restart after changing it |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
@@ -408,6 +410,7 @@ Full list of environment variables:
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
+| `HERMES_WEBUI_VISIBLE_SESSION_LIMIT` | `20` | Size of the sidebar's interactive recency window (how many recent non-cron/webhook sessions are listed). Also bounds how many delegated subagent children can nest at once, since a child only renders when its row wins a slot in the window — raise it for wide fan-outs. Non-integer or non-positive values fall back to the default. Values above 200 are clamped. Resolved before profile init, so a profile `.env` cannot override it |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions; an evicted session lazily reloads from its JSON sidecar on next access |
 

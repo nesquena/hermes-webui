@@ -162,7 +162,7 @@ gate rather than inventing values without source support.
 ## Authoritative emitted events (`/api/chat/stream`)
 
 These are the **real wire `event:` names** emitted by `api/streaming.py` today
-(23 names). Clients and docs must use this table — not the semantic draft above —
+(24 names). Clients and docs must use this table — not the semantic draft above —
 when integrating with the live chat SSE relay.
 
 | Wire name | Role |
@@ -179,11 +179,12 @@ when integrating with the live chat SSE relay.
 | `title` | Session title update (often after `done`) |
 | `title_status` | Title generation status / skip reason |
 | `warning` | Non-fatal provider/fallback warning |
+| `runtime_model` | Local Agent serving identity observed at output or successful completion |
 | `apperror` | Terminal application error (no trailing `stream_end`) |
 | `cancel` | Run cancelled |
 | `done` | Turn finalized (session payload); title/`stream_end` may follow |
 | `stream_end` | SSE fence — close the client EventSource |
-| `metering` | Token/cost metering snapshot |
+| `metering` | Best-effort live token/cost metering snapshot; not journal-replayed |
 | `context_status` | Context window / usage status |
 | `goal` | Goal / plan card update |
 | `goal_continue` | Goal continuation signal |
@@ -198,6 +199,31 @@ Relay close set (stop draining the live queue): `stream_end`, `cancel`,
 The semantic taxonomy table remains a draft for the proposed per-session
 endpoint vocabulary and must be confirmed during maintainer review before that
 endpoint claims parity.
+
+### Observed local runtime model
+
+The local worker emits `runtime_model` with
+`{session_id, stream_id, model, provider?, fallback_active, phase}`. The IDs
+refer to the original run-journal owner even if compression rotates the Agent's
+session. `phase="observed_output"` means the Agent's own model was read at a
+nonempty token/reasoning callback or after successful completion (including a
+non-streaming reply or credential self-heal). It does not promise that a turn
+which emitted partial output will finish successfully. Missing Agent model
+sends no observation; the configured selection is not used as serving proof.
+`fallback_active` is true only when the Agent explicitly reports its fallback
+flag. Consecutive identical observations are deduplicated within the turn.
+
+Fallback lifecycle warnings invalidate older serving evidence and reset the
+deduplication; status text alone never establishes the replacement model. A
+fresh observation after the warning reestablishes it, including when a buffered
+success notice arrives after output. Durable replay retains the event IDs.
+The journal summary and HTTP `runtime_journal_snapshot.runtime_model` project
+the latest valid observation from the same session/stream event window, or null
+if a warning or malformed latest observation invalidated it. No previous run's
+footer or selected route fills an unknown current run. This is a local-worker
+producer; gateway attribution and frontend presentation are separate concerns
+(see #6272 and #7181). `route_observed` remains reserved for route-only data,
+not successful output.
 
 ## Cursor and resume semantics
 
@@ -227,6 +253,31 @@ not a reliable replay source because it holds only recent in-memory state.
 A future implementation must replay from the run journal via the existing
 `_replay_run_journal()` path (in `api/routes.py`) and fall back to the
 snapshot mechanism when journal entries are unavailable for a given cursor.
+
+### Live-only metering (implemented replay behavior)
+
+`metering` is best-effort live telemetry, not durable recovery content.
+`RunJournalWriter.append_sse_event()` returns `None` for metering without
+writing a row or allocating a sequence number. Other journaled events retain
+contiguous sequence numbers. Local-agent and gateway producers carry an
+explicit per-frame event ID, including `None`, through `StreamChannel`;
+an unjournaled metering frame emits no new SSE `id:` and must not borrow the
+previous frame's journal ID. The last-ID fallback is limited to legacy
+two-element queue entries.
+
+Existing journals are not rewritten. Direct readers (`read_run_events()` and
+`read_session_run_events()`) retain legacy metering rows for cursor validation
+and gap/coverage checks. Both run-level and per-session journal replay emitters
+apply `journal_replay_visible()` to omit those rows from reconnect delivery.
+Consequently, replayed legacy event IDs can have gaps where metering was
+filtered; clients must not infer missing durable content from those gaps.
+Metering missed while disconnected is not recovered from the journal; fresh
+live updates remain available. This exception does not remove token, reasoning,
+tool, or terminal events from durable replay.
+
+Coverage: `tests/test_run_journal.py`, `tests/test_run_journal_routes.py`,
+`tests/test_issue4812_session_sse_stream.py`, and
+`tests/test_stage364_opus_live_sse_event_id.py`.
 
 ## Snapshot fallback
 

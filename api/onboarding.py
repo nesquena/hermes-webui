@@ -71,7 +71,9 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_model": "anthropic/claude-sonnet-4.6",
         "requires_base_url": False,
         "models": [
-            {"id": _to_openrouter_namespace(model["id"]), "label": model["label"]}
+            {"id": "z-ai/glm-4.5-air", "label": "GLM-4.5 Air"}
+            if model["id"] == "zai/glm-4.5-flash"
+            else {"id": _to_openrouter_namespace(model["id"]), "label": model["label"]}
             for model in _FALLBACK_MODELS
         ],
         "category": "easy_start",

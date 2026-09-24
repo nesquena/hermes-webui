@@ -71,6 +71,7 @@ from api.helpers import (
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
+from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
@@ -200,41 +201,156 @@ def _compact_for_echo_compare(value: str) -> str:
     return re.sub(r'\s+', '', str(value or ''))
 
 
-def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
+class _CompactEchoIndex:
+    """Incremental whitespace-folded index over a growing text buffer.
+
+    The journal-rebuild echo check runs once per interim event against the
+    whole accumulated reasoning transcript. Rescanning the raw buffer each
+    time walks every whitespace character between the tail and the first
+    non-whitespace character — on a whitespace-heavy transcript that span is
+    megabytes, and the per-interim walk turns the replay quadratic (the
+    ``_find_compact_echo_suffix_start`` shape measured ~55x slower than
+    master on a production-shaped journal in the #7569 review).
+
+    This class keeps the folded view and the raw cut offsets *incrementally*:
+
+    * ``append`` folds each new chunk once and records, per folded character,
+      its raw index — so the cost of a chunk is proportional to the chunk,
+      never to the buffer.
+    * ``matches_tail`` compares only the candidate against the end of the
+      folded view: O(len(candidate)), with no raw-text walk at all.
+    * ``cut_to`` converts a folded length back to a raw index by bisecting
+      the recorded offsets, so one call returns the same cut point the raw
+      backward walk would have produced.
+
+    ``str.isspace`` is used for folding instead of the ``\\s`` pattern used
+    by :func:`_compact_for_echo_compare`. The two agree on every Unicode code
+    point, so the indexed view and the regex-folded view stay consistent.
+    """
+
+    __slots__ = ('_compact', '_offsets', '_raw_len')
+
+    def __init__(self) -> None:
+        self._compact: list[str] = []
+        self._offsets: list[int] = []
+        self._raw_len = 0
+
+    def append(self, text: str) -> None:
+        """Fold ``text`` onto the end of the index (one pass, no rescan)."""
+        raw = str(text or '')
+        if not raw:
+            return
+        compact = self._compact
+        offsets = self._offsets
+        base = self._raw_len
+        for i, ch in enumerate(raw):
+            if not ch.isspace():
+                compact.append(ch)
+                offsets.append(base + i)
+        self._raw_len = base + len(raw)
+
+    def reset(self) -> None:
+        """Drop all indexed state (used after the raw text is truncated)."""
+        self._compact.clear()
+        self._offsets.clear()
+        self._raw_len = 0
+
+    @property
+    def compact_length(self) -> int:
+        return len(self._compact)
+
+    def matches_tail(self, suffix: str) -> bool:
+        """True when the folded ``suffix`` equals the folded tail."""
+        candidate = _compact_for_echo_compare(suffix)
+        if not candidate:
+            return False
+        n = len(candidate)
+        if n > len(self._compact):
+            return False
+        start = len(self._compact) - n
+        compact = self._compact
+        for i in range(n):
+            if compact[start + i] != candidate[i]:
+                return False
+        return True
+
+    def cut_to(self, suffix: str) -> int | None:
+        """Raw index at which the echo of ``suffix`` starts, else ``None``.
+
+        The returned index is the first raw character of the echo, matching
+        the leftmost-cut semantics of the raw backward walk. Trailing
+        whitespace before the echo is left to the caller's ``rstrip``.
+        """
+        candidate = _compact_for_echo_compare(suffix)
+        if not candidate:
+            return None
+        n = len(candidate)
+        if n > len(self._compact):
+            return None
+        start = len(self._compact) - n
+        compact = self._compact
+        for i in range(n):
+            if compact[start + i] != candidate[i]:
+                return None
+        return self._offsets[start]
+
+    def compact_view(self) -> str:
+        """The folded text (materialized on demand — never kept as a string)."""
+        return ''.join(self._compact)
+
+
+def _find_compact_echo_suffix_start(value: str, suffix: str) -> int | None:
+    """Return the index where a whitespace-folded ``suffix`` starts at the
+    end of ``value``, or ``None`` when the tail does not echo it.
+
+    The match walks ``value`` and ``suffix`` from the end, skipping
+    whitespace in ``value``; only the echo span itself is inspected, so the
+    cost is linear in the echo length and allocation-free. Unlike a fixed
+    fold window, the walk cannot miss a compact-equivalent suffix whose raw
+    span is stretched by interior whitespace.
+
+    ``str.isspace`` is used for the walk instead of the ``\\s`` pattern used
+    by :func:`_compact_for_echo_compare`. The two agree on every Unicode code
+    point, so the folded view and the walk stay consistent.
+    """
+    candidate = _compact_for_echo_compare(suffix)
+    if not candidate:
+        return None
+    i = len(value) - 1
+    j = len(candidate) - 1
+    while j >= 0:
+        while i >= 0 and value[i].isspace():
+            i -= 1
+        if i < 0 or value[i] != candidate[j]:
+            return None
+        i -= 1
+        j -= 1
+    return i + 1
+
+
+def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
     """Remove ``suffix`` from ``value`` when they match after whitespace folding.
 
-    The search window is folded once and the cut point is then located by
-    walking backwards across the echo itself. The previous implementation
-    probed every candidate cut index and re-folded the whole remaining tail for
-    each probe, which is quadratic in the window size: a 6000-character final
-    message cost seconds of CPU, held under the GIL, stalling every other
-    stream in the process.
+    The cut point is located by the same backward walk as
+    :func:`_find_compact_echo_suffix_start`: no fixed search window is
+    involved, so a compact-equivalent suffix is removed no matter how much
+    interior whitespace stretches its raw span. The previous windowed
+    implementation folded a bounded tail on every call; its retired probing
+    variant re-folded the remaining tail per candidate cut index, which is
+    quadratic: a 6000-character final message cost seconds of CPU, held under
+    the GIL, stalling every other stream in the process.
 
-    ``str.isspace`` is used for the backwards walk instead of the ``\\s``
-    pattern used by :func:`_compact_for_echo_compare`. The two agree on every
-    Unicode code point, so the folded view and the walk stay consistent.
+    Whitespace sitting between the kept text and the echo is removed by
+    ``rstrip``, which lands on the same result as the leftmost cut index the
+    probing loop used to return.
     """
     raw = str(value or '')
-    candidate = _compact_for_echo_compare(suffix)
-    if not raw or not candidate:
+    if not raw:
         return raw, False
-    tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
-    offset = len(raw) - len(tail)
-    compact_tail = _compact_for_echo_compare(tail)
-    if len(candidate) > len(compact_tail) or not compact_tail.endswith(candidate):
+    start = _find_compact_echo_suffix_start(raw, suffix)
+    if start is None:
         return raw, False
-    # Consume exactly as many non-whitespace characters as the folded suffix
-    # holds; ``idx`` then sits on the first character of the echo. Whitespace
-    # sitting between the kept text and the echo is removed by ``rstrip``,
-    # which is why this lands on the same result as the leftmost cut index the
-    # probing loop used to return.
-    remaining = len(candidate)
-    idx = len(tail)
-    while remaining and idx:
-        idx -= 1
-        if not tail[idx].isspace():
-            remaining -= 1
-    return raw[: offset + idx].rstrip(), True
+    return raw[:start].rstrip(), True
 
 
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
@@ -797,8 +913,37 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
+            or 'model fallback:' in m
+            or 'switched to fallback' in m
+            or 'primary model restored:' in m
         )
     )
+
+
+# Session turn-lease notices emitted by the Agent (agent/turn_facade_lease.py)
+# while another Hermes process (gateway, CLI, cron) holds this session's turn
+# lease. Emitted via ``_emit_status`` (kind ``lifecycle``) while waiting and on
+# admission, and via ``_emit_warning`` (kind ``warn``) when the wait times out
+# and the message was not processed.
+_SESSION_LEASE_WAIT_MARKERS = (
+    'another hermes process is using this session',
+    'still waiting for the other hermes process',
+    'another hermes process kept this session busy',
+    'session is free; loading the latest transcript',
+)
+
+
+def _is_session_lease_wait_message(kind: str, message: str) -> bool:
+    """Return True for Agent session turn-lease wait notices.
+
+    Classification keys on the Agent status kind (``lifecycle`` / ``warn``) so
+    user-authored text can never be promoted to a warning.
+    """
+    k = str(kind or '').strip().lower()
+    if k not in ('lifecycle', 'warn'):
+        return False
+    m = str(message or '').strip().lower()
+    return any(marker in m for marker in _SESSION_LEASE_WAIT_MARKERS)
 
 
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
@@ -2198,6 +2343,14 @@ def _prepare_marker_clean_writeback(
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
+    # Same internal-control class, second home: a consumed mid-turn /steer is
+    # appended to the turn's last tool result wrapped in
+    # [OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]. Strip it
+    # here, on the rows both writebacks are built from, so neither
+    # session.messages (rendered verbatim) nor session.context_messages keeps
+    # the raw wrapper. Stripping the incoming rows too keeps them identity-equal
+    # to the marker-free rows persisted by earlier turns. (#7600)
+    cleaned = _strip_oob_markers_from_messages(cleaned)
     provenance = {
         'verification_nudge_seen': has_verification_nudge,
         'active_turn_identity': copy.deepcopy(active_turn_identity),
@@ -2310,6 +2463,11 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    # The merge carries earlier display rows across turns verbatim, so a row
+    # settled before this guard existed would keep its raw wrapper forever.
+    # Scrub the persisted display copy too — after the merge, so identity
+    # matching above still saw the rows unchanged. (#7600)
+    session.messages = _strip_oob_markers_from_messages(session.messages)
     _annotate_media_snapshots_for_settled_messages(session.messages)
     _compact_session_image_parts_for_persistence(session)
     _advance_truncation_watermark_after_commit(session)  # #3831
@@ -4396,9 +4554,10 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
        short and frequently embed a borrowed Latin technical term (e.g. a CJK
        title containing the word "Python"), the title side uses a proportion
        threshold (>=35% of the title's alphabetic characters in a non-start
-       script, min 2 chars) rather than a strict majority -- so a CJK title with
-       one English word still trips, while an English title with a single
-       foreign place-name does not.
+       script, min 2 chars) rather than a strict majority. CJK titles with
+       borrowed Latin terms are allowed when the title also contains CJK
+       characters (#7693), but pure-Latin titles for CJK conversations are
+       still rejected.
     2. The legacy German-start → English-title heuristic, preserved verbatim so
        the original behavior keeps working for same-script (latin) drift that
        the script check can't see.
@@ -4408,13 +4567,26 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
         return False
 
     # (1) Cross-script mismatch — language-agnostic.
+    # CJK text routinely borrows Latin product/technical terms (e.g. "WeChat
+    # Pay", "Python", "ProRes RAW"), so when the user writes in CJK, Latin
+    # characters in the title are acceptable as long as the title also
+    # contains CJK — i.e. the title is genuinely mixed, not pure drift.
+    # A pure-Latin title for a CJK conversation is still rejected.
+    # Unrelated scripts (Cyrillic, Arabic, Greek …) are always flagged.
     user_script = _dominant_script(user_text)
     if user_script:
         title_counts = _script_counts(candidate)
         title_total = sum(title_counts.values())
         if title_total >= 2:
             for script, n in title_counts.items():
-                if script != user_script and n >= 2 and (n / title_total) >= 0.35:
+                if script == user_script:
+                    continue
+                # When user writes in CJK, Latin in the title is a borrowed
+                # term as long as the title also contains CJK characters.
+                if user_script == 'cjk' and script == 'latin':
+                    if title_counts.get('cjk', 0) >= 2:
+                        continue
+                if n >= 2 and (n / title_total) >= 0.35:
                     return True
 
     # (2) Legacy same-script German→English heuristic.
@@ -5450,6 +5622,94 @@ def _strip_oob_blocks(content):
             for key, value in content.items()
         }
     return content
+
+
+_OOB_ANY_OPEN_RE = re.compile(
+    r'\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]',
+    re.IGNORECASE,
+)
+_OOB_ANY_CLOSE_RE = re.compile(
+    r'\[/OUT-OF-BAND\s+USER\s+MESSAGE\]',
+    re.IGNORECASE,
+)
+
+
+def _unwrap_single_oob_frame(content: str) -> str | None:
+    """Unwrap exactly one fully-validated [OUT-OF-BAND USER MESSAGE] frame.
+
+    Returns the extracted inner user text if and only if ``content`` consists of
+    exactly one valid opening tag and one valid closing tag wrapping the user
+    content. If markers are multiple, nested, incomplete, or ambiguous, returns
+    None so caller preserves the row byte-for-byte.
+    """
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return None
+
+    open_matches = list(_OOB_ANY_OPEN_RE.finditer(stripped))
+    close_matches = list(_OOB_ANY_CLOSE_RE.finditer(stripped))
+
+    # Must have exactly one opening marker and one closing marker
+    if len(open_matches) != 1 or len(close_matches) != 1:
+        return None
+
+    open_m = open_matches[0]
+    close_m = close_matches[0]
+
+    # Opening marker must be at the very start of stripped content
+    if open_m.start() != 0:
+        return None
+
+    # Closing marker must be at the very end of stripped content
+    if close_m.end() != len(stripped):
+        return None
+
+    # Opening marker must end before closing marker starts
+    if open_m.end() > close_m.start():
+        return None
+
+    inner = stripped[open_m.end():close_m.start()]
+    # Strip surrounding whitespace/newlines from the extracted user text
+    return inner.strip('\r\n').strip()
+
+
+def _unwrap_steer_row_oob_marker(message: dict) -> None:
+    """Extract inner steer text from a typed steer row in place (#7600).
+
+    The Hermes Agent emits mid-turn steers as standalone typed user rows
+    (`role == 'user'`, `display_kind == 'steer'`). The control wrapper
+    `[OUT-OF-BAND USER MESSAGE ...] ... [/OUT-OF-BAND USER MESSAGE]` is
+    extracted to preserve only the user-authored instruction.
+
+    Mutates caller-row in place to maintain object identity. If the marker
+    frame is malformed, nested, multiple, or legacy, preserves the row
+    byte-for-byte.
+    """
+    if not isinstance(message, dict):
+        return
+    if message.get('role') != 'user' or message.get('display_kind') != 'steer':
+        return
+    content = message.get('content')
+    if isinstance(content, str):
+        unwrapped = _unwrap_single_oob_frame(content)
+        if unwrapped is not None:
+            message['content'] = unwrapped
+    elif isinstance(content, list):
+        if len(content) == 1 and isinstance(content[0], dict):
+            part = content[0]
+            if part.get('type') == 'text' and isinstance(part.get('text'), str):
+                unwrapped = _unwrap_single_oob_frame(part['text'])
+                if unwrapped is not None:
+                    part['text'] = unwrapped
+
+
+def _strip_oob_markers_from_messages(messages):
+    """Unwrap OOB steer markers from typed steer rows in place (#7600)."""
+    for message in messages or []:
+        _unwrap_steer_row_oob_marker(message)
+    return messages
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
@@ -7967,7 +8227,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                             pending_names[tid] = part.get('name', '')
                             pending_args[tid] = part.get('input', {})
                             pending_asst_idx[tid] = msg_idx
-            for tc in m.get('tool_calls', []):
+            for tc in m.get('tool_calls') or []:
                 if not isinstance(tc, dict):
                     continue
                 tid = tc.get('id', '') or tc.get('call_id', '')
@@ -9187,7 +9447,32 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
+    cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    if q is not None:
+        # Snapshot lookup is not admission: Stop can detach the stream before
+        # we publish the initial run. Register ownership and its retained cancel
+        # signal on the same STREAMS_LOCK edge used by cancellation.
+        with STREAMS_LOCK:
+            cancel_event = CANCEL_FLAGS.get(stream_id, cancel_event)
+            if stream_id not in STREAMS or cancel_event.is_set():
+                q = None
+            else:
+                CANCEL_FLAGS[stream_id] = cancel_event
+                STREAM_PARTIAL_TEXT[stream_id] = ''
+                STREAM_REASONING_TEXT[stream_id] = ''
+                STREAM_LIVE_TOOL_CALLS[stream_id] = []
+                register_active_run(
+                    stream_id,
+                    session_id=session_id,
+                    started_at=time.time(),
+                    phase="starting",
+                    workspace=str(workspace),
+                    model=model,
+                    provider=model_provider,
+                    ephemeral=bool(ephemeral),
+                    backend=WEBUI_LOCAL_CHAT_BACKEND,
+                )
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
@@ -9201,16 +9486,6 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        ephemeral=bool(ephemeral),
-    )
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
@@ -9241,14 +9516,6 @@ def _run_agent_streaming(
     # (was here at v0.51.30) — the previous placement always read the default
     # profile's mcp_servers because os.environ['HERMES_HOME'] hadn't been
     # rewritten yet.  See https://github.com/nesquena/hermes-webui/issues/1968.
-
-    # Sprint 10: create a cancel event for this stream
-    cancel_event = threading.Event()
-    with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
-        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
-        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
-        STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     agent = None
     _live_prompt_estimate_tokens = [0]
@@ -9551,8 +9818,42 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _steer_settled = False
+    _returned_pending_steer = []
+
+    def _remember_pending_steer_result(value):
+        text = value.get('pending_steer') if isinstance(value, dict) else None
+        if isinstance(text, str) and text:
+            _returned_pending_steer.append(text)
+
+    def _settle_pending_steer():
+        # Single terminal boundary for success, returned errors, exceptions and
+        # successful self-heal. Admission closes before the last slot consumer;
+        # registry locks never cover SSE writes or Agent drain callbacks.
+        nonlocal _steer_settled
+        with STREAMS_LOCK:
+            if _steer_settled:
+                return
+            _steer_settled = True
+            target = AGENT_INSTANCES.get(stream_id) or agent
+            if stream_id in STREAMS and not cancel_event.is_set():
+                update_active_run(stream_id, phase="finalizing")
+        leftovers = list(_returned_pending_steer)
+        try:
+            drain = getattr(target, '_drain_pending_steer', None)
+            text = drain() if callable(drain) else None
+            if text:
+                leftovers.append(str(text))
+        except Exception:
+            logger.debug("Failed to drain pending steer for session %s", session_id)
+        if leftovers:
+            put('pending_steer_leftover', {
+                'session_id': session_id, 'text': '\n'.join(leftovers),
+            })
 
     def put(event, data):
+        if event in ('done', 'apperror', 'stream_end'):
+            _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
@@ -9576,10 +9877,41 @@ def _run_agent_streaming(
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
+
+    _last_runtime_model_identity = None
+    _runtime_model_session_id = session_id
+
+    def _observe_runtime_model():
+        """Publish this turn's Agent identity at output, never at an attempted route."""
+        nonlocal _last_runtime_model_identity
+        raw_model = getattr(agent, 'model', None)
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            return
+        raw_provider = getattr(agent, 'provider', None)
+        provider = str(raw_provider).strip().lstrip('@').lower() if isinstance(raw_provider, str) else ''
+        # The Agent may carry a provider-qualified routing hint in its model.
+        from api.config import _parse_provider_qualified_model_id
+        parsed = _parse_provider_qualified_model_id(raw_model.strip())
+        model_id = (parsed[0] if parsed else raw_model).strip()
+        if not model_id:
+            return
+        fallback_active = getattr(agent, '_provider_fallback_active', None) is True
+        identity = (provider, model_id.lower(), fallback_active)
+        if identity == _last_runtime_model_identity:
+            return
+        payload = {
+            'session_id': _runtime_model_session_id, 'stream_id': stream_id,
+            'model': model_id, 'fallback_active': fallback_active,
+            'phase': 'observed_output',
+        }
+        if provider:
+            payload['provider'] = provider
+        put('runtime_model', payload)
+        _last_runtime_model_identity = identity
 
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
@@ -9601,6 +9933,7 @@ def _run_agent_streaming(
         turn-completion classifier can report the real cause instead of the
         generic no_response fallback. All other lifecycle messages are dropped.
         """
+        nonlocal _last_runtime_model_identity
         _message = str(message or '').strip()
         _kind = str(kind or '').strip().lower()
         if not _message:
@@ -9623,8 +9956,14 @@ def _run_agent_streaming(
             return
         # Pass through rate-limit and fallback messages so the frontend can
         # show them as warnings via the existing messages.js 'warning' listener.
+        # Session turn-lease waits (another Hermes process owns this session)
+        # use the same channel so a delayed turn explains itself.
+        if _is_session_lease_wait_message(_kind, _message):
+            put('warning', {'type': 'session_lease_wait', 'message': _message})
+            return
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
+            _last_runtime_model_identity = None
             put('warning', {'type': 'fallback', 'message': _message})
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
@@ -9638,6 +9977,84 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    def _register_agent_if_current(candidate, cache_signature=None):
+        nonlocal agent
+        # Every constructor, including both credential self-heal branches, must
+        # share the Stop publication edge. CANCEL_FLAGS may already be detached;
+        # the worker-retained event and stream membership remain authoritative.
+        with STREAMS_LOCK:
+            cancelled = cancel_event.is_set() or stream_id not in STREAMS
+            if not cancelled:
+                AGENT_INSTANCES[stream_id] = candidate
+                # Check and publication share one admission, not a check followed
+                # by an unlocked cache/lifecycle write that could undo Stop.
+                if cache_signature is not None:
+                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    with SESSION_AGENT_CACHE_LOCK:
+                        SESSION_AGENT_CACHE[session_id] = (candidate, cache_signature)
+                        SESSION_AGENT_CACHE.move_to_end(session_id)
+                if not ephemeral:
+                    try:
+                        # Pure in-memory bookkeeping; no Agent/provider call.
+                        from api.session_lifecycle import register_agent
+                        register_agent(session_id, candidate)
+                    except Exception:
+                        logger.debug("Lifecycle register_agent failed for session %s", session_id, exc_info=True)
+        if not cancelled:
+            return True
+        # A cache hit is a borrowed reusable object, not this worker's private
+        # candidate. Stop may already have let a successor reuse it. Rejected
+        # cache-hit admission must not interrupt that other turn.
+        if cache_signature is None and not ephemeral:
+            if agent is candidate:
+                agent = None
+            return False
+        # Newly constructed candidates were never published on this failed
+        # admission; they cannot have been borrowed by a successor from us.
+        # No Agent call, session persistence or SSE write under registry locks.
+        try:
+            candidate.interrupt("Cancelled before start")
+        except Exception:
+            logger.debug("Failed to interrupt cancelled candidate agent")
+        return False
+
+    def _agent_can_invoke(candidate):
+        nonlocal agent
+        # Prompt preparation and LRU cleanup can yield after registration. Admit
+        # each invocation again at its point of use; never hold registry locks
+        # across run_conversation or interrupt. A later Stop interrupts the
+        # already-admitted invocation through the registered Agent as usual.
+        from api.config import (
+            SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
+            SESSION_WRITEBACK_OWNERS, SESSION_WRITEBACK_OWNERS_LOCK,
+        )
+        with STREAMS_LOCK:
+            current = (not cancel_event.is_set() and stream_id in STREAMS
+                       and AGENT_INSTANCES.get(stream_id) is candidate)
+            if not current:
+                if AGENT_INSTANCES.get(stream_id) is candidate:
+                    AGENT_INSTANCES.pop(stream_id, None)
+                # Agent identity is not turn identity: a successor can reuse the
+                # same cached object. Use the existing cancellation-surviving
+                # ownership record, holding its lock through cache retirement.
+                # Missing ownership also fails closed (successor may have ended).
+                with SESSION_WRITEBACK_OWNERS_LOCK:
+                    if SESSION_WRITEBACK_OWNERS.get(session_id) == stream_id:
+                        with SESSION_AGENT_CACHE_LOCK:
+                            entry = SESSION_AGENT_CACHE.get(session_id)
+                            if entry and entry[0] is candidate:
+                                SESSION_AGENT_CACHE.pop(session_id, None)
+                                # Dirty memory segments keep their original owner.
+                                from api.session_lifecycle import unregister_agent
+                                unregister_agent(session_id)
+        # This invocation never started. Stop owns any required interrupt of the
+        # running Agent; a late duplicate interrupt could hit its new borrower.
+        # Drop our local borrowed handle too: final Steer drain must not reach
+        # the successor through the old worker's fallback `agent` reference.
+        if not current and agent is candidate:
+            agent = None
+        return current
+
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -9981,6 +10398,14 @@ def _run_agent_streaming(
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
             _reasoning_segments: dict = {}
+            # Incremental folded indexes mirroring each reasoning buffer. The
+            # live echo strip consults them instead of re-walking the raw
+            # buffers: an unbounded raw scan of the growing transcript is
+            # quadratic on whitespace-heavy output (#7569 review). Each index
+            # is fed on every append and re-indexed after a strip.
+            _reasoning_segment_indexes: dict = {}
+            _stream_reasoning_index = _CompactEchoIndex()
+            _reasoning_buffer_index = _CompactEchoIndex()
             _current_reasoning_idx = 0
             _tool_boundary_advanced = False
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
@@ -10003,6 +10428,10 @@ def _run_agent_streaming(
                 if _reasoning_buffer[0]:
                     put('reasoning', {'text': _reasoning_buffer[0]})
                     _reasoning_buffer[0] = ''
+                    # The folded index mirrors this buffer 1:1 — dropping the
+                    # text without dropping the index would leave it describing
+                    # text that is no longer there.
+                    _reasoning_buffer_index.reset()
 
 
             def _emit_metering():
@@ -10042,30 +10471,37 @@ def _run_agent_streaming(
                 nonlocal _reasoning_segments
                 removed = False
                 if stream_id in STREAM_REASONING_TEXT:
-                    next_text, did_remove = _strip_compact_echo_suffix(
-                        STREAM_REASONING_TEXT.get(stream_id, ''),
-                        text,
-                    )
-                    if did_remove:
+                    cut = _stream_reasoning_index.cut_to(text)
+                    if cut is not None:
+                        next_text = STREAM_REASONING_TEXT.get(stream_id, '')[:cut].rstrip()
                         STREAM_REASONING_TEXT[stream_id] = next_text
+                        _stream_reasoning_index.reset()
+                        _stream_reasoning_index.append(next_text)
                         removed = True
-                next_buffer, did_remove_buffer = _strip_compact_echo_suffix(_reasoning_buffer[0], text)
-                if did_remove_buffer:
+                cut = _reasoning_buffer_index.cut_to(text)
+                if cut is not None:
+                    next_buffer = _reasoning_buffer[0][:cut].rstrip()
                     _reasoning_buffer[0] = next_buffer
+                    _reasoning_buffer_index.reset()
+                    _reasoning_buffer_index.append(next_buffer)
                     removed = True
                 for idx in (_current_reasoning_idx, _current_reasoning_idx - 1):
                     if idx not in _reasoning_segments:
                         continue
-                    next_segment, did_remove_segment = _strip_compact_echo_suffix(
-                        _reasoning_segments.get(idx, ''),
-                        text,
-                    )
-                    if not did_remove_segment:
+                    segment_index = _reasoning_segment_indexes.get(idx)
+                    if segment_index is None:
                         continue
+                    cut = segment_index.cut_to(text)
+                    if cut is None:
+                        continue
+                    next_segment = _reasoning_segments.get(idx, '')[:cut].rstrip()
                     if next_segment:
                         _reasoning_segments[idx] = next_segment
+                        segment_index.reset()
+                        segment_index.append(next_segment)
                     else:
                         _reasoning_segments.pop(idx, None)
+                        _reasoning_segment_indexes.pop(idx, None)
                     removed = True
                     break
                 return removed
@@ -10074,6 +10510,8 @@ def _run_agent_streaming(
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
+                if text:
+                    _observe_runtime_model()
                 # #4729: visible output is starting — flush any buffered reasoning tail
                 # first so the live Thinking stream is complete before/at the transition.
                 _flush_reasoning_buffer()
@@ -10117,6 +10555,8 @@ def _run_agent_streaming(
                     # partial window is not lost when the reasoning phase ends.
                     _flush_reasoning_buffer()
                     return
+                if text:
+                    _observe_runtime_model()
                 _tool_boundary_advanced = False
                 reasoning_delta = str(text)
                 # Some runtimes mirror user-visible progress text through the
@@ -10129,15 +10569,21 @@ def _run_agent_streaming(
                 _reasoning_segments[_current_reasoning_idx] = (
                     _reasoning_segments.get(_current_reasoning_idx, '') + reasoning_delta
                 )
+                # Keep the folded index in step with the segment text.
+                _reasoning_segment_indexes.setdefault(
+                    _current_reasoning_idx, _CompactEchoIndex()
+                ).append(reasoning_delta)
                 # Mirror full concatenation to shared dict so cancel_stream() can persist
                 # it (#1361 §A). Cancel only creates one partial message, so the flat
                 # concatenation is correct there.
                 # Lock-free GIL-atomic mirror — see the STREAMS_LOCK contract in on_token.
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                _stream_reasoning_index.append(reasoning_delta)
                 # Accumulate into a coalescing buffer so every delta reaches the
                 # browser — reasoning deltas are incremental, not idempotent.
                 _reasoning_buffer[0] += reasoning_delta
+                _reasoning_buffer_index.append(reasoning_delta)
                 # Throttle reasoning SSE events to ~10 Hz to avoid overwhelming the
                 # frontend renderer. Each event triggers _parseStreamState() which
                 # scans the full accumulated text — 10k+ reasoning tokens/second
@@ -10148,6 +10594,10 @@ def _run_agent_streaming(
                     _reasoning_last_put[0] = now
                     put('reasoning', {'text': _reasoning_buffer[0]})
                     _reasoning_buffer[0] = ''
+                    # The folded index mirrors this buffer 1:1 — dropping the
+                    # text without dropping the index would leave it describing
+                    # text that is no longer there.
+                    _reasoning_buffer_index.reset()
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -10256,10 +10706,14 @@ def _run_agent_streaming(
                         _reasoning_segments[_current_reasoning_idx] = (
                             _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
                         )
+                        _reasoning_segment_indexes.setdefault(
+                            _current_reasoning_idx, _CompactEchoIndex()
+                        ).append(reason_delta)
                         # Mirror full concatenation to shared dict (#1361 §A)
                         # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_REASONING_TEXT:
                             STREAM_REASONING_TEXT[stream_id] += reason_delta
+                        _stream_reasoning_index.append(reason_delta)
                         put('reasoning', {'text': reason_delta})
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -10855,6 +11309,7 @@ def _run_agent_streaming(
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
+            _cache_new_agent = False
             if ephemeral:
                 agent = _AIAgent(**_agent_kwargs)
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
@@ -10897,14 +11352,6 @@ def _run_agent_streaming(
                                 session_id,
                                 _cached_agent_session_identity(_cached_agent),
                             )
-                    if agent is not None:
-                        # Reopened/cache-hit sessions must register the agent
-                        # so later lifecycle commits can find it.
-                        try:
-                            from api.session_lifecycle import register_agent
-                            register_agent(session_id, agent)
-                        except Exception:
-                            logger.debug("Lifecycle register_agent failed for cached session %s", session_id, exc_info=True)
 
                 if _identity_mismatch_entry is not None:
                     try:
@@ -10974,77 +11421,64 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
-                    # Register the new agent with the memory lifecycle so
-                    # its commit_memory_session() can be found later.
-                    try:
-                        from api.session_lifecycle import register_agent
-                        register_agent(session_id, agent)
-                    except Exception:
-                        logger.debug("Lifecycle register_agent failed for new session %s", session_id, exc_info=True)
-                    _evicted_items = []
-                    # Snapshot the set of session_ids with a LIVE agent worker
-                    # BEFORE taking SESSION_AGENT_CACHE_LOCK, so LRU eviction never
-                    # closes an agent mid-run AND we never nest ACTIVE_RUNS_LOCK
-                    # inside SESSION_AGENT_CACHE_LOCK (avoids any lock-ordering
-                    # deadlock). A cancel/reconnect can drop STREAMS while the
-                    # worker is still unwinding or blocked in a provider call, so
-                    # ACTIVE_RUNS (worker lifecycle) is the authoritative liveness
-                    # signal, not STREAMS. (#3536 review round 2)
-                    _active_sids = set()
-                    try:
-                        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
-                        with ACTIVE_RUNS_LOCK:
-                            for _entry in (ACTIVE_RUNS or {}).values():
-                                _sid = (_entry or {}).get("session_id")
-                                if _sid:
-                                    _active_sids.add(_sid)
-                    except Exception:
-                        _active_sids = set()
-                    with SESSION_AGENT_CACHE_LOCK:
-                        SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
-                        SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
-                        from api.config import SESSION_AGENT_CACHE_MAX
-                        # Evict the oldest INACTIVE entries first. Walk LRU order
-                        # (front = oldest); skip any session with a live run. If
-                        # every over-cap entry is active, leave the cache
-                        # temporarily above cap rather than close a live worker's
-                        # agent — a later insertion/finalization trims it once the
-                        # run ends.
-                        while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
-                            _evictable_sid = None
-                            for _sid in list(SESSION_AGENT_CACHE.keys()):
-                                if _sid not in _active_sids:
-                                    _evictable_sid = _sid
-                                    break
-                            if _evictable_sid is None:
-                                break  # all over-cap entries are active; defer
-                            evicted_entry = SESSION_AGENT_CACHE.pop(_evictable_sid)
-                            _evicted_items.append((_evictable_sid, evicted_entry))
-                    # Commit and close evicted agents outside the cache lock so
-                    # concurrent cache users are not blocked by provider I/O.
-                    for _evicted_sid, _evicted_entry in _evicted_items:
-                        try:
-                            _evicted_agent = _evicted_entry[0] if isinstance(_evicted_entry, tuple) else None
-                            _close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)
-                        except Exception:
-                            logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
-                        logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
-                    logger.debug('[webui] Created new agent for session %s', session_id)
+                    _cache_new_agent = True
 
-            # Store agent instance for cancel/interrupt propagation
-            with STREAMS_LOCK:
-                AGENT_INSTANCES[stream_id] = agent
-                # Check if cancel was requested during agent initialization
-                if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
-                    # Cancel arrived during agent creation - interrupt immediately
+            if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
+                with _agent_lock:
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                put('cancel', _cancel_event_payload('Cancelled by user'))
+                return
+
+            # Cache publication is already fenced with Stop above. Keep LRU
+            # eviction and any memory-provider close outside the stream lock.
+            if _cache_new_agent:
+                _evicted_items = []
+                # Snapshot the set of session_ids with a LIVE agent worker
+                # BEFORE taking SESSION_AGENT_CACHE_LOCK, so LRU eviction never
+                # closes an agent mid-run AND we never nest ACTIVE_RUNS_LOCK
+                # inside SESSION_AGENT_CACHE_LOCK (avoids any lock-ordering
+                # deadlock). A cancel/reconnect can drop STREAMS while the
+                # worker is still unwinding or blocked in a provider call, so
+                # ACTIVE_RUNS (worker lifecycle) is the authoritative liveness
+                # signal, not STREAMS. (#3536 review round 2)
+                _active_sids = set()
+                try:
+                    from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
+                    with ACTIVE_RUNS_LOCK:
+                        for _entry in (ACTIVE_RUNS or {}).values():
+                            _sid = (_entry or {}).get("session_id")
+                            if _sid:
+                                _active_sids.add(_sid)
+                except Exception:
+                    _active_sids = set()
+                with SESSION_AGENT_CACHE_LOCK:
+                    from api.config import SESSION_AGENT_CACHE_MAX
+                    # Evict the oldest INACTIVE entries first. Walk LRU order
+                    # (front = oldest); skip any session with a live run. If
+                    # every over-cap entry is active, leave the cache
+                    # temporarily above cap rather than close a live worker's
+                    # agent — a later insertion/finalization trims it once the
+                    # run ends.
+                    while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
+                        _evictable_sid = None
+                        for _sid in list(SESSION_AGENT_CACHE.keys()):
+                            if _sid not in _active_sids:
+                                _evictable_sid = _sid
+                                break
+                        if _evictable_sid is None:
+                            break  # all over-cap entries are active; defer
+                        evicted_entry = SESSION_AGENT_CACHE.pop(_evictable_sid)
+                        _evicted_items.append((_evictable_sid, evicted_entry))
+                # Commit and close evicted agents outside the cache lock so
+                # concurrent cache users are not blocked by provider I/O.
+                for _evicted_sid, _evicted_entry in _evicted_items:
                     try:
-                        agent.interrupt("Cancelled before start")
+                        _evicted_agent = _evicted_entry[0] if isinstance(_evicted_entry, tuple) else None
+                        _close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)
                     except Exception:
-                        logger.debug("Failed to interrupt agent before start")
-                    with _agent_lock:
-                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
-                    put('cancel', _cancel_event_payload('Cancelled by user'))
-                    return
+                        logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
+                    logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
+                logger.debug('[webui] Created new agent for session %s', session_id)
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
@@ -11305,7 +11739,13 @@ def _run_agent_streaming(
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
+            if not _agent_can_invoke(agent):
+                with _agent_lock:
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                put('cancel', _cancel_event_payload('Cancelled by user'))
+                return
             result = agent.run_conversation(**_run_conversation_kwargs)
+            _remember_pending_steer_result(result)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -11348,6 +11788,11 @@ def _run_agent_streaming(
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
                         _answer = str(_m.get('content', ''))
                         break
+                if (_answer.strip() and not result.get('error')
+                    and not _agent_result_terminal_failure(result)
+                    and not getattr(agent, '_last_error', None)
+                    and not _captured_terminal_error[0]):
+                    _observe_runtime_model()
                 # /btw is intentionally non-persistent, but its terminal SSE
                 # payload is still public output.  Project the ephemeral
                 # session before enqueueing it so raw Agent ``api_content`` or
@@ -11793,8 +12238,6 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                             agent = _AIAgent(**_agent_kwargs)
-                            with STREAMS_LOCK:
-                                AGENT_INSTANCES[stream_id] = agent
                             _agent_sig = _compute_agent_cache_signature(
                                 resolved_model,
                                 resolved_api_key,
@@ -11811,10 +12254,11 @@ def _run_agent_streaming(
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
                             )
-                            from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
-                            with _SAC_L:
-                                _SAC[session_id] = (agent, _agent_sig)
-                                _SAC.move_to_end(session_id)
+                            if not _register_agent_if_current(agent, _agent_sig):
+                                # Returned-error settlement already owns _agent_lock.
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                put('cancel', _cancel_event_payload('Cancelled by user'))
+                                return
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
@@ -11847,7 +12291,13 @@ def _run_agent_streaming(
                                 _result_partial_pre_call_context = list(
                                     _heal_context_messages
                                 )
+                                if not _agent_can_invoke(agent):
+                                    # Returned-error settlement already owns the lock.
+                                    _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                                    put('cancel', _cancel_event_payload('Cancelled by user'))
+                                    return
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
+                                _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
                                     result=_heal_result,
@@ -12051,6 +12501,8 @@ def _run_agent_streaming(
                         # no_response type; #1765 keeps that type but improves
                         # the catch-all label, hint, and provider details.
                         return  # apperror already closes the stream on the client side
+
+                _observe_runtime_model()
 
                 # ── Handle context compression side effects ──
                 # Also detect compression via the result dict or compressor state
@@ -12258,7 +12710,9 @@ def _run_agent_streaming(
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
-                _used_model = getattr(agent, 'model', None) or resolved_model or model
+                # The configured selection is not proof that it served this turn.
+                _observed_model = getattr(agent, 'model', None)
+                _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -12794,23 +13248,7 @@ def _run_agent_streaming(
                 else None
             )
             # (reasoning trace already attached + saved above, before s.save())
-            # Leftover-steer delivery: if a /steer was queued (via
-            # api/chat/steer) but the agent finished its turn before
-            # reaching a tool-result boundary that would consume it,
-            # the text is still stashed in agent._pending_steer. Drain
-            # it now and emit a pending_steer_leftover SSE event so the
-            # frontend can queue it for the next turn — same fallback
-            # path as the CLI in cli.py:8788-8794.
-            try:
-                _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
-                _leftover = _drain_pending_steer() if _drain_pending_steer else None
-                if _leftover:
-                    put('pending_steer_leftover', {
-                        'session_id': session_id,
-                        'text': str(_leftover),
-                    })
-            except Exception:
-                logger.debug("Failed to drain pending steer for session %s", session_id)
+            _settle_pending_steer()
             # /goal parity: after a successful assistant turn, run the Hermes
             # GoalManager judge before terminal done/stream_end events. The
             # frontend surfaces the status line and queues continuation_prompt as
@@ -13167,8 +13605,9 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                     _heal_agent = _AIAgent(**_heal_kwargs)
-                    with STREAMS_LOCK:
-                        AGENT_INSTANCES[stream_id] = _heal_agent
+                    # Delta callbacks close over `agent`; the replacement, not
+                    # the failed original, owns any successful retry output.
+                    agent = _heal_agent
                     _agent_sig = _compute_agent_cache_signature(
                         resolved_model,
                         resolved_api_key,
@@ -13185,10 +13624,11 @@ def _run_agent_streaming(
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
                     )
-                    from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
-                    with _SAC2_L:
-                        _SAC2[session_id] = (_heal_agent, _agent_sig)
-                        _SAC2.move_to_end(session_id)
+                    if not _register_agent_if_current(_heal_agent, _agent_sig):
+                        with _agent_lock:
+                            _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        return
                     # Retry the conversation
                     _token_sent = False
                     try:
@@ -13220,7 +13660,13 @@ def _run_agent_streaming(
                         _result_partial_pre_call_context = list(
                             _heal_context_messages
                         )
+                        if not _agent_can_invoke(_heal_agent):
+                            with _agent_lock:
+                                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
+                            put('cancel', _cancel_event_payload('Cancelled by user'))
+                            return
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
+                        _remember_pending_steer_result(_heal_result)
                         _active_turn_identity = _resolve_active_turn_authority(
                             _active_turn_identity,
                             result=_heal_result,
@@ -13289,6 +13735,7 @@ def _run_agent_streaming(
                                             s, tool_calls=s.tool_calls
                                         )
                                     )
+                            _observe_runtime_model()
                             if _done_session_payload is not None:
                                 put('done', {
                                     'session': _done_session_payload,
@@ -13474,6 +13921,7 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        _settle_pending_steer()
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a
         # _sessions[stream_id] entry that get_stats() pruning never reclaims (its
@@ -13501,7 +13949,6 @@ def _run_agent_streaming(
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
-            update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
@@ -13596,13 +14043,68 @@ def _run_agent_streaming(
 # ============================================================
 
 
+# Local lifecycle phases with a pending-steer consumer still ahead of them.
+# Gateway uses its own phase vocabulary and never falls through to local delivery.
+_LOCAL_STEERABLE_PHASES = frozenset({"starting", "running"})
+
+
+def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
+    """Deliver to a verified live worker; None retains cache-only compatibility.
+
+    Never perform HTTP writes or cache/database teardown under stream locks.
+    """
+    from api import config as cfg
+
+    with cfg.STREAMS_LOCK:
+        agent = cfg.AGENT_INSTANCES.get(stream_id)
+        owner = cfg.stream_owner_session_id(stream_id)
+        with cfg.ACTIVE_RUNS_LOCK:
+            run = dict(cfg.ACTIVE_RUNS.get(stream_id) or {})
+        # Gateway owns transport even when no in-process worker is registered.
+        # A reusable local cache entry must never override that authority.
+        if run.get("backend") == "gateway":
+            if (stream_id not in cfg.STREAMS
+                    or owner != sid or run.get("session_id") != sid
+                    or run.get("phase") == "cancelling"):
+                return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+            return {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": stream_id}
+        if (stream_id in cfg.STREAMS and owner == sid
+                and run.get("session_id") == sid
+                and run.get("backend") == WEBUI_LOCAL_CHAT_BACKEND
+                and run.get("phase") == "finalizing"):
+            return {"accepted": False, "fallback": "not_running", "stream_id": stream_id}
+        if agent is None:
+            if ((owner and owner != sid)
+                    or (run.get("session_id") and run["session_id"] != sid)
+                    or (run and run.get("phase") not in _LOCAL_STEERABLE_PHASES)):
+                return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+            return None
+        # A cache hit cannot override missing or conflicting worker ownership.
+        if (stream_id not in cfg.STREAMS
+                or owner != sid or run.get("session_id") != sid
+                or run.get("phase") not in _LOCAL_STEERABLE_PHASES
+                or run.get("backend") == "gateway"):
+            return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+        if not callable(getattr(agent, "steer", None)):
+            return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
+        # steer() only stashes input; serializing it with stream teardown keeps
+        # cancel from detaching the selected worker before delivery.
+        try:
+            accepted = bool(agent.steer(text))
+        except Exception:
+            logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
+            return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
+        return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
     Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
-      - Look up the cached AIAgent for the session (PR #1051's
-        SESSION_AGENT_CACHE).
+      - Prefer the active stream's registered AIAgent, with explicit stream
+        and worker ownership; use the cache only for legacy cache-only runs.
       - Verify a stream is currently active for this session.
+      - Never evict or close an agent while delivering steering input.
       - Call agent.steer(text) — thread-safe, stashes text in
         _pending_steer for application at the next tool-result boundary.
 
@@ -13631,24 +14133,23 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
-    evicted_cached_entry = None
+    # A compression rotates agent.session_id without replacing the running
+    # worker. Resolve the stream-bound instance BEFORE consulting the reusable
+    # cache. Steer never owns cache eviction or agent/database teardown.
+    try:
+        session = get_session(sid)
+    except KeyError:
+        session = None
+    stream_id = getattr(session, "active_stream_id", None) or None
+    if stream_id:
+        result = _steer_bound_stream(sid, stream_id, text)
+        if result is not None:
+            return j(handler, result)
+
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
-        if cached:
-            agent = cached[0]
-            if not _cached_agent_matches_session(agent, sid):
-                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
-                logger.warning(
-                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
-                    sid,
-                    _cached_agent_session_identity(agent),
-                )
-                cached = None
-    if evicted_cached_entry is not None:
-        try:
-            _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
-        except Exception:
-            logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
+        if cached and not _cached_agent_matches_session(cached[0], sid):
+            cached = None
     if not cached:
         try:
             s = get_session(sid)
@@ -13694,22 +14195,54 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
+
+    # Cache-only compatibility: no registered worker for this stream. The
+    # liveness/ownership revalidation and the enqueue must share the same
+    # stream-ownership edge as Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). A Stop
+    # that claims cancellation between an unlocked check and agent.steer()
+    # would strand guidance this response still reports as accepted. steer()
+    # only stashes input; interrupt, persistence, and HTTP writes stay outside
+    # the lock, and the cached agent is never evicted or closed here.
+    #
+    # Ownership must be proven positively, not merely unrefuted: BOTH the
+    # stream owner AND the active-run session must equal the requesting
+    # session. Missing metadata is ambiguous and fails closed (stream_dead);
+    # an unfenced cache object is never steered on absent ownership.
+    #
+    # The active-run backend is revalidated the same way. With no registered
+    # worker, the backend tag is the only proof that an in-process runtime
+    # owns this run: Gateway resolves to its own outcome, the explicit local
+    # tag may enqueue, and a missing, empty, or foreign backend fails closed.
+    result = {"accepted": False, "fallback": "stream_dead", "stream_id": None}
     with _cfg.STREAMS_LOCK:
-        stream_alive = active_stream_id in _cfg.STREAMS
-    if not stream_alive:
-        # Active stream id is stale — stream has ended; caller falls back
-        return j(handler, {"accepted": False, "fallback": "stream_dead",
-                           "stream_id": None})
+        if active_stream_id in _cfg.STREAMS:
+            owner = _cfg.stream_owner_session_id(active_stream_id)
+            with _cfg.ACTIVE_RUNS_LOCK:
+                run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+            owned_stream = bool(owner) and owner == sid
+            owned_run = bool(run.get("session_id")) and run["session_id"] == sid
+            if owned_stream and owned_run and run.get("phase") != "cancelling":
+                backend = run.get("backend")
+                if backend == "gateway":
+                    # Gateway owns transport; a local cache object is never steered.
+                    result = {"accepted": False, "fallback": "gateway_steer_queued",
+                              "stream_id": active_stream_id}
+                elif backend == WEBUI_LOCAL_CHAT_BACKEND and run.get("phase") == "finalizing":
+                    result = {"accepted": False, "fallback": "not_running",
+                              "stream_id": active_stream_id}
+                elif (backend == WEBUI_LOCAL_CHAT_BACKEND
+                      and run.get("phase") in _LOCAL_STEERABLE_PHASES):
+                    try:
+                        accepted = bool(agent.steer(text))
+                    except Exception as exc:
+                        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+                        result = {"accepted": False, "fallback": "steer_error",
+                                  "stream_id": active_stream_id}
+                    else:
+                        result = {"accepted": accepted, "fallback": None,
+                                  "stream_id": active_stream_id}
 
-    try:
-        accepted = bool(agent.steer(text))
-    except Exception as exc:
-        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
-        return j(handler, {"accepted": False, "fallback": "steer_error",
-                           "stream_id": active_stream_id})
-
-    return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+    return j(handler, result)
 
 
 def cancel_stream(stream_id: str) -> bool:
@@ -13806,21 +14339,29 @@ def cancel_stream(stream_id: str) -> bool:
                 return False
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    if active_run_entry is None:
-        try:
-            with _live_config.ACTIVE_RUNS_LOCK:
-                active_run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
-        except Exception:
-            active_run_entry = None
-        if active_run_entry and not active_run_session_id:
-            active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+        if active_run_entry is None:
+            try:
+                with _live_config.ACTIVE_RUNS_LOCK:
+                    active_run_entry = dict((_live_config.ACTIVE_RUNS or {}).get(stream_id) or {})
+            except Exception:
+                active_run_entry = None
+            if active_run_entry and not active_run_session_id:
+                active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    # Mark the worker lifecycle registry immediately. The SSE maps may be popped
-    # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
-    # health polling sees during that detached window. Stamp cancelled_at so
-    # _clear_stale_stream_state() can eventually reclaim the session if the
-    # worker is stuck in C-level I/O and never reaches its finally (#6623).
-    update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+        # Mark the worker lifecycle registry immediately. The SSE maps may be popped
+        # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
+        # health polling sees during that detached window. Stamp cancelled_at so
+        # _clear_stale_stream_state() can eventually reclaim the session if the
+        # worker is stuck in C-level I/O and never reaches its finally (#6623).
+        update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+
+        # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
+        # Publish cancellation and detach ownership before releasing the edge;
+        # later Steer cannot enqueue into a turn already claimed by Stop.
+        if stream_present:
+            streams.pop(stream_id, None)
+            cancel_flags.pop(stream_id, None)
+            agent_instances.pop(stream_id, None)
 
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
@@ -13873,16 +14414,7 @@ def cancel_stream(stream_id: str) -> bool:
     # worker save and show cancel in the client while persistence says done.
     _emit_cancel_event = True
 
-    # ── Eager session lock release (fixes #653) ──────────────────────────
-    # Pop stream state now so the 409 guard in routes.py sees the session
-    # as idle and allows new /api/chat/start immediately after cancel,
-    # even if the agent thread is still blocked in a C-level syscall.
-    # The worker thread's finally block uses .pop(key, None) too, so a
-    # double-pop here is safe (no-op).
-    if stream_present:
-        streams.pop(stream_id, None)
-        cancel_flags.pop(stream_id, None)
-        agent_instances.pop(stream_id, None)
+    # Stream ownership was detached under streams_lock before interrupting.
     # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
     # still be appending tokens, and the streaming finally block handles cleanup
     # when the thread exits. We already snapshotted the buffers under streams_lock

@@ -25,6 +25,7 @@ let _currentCronDetail = null; // full cron job object
 let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _cronModelPickerTouched = false; // true once the user changes the model picker in the current form
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
@@ -1550,6 +1551,7 @@ function duplicateCurrentCron(){
   const job = _currentCronDetail;
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = true;
@@ -1606,6 +1608,7 @@ let _cronDeliveryOptionsCache=null;
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = false;
@@ -1623,6 +1626,7 @@ function openCronCreate(){
 function openCronEdit(job){
   if (!job) return;
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = job.id;
   _cronMode = 'edit';
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
@@ -1855,6 +1859,9 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
       sel.appendChild(opt);
     }
     sel.dataset.loaded = '1';
+    // Track deliberate picker changes so an untouched "Default" can keep a
+    // hidden provider-only pin on save (see _cronProviderForClear).
+    sel.addEventListener('change', () => { _cronModelPickerTouched = true; });
   } catch (e) {
     console.warn('Failed to load cron model picker:', e.message);
     // Load failed: dataset.loaded stays unset so saveCronForm omits model/provider
@@ -1940,6 +1947,18 @@ function _cronModelBareName(model, provider) {
   return _modelBareNameForProvider(model, provider);
 }
 
+function _cronProviderForClear(prevDetail, pickerTouched) {
+  // Provider to submit when the picker shows "Default" (no model) on save.
+  // An explicit return to Default honors "Default = no overrides" (#4030) and
+  // clears the provider. An untouched picker must not: provider-only jobs
+  // (a pinned provider with no model) render as "Default" in the combined
+  // picker, so saving any other field would silently erase the pin the user
+  // never touched.
+  const prev = prevDetail || {};
+  if (pickerTouched) return null;
+  return (prev.model == null) ? prev.provider : null;
+}
+
 async function saveCronForm(){
   const nameEl=$('cronFormName');
   const schEl=$('cronFormSchedule');
@@ -1977,8 +1996,11 @@ async function saveCronForm(){
           updates.model = _cronModelBareName(modelState.model, modelState.model_provider) || null;
           updates.provider = modelState.model_provider || null;
         } else if (modelLoaded) {
+          // "Default" selected (no model). An untouched picker preserves a
+          // hidden provider-only pin; a deliberate return to Default clears
+          // it (#4030 "Default = no overrides").
           updates.model = null;
-          updates.provider = null;
+          updates.provider = _cronProviderForClear(_cronPreFormDetail, _cronModelPickerTouched);
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
@@ -9300,8 +9322,17 @@ async function loadSettingsPanel(){
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
+    // #7622 (round 3): the settings payload's `settings.language` is
+    // absent (None) for a fresh install, so an explicit non-empty
+    // value is the user's genuine saved choice.  The browser
+    // navigator hint is now read via the guarded
+    // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+    // a throwing `navigator` accessor can no longer abort settings
+    // hydration before model, provider, plugin and extension sections
+    // are populated.  The fallback ternary preserves the pre-#7622
+    // settings-modal behaviour when neither helper is in scope.
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
-      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
+      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
     if(typeof setLocale==='function'){
