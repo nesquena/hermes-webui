@@ -1,8 +1,12 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
+import os
 import sqlite3
+import sys
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import quote, quote_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -18,36 +22,71 @@ logger = logging.getLogger(__name__)
 _SOURCE_COLUMN_WARNED_DB_PATHS: set[str] = set()
 
 
+def state_db_file_uri(db_path, platform: str | None = None) -> str:
+    """Build the ``file:`` URI (no query string) for an absolute ``state.db`` path.
+
+    ``Path.as_uri()`` is not usable here: for a UNC share it emits
+    ``file://server/share/state.db`` and SQLite rejects any non-local URI
+    authority unless compiled with ``SQLITE_ALLOW_URI_AUTHORITY`` (the
+    CPython 3.11-3.13 Windows builds are not). SQLite instead accepts the
+    *empty*-authority spelling ``file:////server/share/state.db``, whose path
+    ``//server/share/...`` the Windows VFS opens as the UNC name. Drive-letter
+    paths keep the documented ``file:///C:/...`` form and POSIX paths are
+    unchanged. Only ``/`` survives unescaped, so ``?`` and ``#`` in path
+    components cannot leak into the query string.
+
+    ``platform`` defaults to the running interpreter; tests pass it explicitly
+    so the Windows shapes are checked from any host.
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        win = PureWindowsPath(str(db_path))
+        drive = win.drive
+        if drive.startswith("\\\\?\\"):
+            # Extended-length prefix: "\\?\C:" or "\\?\UNC\server\share".
+            drive = drive[4:]
+            if drive.upper().startswith("UNC\\"):
+                drive = "\\\\" + drive[4:]
+        parts = win.parts[1:]  # drop the anchor, keep the path components
+        if drive.startswith("\\\\"):
+            host_share = drive[2:].replace("\\", "/")
+            posix_path = "//" + "/".join((host_share, *parts))
+        else:
+            posix_path = "/" + "/".join((drive, *parts))
+        # ``:`` stays literal so the drive letter keeps SQLite's documented
+        # ``file:///C:/...`` shape (``Path.as_uri()`` leaves it unescaped too).
+        return "file://" + quote(posix_path, safe="/:")
+    posix_path = PurePosixPath(str(db_path)).as_posix()
+    # Quote the filesystem BYTES, not the str: a POSIX path component that is
+    # not valid UTF-8 is carried in the str as ``surrogateescape`` code points,
+    # which ``quote(str)`` rejects with UnicodeEncodeError (the caller then
+    # treats the db as unreadable and every agent-backed session vanishes).
+    # ``Path.as_uri()`` — what master used — percent-encodes os.fsencode()
+    # bytes; this keeps that behavior.
+    return "file://" + quote_from_bytes(os.fsencode(posix_path), safe="/")
+
+
+def state_db_readonly_uri(db_path, platform: str | None = None) -> str:
+    """Strict read-only (``mode=ro``) form of :func:`state_db_file_uri`."""
+    return state_db_file_uri(db_path, platform=platform) + "?mode=ro"
+
+
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
 
     Same rationale as the session-listing path (#5455): a write-capable handle
     on the multi-GB, WAL ``state.db`` while the agent streams into it adds
     needless checkpoint/lock surface. The read-only ``file:...?mode=ro`` URI
-    avoids that. Falls back to a writable connection (and warns) if the
-    read-only open fails, so callers never lose data on exotic filesystems.
+    avoids that. Read failures propagate; a reader never upgrades to a writer.
 
     The caller must ensure ``db_path`` exists — this raises ``FileNotFoundError``
-    for a missing path rather than letting the writable fallback below create an
-    empty, writable ``state.db`` there (a ghost DB in the agent's HOME). The
-    fallback is only for an *existing* DB whose read-only open fails on an exotic
-    filesystem, so a real read never loses data.
+    for a missing path rather than creating a ghost database.
 
     Callers own the returned connection (wrap it in ``contextlib.closing``).
     """
-    log = log or logger
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
-    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    try:
-        return sqlite3.connect(read_only_uri, uri=True)
-    except sqlite3.Error as exc:
-        log.warning(
-            "agent state.db read-only open failed for %s; falling back to writable connection: %s",
-            db_path,
-            exc,
-        )
-        return sqlite3.connect(str(db_path))
+    return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
 
 
 MESSAGING_SOURCES = {
@@ -64,6 +103,15 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
+
+# Sub-second scheduling/write-order races during a compression/cli_close
+# handoff can persist the continuation row with ``started_at`` a few
+# milliseconds BEFORE the parent's ``ended_at`` lands (#6931). The tolerance
+# below lets those rows still classify as the next segment; the fork /
+# model_config branch-marker / cross-source / end_reason guards in
+# ``_is_continuation_session`` already rule out unrelated rows, so a small
+# window cannot collapse genuinely concurrently started children.
+CONTINUATION_STARTED_AT_TOLERANCE_SECONDS = 2.0
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -318,6 +366,61 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
+# Every model_config marker Hermes Agent binds to ``parent_session_id`` in its
+# non-continuation child predicate (``_NON_CONTINUATION_CHILD_FILTER_SQL``):
+# ``_delegate_from`` (delegate_task), ``_branched_from`` (/branch) and
+# ``_reset_from`` (gateway reset children, stamped at creation or durably by
+# ``reopen_session()`` in ``gateway/session_recovery.py``).
+_MODEL_CONFIG_LINEAGE_KEYS = ('_delegate_from', '_branched_from', '_reset_from')
+
+
+def _branch_markers(row: dict | None) -> tuple[str, dict[str, str]]:
+    """Return ``(state, markers)`` for a row's ``model_config`` lineage identity.
+
+    Hermes Agent stamps explicit branches, delegate/subagent runs and gateway
+    reset children in the ``model_config`` JSON column (see
+    ``_MODEL_CONFIG_LINEAGE_KEYS``); ``session_source='fork'`` alone only
+    covers WebUI-created forks.
+
+    ``state`` is one of:
+
+    - ``'none'``: no ``model_config``, or an object carrying no lineage marker;
+    - ``'markers'``: every non-null marker is a non-empty string, returned by key;
+    - ``'unknown'``: identity evidence exists but cannot be trusted (payload is
+      not JSON, not a JSON object, too deeply nested to decode, or a marker is
+      not a non-empty string). Callers must fail closed on this state and treat
+      the row as a lineage boundary, never as a continuation.
+    """
+    if not row:
+        return 'none', {}
+    raw = row.get('model_config')
+    if raw is None:
+        return 'none', {}
+    if isinstance(raw, (str, bytes, bytearray)):
+        if not raw.strip():
+            return 'none', {}
+        try:
+            config = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            # RecursionError: a valid but pathologically deep payload exceeds
+            # the decoder's recursion limit; it is untrusted identity evidence
+            # like any other undecodable payload, never an escaping crash.
+            return 'unknown', {}
+    else:
+        config = raw
+    if not isinstance(config, dict):
+        return 'unknown', {}
+    markers: dict[str, str] = {}
+    for key in _MODEL_CONFIG_LINEAGE_KEYS:
+        value = config.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return 'unknown', {}
+        markers[key] = value.strip()
+    return ('markers', markers) if markers else ('none', {})
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
@@ -325,19 +428,44 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     by ``hermes -c`` also records a new child session; for sidebar projection it
     should continue the same visible conversation rather than becoming a
     separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    parent's ended boundary remain child sessions. A small scheduling/write-order
+    overlap between the handoff boundary timestamps is tolerated (#6931).
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
     conversation; otherwise the tip inherits the root's title/source metadata and
     can disappear under messaging/sidebar policies.
+
+    Explicit branches/delegates/resets never continue: a child whose
+    ``model_config`` ``_branched_from`` / ``_delegate_from`` / ``_reset_from``
+    points at this parent is a separate conversation and must stay visible.
+    Unparsable or non-string marker evidence fails closed as a boundary.
+    Beyond the bounded tolerance window there is no reliable continuation
+    signal — titles are user-controlled and non-unique, so they are never used
+    to widen the window (#7021 re-gate).
     """
     if not parent or not child:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
         return False
+    # Real Agent branches/delegates/resets are marked in model_config (not
+    # session_source, which only WebUI-created forks carry). The marker must
+    # reference THIS parent: compression continuations inherit the rotated
+    # agent's model_config verbatim, so presence alone (a delegate's
+    # continuation still carries the delegate's own ``_delegate_from``) would
+    # misclassify real continuations. Untrusted identity evidence fails closed.
+    marker_state, child_markers = _branch_markers(child)
+    if marker_state == 'unknown':
+        return False
+    parent_id = str(parent.get('id') or '').strip()
+    if parent_id and parent_id in child_markers.values():
+        return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
+    # Agent lineage excludes tool children even when the parent has the same
+    # source (or no source); a timestamp overlap cannot override that boundary.
+    if child_source == 'tool':
+        return False
     if parent_source and child_source and parent_source != child_source:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:
@@ -349,9 +477,16 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        child_started = float(child.get('started_at') or 0)
+        parent_ended = float(ended_at)
     except (TypeError, ValueError):
         return False
+    if child_started >= parent_ended - CONTINUATION_STARTED_AT_TOLERANCE_SECONDS:
+        return True
+    # Beyond the bounded early-side window the child is a genuine concurrent
+    # session — an exact title match is not evidence (titles are user-controlled
+    # and non-unique, so it cannot extend the tolerance).
+    return False
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
@@ -478,7 +613,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # expects from "Show agent sessions" sorted by activity.
         for key in (
             'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
-            'ended_at', 'end_reason', 'last_activity',
+            'ended_at', 'end_reason', 'last_activity', 'archived',
         ):
             if key in tip:
                 merged[key] = tip[key]
@@ -549,21 +684,7 @@ def read_importable_agent_session_rows(
         return []
 
     log = log or logger
-    # Open read-only for this projection/listing path: it is a pure read, and
-    # holding a write-capable handle on the live (multi-GB, WAL) state.db while
-    # the agent streams into it adds needless checkpoint/lock surface (#5455).
-    # The defensive index self-heal below still runs, but through a separate
-    # short-lived writable connection on the rare missing-index path only.
-    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    try:
-        conn = sqlite3.connect(read_only_uri, uri=True)
-    except sqlite3.Error as exc:
-        log.warning(
-            "agent session listing read-only open failed for %s; falling back to writable connection: %s",
-            db_path,
-            exc,
-        )
-        conn = sqlite3.connect(str(db_path))
+    conn = open_state_db_readonly(db_path, log=log)
     with closing(conn):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -588,6 +709,7 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        model_config_expr = _optional_col('model_config', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -598,6 +720,7 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        archived_expr = _optional_col('archived', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -613,11 +736,7 @@ def read_importable_agent_session_rows(
         use_messages_join = messages_has_session_id
         count_col = 'id' if 'id' in message_cols else 'session_id'
 
-        # Defensive index prime (#3887). The normal candidate-ordering shape uses
-        # the agent's standard ``idx_messages_session ON messages(session_id,
-        # timestamp)`` index; without it, large cron-only scans degrade badly.
-        # Writable dbs self-heal by recreating the index. Read-only or locked dbs
-        # fall back to the pre-aggregated cron-only path below instead of failing.
+        # Index creation belongs to explicit drained maintenance, never a read.
         messages_index_present = False
         if messages_has_session_id and messages_has_timestamp:
             try:
@@ -625,21 +744,7 @@ def read_importable_agent_session_rows(
                 messages_index_present = any(str(row[1]) == "idx_messages_session" for row in cur.fetchall())
             except sqlite3.Error:
                 messages_index_present = False
-            if not messages_index_present:
-                # Self-heal via a separate writable connection so the common
-                # (index-present) path keeps its read-only handle. On a truly
-                # read-only/locked db this fails and we degrade to the
-                # pre-aggregated cron-only path below, exactly as before.
-                try:
-                    with closing(sqlite3.connect(str(db_path))) as _heal:
-                        _heal.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_messages_session "
-                            "ON messages(session_id, timestamp)"
-                        )
-                        _heal.commit()
-                    messages_index_present = True
-                except sqlite3.Error:
-                    pass  # read-only db / locked / older schema — degrade gracefully
+
 
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
@@ -665,7 +770,6 @@ def read_importable_agent_session_rows(
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
-        included = ()
         if include_sources:
             included = tuple(str(source) for source in include_sources if source)
             if included:
@@ -679,10 +783,16 @@ def read_importable_agent_session_rows(
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
 
+        # Without ``idx_messages_session`` the correlated ``MAX(mx.timestamp)``
+        # candidate ordering rescans ``messages`` once per session (seconds on
+        # a few thousand sessions). Every missing-index projection — default
+        # sidebar, gateway watcher, cron/webhook/kanban views — orders through
+        # one read-only pre-aggregation pass instead; the listing never creates
+        # the index itself (that is drained maintenance, see
+        # ``scripts/ensure_state_db_read_indexes.py``).
         use_preaggregated_candidate_order = (
             use_messages_join
             and messages_has_timestamp
-            and included == ("cron",)
             and not messages_index_present
         )
         if use_preaggregated_candidate_order:
@@ -709,6 +819,7 @@ def read_importable_agent_session_rows(
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
                    {session_source_expr},
+                   {model_config_expr},
                    {user_id_expr},
                    {chat_id_expr},
                    {chat_type_expr},
@@ -720,6 +831,7 @@ def read_importable_agent_session_rows(
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},
+                   {archived_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
                    {last_activity_expr} AS last_activity
@@ -791,6 +903,11 @@ def read_importable_agent_session_rows(
                 params,
             )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
+        # model_config is selected only so the continuation classifier can
+        # read the real _branched_from/_delegate_from markers; it is internal
+        # agent state and must not leak into the /api/sessions response.
+        for row in projected:
+            row.pop('model_config', None)
         projected = [_with_normalized_source(row) for row in projected]
         projected = [row for row in projected if is_cli_session_row_visible(row)]
         if limit is None:
@@ -893,6 +1010,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
 
             source_expr = _optional_col('source', session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             title_expr = _optional_col('title', session_cols)
             started_expr = _optional_col('started_at', session_cols, '0')
             ended_expr = _optional_col('ended_at', session_cols)
@@ -907,6 +1025,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -953,6 +1072,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -1030,6 +1150,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
@@ -1066,7 +1187,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1095,7 +1216,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
