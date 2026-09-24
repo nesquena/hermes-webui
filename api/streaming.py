@@ -22,6 +22,7 @@ import time
 import traceback
 import copy
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -190,6 +191,61 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     except Exception:
         raw.pop('regeneration_revision', None)
     return raw
+
+
+def _successful_skill_view_name(tool_name, function_result) -> str | None:
+    """Return the canonical name from a successful structured skill_view."""
+    if tool_name != "skill_view":
+        return None
+    result = function_result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        return None
+    if result.get("error"):
+        return None
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name
+
+
+def _record_streaming_skill_usage(
+    session_id,
+    tool_name,
+    function_result,
+    *,
+    ephemeral=False,
+) -> bool:
+    """Persist a successful skill_view result for the live session owner."""
+    if ephemeral:
+        return False
+    name = _successful_skill_view_name(tool_name, function_result)
+    if name is None:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _get_session_agent_lock(sid):
+        try:
+            current_session = get_session(sid)
+        except Exception:
+            return False
+        if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
+            return False
+        if getattr(current_session, "read_only", False):
+            return False
+        try:
+            if not current_session.record_skill_usage(name):
+                return False
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill usage for %s", sid, exc_info=True)
+            return False
+    return True
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -10914,6 +10970,15 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_usage(
+                        session_id,
+                        name,
+                        function_result,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill usage', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
