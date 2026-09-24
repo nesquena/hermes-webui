@@ -7500,6 +7500,7 @@ async function toggleYoloFromApproval() {
 let _approvalPollTimer = null;
 let _approvalFallbackPollInFlight = false;
 let _approvalHideTimer = null;
+let _approvalPollEpoch = 0;
 let _approvalVisibleSince = 0;
 let _approvalSignature = '';
 const APPROVAL_MIN_VISIBLE_MS = 30000;
@@ -7540,6 +7541,7 @@ function _resetApprovalCardState() {
 }
 
 function hideApprovalCard(force=false) {
+  _approvalPollEpoch++;
   const card = $("approvalCard");
   if (!card) return;
   if (!force && _approvalVisibleSince) {
@@ -7592,16 +7594,6 @@ function _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile) {
   let m = mirrorToken;
   let prof = profile;
   if ((r === undefined || m === undefined) && sid) {
-    if (typeof _approvalResponding !== 'undefined' && _approvalResponding && _approvalResponding.sid === sid && _approvalResponding.approvalId === approvalId) {
-      if (r === undefined) r = _approvalResponding.runId;
-      if (m === undefined) m = _approvalResponding.mirrorToken;
-      if (prof === undefined) prof = _approvalResponding.profile;
-    }
-    if (typeof _approvalDisplayedOwner !== 'undefined' && _approvalDisplayedOwner && _approvalDisplayedOwner.sid === sid && _approvalDisplayedOwner.approvalId === approvalId) {
-      if (r === undefined) r = _approvalDisplayedOwner.runId;
-      if (m === undefined) m = _approvalDisplayedOwner.mirrorToken;
-      if (prof === undefined) prof = _approvalDisplayedOwner.profile;
-    }
     if (typeof _approvalPendingBySession !== 'undefined' && _approvalPendingBySession) {
       const entry = _approvalPendingBySession.get(sid);
       const p = entry && entry.pending;
@@ -7629,16 +7621,6 @@ function _isApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
   let m = mirrorToken;
   let prof = profile;
   if ((r === undefined || m === undefined) && sid) {
-    if (typeof _approvalResponding !== 'undefined' && _approvalResponding && _approvalResponding.sid === sid && _approvalResponding.approvalId === approvalId) {
-      if (r === undefined) r = _approvalResponding.runId;
-      if (m === undefined) m = _approvalResponding.mirrorToken;
-      if (prof === undefined) prof = _approvalResponding.profile;
-    }
-    if (typeof _approvalDisplayedOwner !== 'undefined' && _approvalDisplayedOwner && _approvalDisplayedOwner.sid === sid && _approvalDisplayedOwner.approvalId === approvalId) {
-      if (r === undefined) r = _approvalDisplayedOwner.runId;
-      if (m === undefined) m = _approvalDisplayedOwner.mirrorToken;
-      if (prof === undefined) prof = _approvalDisplayedOwner.profile;
-    }
     if (typeof _approvalPendingBySession !== 'undefined' && _approvalPendingBySession) {
       const entry = _approvalPendingBySession.get(sid);
       const p = entry && entry.pending;
@@ -7669,15 +7651,9 @@ function _markApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
 
 function _unmarkApprovalDismissed(sid, approvalId, runId, mirrorToken, profile) {
   if (!approvalId) return;
-  const resolvedProf = profile || (typeof S !== 'undefined' && S && S.activeProfile) || 'default';
-  let set = _getDismissedApprovals();
-  if (runId !== undefined || mirrorToken !== undefined) {
-    const key = _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile);
-    set = set.filter(k => k !== key);
-  } else {
-    const prefix = String(resolvedProf) + '\u0000' + String(sid || '') + '\u0000' + String(approvalId) + '\u0000';
-    set = set.filter(k => k !== prefix && !k.startsWith(prefix));
-  }
+  const key = _approvalDismissKey(sid, approvalId, runId, mirrorToken, profile);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
   try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
   catch (_) {}
 }
@@ -7709,6 +7685,7 @@ function _rememberApprovalPending(pending, pendingCount) {
 
 function _clearApprovalPendingForSession(sid) {
   if (sid) {
+    _approvalPollEpoch++;
     _approvalPendingBySession.delete(sid);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
@@ -7766,6 +7743,7 @@ function _approvalOwnerForPending(sid, pending) {
 }
 
 function _approvalOwnerIdentityMatches(left, right) {
+  if (!left && !right) return true;
   return !!(
     left &&
     right &&
@@ -7863,9 +7841,10 @@ function showApprovalForSession(sid, pending, pendingCount) {
 }
 
 function showApprovalCard(pending, pendingCount) {
+  _approvalPollEpoch++;
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
-  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id, pending.run_id, pending._gateway_mirror_token, pending.profile)) return;
   _approvalClearedOwner = null;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
@@ -7956,7 +7935,7 @@ function dismissApprovalCard() {
   // from the authoritative response — a silent failure must never leave the
   // server approval pending while the dismissal marker suppresses re-render.
   // (#7242)
-  _markApprovalDismissed(ownerSid, ownerApprovalId);
+  _markApprovalDismissed(ownerSid, ownerApprovalId, owner.runId, owner.mirrorToken, owner.profile);
   _approvalClearedOwner = null;
   // Claim the response owner BEFORE hiding so hideApprovalCard preserves the
   // displayed owner (needed to restore the card if the deny fails).
@@ -7965,7 +7944,7 @@ function dismissApprovalCard() {
   hideApprovalCard(true);
   if (ownerSid) _clearApprovalPendingForSession(ownerSid);
   const restoreAfterFailure = (errMsg) => {
-    _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+    _unmarkApprovalDismissed(ownerSid, ownerApprovalId, owner.runId, owner.mirrorToken, owner.profile);
     if (snapshot && !_approvalPendingBySession.has(ownerSid)) {
       _approvalPendingBySession.set(ownerSid, snapshot);
     }
@@ -8094,7 +8073,7 @@ function dismissApprovalCard() {
               // server reused the id for another tuple, so the marker we just
               // set (keyed by session + approval_id) would suppress a
               // successor the user never dismissed.
-              _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+              _unmarkApprovalDismissed(ownerSid, ownerApprovalId, owner.runId, owner.mirrorToken, owner.profile);
             }
             // Any other successor head — including a different approval_id —
             // is live now: clear the captured tuple's dismissal marker BEFORE
@@ -8104,7 +8083,7 @@ function dismissApprovalCard() {
             // re-fetch exposes only the current head, so seeing B never
             // proved A settled). Only the captured response owner is
             // released: a successor rendered by someone else keeps its own.
-            _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+            _unmarkApprovalDismissed(ownerSid, ownerApprovalId, owner.runId, owner.mirrorToken, owner.profile);
             showApprovalForSession(ownerSid, pending, pendingCount);
             _releaseApprovalResponseOwner(owner);
           })();
@@ -8201,7 +8180,7 @@ async function respondApproval(choice, options = {}) {
   const {sid, approvalId} = owner;
   if (_approvalResponseMatches(sid, approvalId, owner.generation, owner)) return false;
   _approvalClearedOwner = null;
-  _unmarkApprovalDismissed(sid, approvalId);
+  _unmarkApprovalDismissed(sid, approvalId, owner.runId, owner.mirrorToken, owner.profile);
   const controlChoice = options.yolo ? "skipAll" : choice;
   _approvalResponding = {...owner, choice};
   _approvalResponding.controlChoice = controlChoice;
@@ -8308,8 +8287,22 @@ function _startApprovalFallbackPoll(sid) {
     }
     if (_approvalFallbackPollInFlight) return;
     _approvalFallbackPollInFlight = true;
+    const pollEpoch = ++_approvalPollEpoch;
+    const preAwaitGeneration = typeof _loadSessionGeneration !== 'undefined' ? _loadSessionGeneration : 0;
+    const preAwaitOwner = _approvalDisplayedOwner ? { ..._approvalDisplayedOwner } : null;
+    const preAwaitStored = _approvalPendingBySession.get(sid);
+    const preAwaitPending = preAwaitStored ? preAwaitStored.pending : null;
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
+      if (
+        _approvalPollingSessionMissingOrMismatched(sid) ||
+        (typeof _loadSessionGeneration !== 'undefined' && _loadSessionGeneration !== preAwaitGeneration) ||
+        pollEpoch !== _approvalPollEpoch ||
+        !_approvalOwnerIdentityMatches(_approvalDisplayedOwner, preAwaitOwner) ||
+        ((_approvalPendingBySession.get(sid) && _approvalPendingBySession.get(sid).pending) !== preAwaitPending)
+      ) {
+        return;
+      }
       if (data.pending) {
         if (data.pending.approval_id && _isApprovalDismissed(sid, data.pending.approval_id, data.pending.run_id, data.pending._gateway_mirror_token, data.pending.profile)) {
           // Durable dismissal: compare the fetched owner against the stored/displayed owner:
@@ -8366,6 +8359,7 @@ function stopApprovalPollingForSession(sid) {
 }
 
 function stopApprovalPolling() {
+  _approvalPollEpoch++;
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
   if (_approvalEventSource) { try { if(_approvalEventSource.readyState!==2)_approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }

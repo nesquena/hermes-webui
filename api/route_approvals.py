@@ -593,9 +593,11 @@ def retire_gateway_pending_mirror(
                 ]
             if normalized_run_id:
                 retained_gateway_queue = []
+                gateway_targets = []
                 for entry in gateway_queue:
                     data = getattr(entry, "data", None) or {}
                     if str(data.get("run_id") or "").strip() == normalized_run_id:
+                        gateway_targets.append(entry)
                         gateway_queue_changed = True
                         continue
                     retained_gateway_queue.append(entry)
@@ -608,6 +610,8 @@ def retire_gateway_pending_mirror(
         for match in retired:
             entries.remove(match)
         if normalized_run_id and not approval_id:
+            for entry in gateway_targets:
+                _settle_gateway_entry(entry, "deny", "terminal_run_retired")
             if retained_gateway_queue:
                 _gateway_queues[session_key] = retained_gateway_queue
             else:

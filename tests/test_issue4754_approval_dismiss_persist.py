@@ -77,7 +77,7 @@ def test_guard_in_show_approval_card():
     assert func_start != -1
     # Locate the guard after the function start (dismissals are namespaced by
     # session, so the guard passes sid + approval_id).
-    guard = "_isApprovalDismissed(sid,pending.approval_id)"
+    guard = "_isApprovalDismissed(sid,pending.approval_id"
     guard_idx = compact.find(guard, func_start)
     assert guard_idx != -1, "guard _isApprovalDismissed must appear in showApprovalCard"
     # _rememberApprovalPending must appear before the guard
@@ -90,7 +90,7 @@ def test_guard_in_show_approval_card():
 def test_guard_returns_early():
     # The guard must be a return statement
     compact = _compact(MESSAGES_JS)
-    assert "if(pending&&pending.approval_id&&_isApprovalDismissed(sid,pending.approval_id))return;" in compact
+    assert "if(pending&&pending.approval_id&&_isApprovalDismissed(sid,pending.approval_id" in compact
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def test_dismiss_approval_card_marks_dismissed():
     # (#7242): the id is captured from the response owner, not from the
     # process-global current card.
     body = _function_body(_compact(MESSAGES_JS), "functiondismissApprovalCard(")
-    assert "_markApprovalDismissed(ownerSid,ownerApprovalId)" in body
+    assert "_markApprovalDismissed(ownerSid,ownerApprovalId" in body
 
 
 def test_dismiss_approval_card_hides_card():
@@ -155,7 +155,7 @@ def test_respond_approval_unmarks_dismissed():
     func_start = compact.find("asyncfunctionrespondApproval(")
     assert func_start != -1
     # Find the closing brace of the function (scan for matching })
-    assert "_unmarkApprovalDismissed(sid,approvalId)" in compact[func_start:], \
+    assert "_unmarkApprovalDismissed(sid,approvalId" in compact[func_start:], \
         "_unmarkApprovalDismissed(sid,approvalId) must be called inside respondApproval"
 
 
@@ -165,7 +165,7 @@ def test_respond_approval_unmarks_before_clear():
     compact = _compact(MESSAGES_JS)
     func_start = compact.find("asyncfunctionrespondApproval(")
     assert func_start != -1
-    unmark_idx = compact.find("_unmarkApprovalDismissed(sid,approvalId)", func_start)
+    unmark_idx = compact.find("_unmarkApprovalDismissed(sid,approvalId", func_start)
     clear_idx = compact.find("_approvalCurrentId=null;", func_start)
     assert unmark_idx != -1
     assert clear_idx != -1

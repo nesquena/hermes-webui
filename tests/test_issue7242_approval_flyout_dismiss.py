@@ -207,7 +207,7 @@ def test_dismiss_approval_card_keeps_local_dismissal_behavior():
     """The optimistic local dismissal behavior must be preserved: the card is
     hidden and the local projection cleared immediately, then settled."""
     body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
-    assert "_markApprovalDismissed(ownerSid,ownerApprovalId)" in body
+    assert "_markApprovalDismissed(ownerSid,ownerApprovalId" in body
     assert "hideApprovalCard(true)" in body
     assert "_clearApprovalPendingForSession(ownerSid)" in body
 
@@ -260,7 +260,7 @@ def test_dismiss_rollback_restores_card_after_failure():
     marker, restore the pending projection snapshot, re-enable controls and
     surface an error (the card is the retry affordance)."""
     body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
-    assert "_unmarkApprovalDismissed(ownerSid,ownerApprovalId)" in body
+    assert "_unmarkApprovalDismissed(ownerSid,ownerApprovalId" in body
     assert "_approvalPendingBySession.set(ownerSid,snapshot)" in body, (
         "rollback must restore the pending projection snapshot"
     )
@@ -1262,3 +1262,208 @@ async function main() {
 }
 ''')
     assert out["visible"] is True
+
+
+def test_node_same_id_successor_arriving_while_dismissed_card_still_displayed_is_not_suppressed():
+    """Defect 1 regression: When dismissed A (id=1, run=r1, token=t1) is still
+    displayed (e.g. response or animation in progress), successor B (id=1, run=r2, token=t2)
+    arriving with the same approval_id must NOT be suppressed by A's displayed owner."""
+    out = _run_node_scenario(r'''
+async function main() {
+  // 1. First approval arrives: id=1, run=r1, token=t1
+  showApproval({ approval_id: "1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd run1" }, "sidA");
+  assertTrue(cardVisible(), "card A is displayed");
+  assertEq(els.approvalDesc.textContent, "cmd run1", "card A owns the display");
+
+  // 2. Card A is marked dismissed (simulating dismissal while card is still displayed)
+  _markApprovalDismissed("sidA", "1", "r1", "t1");
+  assertTrue(_isApprovalDismissed("sidA", "1", "r1", "t1"), "card A is marked dismissed");
+
+  // Notice card A is still displayed in the DOM (_approvalDisplayedOwner is A)
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.runId, "r1", "displayed owner is still card A");
+
+  // 3. Successor B arrives with the SAME approval_id: "1", but run_id: "r2", mirror_token: "t2"
+  showApproval({ approval_id: "1", run_id: "r2", _gateway_mirror_token: "t2", description: "cmd run2" }, "sidA");
+
+  // 4. Verify B is NOT suppressed: B must own the card
+  assertTrue(cardVisible(), "successor B must be visible (not suppressed by displayed A)");
+  assertEq(els.approvalDesc.textContent, "cmd run2", "successor B owns the card");
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.runId, "r2", "displayed owner updated to B");
+
+  // 5. A's dismissal marker remains, B is not dismissed
+  assertTrue(_isApprovalDismissed("sidA", "1", "r1", "t1"), "card A dismissal marker retained");
+  assertTrue(!_isApprovalDismissed("sidA", "1", "r2", "t2"), "successor B is NOT dismissed");
+
+  return { visible: cardVisible(), desc: els.approvalDesc.textContent };
+}
+''')
+    assert out["visible"] is True
+    assert out["desc"] == "cmd run2"
+
+
+def test_node_deferred_poll_non_null_race_does_not_overwrite_newer_sse_successor():
+    """Defect 2a regression: A deferred fallback poll returning stale non-null approval A
+    must NOT overwrite a newer approval B installed via SSE while the poll was in flight."""
+    out = _run_node_scenario(r'''
+async function main() {
+  S.session = { session_id: "sidA" };
+
+  let resolvePoll;
+  const pollPromise = new Promise((resolve) => { resolvePoll = resolve; });
+
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return pollPromise;
+    }
+    return { ok: true };
+  };
+
+  // 1. Start fallback poll (in flight, waiting on pollPromise)
+  _runPollTick("sidA");
+
+  // 2. While poll is in flight, an SSE event installs approval B
+  showApprovalForSession("sidA", {
+    approval_id: "b2",
+    run_id: "r2",
+    _gateway_mirror_token: "t2",
+    description: "cmd SSE B",
+  }, 1);
+
+  assertTrue(cardVisible(), "SSE approval B is visible");
+  assertEq(els.approvalDesc.textContent, "cmd SSE B", "B owns the card");
+
+  // 3. Deferred poll completes, returning stale approval A
+  resolvePoll({
+    pending: { approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "stale cmd A" },
+    pending_count: 1,
+  });
+  await flush();
+
+  // 4. Stale poll result must be discarded by post-await fence
+  assertTrue(cardVisible(), "card remains visible");
+  assertEq(els.approvalDesc.textContent, "cmd SSE B", "stale poll did NOT overwrite SSE-installed B");
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.approvalId, "b2", "displayed owner is still B");
+  const stored = _approvalPendingBySession.get("sidA");
+  assertEq(stored && stored.pending && stored.pending.approval_id, "b2", "stored pending is still B");
+
+  return { visible: cardVisible(), desc: els.approvalDesc.textContent };
+}
+''')
+    assert out["visible"] is True
+    assert out["desc"] == "cmd SSE B"
+
+
+def test_node_deferred_poll_null_race_does_not_clear_newer_sse_successor():
+    """Defect 2b regression: A deferred fallback poll returning pending: null must NOT
+    clear or hide a newer approval B installed via SSE while the poll was in flight."""
+    out = _run_node_scenario(r'''
+async function main() {
+  S.session = { session_id: "sidA" };
+
+  let resolvePoll;
+  const pollPromise = new Promise((resolve) => { resolvePoll = resolve; });
+
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return pollPromise;
+    }
+    return { ok: true };
+  };
+
+  // 1. Start fallback poll (in flight, waiting on pollPromise)
+  _runPollTick("sidA");
+
+  // 2. While poll is in flight, an SSE event installs approval B
+  showApprovalForSession("sidA", {
+    approval_id: "b2",
+    run_id: "r2",
+    _gateway_mirror_token: "t2",
+    description: "cmd SSE B",
+  }, 1);
+
+  assertTrue(cardVisible(), "SSE approval B is visible");
+  assertEq(els.approvalDesc.textContent, "cmd SSE B", "B owns the card");
+
+  // 3. Deferred poll completes, returning pending: null
+  resolvePoll({
+    pending: null,
+    pending_count: 0,
+  });
+  await flush();
+
+  // 4. Stale null poll must be discarded by post-await fence: B must NOT be cleared or hidden
+  assertTrue(cardVisible(), "card remains visible (not hidden by stale null poll)");
+  assertEq(els.approvalDesc.textContent, "cmd SSE B", "stale null poll did NOT hide B");
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.approvalId, "b2", "displayed owner is still B");
+  assertTrue(_approvalPendingBySession.has("sidA"), "stored pending not cleared");
+  const stored = _approvalPendingBySession.get("sidA");
+  assertEq(stored && stored.pending && stored.pending.approval_id, "b2", "stored pending is still B");
+
+  return { visible: cardVisible(), desc: els.approvalDesc.textContent };
+}
+''')
+    assert out["visible"] is True
+    assert out["desc"] == "cmd SSE B"
+
+
+def test_retire_gateway_pending_mirror_settles_event_bearing_producers_and_preserves_unrelated():
+    """Defect 3 regression: retire_gateway_pending_mirror() with run_id must call
+    _settle_gateway_entry() on matching producers in _gateway_queues, setting their
+    event, result='deny', and reason='terminal_run_retired', while preserving
+    unrelated runs in the queue."""
+    import threading
+    from types import SimpleNamespace
+    from api.route_approvals import _gateway_queues, retire_gateway_pending_mirror
+
+    sid = "test-7242-producer-" + uuid.uuid4().hex[:8]
+    target_run = "run-target-" + uuid.uuid4().hex[:8]
+    surviving_run = "run-survivor-" + uuid.uuid4().hex[:8]
+
+    target_entry = SimpleNamespace(
+        data={"run_id": target_run, "description": "target run cmd"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    survivor_entry = SimpleNamespace(
+        data={"run_id": surviving_run, "description": "surviving run cmd"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+
+    try:
+        _gateway_queues[sid] = [target_entry, survivor_entry]
+        _pending[sid] = [
+            {_GATEWAY_MIRROR_FLAG: True, "run_id": target_run, "approval_id": "appr-target"},
+            {_GATEWAY_MIRROR_FLAG: True, "run_id": surviving_run, "approval_id": "appr-survivor"},
+        ]
+
+        result = retire_gateway_pending_mirror(sid, run_id=target_run)
+        assert result is True
+
+        # Target entry assertions:
+        assert target_entry.event.is_set() is True, "target producer event must be set"
+        assert target_entry.result == "deny", "target producer result must be deny"
+        assert target_entry.reason == "terminal_run_retired", (
+            "target producer reason must be terminal_run_retired"
+        )
+
+        # Survivor entry assertions:
+        assert survivor_entry.event.is_set() is False, "surviving producer event must NOT be set"
+        assert survivor_entry.result is None, "surviving producer result must be None"
+        assert sid in _gateway_queues, "surviving queue must remain"
+        assert _gateway_queues[sid] == [survivor_entry], (
+            "surviving producer must be retained in _gateway_queues"
+        )
+
+        # _pending assertions:
+        assert not any(entry.get("run_id") == target_run for entry in _pending[sid]), (
+            "target run must be cleared from _pending"
+        )
+        assert any(entry.get("run_id") == surviving_run for entry in _pending[sid]), (
+            "surviving run must remain in _pending"
+        )
+    finally:
+        _gateway_queues.pop(sid, None)
+        _pending.pop(sid, None)
