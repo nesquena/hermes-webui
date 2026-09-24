@@ -138,15 +138,15 @@ orphan snapshots and consume browser quota. The owner still rejects snapshots
 beyond the reader's ten-minute window. This deliberately sacrifices seamless
 reload recovery rather than granting a duplicated tab another tab's authority.
 
-A session ID invalidated by a 404/delete or failed boot restore is rejected
-through a key scoped to the resolved profile and ID, not removed from the
-shared legacy fallback slot: another tab may have written a newer session
-between comparison and deletion. Profile
-switches reject the source ID in the target profile without invalidating the
-source profile. The existing failed-boot self-heal still prevents repeated
-auto-restoration after non-404 failures; an unresolved profile does not adopt
-the ownerless fallback.
-Older clients unaware of rejection keys can still read the legacy slot.
+A session ID invalidated by a 404/delete is rejected through a key scoped
+to the resolved profile and ID, not removed from the shared legacy fallback
+slot: another tab may have written a newer session between comparison and
+deletion. Profile switches reject the source ID in the target profile without
+invalidating the source profile. A non-404 boot failure only clears this
+document's selection and URL: a fresh document may retry the possibly valid
+session after the server recovers. An unresolved profile does not adopt the
+ownerless fallback. Older clients unaware of rejection keys can still read
+the legacy slot.
 
 This RFC remains `Proposed` because its broader cross-layer contract also covers
 model-context reconstruction, compression handoff, session metadata, and future

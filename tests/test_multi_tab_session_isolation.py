@@ -1004,11 +1004,11 @@ console.log(JSON.stringify({{interleaved, sharedAfter, fresh}}));
     assert out["fresh"] == "valid-Y"
 
 
-def test_boot_self_heal_paths_reject_the_stuck_sid_for_future_boots():
-    """Boot self-heal avoids retrying the same failing SID on every reload.
+def test_boot_self_heal_retries_transient_sid_but_rejects_a_proven_404():
+    """Transient boot errors clear this document, not the valid shared SID.
 
     Execute real `_clearStuckSessionOnBoot` against real ui.js helpers;
-    404/delete callers also name their rejected SID.
+    404/delete callers still name their proven-rejected SID.
     """
     clear_stuck = _function_body(SESSIONS_SRC, "function _clearStuckSessionOnBoot")
     script = f"""
@@ -1018,14 +1018,18 @@ let replaced = 0;
 const history = {{ replaceState(){{ replaced++; }} }};
 function _appRootPath(){{ return '/'; }}
 {clear_stuck}
-// Pre-upgrade storage: only the shared key names the (now dead) session.
+// Pre-upgrade storage: only the shared key names a session. The first failure
+// is transient; only a later 404 proves the SID should not be retried.
 localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'dead-sid');
 useTab(makeTab());
 const savedAtBoot = _rememberedActiveSession();
-_clearStuckSessionOnBoot('dead-sid', null);        // boot restore failed
+_clearStuckSessionOnBoot('dead-sid', null);        // transient boot failure
 const legacyAfterBootHeal = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
 useTab(makeTab());
 const nextDocument = _rememberedActiveSession();
+_forgetActiveSession('dead-sid'); // a later authoritative 404
+useTab(makeTab());
+const after404 = _rememberedActiveSession();
 // Mid-session failure of a different session must not heal anything.
 localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'live-sid');
 useTab(makeTab());
@@ -1033,12 +1037,13 @@ _rememberActiveSession('live-sid');
 _clearStuckSessionOnBoot('other-dead-sid', 'live-sid');
 const legacyAfterMidSession = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
 const ownAfterMidSession = _rememberedActiveSession();
-console.log(JSON.stringify({{savedAtBoot, legacyAfterBootHeal, nextDocument, replaced, legacyAfterMidSession, ownAfterMidSession}}));
+console.log(JSON.stringify({{savedAtBoot, legacyAfterBootHeal, nextDocument, after404, replaced, legacyAfterMidSession, ownAfterMidSession}}));
 """
     out = _run(script)
     assert out["savedAtBoot"] == "dead-sid"
     assert out["legacyAfterBootHeal"] == "dead-sid", "shared slot is never removed by another document"
-    assert out["nextDocument"] is None, "the next boot must not loop on the same failed SID"
+    assert out["nextDocument"] == "dead-sid", "a fresh document must retry after a transient error"
+    assert out["after404"] is None, "an authoritative 404 still rejects that SID"
     assert out["replaced"] == 1
     assert out["legacyAfterMidSession"] == "live-sid"
     assert out["ownAfterMidSession"] == "live-sid"
