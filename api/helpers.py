@@ -26,6 +26,8 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_fork_child_turn",
     "_webui_trusted_agent_input_text",
     "_webui_unmatched_native_image_mirror",
+    "_recovered_from_run_journal",
+    "_recovered_stream_id",
 })
 
 

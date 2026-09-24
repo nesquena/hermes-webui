@@ -1015,6 +1015,50 @@ def _append_recovered_pending_turn(
     if before_lcm_output:
         context = session.context_messages
         pending_started_at = getattr(session, 'pending_started_at', None)
+        active_stream_id = str(getattr(session, 'active_stream_id', None) or '').strip()
+        if not isinstance(pending_started_at, (int, float)):
+            pending_started_at = None
+        else:
+            try:
+                pending_started_at = float(pending_started_at)
+            except OverflowError:
+                pending_started_at = None
+            if pending_started_at is not None and (
+                not math.isfinite(pending_started_at) or pending_started_at <= 0
+            ):
+                pending_started_at = None
+        pending_token = recovered.get('_active_turn_token')
+
+        def can_skip_display_row(message):
+            if is_lcm_context_recovery_marker(message):
+                return True
+            if (
+                not isinstance(message, dict)
+                or message.get('role') == 'user'
+            ):
+                return False
+            if message.get('_ts') is None and message.get('timestamp') is None:
+                # ponytail: undated unowned activity stays a barrier; widen only with durable turn identity.
+                return bool(
+                    (
+                        pending_token
+                        and message.get('_active_turn_token') == pending_token
+                    )
+                    or (
+                        active_stream_id
+                        and message.get('_recovered_from_run_journal') is True
+                        and message.get('_recovered_stream_id') == active_stream_id
+                    )
+                )
+            if pending_started_at is None:
+                return False
+            row_timestamp = _message_timestamp(message)
+            return (
+                row_timestamp is not None
+                and math.isfinite(row_timestamp)
+                and row_timestamp >= pending_started_at
+            )
+
         for index in range(len(context) - 2, -1, -1):
             message = context[index]
             if isinstance(message, dict) and message.get('role') == 'user' and not is_lcm_context_recovery_marker(message):
@@ -1024,8 +1068,7 @@ def _append_recovered_pending_turn(
             if (
                 marker_timestamp is not None
                 and math.isfinite(marker_timestamp)
-                and isinstance(pending_started_at, (int, float))
-                and pending_started_at > 0
+                and pending_started_at is not None
                 and int(marker_timestamp) < int(pending_started_at)
             ):
                 continue
@@ -1036,11 +1079,83 @@ def _append_recovered_pending_turn(
                 ))
                 == _normalize_journal_recovery_text(pending_text)
             ):
-                # Count the output suffix, since display may retain more history.
-                visible_index = len(session.messages) - 1 - sum(
-                    not is_lcm_context_recovery_marker(row)
-                    for row in context[index + 1:-1]
-                )
+                # Align the context suffix to display mirrors, skipping rows
+                # that are context-only or have no model-context projection.
+                visible_index = len(session.messages) - 1
+                matched_output = matched_visible = None
+                for output in reversed(context[index + 1:-1]):
+                    if is_lcm_context_recovery_marker(output):
+                        continue
+                    projected = _recovered_model_context_projection(output)
+                    if projected is None:
+                        continue
+                    matched = False
+                    while visible_index > 0:
+                        candidate_index = visible_index - 1
+                        candidate = _recovered_model_context_projection(
+                            session.messages[candidate_index],
+                        )
+                        if candidate is None or is_lcm_context_recovery_marker(
+                            session.messages[candidate_index],
+                        ):
+                            if not can_skip_display_row(session.messages[candidate_index]):
+                                break
+                            visible_index = candidate_index
+                            continue
+                        if _session_messages_have_prefix(
+                            [candidate], [projected], compatible=True,
+                        ):
+                            visible_index = candidate_index
+                            matched = True
+                            matched_output, matched_visible = projected, candidate
+                        break
+                    if not matched:
+                        break
+                prefix = None
+                for output in reversed(context[:index]):
+                    if is_lcm_context_recovery_marker(output):
+                        continue
+                    prefix = _recovered_model_context_projection(output)
+                    if prefix is not None:
+                        break
+                prefix_matched = False
+                if prefix is not None:
+                    prefix_index = visible_index
+                    while prefix_index > 0:
+                        candidate_index = prefix_index - 1
+                        candidate = _recovered_model_context_projection(
+                            session.messages[candidate_index],
+                        )
+                        if candidate is None or is_lcm_context_recovery_marker(
+                            session.messages[candidate_index],
+                        ):
+                            prefix_index = candidate_index
+                            continue
+                        prefix_matched = _session_messages_have_prefix(
+                            [candidate], [prefix], compatible=True,
+                        )
+                        break
+                if not prefix_matched and matched_output is not None:
+                    output_timestamp = _message_timestamp(matched_output)
+                    visible_timestamp = _message_timestamp(matched_visible)
+                    same_timestamp = (
+                        output_timestamp is not None
+                        and visible_timestamp is not None
+                        and math.isfinite(output_timestamp)
+                        and math.isfinite(visible_timestamp)
+                        and output_timestamp == visible_timestamp
+                    )
+                    if not same_timestamp:
+                        # Without a prior context anchor, don't claim a repeated
+                        # historical answer when the display row lacks a time.
+                        visible_index = len(session.messages) - 1
+                while visible_index > 0:
+                    previous = session.messages[visible_index - 1]
+                    if _recovered_model_context_projection(previous) is not None:
+                        break
+                    if not can_skip_display_row(previous):
+                        break
+                    visible_index -= 1
                 context.insert(index + 1, context.pop())
                 session.messages.insert(visible_index, session.messages.pop())
                 break
@@ -2888,15 +3003,26 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
     collapsed = []
     changed = False
     previous_partial_sig = None
+    previous_partial_token = None
     for message in messages:
         if isinstance(message, dict) and message.get('_partial'):
             sig = _partial_message_signature(message)
-            if previous_partial_sig == sig:
+            token = message.get('_active_turn_token')
+            if (
+                previous_partial_sig == sig
+                and (
+                    previous_partial_token is None
+                    or token is None
+                    or previous_partial_token == token
+                )
+            ):
                 changed = True
                 continue
             previous_partial_sig = sig
+            previous_partial_token = token
         else:
             previous_partial_sig = None
+            previous_partial_token = None
         collapsed.append(message)
     return collapsed, changed
 
@@ -4573,7 +4699,6 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
                     locked_messages.insert(0, pending_row)
             locked.messages = locked_messages
 
-        display_baseline_count = len(locked_messages)
         merged_messages = reconciled_state_db_messages_for_session(
             locked,
             state_messages=state_messages,

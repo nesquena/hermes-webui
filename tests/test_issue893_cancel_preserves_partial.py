@@ -496,8 +496,20 @@ def test_cancel_backfills_eager_saved_owner_before_partial_in_context(monkeypatc
     assert [row['content'] for row in context] == [
         'Earlier', 'History', 'Continue', 'Partial response',
     ]
-    assert sum(row.get('_active_turn_token') == owner['_active_turn_token'] for row in context) == 1
-    assert sum(row.get('_active_turn_token') == owner['_active_turn_token'] for row in loaded.messages) == 1
+    assert sum(
+        row.get('role') == 'user'
+        and row.get('_active_turn_token') == owner['_active_turn_token']
+        for row in context
+    ) == 1
+    assert sum(
+        row.get('role') == 'user'
+        and row.get('_active_turn_token') == owner['_active_turn_token']
+        for row in loaded.messages
+    ) == 1
+    context_partial = next(row for row in context if row.get('_partial'))
+    display_partial = next(row for row in loaded.messages if row.get('_partial'))
+    assert context_partial['_active_turn_token'] == owner['_active_turn_token']
+    assert display_partial['_active_turn_token'] == owner['_active_turn_token']
     assert loaded.messages[:len(original_display)] == original_display
     assert loaded.messages.index(owner) < next(
         i for i, row in enumerate(loaded.messages)

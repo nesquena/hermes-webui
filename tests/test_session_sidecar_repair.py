@@ -2353,6 +2353,297 @@ def test_lcm_recovery_does_not_cross_historical_user(hermes_home, monkeypatch, s
         assert snapshot.pending_user_message is None
 
 
+@pytest.mark.parametrize('error_timestamp', [99, 100.1, None])
+@pytest.mark.parametrize('has_current_output', [False, True])
+def test_lcm_pending_owner_stays_after_prior_error(
+    error_timestamp, has_current_output,
+):
+    heading = '[Recent Summary (d0, node 418)]'
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    prior_error = {
+        'role': 'assistant', 'content': 'Earlier recovery error',
+        '_error': True, 'timestamp': error_timestamp,
+    }
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    reasoning = {
+        'role': 'assistant',
+        'content': [{'type': 'thinking', 'thinking': 'Current reasoning'}],
+        'timestamp': 100.5,
+    }
+    current_error = {
+        'role': 'assistant', 'content': 'Current activity error',
+        '_error': True, 'timestamp': 100.75,
+    }
+    current_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    display_output = [reasoning, current_error, current_answer] if has_current_output else []
+    context_output = [current_answer] if has_current_output else []
+    session = _make_session(
+        messages=[history_user, prior_error, *display_output],
+        context_messages=[history_user, marker, *context_output],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+
+    owner = models._append_recovered_pending_turn(
+        session, timestamp=100, before_lcm_output=True,
+    )
+    session.save()
+
+    expected_messages = [history_user, prior_error, owner, *display_output]
+    expected_context = [history_user, marker, owner, *context_output]
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == expected_messages
+        assert snapshot.context_messages == expected_context
+
+
+@pytest.mark.parametrize('activity', ['reasoning', 'error', 'blank'])
+def test_lcm_pending_owner_precedes_undated_activity_with_current_stream_provenance(activity):
+    heading = '[Recent Summary (d0, node 418)]'
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    prior_error = {
+        'role': 'assistant', 'content': 'Earlier recovery error',
+        '_error': True,
+    }
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    current_activity = {
+        'role': 'assistant',
+        'content': '',
+        '_recovered_from_run_journal': True,
+        '_recovered_stream_id': 'new',
+    }
+    if activity == 'reasoning':
+        current_activity['reasoning'] = 'Current reasoning'
+    elif activity == 'error':
+        current_activity.update(content='Current activity error', _error=True)
+    current_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    session = _make_session(
+        messages=[history_user, prior_error, current_activity, current_answer],
+        context_messages=[history_user, marker, current_answer],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+
+    owner = models._append_recovered_pending_turn(
+        session, timestamp=100, before_lcm_output=True,
+    )
+    session.save()
+
+    expected_messages = [history_user, prior_error, owner, current_activity, current_answer]
+    expected_context = [history_user, marker, owner, current_answer]
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == expected_messages
+        assert snapshot.context_messages == expected_context
+
+
+@pytest.mark.parametrize('activity', ['reasoning', 'error', 'blank'])
+def test_lcm_pending_owner_precedes_undated_activity_with_exact_active_turn_token(activity):
+    heading = '[Recent Summary (d0, node 418)]'
+    token = streaming.build_active_turn_token('new', 100.25)
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    prior_error = {
+        'role': 'assistant', 'content': 'Earlier recovery error',
+        '_error': True,
+    }
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    current_activity = {
+        'role': 'assistant', 'content': '', '_active_turn_token': token,
+    }
+    if activity == 'reasoning':
+        current_activity['reasoning'] = 'Current reasoning'
+    elif activity == 'error':
+        current_activity.update(content='Current activity error', _error=True)
+    else:
+        current_activity['_partial'] = True
+    current_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    session = _make_session(
+        messages=[history_user, prior_error, current_activity, current_answer],
+        context_messages=[history_user, marker, current_answer],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+
+    owner = models._append_recovered_pending_turn(
+        session, timestamp=100, before_lcm_output=True,
+    )
+    session.save()
+
+    expected_messages = [history_user, prior_error, owner, current_activity, current_answer]
+    expected_context = [history_user, marker, owner, current_answer]
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == expected_messages
+        assert snapshot.context_messages == expected_context
+
+
+def test_lcm_pending_owner_does_not_skip_undated_activity_with_foreign_active_turn_token():
+    heading = '[Recent Summary (d0, node 418)]'
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    foreign_activity = {
+        'role': 'assistant', 'content': '',
+        '_active_turn_token': 'old:100.125',
+    }
+    current_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    session = _make_session(
+        messages=[history_user, foreign_activity, current_answer],
+        context_messages=[history_user, marker, current_answer],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+
+    owner = models._append_recovered_pending_turn(
+        session, timestamp=100, before_lcm_output=True,
+    )
+    session.save()
+
+    expected_messages = [history_user, foreign_activity, owner, current_answer]
+    expected_context = [history_user, marker, owner, current_answer]
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == expected_messages
+        assert snapshot.context_messages == expected_context
+
+
+@pytest.mark.parametrize('restamped_with_stable_id', [False, True])
+def test_lcm_pending_owner_after_prior_error_with_unstamped_answer(restamped_with_stable_id):
+    heading = '[Recent Summary (d0, node 418)]'
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    history_answer = {'role': 'assistant', 'content': 'Earlier answer', 'timestamp': 99}
+    prior_error = {
+        'role': 'assistant', 'content': 'Earlier recovery error', '_error': True,
+        'timestamp': 99.5,
+    }
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    context_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    display_answer: dict[str, object] = {'role': 'assistant', 'content': 'Current answer'}
+    if restamped_with_stable_id:
+        context_answer['id'] = display_answer['id'] = 'current-answer-id'
+        display_answer['timestamp'] = 102
+    session = _make_session(
+        messages=[history_user, history_answer, prior_error, display_answer],
+        context_messages=[history_user, history_answer, marker, context_answer],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+
+    owner = models._append_recovered_pending_turn(
+        session, timestamp=100, before_lcm_output=True,
+    )
+    session.save()
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == [
+            history_user, history_answer, prior_error, owner, display_answer,
+        ]
+        assert snapshot.context_messages == [
+            history_user, history_answer, marker, owner, context_answer,
+        ]
+
+
+def test_state_repair_places_lcm_owner_before_display_only_current_output(monkeypatch):
+    heading = '[Recent Summary (d0, node 418)]'
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    history_answer = {'role': 'assistant', 'content': 'Earlier answer', 'timestamp': 99}
+    reasoning = {
+        'role': 'assistant',
+        'content': [{'type': 'thinking', 'thinking': 'Current reasoning'}],
+        'timestamp': 100.5,
+    }
+    error = {
+        'role': 'assistant', 'content': 'Current activity error',
+        '_error': True, 'timestamp': 100.75,
+    }
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    current_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    session = _make_session(
+        messages=[history_user, history_answer, reasoning, error],
+        context_messages=[history_user, history_answer, marker],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+    session.save()
+    state_messages = [history_user, history_answer, marker, current_answer]
+    monkeypatch.setattr(models, 'get_state_db_session_summary', lambda *a, **k: {
+        'message_count': len(state_messages), 'last_message_at': 101,
+    })
+    monkeypatch.setattr(models, 'get_state_db_session_messages', lambda *a, **k: state_messages)
+
+    assert models._sync_sidecar_from_state_db_if_newer(session)
+
+    owner = next(row for row in session.messages if row.get('_active_turn_token') == 'new:100.25')
+    expected_messages = [history_user, history_answer, owner, reasoning, error, current_answer]
+    expected_context = [history_user, history_answer, marker, owner, current_answer]
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == expected_messages
+        assert snapshot.context_messages == expected_context
+        assert marker not in snapshot.messages
+        assert snapshot.pending_user_message is None
+
+
+@pytest.mark.parametrize(
+    ('later_marker', 'display_timestamp', 'repeat_answer', 'current_visible'),
+    [
+        (
+            {'role': 'assistant', 'content': '[Recent Summary (d1, node 419)]', 'timestamp': 101.5},
+            101,
+            False,
+            True,
+        ),
+        (None, None, True, True),
+        (None, None, True, False),
+    ],
+)
+def test_lcm_pending_owner_aligns_context_mirrors(
+    later_marker, display_timestamp, repeat_answer, current_visible,
+):
+    heading = '[Recent Summary (d0, node 418)]'
+    history_user = {'role': 'user', 'content': 'Earlier request', 'timestamp': 98}
+    answer_text = 'Same answer' if repeat_answer else 'Earlier answer'
+    history_answer = {'role': 'assistant', 'content': answer_text, 'timestamp': 99}
+    display_history_answer = dict(history_answer)
+    if repeat_answer and not current_visible:
+        display_history_answer.pop('timestamp')
+    marker = {'role': 'user', 'content': heading, 'timestamp': 100}
+    context_answer = {'role': 'assistant', 'content': 'Current answer', 'timestamp': 101}
+    display_answer = None
+    if current_visible:
+        display_answer = dict(context_answer)
+        if display_timestamp is None:
+            display_answer.pop('timestamp')
+        else:
+            display_answer['timestamp'] = display_timestamp
+    if repeat_answer:
+        history_answer['content'] = display_history_answer['content'] = 'Same answer'
+        context_answer['content'] = 'Same answer'
+        if display_answer:
+            display_answer['content'] = 'Same answer'
+    context_tail = [context_answer, *([later_marker] if later_marker else [])]
+    session = _make_session(
+        messages=[history_user, display_history_answer, *([display_answer] if display_answer else [])],
+        context_messages=[history_user, history_answer, marker, *context_tail],
+        active_stream_id='new',
+        pending_user_message=heading,
+        pending_started_at=100.25,
+    )
+
+    owner = models._append_recovered_pending_turn(
+        session, timestamp=100, before_lcm_output=True,
+    )
+    session.save()
+
+    expected_messages = [
+        history_user, display_history_answer, *([owner, display_answer] if display_answer else [owner]),
+    ]
+    expected_context = [history_user, history_answer, marker, owner, *context_tail]
+    for snapshot in (session, Session.load(session.session_id)):
+        assert snapshot.messages == expected_messages
+        assert snapshot.context_messages == expected_context
+        assert marker not in snapshot.messages
+
+
 @pytest.mark.parametrize('terminal', ['apperror', 'cancel', 'done', None])
 def test_pending_recovery_preserves_conflicting_token_owner(hermes_home, terminal):
     heading = '[Recent Summary (d0, node 418)]'

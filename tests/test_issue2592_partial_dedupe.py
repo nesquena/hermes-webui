@@ -1,8 +1,8 @@
 import json
 
 
-def _tool_partial(reasoning="same reasoning", args=None, *, timestamp=123):
-    return {
+def _tool_partial(reasoning="same reasoning", args=None, *, timestamp=123, token=None):
+    row = {
         "role": "assistant",
         "content": "",
         "_partial": True,
@@ -18,6 +18,9 @@ def _tool_partial(reasoning="same reasoning", args=None, *, timestamp=123):
             }
         ],
     }
+    if token is not None:
+        row["_active_turn_token"] = token
+    return row
 
 
 def test_tool_only_partial_dedupe_uses_reasoning_and_tool_signature():
@@ -48,6 +51,36 @@ def test_tool_only_partial_dedupe_is_scoped_to_current_user_turn():
     ]
 
     assert not _partial_marker_already_present(existing, _tool_partial(), before_idx=len(existing))
+
+
+def test_runtime_partial_dedupe_preserves_foreign_turn_tokens():
+    from api.streaming import _partial_marker_already_present
+
+    existing = [
+        {"role": "user", "content": "current", "_active_turn_token": "current:1"},
+        _tool_partial(token="foreign:1"),
+    ]
+
+    assert not _partial_marker_already_present(
+        existing,
+        _tool_partial(token="current:1"),
+        before_idx=len(existing),
+    )
+    assert _partial_marker_already_present(
+        existing,
+        _tool_partial(token="foreign:1"),
+        before_idx=len(existing),
+    )
+
+
+def test_load_partial_dedupe_preserves_foreign_turn_tokens():
+    import api.models as models
+
+    first = _tool_partial(token="current:1")
+    second = _tool_partial(token="foreign:1")
+    collapsed, changed = models._collapse_adjacent_duplicate_partials([first, second])
+    assert collapsed == [first, second]
+    assert changed is False
 
 
 def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatch):

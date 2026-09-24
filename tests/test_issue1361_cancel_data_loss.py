@@ -141,6 +141,24 @@ class TestCancelPreservesReasoningText:
         assert has_reasoning, \
             f"Expected reasoning field on partial assistant msg after cancel. Got messages: {assistant_msgs}"
 
+    def test_cancel_stamps_current_partial_and_error_with_active_turn_token(self):
+        sid = "test_1361_cancel_token"
+        stream_id = "stream_cancel_token"
+        session = _make_session(session_id=sid)
+        _setup_cancel_state(sid, stream_id)
+        session.pending_started_at = 100.25
+        session.save()
+        config.STREAM_PARTIAL_TEXT[stream_id] = "Partial output before stop"
+
+        cancel_stream(stream_id)
+
+        token = streaming.build_active_turn_token(stream_id, 100.25)
+        reloaded = Session.load(sid)
+        partial = next(row for row in reloaded.messages if row.get('_partial'))
+        error = next(row for row in reloaded.messages if row.get('_error'))
+        assert partial['_active_turn_token'] == token
+        assert error['_active_turn_token'] == token
+
     def test_cancel_with_reasoning_and_partial_tokens_preserves_both(self):
         """Cancel mid-stream with both reasoning and some visible tokens."""
         sid = "test_1361_a2"
@@ -388,6 +406,63 @@ def test_stream_error_materializes_pending_user_turn_before_clearing_runtime_sta
     assert s.messages[-1]["timestamp"] == 1778098700
     assert s.messages[-1]["attachments"] == [{"name": "screenshot.png"}]
     assert s.pending_user_message == "please restart the WebUI"
+
+
+def test_current_turn_partial_upsert_stamps_only_available_exact_token():
+    token = streaming.build_active_turn_token('stream_1361', 1778098700.25)
+    identity = {'token': token}
+    messages = [{'role': 'user', 'content': 'current', '_active_turn_token': token}]
+
+    row = streaming._upsert_current_turn_partial(
+        messages,
+        {'role': 'assistant', 'content': 'partial', '_partial': True},
+        active_turn_identity=identity,
+    )
+    assert row['_active_turn_token'] == token
+
+    foreign = streaming._upsert_current_turn_partial(
+        messages,
+        {
+            'role': 'assistant', 'content': 'other partial', '_partial': True,
+            '_active_turn_token': 'foreign:1',
+        },
+        active_turn_identity=identity,
+    )
+    assert foreign['_active_turn_token'] == 'foreign:1'
+
+    unstamped = streaming._upsert_current_turn_partial(
+        [{'role': 'user', 'content': 'current'}],
+        {'role': 'assistant', 'content': 'unowned partial', '_partial': True},
+        active_turn_identity={},
+    )
+    assert '_active_turn_token' not in unstamped
+
+
+@pytest.mark.parametrize('result_token', [None, 'active', 'foreign'])
+def test_result_partial_preserves_existing_token_or_stamps_active_turn(result_token):
+    token = streaming.build_active_turn_token('stream_1361', 1778098700.25)
+    result_user = {'role': 'user', 'content': 'current', '_active_turn_token': token}
+    assistant = {'role': 'assistant', 'content': 'partial response'}
+    if result_token == 'active':
+        assistant['_active_turn_token'] = token
+    elif result_token == 'foreign':
+        assistant['_active_turn_token'] = 'foreign:1'
+    session = Session(
+        session_id=f'result_partial_{result_token}',
+        messages=[dict(result_user)],
+    )
+
+    row = streaming._append_result_partial_on_error(
+        session,
+        {'partial': True, 'messages': [result_user, assistant]},
+        [],
+        'current',
+        active_turn_identity={'token': token},
+    )
+
+    assert row['_active_turn_token'] == (
+        'foreign:1' if result_token == 'foreign' else token
+    )
 
 
 def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoint():
@@ -697,7 +772,10 @@ def test_cancel_tokenless_checkpoint_requires_precise_time(monkeypatch, marker, 
     recovered = provenance != 'current' and (provenance == 'old' or marker or float(timestamp) < 100.9)
     for saved in (session, Session.load(session.session_id)):
         assert saved.context_messages[:2] == [row, answer]
-        owners = [m for m in saved.messages if m.get('_active_turn_token') == token]
+        owners = [
+            m for m in saved.messages
+            if m.get('role') == 'user' and m.get('_active_turn_token') == token
+        ]
         assert len(owners) == int(recovered or provenance == 'current'), saved.messages
         if recovered:
             assert saved.messages.index(owners[0]) > saved.messages.index(answer)
