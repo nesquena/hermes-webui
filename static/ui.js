@@ -7271,6 +7271,21 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // #1804 re-gate 9/24: the busy-mode send button renders a Stop/Queue/
+  // Interrupt/Steer label that widens it from a 34px round button to a
+  // 74-108px pill (see .send-btn[data-action=...]: width:auto). That
+  // extra width steals room from .composer-left, so measuring overflow
+  // with the pill in place resolves a tighter stage than with the
+  // icon-only (idle) button — the footer would otherwise flicker between
+  // stages the moment a turn starts (the #4968 chip-label flicker) and
+  // clip the mobile config burger under the pill at narrow widths.
+  // Pin the label hidden so the button is at its idle width during the
+  // measurement, the same shape as the existing height/visibility
+  // freeze: commit nothing to the screen, restore both in `finally`.
+  const sendBtn=document.getElementById('btnSend');
+  const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
+  const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
+  if(sendBtnLabel) sendBtnLabel.style.display='none';
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
   // e.g. a constant 760px viewport). CSS hides the inline model/reasoning/
@@ -7314,6 +7329,7 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+    if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;
   }
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
@@ -11103,6 +11119,14 @@ function updateSendBtn(){
   }
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
+  // #1804 re-gate 9/24: #btnSend is .has-tooltip and its hover tooltip
+  // is driven by the [data-tooltip] attribute (see .has-tooltip::after at
+  // static/style.css:2110). The static markup ships data-tooltip="Send
+  // message" (composer_send), so every busy mode showed "Send message"
+  // on hover even though title/aria-label carried the correct mode name.
+  // Mirror the same string into [data-tooltip] so the hover tooltip and
+  // the screen-reader label stay in sync with the action.
+  btn.setAttribute('data-tooltip',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop

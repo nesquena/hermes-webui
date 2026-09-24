@@ -191,30 +191,77 @@ def test_set_composer_primary_button_icon_inserts_label_span():
 # ── i18n invariant ────────────────────────────────────────────────────
 
 
+def _locale_block(text, lang):
+    """Return the body of one top-level locale block (``lang: { ... }``) or
+    ``None`` if the locale is not present. Used to assert per-locale key
+    coverage without leaning on the regex's ``\\n    `` anchor (which can
+    miss keys placed at the start of a block after a previous deletion).
+    """
+    m = re.search(
+        rf"^  {re.escape(lang)}: \{{(.*?)(?=^  [a-z]+: \{{|\Z)",
+        text, re.MULTILINE | re.DOTALL,
+    )
+    return m.group(1) if m else None
+
+
+@pytest.mark.parametrize("lang", [
+    "it", "ja", "ru", "es", "de", "zh", "pt", "ko", "fr", "cs", "tr", "pl", "vi",
+])
 @pytest.mark.parametrize("key", [
     "composer_action_stop",
     "composer_action_queue",
     "composer_action_interrupt",
     "composer_action_steer",
 ])
-def test_label_key_present_in_every_locale_block(key):
-    """All 15 locale blocks (en + 13 translations + zh-Hant) must define
-    the new key so the invariant ``test_*_locale_covers_english_keys``
-    holds.
+def test_label_key_absent_from_non_english_locale_block(lang, key):
+    """#1804 re-gate 9/24 maintainer finding: the four new keys were
+    English in all 14 non-English locales while the neighbouring tooltip
+    keys (``composer_stop`` and friends) are translated. Fix is to make
+    the English fallback explicit — drop the keys from every non-English
+    block so ``t()`` resolves them via ``LOCALES.en`` (see static/i18n.js
+    line ~27065: ``val = _locale[key] ?? LOCALES.en[key]``). The 9/24
+    review accepted either translating or dropping; dropping keeps the
+    i18n.js diff small and the English fallback honest in the locale
+    files instead of a duplicate copy-paste of the en values.
     """
-    # The blocks are the top-level locale objects. We rely on the
-    # existing invariant test for the count; here we just assert that
-    # every block where the key is present defines it with a non-empty
-    # string.
-    pattern = re.compile(
-        rf"\n    {re.escape(key)}:\s*'([^']*)',"
+    body = _locale_block(I18N_JS, lang)
+    assert body is not None, f"locale {lang!r} not present in i18n.js"
+    # The key MUST NOT appear in non-English blocks. ``t()`` falls back
+    # to LOCALES.en, so the busy-mode pill renders the English label
+    # (the maintainer-accepted trade-off — see the comment in this file
+    # and the review on PR #7686).
+    assert not re.search(rf"^\s{{4}}{re.escape(key)}:", body, re.MULTILINE), (
+        f"key {key!r} should be absent from locale {lang!r}; "
+        "non-English blocks must rely on the LOCALES.en fallback so the "
+        "English fallback is explicit (see #1804 re-gate 9/24 review)."
     )
+
+
+@pytest.mark.parametrize("key", [
+    "composer_action_stop",
+    "composer_action_queue",
+    "composer_action_interrupt",
+    "composer_action_steer",
+])
+def test_label_key_present_only_in_en_block(key):
+    """The four keys live in ``LOCALES.en`` (the i18n fallback) and
+    nowhere else. With the 14 non-English blocks dropping them, the
+    total occurrence count is exactly 1 (the en block).
+    """
+    pattern = re.compile(rf"\n    {re.escape(key)}:\s*'([^']*)',")
     matches = pattern.findall(I18N_JS)
-    assert len(matches) >= 15, (
-        f"Expected >=15 locale entries for {key!r}, found {len(matches)}"
+    assert len(matches) == 1, (
+        f"Expected exactly 1 entry for {key!r} (LOCALES.en only — "
+        f"non-English blocks must drop the key so the English fallback "
+        f"is explicit, per #1804 re-gate 9/24 review); found {len(matches)}"
     )
-    for v in matches:
-        assert v.strip(), f"Empty translation for {key!r}"
+    body = _locale_block(I18N_JS, "en")
+    assert body is not None, "en locale block missing"
+    assert re.search(rf"^\s{{4}}{re.escape(key)}:", body, re.MULTILINE), (
+        f"key {key!r} must live in LOCALES.en so t() can fall back to it"
+    )
+    # The English value must be a non-empty label string (not a raw key).
+    assert matches[0].strip(), f"Empty en translation for {key!r}"
 
 
 # ── Behavioural: run the helper in a Node VM to confirm the span is
@@ -349,4 +396,191 @@ def test_helper_escapes_label_text_in_innerhtml():
     )
     assert "&quot;" in rendered, (
         f"label text should escape \"; got {rendered!r}"
+    )
+
+
+# ── #1804 re-gate 9/24: hover tooltip sync ─────────────────────────────
+#
+# ``#btnSend`` is ``.has-tooltip`` and its hover tooltip is driven by
+# the ``[data-tooltip]`` attribute (see ``.has-tooltip::after`` at
+# static/style.css:2110). The static markup ships ``data-tooltip="Send
+# message"`` (composer_send), so before the fix every busy mode
+# surfaced "Send message" on hover even though ``title``/``aria-label``
+# carried the correct mode name. The fix mirrors the resolved title
+# into ``[data-tooltip]`` inside ``updateSendBtn`` so the hover
+# tooltip, the screen-reader label, and the title stay in sync.
+
+
+def test_update_send_btn_mirrors_title_into_data_tooltip():
+    """``updateSendBtn`` must write the resolved title into the
+    ``[data-tooltip]`` attribute for every action, so the
+    ``.has-tooltip::after`` rule surfaces the same string on hover
+    that ``title`` shows on the native browser tooltip. The
+    extraction finds the literal source of ``updateSendBtn`` and
+    asserts it sets ``data-tooltip`` to the same string used for
+    ``title`` and ``aria-label``.
+    """
+    i = UI_JS.find("function updateSendBtn")
+    assert i != -1, "updateSendBtn not found in static/ui.js"
+    brace_open = UI_JS.find("{", i)
+    depth = 0
+    end = brace_open
+    for j in range(brace_open, len(UI_JS)):
+        ch = UI_JS[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
+    body = UI_JS[i:end]
+    # The mirror must happen after the title / aria-label writes so
+    # the data-tooltip value is the *resolved* title (with locale
+    # fallback), not a stale static string.
+    title_idx = body.find("btn.title=")
+    aria_idx = body.find("btn.setAttribute('aria-label'")
+    if aria_idx == -1:
+        aria_idx = body.find('btn.setAttribute("aria-label"')
+    tooltip_idx = body.find("btn.setAttribute('data-tooltip'")
+    if tooltip_idx == -1:
+        tooltip_idx = body.find('btn.setAttribute("data-tooltip"')
+    assert title_idx != -1, "updateSendBtn must still set btn.title"
+    assert aria_idx != -1, (
+        "updateSendBtn must still set aria-label (regression check)"
+    )
+    assert tooltip_idx != -1, (
+        "updateSendBtn must mirror the resolved title into "
+        "[data-tooltip] so the .has-tooltip::after hover tooltip "
+        "matches the busy-mode action (see #1804 re-gate 9/24 "
+        "review — data-tooltip was hard-coded 'Send message' on "
+        "every busy mode)."
+    )
+    assert title_idx < tooltip_idx, (
+        "data-tooltip mirror must happen after the title write so "
+        "the tooltip carries the resolved mode name, not a stale "
+        "value from a prior action."
+    )
+    assert aria_idx < tooltip_idx, (
+        "data-tooltip mirror must happen after the aria-label write."
+    )
+    # The mirror must use the same variable that holds the resolved
+    # title (_btnTitle), not a hard-coded "Send message" string —
+    # otherwise the tooltip would still read "Send message" on the
+    # busy modes, the exact regression the 9/24 review flagged.
+    snippet = body[title_idx:tooltip_idx]
+    # Find the exact line that sets data-tooltip.
+    tooltip_line = body[tooltip_idx:body.find("\n", tooltip_idx)]
+    assert "_btnTitle" in tooltip_line, (
+        f"data-tooltip mirror must use the resolved title variable, "
+        f"not a hard-coded string: {tooltip_line!r}"
+    )
+
+
+# ── #1804 re-gate 9/24: cf-burger icon-only ────────────────────────────
+#
+# At the narrowest footer stage (cf-burger) the busy-mode send button
+# would otherwise stay as a 74-108px pill and clip the mobile config
+# burger (the fit pass already hides the workspace chip and the
+# model/reasoning/toolsets/quota chips in cf-burger, leaving only the
+# 44px workspace-files button + the 44px config button in
+# .composer-left). The fix collapses the button back to a 34px round
+# icon in cf-burger and hides the label, so the 34px width + 4px gap
+# fits under even the 320px extreme-legacy phone rule. The CSS
+# contract is pinned here so a future refactor that re-enables the
+# pill in cf-burger trips this test directly.
+
+
+CF_BURGER_BTN_RULE = re.compile(
+    r"\.composer-footer\.cf-burger\s+\.send-btn\s*\{[^}]*\}",
+    re.DOTALL,
+)
+CF_BURGER_LABEL_RULE = re.compile(
+    r"\.composer-footer\.cf-burger\s+\.send-btn-label\s*\{[^}]*\}",
+    re.DOTALL,
+)
+CF_BURGER_BTN_RULES = re.compile(
+    r"\.composer-footer\.cf-burger\s+\.send-btn\[data-action=\"(?:stop|queue|interrupt|steer)\"\][^{}]*\{[^}]*\}",
+    re.DOTALL,
+)
+
+
+def test_cf_burger_hides_send_btn_label():
+    """The cf-burger stage must hide the ``.send-btn-label`` so the
+    pill collapses to a 34px round icon and the 44px mobile config
+    burger stays fully visible (the fit pass already hid the
+    workspace / model / reasoning / toolsets / quota chips in
+    cf-burger, so .composer-left is just the 44px workspace-files
+    button + the 44px config button + the send button).
+    """
+    m = CF_BURGER_LABEL_RULE.search(STYLE_CSS)
+    assert m, (
+        "expected a `.composer-footer.cf-burger .send-btn-label { ... }` "
+        "rule that hides the busy-mode label at the narrowest footer "
+        "stage (#1804 re-gate 9/24 review)."
+    )
+    block = m.group(0)
+    assert "display" in block and "none" in block, (
+        f".send-btn-label must be display:none inside cf-burger, got: {block!r}"
+    )
+
+
+def test_cf_burger_collapses_send_btn_to_round_icon():
+    """The cf-burger stage must reset the send button to a 34px round
+    icon, overriding the busy-mode pill shape so the mobile config
+    burger stays visible. The rule must cover the four busy-mode
+    data-action selectors (stop / queue / interrupt / steer) AND the
+    base ``.send-btn`` selector, with at least width, height, and
+    border-radius set so the pill collapses to a round icon-only
+    button.
+    """
+    base = CF_BURGER_BTN_RULE.search(STYLE_CSS)
+    assert base, (
+        "expected a `.composer-footer.cf-burger .send-btn { ... }` "
+        "rule that collapses the button to a 34px round icon in the "
+        "narrowest footer stage (#1804 re-gate 9/24 review)."
+    )
+    block = base.group(0)
+    assert "width" in block and "34px" in block, (
+        f"cf-burger .send-btn must set width:34px, got: {block!r}"
+    )
+    assert "height" in block and "34px" in block, (
+        f"cf-burger .send-btn must set height:34px, got: {block!r}"
+    )
+    assert "border-radius" in block and "50%" in block, (
+        f"cf-burger .send-btn must set border-radius:50%, got: {block!r}"
+    )
+    # The four busy-mode data-action selectors must share the same
+    # collapse rule so the pill shape cannot override it via
+    # specificity. The pattern matches either one combined rule
+    # listing all four actions or a single base rule (the latter
+    # already covers them because of CSS cascade order — the base
+    # rule is later in the file than the busy-mode pill rule).
+    # We assert at least one of the two patterns is present.
+    combined = CF_BURGER_BTN_RULES.search(STYLE_CSS)
+    assert combined is not None or base is not None, (
+        "cf-burger must collapse the send button to a 34px round "
+        "icon for all four busy-mode data-action selectors (stop / "
+        "queue / interrupt / steer) so the pill shape cannot survive "
+        "the cascade."
+    )
+
+
+def test_cf_burger_label_rule_uses_important():
+    """The cf-burger label-hide rule must use ``!important`` (or
+    come after the busy-mode label rule) so the pill cannot be
+    resurrected by a later rule. The label rule is the only way
+    to ensure the pill collapses to icon-only in cf-burger.
+    """
+    m = CF_BURGER_LABEL_RULE.search(STYLE_CSS)
+    assert m, "cf-burger label rule missing"
+    block = m.group(0)
+    # Either !important OR the rule is positioned after the .send-btn-label
+    # base rule. We check for !important because the existing label
+    # base rule at line 2774 has no !important, and we need cf-burger
+    # to win regardless of cascade.
+    assert "!important" in block, (
+        f"cf-burger .send-btn-label rule must use !important so "
+        f"the busy-mode pill cannot be resurrected by a later rule: "
+        f"{block!r}"
     )

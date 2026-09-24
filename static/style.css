@@ -3285,6 +3285,20 @@
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
+  /* #1804 re-gate 9/24: in the narrowest footer stage (cf-burger) the busy
+     send button is a 74-108px pill that overlaps the mobile config
+     burger (the fit pass already hides the workspace chip and the
+     model/reasoning/toolsets/quota chips, leaving only the 44px
+     workspace-files button + the 44px config button in .composer-left).
+     Collapse the button back to a 34px round icon so the config burger
+     stays fully visible — the 34px width + 4px gap fits under even the
+     320px extreme-legacy phone rule in @media (max-width:340px) above. */
+  .composer-footer.cf-burger .send-btn-label{display:none!important;}
+  .composer-footer.cf-burger .send-btn{width:34px;height:34px;border-radius:50%;padding:0;gap:0;}
+  .composer-footer.cf-burger .send-btn[data-action="stop"],
+  .composer-footer.cf-burger .send-btn[data-action="queue"],
+  .composer-footer.cf-burger .send-btn[data-action="interrupt"],
+  .composer-footer.cf-burger .send-btn[data-action="steer"]{width:34px;height:34px;border-radius:50%;padding:0;gap:0;}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+

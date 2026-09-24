@@ -134,6 +134,12 @@ function makeFooterDom(opts) {
     get scrollWidth() {
       layout('measure');
       if (throwOnMeasure) { throwOnMeasure = false; throw new Error('synthetic measurement failure'); }
+      // customContent (when supplied) overrides the stage-class content
+      // width — used by the #1804 re-gate 9/24 width-sweep test to
+      // model the maintainer's specific content widths at each stage.
+      if (opts.customContent) {
+        return opts.customContent[stageOf(classes)] || 0;
+      }
       return Math.max(opts.availableWidth, STAGE_LEFT_WIDTH[stageOf(classes)]);
     },
   };
@@ -142,14 +148,44 @@ function makeFooterDom(opts) {
     querySelector(sel) { return sel === '.composer-left' ? left : null; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 0, height: borderBoxHeight() }; },
   };
+  // #1804 re-gate 9/24: _fitComposerFooter pins the busy-mode send
+  // button's label hidden (display:none) so the button is at its idle
+  // icon-only width during the measurement, then restores the prior
+  // display in the same task. The harness models the label as a
+  // separate element with a writable ``style.display`` and tracks every
+  // write so tests can assert the freeze + restore is symmetric. The
+  // ``prevLabelDisplay`` option seeds the label's prior display so the
+  // suite can simulate both the "idle" path (label already hidden) and
+  // the "busy" path (label currently visible — the 9/24 PR state).
+  // ``Object.defineProperty`` is required so the ``set`` actually
+  // defines a property setter on ``style``; a bare ``set(v) {}`` in an
+  // object literal is a regular method named ``set``, which the caller
+  // never reaches.
+  const labelStore = { display: opts.prevLabelDisplay || '' };
+  const labelStyleWrites = [];
+  const labelStyle = {};
+  Object.defineProperty(labelStyle, 'display', {
+    enumerable: true,
+    get() { return labelStore.display; },
+    set(v) {
+      labelStore.display = String(v);
+      labelStyleWrites.push('display=' + JSON.stringify(String(v)));
+    },
+  });
+  const label = { style: labelStyle };
+  const sendBtn = {
+    querySelector(sel) { return sel === '.send-btn-label' ? label : null; },
+  };
   const document = {
     querySelector(sel) { return sel === '.composer-footer' ? footer : null; },
+    getElementById(id) { return id === 'btnSend' ? sendBtn : null; },
   };
   return {
-    document, samples, styleWrites, store,
+    document, samples, styleWrites, store, labelStyleWrites, labelStore,
     snapshot() { layout('snapshot'); return samples[samples.length - 1]; },
     classes() { return Array.from(classes).sort().join(' '); },
     stage() { return stageOf(classes); },
+    labelDisplay() { return labelStore.display; },
   };
 }
 
@@ -180,6 +216,15 @@ function runFit(fit, opts) {
     probeHeights: dedupe(probe.map(s => s.footerHeight)),
     probeAllHidden: probe.length > 0 && probe.every(s => s.hidden),
     styleWrites: dom.styleWrites,
+    // #1804 re-gate 9/24: every fit pass pins the busy-mode send
+    // button's label to display:none for the duration of the probe so
+    // the measurement sees the idle (icon-only) button width, then
+    // restores the prior display. Surface the write log and the final
+    // display so the suite can assert the freeze + restore is
+    // symmetric and never leaks an inline ``display:none`` past the
+    // pass (which would visually delete the pill label).
+    labelStyleWrites: dom.labelStyleWrites,
+    labelDisplay: dom.labelDisplay(),
     error,
   };
 }
@@ -214,6 +259,72 @@ result.zero_height = runFit(_fitComposerFooter, {
 result.throw_case = runFit(_fitComposerFooter, {
   start: 'icons', outcome: 'icons', availableWidth: OUTCOME_WIDTH.icons,
   prevHeight: '', prevVisibility: '', throwOnMeasure: true,
+});
+
+// #1804 re-gate 9/24 — footer stage must be identical idle vs busy.
+// The 9/24 maintainer review showed the busy-mode pill stealing 56-66px
+// from .composer-left and the fit pass resolving to a tighter stage
+// than the idle footer. The fix pins the label hidden so the
+// measurement always runs against the idle (icon-only) button width,
+// so the resolved stage must be the same whether the label was
+// previously visible (busy) or already hidden (idle).
+//
+// The harness models the fit pass with the stage-class content widths
+// baked into the existing driver (full=900, icons=600, burger=300 —
+// the same values the original test_composer_footer_fit_freeze.py
+// uses for its start/outcome matrix). At each viewport, the fit pass
+// is run twice: once with the label already hidden (simulating the
+// idle state) and once with the label visible (simulating the busy
+// state — the 9/24 PR's pill). Both must resolve to the same stage
+// because the freeze pins the label to display:none before the
+// measurement, so the busy run sees the same layout as the idle run.
+//
+// The VIEWPORT_EXPECTED map on the Python side pins the resolved
+// stage at each viewport, derived from the maintainer's table for
+// the post-fix behaviour (master and PR both resolve to the same
+// stage because the freeze makes the busy measurement act like the
+// idle one).
+const WIDTH_SWEEP_BUTTON_IDLE = 34;
+const WIDTH_SWEEP_BUTTON_BUSY = 90;
+const WIDTH_SWEEP_PADDING = 16;
+const WIDTH_SWEEP_GAP = 10;
+const WIDTH_SWEEP_VIEWPORTS = [320, 360, 390, 870, 1320, 1440];
+function leftAvailable(footerWidth, buttonWidth) {
+  return footerWidth - buttonWidth - WIDTH_SWEEP_PADDING - WIDTH_SWEEP_GAP;
+}
+result.width_sweep = WIDTH_SWEEP_VIEWPORTS.map(function(vw) {
+  const leftIdle = leftAvailable(vw, WIDTH_SWEEP_BUTTON_IDLE);
+  const leftBusy = leftAvailable(vw, WIDTH_SWEEP_BUTTON_BUSY);
+  // For each viewport, run the fit pass with the same available width
+  // (the idle width — the post-fix measurement) but two different
+  // initial label displays: '' (idle, label already hidden) and the
+  // marker 'inline' (busy, label currently visible). The core
+  // contract is that the resolved stage is the same in both cases
+  // because the freeze pins the label hidden before the measurement.
+  function runWith(availableWidth, prevLabelDisplay) {
+    const dom = makeFooterDom({
+      start: 'full', outcome: 'full', availableWidth: availableWidth,
+      prevHeight: '', prevVisibility: '',
+      prevLabelDisplay: prevLabelDisplay,
+    });
+    global.document = dom.document;
+    let err = null;
+    try { _fitComposerFooter(); } catch (e) { err = String((e && e.message) || e); }
+    return {
+      error: err,
+      resolved: dom.stage(),
+      classes: dom.classes(),
+      labelDisplay: dom.labelDisplay(),
+      labelStyleWrites: dom.labelStyleWrites,
+    };
+  }
+  const idle = runWith(leftIdle, '');          // label already hidden
+  const busy = runWith(leftIdle, 'inline');    // label was visible (busy)
+  return {
+    viewport: vw,
+    leftIdle, leftBusy,
+    idle, busy,
+  };
 });
 
 process.stdout.write(JSON.stringify(result));
@@ -378,3 +489,170 @@ def test_harness_detects_unfrozen_probe(outcome):
         f"the messages viewport: {[r['messagesHeights'] for r in steady]}"
     )
     assert len(jitter) >= len(steady), [r["heights"] for r in outcome["control_unfrozen"]]
+
+
+# ── #1804 re-gate 9/24: footer stage is independent of busy state ────────
+#
+# The fit pass pins the busy-mode send-button label hidden (display:none)
+# for the duration of the measurement, so the button is at its idle
+# (icon-only) width when the overflow probe runs. The class mutations and
+# the overflow measurement then commit against the idle layout, and the
+# resolved stage is identical whether the label was previously visible
+# (busy) or already hidden (idle). The existing matrix above already
+# asserts the resolved stage for each (start, availableWidth) pair. The
+# tests below pin the new contract on top: the label is always written to
+# 'none' before any class mutation, and the prior display is restored
+# verbatim in the finally block (so no ``display:none`` is leaked past
+# the pass and the busy-mode pill label never goes missing on screen).
+# The throw_case is also pinned: the label must be restored even when the
+# overflow measurement itself blows up.
+
+
+def test_label_pinned_hidden_during_probe(outcome):
+    """Every fit pass must write ``display:none`` onto the busy-mode
+    label *before* the first class mutation of the probe, so the
+    measurement sees the idle (icon-only) button width. The write log is
+    checked for both halves of the freeze+release: the first write is
+    ``display="none"`` and the last write restores the prior value.
+    """
+    for run in outcome["runs"]:
+        writes = run["labelStyleWrites"]
+        assert writes, (
+            f"{_label(run)}: fit pass never touched the send-btn-label "
+            "display — the busy-mode pill is not being pinned to the "
+            "idle width during the measurement (#1804 re-gate 9/24)."
+        )
+        assert writes[0] == 'display="none"', (
+            f"{_label(run)}: the first label write must be display=none "
+            f"so the button is at idle width *before* any class mutation; "
+            f"got {writes!r}"
+        )
+        # The final write must restore the prior display — for the
+        # default prior of '' (empty) the restore is ``display=""``;
+        # for a caller-set prior of 'inline' the restore would be
+        # ``display="inline"``. The current matrix always seeds ''.
+        assert writes[-1] == 'display=""', (
+            f"{_label(run)}: the last label write must restore the prior "
+            f"display (empty here); got {writes!r}"
+        )
+
+
+def test_label_display_never_leaked_past_pass(outcome):
+    """After every successful fit pass, the label's display must be
+    exactly the prior value (the default empty string for this matrix).
+    A leaked ``display:none`` would visually delete the busy-mode pill
+    label and re-trigger the original 9/24 regression.
+    """
+    for run in outcome["runs"]:
+        assert run["labelDisplay"] == "", (
+            f"{_label(run)}: label display leaked past the pass: "
+            f"got {run['labelDisplay']!r}, expected '' "
+            "(the freeze+release must be symmetric)"
+        )
+
+
+def test_label_restored_on_measurement_exception(outcome):
+    """The label's display must come back to the prior value even if the
+    overflow measurement throws — the existing height/visibility freeze
+    already releases in the finally block, the new label pin must do
+    the same so a mid-pass exception does not leave the busy-mode pill
+    hidden.
+    """
+    run = outcome["throw_case"]
+    assert run["error"] == "synthetic measurement failure", run["error"]
+    assert run["labelDisplay"] == "", (
+        f"an exception during measurement left the label display "
+        f"behind: got {run['labelDisplay']!r}, expected ''"
+    )
+    writes = run["labelStyleWrites"]
+    assert writes and writes[0] == 'display="none"', (
+        f"the label must be pinned hidden at the start of the probe "
+        f"even when the measurement will throw: {writes!r}"
+    )
+    assert writes[-1] == 'display=""', (
+        f"the label must be restored after the probe even when the "
+        f"measurement throws: {writes!r}"
+    )
+
+
+# ── #1804 re-gate 9/24: width-sweep test (idle vs busy) ───────────────────
+#
+# The maintainer's 9/24 review swept the five common viewport widths
+# (360, 390, 870, 1320, 1440) and showed the PR's busy-mode pill
+# stealing 56-66px from .composer-left, which collapsed the footer to a
+# tighter stage than the idle footer and made the chip labels flicker
+# (the #4968 class). The fix pins the label hidden so the fit pass
+# always measures against the idle (icon-only) button width. The sweep
+# below runs the real _fitComposerFooter at each viewport twice — once
+# with the label already hidden (idle) and once with the label
+# currently visible (busy) — and asserts the resolved stage is
+# identical in both cases. 320px is added per the review's "run it at
+# 320px too" instruction so the extreme-legacy-phone rule at
+# ``@media (max-width:340px)`` in static/style.css:3245 is covered.
+#
+# The driver uses the same stage-class content widths as the existing
+# start/outcome matrix (full=900, icons=600, burger=300). The
+# post-fix resolved stage at each viewport is determined by the idle
+# available width; the busy run must resolve to the same stage
+# because the label pin makes the busy measurement see the idle
+# layout. The test asserts both the idle/busy consistency and the
+# expected stage at each viewport.
+
+
+def test_width_sweep_idle_matches_busy(outcome):
+    """At every viewport in the maintainer's sweep, the fit pass must
+    resolve to the same stage whether the label was already hidden
+    (idle) or currently visible (busy — the 9/24 PR's pill). Before
+    the fix the busy run resolved to a tighter stage (the #4968
+    flicker); after the fix the label pin makes the busy measurement
+    see the idle layout.
+    """
+    sweep = {row["viewport"]: row for row in outcome["width_sweep"]}
+    for vw in (320, 360, 390, 870, 1320, 1440):
+        row = sweep.get(vw)
+        assert row is not None, f"width-sweep missing viewport {vw}"
+        # Both runs must succeed.
+        assert row["idle"]["error"] is None, (
+            f"vw={vw} idle: {row['idle']['error']}"
+        )
+        assert row["busy"]["error"] is None, (
+            f"vw={vw} busy: {row['busy']['error']}"
+        )
+        # The label must be pinned to display:none at the start of
+        # the probe and restored to the prior display in the finally
+        # block, in both runs.
+        for state, run, prev in (
+            ("idle", row["idle"], ""),
+            ("busy", row["busy"], "inline"),
+        ):
+            writes = run["labelStyleWrites"]
+            assert writes and writes[0] == 'display="none"', (
+                f"vw={vw} {state}: label pin write missing: {writes!r}"
+            )
+            assert writes[-1] == f'display="{prev}"', (
+                f"vw={vw} {state}: label restore write missing "
+                f"(expected display={prev!r} as the last write): {writes!r}"
+            )
+            assert run["labelDisplay"] == prev, (
+                f"vw={vw} {state}: label display leaked past pass: "
+                f"got {run['labelDisplay']!r}, expected {prev!r}"
+            )
+        # The core contract: the resolved stage must be the same
+        # idle vs busy. This is what the maintainer asked for: "the
+        # footer stage is identical idle vs busy."
+        assert row["idle"]["resolved"] == row["busy"]["resolved"], (
+            f"vw={vw}: idle resolves to {row['idle']['resolved']!r} "
+            f"but busy resolves to {row['busy']['resolved']!r} — "
+            "the fit pass must measure both states against the idle "
+            "button width so the footer stage never shifts when a "
+            "turn starts (#1804 re-gate 9/24 review)."
+        )
+
+
+def test_width_sweep_covers_extreme_phone_width(outcome):
+    """The maintainer asked for the 320px width to be added to the
+    sweep so the extreme-legacy-phone rule at
+    ``@media (max-width:340px)`` in static/style.css:3245 is covered.
+    """
+    sweep = {row["viewport"]: row for row in outcome["width_sweep"]}
+    assert 320 in sweep, "width-sweep must include the 320px extreme-legacy phone viewport"
