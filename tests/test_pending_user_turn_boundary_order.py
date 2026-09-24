@@ -197,22 +197,15 @@ def test_materialized_pending_prompt_stays_above_output_with_live_row():
     )
 
 
-def test_unmatched_transcript_row_does_not_duplicate_below_its_own_output():
-    """The current turn's user row IS present but is not identity-matched.
+def test_unmatched_transcript_row_keeps_pending_prompt_above_output():
+    """A sub-second drift without a turn token is ambiguous: keep both rows.
 
-    Sub-second timestamp drift defeats the exact-identity match, so the prompt is
-    materialized a second time. The duplicate must not land under the turn's own
-    output; the existing row is authoritative and must be adopted instead.
+    A prior imported row may be stamped after the pending boundary. Its text
+    and position cannot prove ownership of the active turn.
     """
     drifted = {"role": "user", "content": _PROMPT, "timestamp": _T0 + 0.4}
     result = _probe(drifted, with_live=False)
-    assert not result["duplicated"], (
-        "the pending prompt was rendered twice (the transcript row plus a "
-        f"materialized copy): {result['order']}"
-    )
-    assert not result["belowOwnOutput"], (
-        f"the duplicated bubble landed below its own turn output: {result['order']}"
-    )
+    assert result["promptIdxs"] == [2, 7], result["order"]
 
 
 def test_identical_prompt_point_four_seconds_before_boundary_keeps_both_turns():
@@ -263,6 +256,56 @@ process.stdout.write(JSON.stringify({{
         "the pending turn must keep its attachment: "
         f"{result['attachmentsByIdx']} ({result['order']})"
     )
+
+
+def test_imported_future_stamped_repeat_keeps_both_attachment_sets():
+    """An imported prior turn may be timestamped AFTER pending_started_at.
+
+    Matching text and a plausible boundary are not proof of active-turn
+    identity; do not adopt that prior row and discard the pending attachments.
+    """
+    result = _run_epoch_probe(
+        f"""  {{role:'user', content:{json.dumps(_PROMPT)}, timestamp:{_EPOCH + 2}, attachments:[{{name:'ancien.png'}}]}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{_EPOCH + 3}}},
+""",
+        attachments=[{"name": "nouveau.pdf"}],
+    )
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [0, 4], result["order"]
+    assert result["attachmentsByIdx"][0] == ["ancien.png"]
+    assert result["attachmentsByIdx"][4] == ["nouveau.pdf"]
+
+
+def test_imported_future_stamped_tail_user_is_not_adopted_by_text():
+    """The same imported row is unsafe even without settled assistant output."""
+    body = f"""
+const session={_epoch_session([{'name': 'nouveau.pdf'}])};
+const messages=[{{role:'user',content:{json.dumps(_PROMPT)},timestamp:{_EPOCH + 2},attachments:[{{name:'ancien.png'}}]}}];
+const merged=_mergePendingSessionMessage(session,messages);
+process.stdout.write(JSON.stringify({{
+  merged,
+  attachments:messages.map(m=>m.attachments?.map(a=>a.name)),
+  prompts:messages.map(m=>m.content),
+}}));
+"""
+    result = _run_probe(body)
+    assert result["merged"] is True
+    assert result["prompts"] == [_PROMPT, _PROMPT]
+    assert result["attachments"] == [["ancien.png"], ["nouveau.pdf"]]
+
+
+def test_imported_same_timestamp_does_not_prove_turn_identity():
+    """Even an exact timestamp collision cannot consume an imported prior turn."""
+    result = _run_epoch_probe(
+        f"""  {{role:'user', content:{json.dumps(_PROMPT)}, timestamp:{_EPOCH}, attachments:[{{name:'ancien.png'}}]}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{_EPOCH + 3}}},
+""",
+        attachments=[{"name": "nouveau.pdf"}],
+    )
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [0, 4], result["order"]
+    assert result["attachmentsByIdx"][0] == ["ancien.png"]
+    assert result["attachmentsByIdx"][4] == ["nouveau.pdf"]
 
 
 def test_timestampless_transcript_row_fails_closed_to_prior_merge_behavior():

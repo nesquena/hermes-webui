@@ -11383,19 +11383,13 @@ function _activeTurnTokenMatches(msg, session){
  * Scanning past assistant/tool rows alone would be wrong: a user who submits the
  * same text twice in a row (a plain "继续" follow-up) legitimately gets two
  * identical user turns, and matching on text would swallow the new one. The
- * discriminator is therefore exact identity, never proximity: the active turn's
- * public row carries `_active_turn_user`, while private rows carry the server-
- * stamped `_active_turn_token` (stream_id + started_at — unique to this turn),
- * or their timestamp equals `pending_started_at` within a precision-only epsilon
- * that absorbs float/state.db drift but never a full second. A whole-second (or
- * sub-second) mismatch is ambiguous and returns null so the caller materializes
- * the pending turn — the transient duplicate is harmless, hiding a turn + moving
- * its attachments is not. Text equality is still required downstream, so a false
- * match needs identical text AND an exact identity signal.
+ * discriminator is the active stream's token or a server-owned public marker.
+ * Timestamps (including an exact match to pending_started_at) are only useful
+ * for placement, not identity: imported history and clock skew may carry the
+ * same or later time. An ambiguous row must keep both bubbles and attachments
+ * until the settled transcript replaces the projection.
  */
 function _pendingActiveTurnUserMessage(messages, session){
-  const startedAt=Number(session?.pending_started_at);
-  if(!Number.isFinite(startedAt)||startedAt<=0) return null;
   const list=Array.isArray(messages)?messages:[];
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
@@ -11406,15 +11400,7 @@ function _pendingActiveTurnUserMessage(messages, session){
     // Unambiguous: the row carries the active turn's exact token
     // (stream_id + started_at) stamped by the server's eager-checkpoint path.
     if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
-    // Unambiguous: the row's timestamp IS pending_started_at within
-    // precision-only float drift (never a whole second).
-    const ts=_messageTimestampSeconds(msg);
-    if(ts===null) continue;
-    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON) return msg;
   }
-  // Any wider drift (whole-second truncation, a rapid repeat ~1s later) is
-  // ambiguous: return null so getPendingSessionMessage() materializes the
-  // pending turn rather than guessing.
   return null;
 }
 
@@ -11436,16 +11422,16 @@ function getPendingSessionMessage(session, messagesOverride=null){
     return null;
   };
   const currentTailUser=_pendingCurrentTailUserMessage(messages);
-  if(currentTailUser){
-    const sameCurrentTurn=_matchesPending(currentTailUser);
-    if(sameCurrentTurn) return _adoptExistingRow(currentTailUser);
-  }
+  const sameCurrentTurn=currentTailUser&&_matchesPending(currentTailUser)
+    &&(currentTailUser._active_turn_user===true
+      ||(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(currentTailUser,session)));
+  if(sameCurrentTurn) return _adoptExistingRow(currentTailUser);
   // Fallback: the current turn's user row is already in the transcript but the
   // strict tail scan above could not see it because this turn's assistant/tool
-  // output follows it. Matched by pending_started_at, so previous turns that
-  // repeat the same text are unaffected. Guarded with typeof so a partial load
-  // (or a static probe that extracts only some helpers) degrades to the
-  // original strict-tail behaviour instead of throwing.
+  // output follows it. Match only the server's turn marker or stream token;
+  // an earlier same-text row's timestamp cannot authorize adoption. Guarded
+  // with typeof so a partial load (or a static probe that extracts only some
+  // helpers) degrades to the original strict-tail behaviour instead of throwing.
   const activeTurnUser=typeof _pendingActiveTurnUserMessage==='function'
     ? _pendingActiveTurnUserMessage(messages,session)
     : null;
