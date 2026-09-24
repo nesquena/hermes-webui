@@ -17,7 +17,7 @@ import threading
 import shutil
 import sqlite3
 from collections import Counter
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 from typing import Iterable
 
@@ -559,19 +559,40 @@ def repair_session_discoverability(
     backup_dir = Path(backup_dir)
     backed_up: dict[Path, str] = {}
     applied: list[dict] = []
-    for action in planned:
-        sid = str(action.get("session_id") or "")
-        name = action.get("action")
-        try:
-            if name == "clear_sidecar_cli_flag":
-                applied.append(_clear_sidecar_cli_flag(session_dir, sid, backup_dir, backed_up))
-            elif name == "clear_index_cli_flag":
-                applied.append(_clear_index_cli_flag(session_dir, sid, backup_dir, backed_up))
-            elif name == "materialize_sidecar_from_state_db":
-                applied.append(_materialize_sidecar_from_state_db(session_dir, state_db_path, sid, backup_dir, backed_up))
-        except Exception as exc:
-            applied.append({"session_id": sid, "action": name, "applied": False, "error": str(exc)})
-    after = audit_session_discoverability(session_dir, state_db_path=state_db_path, api_sessions=api_sessions)
+    from api.models import _get_session_agent_lock
+    from api.session_batch_transaction import session_store_transaction_lock
+
+    with ExitStack() as session_locks:
+        for sid in sorted({str(action.get("session_id") or "") for action in planned}):
+            if sid:
+                session_locks.enter_context(_get_session_agent_lock(sid))
+        with session_store_transaction_lock(session_dir):
+            # Planning happened before lock acquisition; re-audit the exact
+            # durable generation that will be repaired.  Each action revalidates
+            # its own preconditions under these locks and skips if a writer won
+            # the race, so the locked session-id set remains the planned set.
+            before = audit_session_discoverability(
+                session_dir,
+                state_db_path=state_db_path,
+                api_sessions=api_sessions,
+            )
+            for action in planned:
+                sid = str(action.get("session_id") or "")
+                name = action.get("action")
+                try:
+                    if name == "clear_sidecar_cli_flag":
+                        applied.append(_clear_sidecar_cli_flag(session_dir, sid, backup_dir, backed_up))
+                    elif name == "clear_index_cli_flag":
+                        applied.append(_clear_index_cli_flag(session_dir, sid, backup_dir, backed_up))
+                    elif name == "materialize_sidecar_from_state_db":
+                        applied.append(_materialize_sidecar_from_state_db(session_dir, state_db_path, sid, backup_dir, backed_up))
+                except Exception as exc:
+                    applied.append({"session_id": sid, "action": name, "applied": False, "error": str(exc)})
+            after = audit_session_discoverability(
+                session_dir,
+                state_db_path=state_db_path,
+                api_sessions=api_sessions,
+            )
     errors = [item for item in applied if item.get("error")]
     return {
         "ok": not errors,
