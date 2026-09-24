@@ -143,3 +143,86 @@ def test_diagnostic_applies_original_checkout_proxy_guard(tmp_path, isolated_hom
     monkeypatch.setattr(sys, "argv", [str(DIAGNOSTIC), str(repo)])
     assert diagnostic.main() == 1
     assert not calls, "refused checkout must not reach the outside-checkout probe"
+
+
+@pytest.mark.parametrize("url_key", ["pushurl", "url"])
+def test_push_checks_every_destination_before_any_side_effect(tmp_path, url_key):
+    repo, origin = _make_bare_origin(tmp_path)
+    safe = tmp_path / "safe.git"
+    _git(tmp_path, "init", "--bare", "-q", str(safe))
+    _git(repo, "remote", "add", "origin", str(origin))
+    if url_key == "url":
+        _git(repo, "config", "--unset-all", "remote.origin.url")
+    _git(repo, "config", "--add", f"remote.origin.{url_key}", str(safe))
+    _git(repo, "config", "--add", f"remote.origin.{url_key}", "git://example.invalid/repo")
+    marker = tmp_path / "proxy-ran"
+    proxy = tmp_path / "proxy"
+    proxy.write_text(f"#!/bin/sh\nprintf invoked > {shlex.quote(str(marker))}\nexit 1\n")
+    proxy.chmod(0o755)
+    _git(repo, "config", "core.gitProxy", f"{proxy} for example.invalid")
+    args = ["push", "-u", "origin", "master"]
+    # Real Git reaches the second URL after updating the first one.
+    oracle = subprocess.run(["git", *args], cwd=repo, capture_output=True, timeout=15)
+    assert oracle.returncode != 0
+    assert marker.exists()
+    assert _git(safe, "rev-parse", "master") == _git(repo, "rev-parse", "HEAD")
+    marker.unlink()
+    _git(repo, "commit", "--allow-empty", "-m", "not pushed")
+    assert utils.repository_git_proxy_blocks(args, repo, utils.clean_git_env())
+    with pytest.raises(workspace_git.GitWorkspaceError) as exc:
+        workspace_git._run_git(repo, args)
+    assert exc.value.code == "unsafe_git_config"
+    assert not marker.exists()
+    assert _git(safe, "rev-parse", "master") != _git(repo, "rev-parse", "HEAD")
+    # Fetch/pull contact only the first ordinary URL, not the later push target.
+    for command in ("fetch", "pull"):
+        assert not utils.repository_git_proxy_blocks([command, "origin"], repo, utils.clean_git_env())
+    _git(repo, "fetch", "origin")
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("url_key", ["pushurl", "url"])
+def test_mixed_push_destinations_preserve_ssh_only_when_used(tmp_path, url_key):
+    repo, origin = _make_bare_origin(tmp_path)
+    local = tmp_path / "local.git"
+    ssh = tmp_path / "ssh.git"
+    for target in (local, ssh):
+        _git(tmp_path, "init", "--bare", "-q", str(target))
+    _git(repo, "remote", "add", "origin", str(origin))
+    if url_key == "url":
+        _git(repo, "config", "--unset-all", "remote.origin.url")
+    _git(repo, "config", "--add", f"remote.origin.{url_key}", str(local))
+    _git(repo, "config", "--add", f"remote.origin.{url_key}", f"test-host:{ssh}")
+    marker = tmp_path / "ssh-ran"
+    wrapper = tmp_path / "custom-ssh"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, shlex, subprocess\n"
+        "from pathlib import Path\n"
+        f"with Path({str(marker)!r}).open('a') as log: log.write('probe\\n' if '-G' in sys.argv else 'transport\\n')\n"
+        "if '-G' in sys.argv: raise SystemExit(0)\n"
+        "raise SystemExit(subprocess.call(shlex.split(sys.argv[-1])))\n"
+    )
+    wrapper.chmod(0o755)
+    _git(repo, "config", "--global", "core.sshCommand", str(wrapper))
+    args = ["push", "origin", "master"]
+    _git(repo, *args)
+    assert "transport" in marker.read_text()
+    marker.unlink()
+    _git(repo, "commit", "--allow-empty", "-m", "through WebUI")
+    result = workspace_git._run_git(repo, args)
+    assert result.returncode == 0, result.stderr
+    assert "probe" in marker.read_text()
+    assert "transport" in marker.read_text()
+    for target in (local, ssh):
+        assert _git(target, "rev-parse", "master") == _git(repo, "rev-parse", "HEAD")
+    marker.unlink()
+    # The SSH URL is present but irrelevant to fetch/pull's first URL.
+    for command in ("fetch", "pull"):
+        utils.noninteractive_git_env(repo, utils.clean_git_env(), args=[command, "origin"])
+    assert workspace_git._run_git(repo, ["fetch", "origin"]).returncode == 0
+    assert not marker.exists()
+    # Explicit pushurls override an ordinary SSH URL completely.
+    _git(repo, "config", "--replace-all", "remote.origin.pushurl", str(local))
+    assert workspace_git._run_git(repo, args).returncode == 0
+    assert not marker.exists()

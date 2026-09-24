@@ -239,8 +239,8 @@ def noninteractive_git_env(
 ) -> dict[str, str]:
     """Force SSH batch mode; probe custom commands only for SSH destinations."""
     if args is not None:
-        url = _remote_url_for_command(args, cwd, env, executable=executable)
-        if not url or not _is_ssh_remote(url):
+        urls = _remote_urls_for_command(args, cwd, env, executable=executable)
+        if not urls or not any(_is_ssh_remote(url) for url in urls):
             # Keep checkout SSH commands suppressed even when no probe is needed.
             return {**env, "GIT_SSH_COMMAND": "ssh -oBatchMode=yes", "GIT_SSH_VARIANT": "ssh"}
     trusted_commands = tuple(
@@ -415,13 +415,14 @@ def _explicit_remote_arg(args: list[str]) -> str | None:
     return None
 
 
-def _remote_url_for_command(
+def _remote_urls_for_command(
     args: list[str],
     cwd: str | Path,
     env: dict[str, str],
     *,
     executable: str,
-) -> str | None:
+) -> tuple[str, ...] | None:
+    """Resolve every push destination, or the single fetch/pull destination."""
     remote = _explicit_remote_arg(args)
     push = bool(args and args[0] == "push")
     if not remote:
@@ -449,19 +450,19 @@ def _remote_url_for_command(
                 break
         remote = remote or "origin"
     if remote == ".":
-        return ""
+        return ()
     # Named push remotes use pushurl (and pushInsteadOf), not their fetch URL.
     # An explicit URL destination is not a remote name, so keep Git's own
     # resolution (ls-remote --get-url echoes it back) as the fallback.
     if push:
         try:
             resolved = subprocess.run(
-                [executable, "remote", "get-url", "--push", remote],
+                [executable, "remote", "get-url", "--push", "--all", remote],
                 cwd=str(cwd), shell=False, capture_output=True, text=True,
                 timeout=10, env=env, creationflags=windows_hide_flags(),
             )
             if resolved.returncode == 0:
-                return (resolved.stdout or "").strip() or None
+                return tuple((resolved.stdout or "").splitlines()) or None
         except (OSError, subprocess.TimeoutExpired):
             return None
     # --get-url performs only Git's configured URL rewrite; it does not contact
@@ -477,7 +478,8 @@ def _remote_url_for_command(
         return None
     if resolved.returncode != 0:
         return None
-    return (resolved.stdout or "").strip() or None
+    url = (resolved.stdout or "").strip()
+    return (url,) if url else None
 
 
 def repository_git_proxy_blocks(
@@ -501,13 +503,16 @@ def repository_git_proxy_blocks(
     )
     if not any(scope in {"local", "worktree"} for scope, _value in proxy_values):
         return False
-    url = _remote_url_for_command(args, cwd, env, executable=executable)
-    if url == "":
-        return False
+    urls = _remote_urls_for_command(args, cwd, env, executable=executable)
     # A local proxy plus an unresolvable active URL is not safe to pass through:
     # the subsequent network command may resolve more successfully and execute it.
-    if url is None:
+    if urls is None:
         return True
+    return any(_repository_proxy_selected(url, proxy_values) for url in urls)
+
+
+def _repository_proxy_selected(url: str, proxy_values: tuple[tuple[str, str], ...]) -> bool:
+    """Whether this destination selects a checkout-controlled proxy."""
     if not url.lower().startswith("git://"):
         return False
     try:

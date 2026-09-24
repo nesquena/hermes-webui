@@ -288,7 +288,10 @@ its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for
 as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
 to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
 supported. Push checks follow `branch.<name>.pushRemote`, `remote.pushDefault`,
-`branch.<name>.remote`, then `origin`, and honor the selected remote's `pushurl`.
+`branch.<name>.remote`, then `origin`. Checks cover every selected remote `pushurl`,
+or every `url` when no `pushurl` exists; fetch/pull use only the first fetch URL.
+Any applicable checkout-controlled proxy blocks the entire push before it starts.
+A trusted SSH command is preserved/probed when any actual push destination uses SSH.
 Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
 transport prefix names a helper command.
 
