@@ -23860,6 +23860,13 @@ def _start_chat_stream_for_session(
 
     consumed_goal_continuation = False
     consumed_bg_task_completion = False
+
+    def restore_consumed_continuation_markers() -> None:
+        if consumed_goal_continuation:
+            PENDING_GOAL_CONTINUATION.add(s.session_id)
+        if consumed_bg_task_completion:
+            PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
+
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
     # so the next chat/start for this session is automatically treated as goal-related.
@@ -23889,6 +23896,7 @@ def _start_chat_stream_for_session(
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
+                    restore_consumed_continuation_markers()
                     diag.stage("response_write") if diag else None
                     return {
                         "error": "session already has an active stream",
@@ -23899,6 +23907,7 @@ def _start_chat_stream_for_session(
             else:
                 blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
                 if blocking_run_stream_id:
+                    restore_consumed_continuation_markers()
                     diag.stage("response_write") if diag else None
                     return {
                         "error": "session already has an active stream",
@@ -23907,19 +23916,29 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = False
                 if regeneration is not None:
-                    return _start_regeneration_stream_locked(
-                        s,
-                        turn=regeneration,
-                        workspace=workspace,
-                        model=model,
-                        model_provider=model_provider,
-                        normalized_model=normalized_model,
-                        diag=diag,
-                        goal_related=goal_related,
-                        source=source,
-                        moa_config=moa_config,
-                        backend_is_gateway=backend_is_gateway,
-                    )
+                    try:
+                        regeneration_response = _start_regeneration_stream_locked(
+                            s,
+                            turn=regeneration,
+                            workspace=workspace,
+                            model=model,
+                            model_provider=model_provider,
+                            normalized_model=normalized_model,
+                            diag=diag,
+                            goal_related=goal_related,
+                            source=source,
+                            moa_config=moa_config,
+                            backend_is_gateway=backend_is_gateway,
+                        )
+                    except Exception:
+                        restore_consumed_continuation_markers()
+                        raise
+                    if (
+                        isinstance(regeneration_response, dict)
+                        and int(regeneration_response.get("_status", 200) or 200) >= 400
+                    ):
+                        restore_consumed_continuation_markers()
+                    return regeneration_response
                 stream_id = uuid.uuid4().hex
                 from api.session_ops import snapshot_session_state
 
@@ -24044,10 +24063,7 @@ def _start_chat_stream_for_session(
                             exc._chat_start_cleanup_result = cleanup_result
                         except Exception:
                             pass
-                    if consumed_goal_continuation:
-                        PENDING_GOAL_CONTINUATION.add(s.session_id)
-                    if consumed_bg_task_completion:
-                        PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
+                    restore_consumed_continuation_markers()
                     if journal_event:
                         try:
                             from api.turn_journal import append_turn_journal_event
@@ -24072,6 +24088,7 @@ def _start_chat_stream_for_session(
             diag.stage("stale_stream_cleanup") if diag else None
             cleared = _clear_stale_stream_state(s)
             if not cleared and getattr(s, "active_stream_id", None):
+                restore_consumed_continuation_markers()
                 diag.stage("response_write") if diag else None
                 return {
                     "error": "session already has an active stream",

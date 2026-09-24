@@ -129,6 +129,51 @@ def test_rejected_start_restores_pending_continuation_markers(
     assert session.session_id in routes.PENDING_BG_TASK_COMPLETIONS
 
 
+def test_rejected_start_409_restores_pending_continuation_markers(
+    issue7193_env, monkeypatch
+):
+    session = new_session(workspace=str(issue7193_env.parent), profile="profile-a")
+    routes.PENDING_GOAL_CONTINUATION.add(session.session_id)
+    routes.PENDING_BG_TASK_COMPLETIONS.add(session.session_id)
+    monkeypatch.setattr(
+        routes,
+        "_active_run_stream_for_session",
+        lambda _session_id: "active-run",
+    )
+
+    response = _start(session, workspace=issue7193_env / "workspace")
+
+    assert response["_status"] == 409
+    assert session.session_id in routes.PENDING_GOAL_CONTINUATION
+    assert session.session_id in routes.PENDING_BG_TASK_COMPLETIONS
+
+
+def test_rejected_regeneration_restores_pending_continuation_markers(
+    issue7193_env, monkeypatch
+):
+    session = new_session(workspace=str(issue7193_env.parent), profile="profile-a")
+    routes.PENDING_GOAL_CONTINUATION.add(session.session_id)
+    routes.PENDING_BG_TASK_COMPLETIONS.add(session.session_id)
+    monkeypatch.setattr(
+        routes,
+        "_start_regeneration_stream_locked",
+        lambda *_args, **_kwargs: {
+            "error": "regeneration rejected",
+            "_status": 409,
+        },
+    )
+
+    response = _start(
+        session,
+        workspace=issue7193_env / "workspace",
+        regeneration=object(),
+    )
+
+    assert response["_status"] == 409
+    assert session.session_id in routes.PENDING_GOAL_CONTINUATION
+    assert session.session_id in routes.PENDING_BG_TASK_COMPLETIONS
+
+
 def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
     issue7193_env, monkeypatch
 ):
