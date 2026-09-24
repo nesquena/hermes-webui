@@ -18,9 +18,10 @@ if str(ROOT) not in sys.path:
 from api.subprocess_utils import (  # noqa: E402
     clean_git_env,
     is_safe_diagnostic_remote,
+    noninteractive_git_env,
     noninteractive_git_argv,
     sanitize_git_diagnostic,
-    trusted_git_credential_helpers,
+    trusted_git_credential_config,
     windows_hide_flags,
 )
 
@@ -43,13 +44,13 @@ def _run(
     checkout: Path,
     git: str,
     env: dict[str, str],
-    credential_helpers: tuple[str, ...],
+    credential_config: tuple[tuple[str, str], ...],
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         noninteractive_git_argv(
             args,
             executable=git,
-            credential_helpers=credential_helpers,
+            credential_config=credential_config,
         ),
         cwd=str(checkout),
         capture_output=True,
@@ -94,18 +95,19 @@ def main() -> int:
         return 1
 
     env = clean_git_env()
-    credential_helpers = trusted_git_credential_helpers(
+    credential_config = trusted_git_credential_config(
         checkout,
         env,
         executable=git,
     )
+    env = noninteractive_git_env(checkout, env, executable=git)
     try:
         origin = _run(
             ["remote", "get-url", "origin"],
             checkout,
             git,
             env,
-            credential_helpers,
+            credential_config,
         )
         if origin.returncode != 0:
             _emit(
@@ -136,7 +138,7 @@ def main() -> int:
                 Path(probe_dir),
                 git,
                 env,
-                credential_helpers,
+                credential_config,
             )
     except subprocess.TimeoutExpired:
         _emit(

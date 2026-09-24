@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import functools
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -73,8 +74,12 @@ class _AuthenticatedGitHandler(SimpleHTTPRequestHandler):
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
+@pytest.mark.parametrize("helper_scope", ["generic", "url"])
 def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: str,
+    helper_scope: str,
 ) -> None:
     """Trusted user helpers must work while checkout-controlled helpers stay inert."""
     if os.name == "nt":
@@ -114,9 +119,19 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     helper.chmod(0o755)
     env = os.environ.copy()
     env["HOME"] = str(home)
+    repo = tmp_path / f"{caller}-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    url = f"http://127.0.0.1:{server.server_port}/origin.git"
+    _git(repo, "remote", "add", "origin", url)
+    helper_key = (
+        "credential.helper"
+        if helper_scope == "generic"
+        else f"credential.http://127.0.0.1:{server.server_port}.helper"
+    )
     subprocess.run(
         [
-            "git", "config", "--global", "credential.helper",
+            "git", "config", "--global", helper_key,
             f"!{sys.executable} {helper} {trusted_marker} {username} {password}",
         ],
         env=env,
@@ -124,12 +139,6 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
         timeout=20,
     )
     monkeypatch.setenv("HOME", str(home))
-
-    repo = tmp_path / f"{caller}-repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    url = f"http://127.0.0.1:{server.server_port}/origin.git"
-    _git(repo, "remote", "add", "origin", url)
     _git(
         repo,
         "config",
@@ -150,6 +159,86 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
         server.server_close()
 
     assert trusted_marker.exists()
+    assert not repo_marker.exists()
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master").strip()
+
+
+@pytest.mark.parametrize("caller", ["updates", "workspace"])
+@pytest.mark.parametrize(
+    ("ssh_variant", "batch_option"),
+    [("ssh", "-oBatchMode=yes"), ("plink", "-batch")],
+)
+def test_ssh_fetch_uses_trusted_global_command_with_batch_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: str,
+    ssh_variant: str,
+    batch_option: str,
+) -> None:
+    """A trusted SSH wrapper remains usable without allowing terminal prompts."""
+    if os.name == "nt":
+        pytest.skip("executable SSH wrapper setup is POSIX-only")
+
+    _, origin = _make_bare_origin(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = tmp_path / f"{caller}-trusted-ssh-ran"
+    repo_marker = tmp_path / f"{caller}-repo-ssh-ran"
+    wrapper = tmp_path / "ssh_wrapper.py"
+    wrapper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, shlex, subprocess, sys\n"
+        "marker, *args = sys.argv[1:]\n"
+        "pathlib.Path(marker).write_text('\\n'.join(args), encoding='utf-8')\n"
+        f"args = [value for value in args if value not in ({batch_option!r}, '-oBatchMode=no')]\n"
+        "command = args[-1]\n"
+        "raise SystemExit(subprocess.call(shlex.split(command)))\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    trusted_command = " ".join(
+        (
+            "TEST_SSH_PREFIX=preserved",
+            shlex.quote(str(wrapper)),
+            shlex.quote(str(marker)),
+        )
+    )
+    subprocess.run(
+        ["git", "config", "--global", "core.sshCommand", trusted_command],
+        env=env,
+        check=True,
+        timeout=20,
+    )
+    subprocess.run(
+        ["git", "config", "--global", "ssh.variant", ssh_variant],
+        env=env,
+        check=True,
+        timeout=20,
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    repo = tmp_path / f"{caller}-ssh-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", f"test-host:{origin}")
+    _git(
+        repo,
+        "config",
+        "core.sshCommand",
+        f"{sys.executable} -c 'from pathlib import Path; Path(\"{repo_marker}\").touch()'",
+    )
+
+    if caller == "updates":
+        output, ok = updates._run_git(["fetch", "origin"], repo, timeout=30)
+        assert ok, output
+    else:
+        assert git_fetch(repo)["ok"] is True
+
+    assert marker.exists()
+    ssh_args = marker.read_text(encoding="utf-8").splitlines()
+    assert batch_option in ssh_args
     assert not repo_marker.exists()
     assert _git(repo, "rev-parse", "refs/remotes/origin/master").strip()
 

@@ -30,10 +30,11 @@ from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 from api.subprocess_utils import (
     clean_git_env,
+    noninteractive_git_env,
     noninteractive_git_argv,
     repository_git_proxy_blocks,
     sanitize_git_diagnostic,
-    trusted_git_credential_helpers,
+    trusted_git_credential_config,
     windows_hide_flags,
 )
 
@@ -243,19 +244,20 @@ def _run_git(args, cwd, timeout=10):
     if repository_git_proxy_blocks(args, cwd, env, executable=git_executable):
         return 'repository-configured core.gitProxy is not allowed for git:// update remotes', False
     is_network_command = bool(args and args[0] in {'fetch', 'pull', 'push', 'ls-remote'})
-    credential_helpers = ()
+    credential_config = ()
     if is_network_command:
-        credential_helpers = trusted_git_credential_helpers(
+        credential_config = trusted_git_credential_config(
             cwd,
             env,
             executable=git_executable,
         )
+        env = noninteractive_git_env(cwd, env, executable=git_executable)
     try:
         r = subprocess.run(
             noninteractive_git_argv(
                 args,
                 executable=git_executable,
-                credential_helpers=credential_helpers,
+                credential_config=credential_config,
             ) if is_network_command else [git_executable] + args,
             cwd=str(cwd),
             capture_output=True,

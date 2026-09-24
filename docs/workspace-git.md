@@ -94,7 +94,9 @@ If a hook fails, the API returns a structured Git error instead of hiding the fa
 failures include authentication errors, missing upstream branches, conflicts, dirty worktrees, invalid
 refs, missing Git binaries, and timeouts.
 
-Repository-local credential helpers and askpass commands are disabled for workspace Git operations.
-Credential helpers from user and system Git config remain available for private HTTPS remotes.
-SSH remotes can use the inherited SSH agent, but unattended operations do not open password,
-passphrase, or host-key prompts.
+Repository-local credential helpers, askpass commands, and SSH commands are disabled for workspace
+Git operations. Generic and URL-scoped credential helpers from user and system Git config remain
+available for private HTTPS remotes. SSH remotes can use the inherited SSH agent and a user/system
+`core.sshCommand`; WebUI appends the SSH variant's batch option so unattended operations do not open password,
+passphrase, or host-key prompts. Unknown custom transports and Git's `simple` SSH variant fail closed
+because they do not expose a portable batch-mode option.

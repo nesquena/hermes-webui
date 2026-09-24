@@ -228,8 +228,10 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 **Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
 config injection settings; disables checkout-controlled askpass and credential helpers; and forces
-SSH batch mode. Credential helpers from trusted user and system Git config remain available, as does
-an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
+SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
+remain available. A trusted user/system `core.sshCommand` is also retained with the batch option for
+its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
+as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
 to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
 supported. Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
 transport prefix names a helper command.
@@ -247,7 +249,9 @@ checkout paths, origin paths, URL credentials, tokens, and secret query values.
 
 **Fix.** Configure a non-interactive user/system credential helper for a private HTTPS origin, or use
 an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
-it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check.
+it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
+commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
+and unknown transports fail closed because WebUI cannot establish a portable no-prompt option.
 
 **When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
 environment but the update check still fails, or if either path opens a credential prompt. Include

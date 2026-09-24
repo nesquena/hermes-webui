@@ -22,9 +22,10 @@ from typing import Iterable
 
 from api.subprocess_utils import (
     clean_git_env,
+    noninteractive_git_env,
     noninteractive_git_argv,
     repository_git_proxy_blocks,
-    trusted_git_credential_helpers,
+    trusted_git_credential_config,
     windows_hide_flags,
 )
 from api.workspace import rmtree_anchored, safe_resolve_ws, unlink_anchored
@@ -65,12 +66,12 @@ _GIT_DESTRUCTIVE_HARDENED_CONFIG = (
 def _hardened_git_argv(
     args: list[str],
     *,
-    credential_helpers: tuple[str, ...] = (),
+    credential_config: tuple[tuple[str, str], ...] = (),
     destructive: bool = False,
     attributes_file: str | None = None,
     hooks_path: str | None = None,
 ) -> list[str]:
-    argv = noninteractive_git_argv([], credential_helpers=credential_helpers)
+    argv = noninteractive_git_argv([], credential_config=credential_config)
     for key, value in _GIT_HARDENED_CONFIG:
         argv.extend(["-c", f"{key}={value}"])
     if destructive:
@@ -186,9 +187,10 @@ def _run_git(
             "Repository-configured core.gitProxy is not allowed for git:// remotes",
             "unsafe_git_config",
         )
-    credential_helpers = ()
+    credential_config = ()
     if args and args[0] in {"fetch", "pull", "push", "ls-remote"}:
-        credential_helpers = trusted_git_credential_helpers(cwd, run_env)
+        credential_config = trusted_git_credential_config(cwd, run_env)
+        run_env = noninteractive_git_env(cwd, run_env)
     effective_destructive = destructive and workspace_git_destructive_enabled()
     hardened_destructive_path = effective_destructive or force_destructive_hardening
     attributes_file = None
@@ -222,7 +224,7 @@ def _run_git(
         result = subprocess.run(
             _hardened_git_argv(
                 args,
-                credential_helpers=credential_helpers,
+                credential_config=credential_config,
                 destructive=hardened_destructive_path,
                 attributes_file=attributes_file,
                 hooks_path=hooks_path,

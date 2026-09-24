@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +40,7 @@ GIT_ENV_SCRUB_KEYS = (
     "SSH_ASKPASS",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
     "GIT_PROXY_COMMAND",
 )
 GIT_ENV_SCRUB_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
@@ -55,6 +57,8 @@ _REMOTE_HELPER_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*::")
 _SCP_SSH_REMOTE_RE = re.compile(
     r"^(?:[^/@:\s]+@)?(?:\[[^\[\]/\s]+\]|[^/@:\s]+):(?!:).+$"
 )
+_SHELL_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
 
 
 def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -109,45 +113,178 @@ def _scoped_git_config_values(
     return tuple(zip(fields[0::2], fields[1::2], strict=True))
 
 
-def trusted_git_credential_helpers(
+def _scoped_git_config_entries(
+    cwd: str | Path,
+    env: dict[str, str],
+    pattern: str,
+    *,
+    executable: str,
+) -> tuple[tuple[str, str, str], ...]:
+    """Read ``(scope, key, value)`` triples matching a Git config regex."""
+    try:
+        result = subprocess.run(
+            [
+                executable, "config", "--includes", "--show-scope", "-z",
+                "--get-regexp", pattern,
+            ],
+            cwd=str(cwd), shell=False, capture_output=True, timeout=10,
+            env=env, creationflags=windows_hide_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    if result.returncode != 0:
+        return ()
+    raw_output = result.stdout or b""
+    if isinstance(raw_output, str):
+        raw_output = raw_output.encode("utf-8", errors="replace")
+    raw_fields = raw_output.split(b"\0")
+    if raw_fields and raw_fields[-1] == b"":
+        raw_fields.pop()
+    if len(raw_fields) % 2:
+        return ()
+    entries = []
+    for raw_scope, raw_entry in zip(raw_fields[0::2], raw_fields[1::2], strict=True):
+        if b"\n" not in raw_entry:
+            return ()
+        raw_key, raw_value = raw_entry.split(b"\n", 1)
+        entries.append(
+            (
+                raw_scope.decode("utf-8", errors="replace"),
+                raw_key.decode("utf-8", errors="replace"),
+                raw_value.decode("utf-8", errors="replace"),
+            )
+        )
+    return tuple(entries)
+
+
+def trusted_git_credential_config(
     cwd: str | Path,
     env: dict[str, str],
     *,
     executable: str = "git",
-) -> tuple[str, ...]:
-    """Read credential helpers from trusted system and user config scopes.
+) -> tuple[tuple[str, str], ...]:
+    """Read credential-helper entries from trusted system and user scopes.
 
-    Repository and worktree config are deliberately excluded. The returned
-    values can be re-applied after an empty ``credential.helper`` value resets
-    Git's accumulated helper list, preserving normal private-HTTPS access while
-    preventing a checkout from supplying an executable helper.
+    This preserves both generic ``credential.helper`` entries and URL-scoped
+    entries such as ``credential.https://github.com.helper``. Repository and
+    worktree config are deliberately excluded. Git performs its normal URL
+    matching after the trusted entries are re-applied on the command line.
     """
     return tuple(
-        value
-        for scope, value in _scoped_git_config_values(
-            cwd, env, "credential.helper", executable=executable,
+        (key, value)
+        for scope, key, value in _scoped_git_config_entries(
+            cwd,
+            env,
+            r"^credential(\..*)?\.helper$",
+            executable=executable,
         )
         if scope in {"system", "global"}
     )
+
+
+def noninteractive_git_env(
+    cwd: str | Path,
+    env: dict[str, str],
+    *,
+    executable: str = "git",
+) -> dict[str, str]:
+    """Force SSH batch mode while preserving a trusted custom SSH command."""
+    trusted_commands = tuple(
+        value
+        for scope, value in _scoped_git_config_values(
+            cwd, env, "core.sshCommand", executable=executable,
+        )
+        if scope in {"system", "global"}
+    )
+    trusted_variants = tuple(
+        value
+        for scope, value in _scoped_git_config_values(
+            cwd, env, "ssh.variant", executable=executable,
+        )
+        if scope in {"system", "global"}
+    )
+    ssh_command = trusted_commands[-1] if trusted_commands else "ssh"
+    try:
+        command_words = shlex.split(ssh_command, posix=True)
+    except ValueError:
+        command_words = []
+    variant = trusted_variants[-1].strip().lower() if trusted_variants else "auto"
+    if variant == "auto":
+        # Git interprets core.sshCommand as a shell command on every platform.
+        executable_words = list(command_words)
+        while executable_words and _SHELL_ASSIGNMENT_RE.match(executable_words[0]):
+            executable_words.pop(0)
+        if executable_words and executable_words[0] in {"command", "exec"}:
+            executable_words.pop(0)
+            while executable_words and executable_words[0].startswith("-"):
+                executable_words.pop(0)
+        if executable_words and executable_words[0] == "env":
+            executable_words.pop(0)
+            while executable_words and (
+                executable_words[0].startswith("-")
+                or _SHELL_ASSIGNMENT_RE.match(executable_words[0])
+            ):
+                executable_words.pop(0)
+        executable_name = executable_words[0] if executable_words else ""
+        executable_name = executable_name.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
+        executable_name = executable_name.lower().removesuffix(".exe")
+        variant = {
+            "ssh": "ssh",
+            "plink": "plink",
+            "putty": "putty",
+            "tortoiseplink": "tortoiseplink",
+        }.get(executable_name, "unsupported")
+    if variant not in {"ssh", "plink", "putty", "tortoiseplink"}:
+        # Git's "simple" variant and unknown custom transports have no general
+        # non-interactive flag. Do not run one when the no-prompt invariant
+        # cannot be established.
+        ssh_command = "git-ssh-variant-is-not-supported-by-hermes-webui"
+        variant = "simple"
+        batch_option = ""
+    else:
+        batch_option = (
+            "-batch"
+            if variant in {"plink", "putty", "tortoiseplink"}
+            else "-oBatchMode=yes"
+        )
+    if variant == "ssh":
+        normalized_words = [word.lower().replace(" ", "") for word in command_words]
+        for index, word in enumerate(normalized_words):
+            if word in {"-obatchmode=no", "-obatchmode=false"}:
+                ssh_command = "git-ssh-command-disables-batch-mode"
+                variant = "simple"
+                batch_option = ""
+                break
+            if word == "-o" and index + 1 < len(normalized_words):
+                if normalized_words[index + 1] in {"batchmode=no", "batchmode=false"}:
+                    ssh_command = "git-ssh-command-disables-batch-mode"
+                    variant = "simple"
+                    batch_option = ""
+                    break
+    if batch_option:
+        ssh_command = f"{ssh_command} {batch_option}"
+    configured = dict(env)
+    configured["GIT_SSH_COMMAND"] = ssh_command
+    configured["GIT_SSH_VARIANT"] = variant
+    return configured
 
 
 def noninteractive_git_argv(
     args: list[str],
     *,
     executable: str = "git",
-    credential_helpers: tuple[str, ...] = (),
+    credential_config: tuple[tuple[str, str], ...] = (),
 ) -> list[str]:
     """Build Git argv that cannot prompt or run checkout-controlled helpers."""
     argv = [executable]
     for key, value in (
         ("core.askPass", ""),
-        ("core.sshCommand", "ssh -oBatchMode=yes"),
         ("protocol.ext.allow", "never"),
         ("credential.helper", ""),
     ):
         argv.extend(["-c", f"{key}={value}"])
-    for helper in credential_helpers:
-        argv.extend(["-c", f"credential.helper={helper}"])
+    for key, value in credential_config:
+        argv.extend(["-c", f"{key}={value}"])
     argv.extend(args)
     return argv
 
