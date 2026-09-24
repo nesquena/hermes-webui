@@ -1114,15 +1114,33 @@ async function openFile(path, opts={}){
   _previewOfficeFormat = '';
   _previewPreviewKind = '';
 
-  // #6709 (gate certification B1): a new preview starting while the panel is CLOSED
-  // supersedes whatever a previous collapse retained — that recorded owner describes the
-  // old preview, and the next open must not restore `browse` for a preview nobody
-  // reached from the tree (its X would reveal the tree instead of closing the drawer).
-  // Retiring here is scoped to this exact situation: while the panel is OPEN the owner
-  // is still the live collapse record (openWorkspacePanel() reads it on reopen), and a
-  // file-to-file switch inside an open panel must not clear it.
+  // #6709 (gate certification B1): a DIFFERENT preview starting while the panel is
+  // CLOSED supersedes whatever a previous collapse retained — that recorded owner
+  // describes the old preview, and the next open must not restore `browse` for a preview
+  // nobody reached from the tree (its X would reveal the tree instead of closing the
+  // drawer).
+  //
+  // #6709 (Greptile P1): re-opening the SAME path is not a new preview. The turn-complete
+  // refresh (refreshOpenPreviewIfMutated) and the markdown re-render both call
+  // openFile(_previewCurrentPath, …) with the panel still collapsed, and that path IS the
+  // preview the collapse retained — dropping its ownership there made a later sync reopen
+  // the deliberately collapsed drawer as preview-owned, so the X closed it instead of
+  // returning to the tree. Only a genuinely different file retires the owner.
+  //
+  // Scoped to the closed-panel case: while the panel is OPEN the owner is still the live
+  // collapse record (openWorkspacePanel() reads it on reopen), and a file-to-file switch
+  // inside an open panel must not clear it.
   if(typeof _workspacePanelMode!=='undefined' && _workspacePanelMode==='closed'){
-    _workspacePanelRetainedMode=null;
+    const _retainedPath=(typeof _previewCurrentPath==='string'&&_previewCurrentPath)?_previewCurrentPath:'';
+    const _nextPath=(typeof path==='string'&&path)?path:'';
+    // Guarded like every other cross-file call here (the round-16 lesson): an extracted
+    // openFile() body with no normalizer simply falls back to the raw string compare.
+    const _canon=(typeof _normalizeArtifactPath==='function')
+      ? ((p)=>{ try{ return _normalizeArtifactPath(p)||p; }catch(_){ return p; } })
+      : ((p)=>p);
+    if(!_retainedPath || _canon(_retainedPath)!==_canon(_nextPath)){
+      _workspacePanelRetainedMode=null;
+    }
   }
 
   $('previewPathText').textContent=path;

@@ -1848,3 +1848,73 @@ def test_a_sync_does_not_undo_a_deliberate_collapse():
     assert out["afterNone"] == "preview", (
         f"with no recorded owner the historical reopen behaviour must still apply: {out}"
     )
+
+# ── Greptile P1: a background refresh of the SAME preview is not a new preview ──
+#
+# The turn-complete refresh (refreshOpenPreviewIfMutated) and the markdown re-render both
+# call openFile(_previewCurrentPath, …) while the panel is collapsed. That path IS the
+# preview the collapse retained, so retiring its ownership there left a later sync free to
+# reopen the deliberately collapsed drawer as preview-owned — the X then closed it instead
+# of returning to the tree.
+
+_SAME_PATH_REFRESH_DRIVER = r"""
+(async () => {
+  // browse-owned preview, then a deliberate collapse (records the owner)
+  _previewCurrentPath='A.txt'; _workspacePanelMode='browse';
+  _workspacePanelRetainedMode=null;
+  closeWorkspacePanel();
+  const retainedAfterCollapse = _workspacePanelRetainedMode;
+
+  // the turn-complete refresh re-opens the SAME path while the panel is still collapsed
+  await openFile('A.txt', {bustCache:true});
+  const retainedAfterSameRefresh = _workspacePanelRetainedMode;
+  // …so a sync must still treat the collapse as deliberate and leave it closed
+  syncWorkspacePanelState();
+  const modeAfterSync = _workspacePanelMode;
+  // …and the explicit reopen still restores the browse owner
+  openWorkspacePanel('preview');
+  const modeAfterExplicitReopen = _workspacePanelMode;
+
+  // control: a DIFFERENT file while collapsed DOES supersede the retained owner
+  _workspacePanelMode='browse'; _previewCurrentPath='A.txt';
+  closeWorkspacePanel();
+  const retainedBeforeOther = _workspacePanelRetainedMode;
+  await openFile('B.txt');
+  const retainedAfterOther = _workspacePanelRetainedMode;
+  const modeAfterOtherSync = (syncWorkspacePanelState(), _workspacePanelMode);
+  console.log(JSON.stringify({ retainedAfterCollapse, retainedAfterSameRefresh, modeAfterSync,
+                               modeAfterExplicitReopen, retainedBeforeOther, retainedAfterOther,
+                               modeAfterOtherSync }));
+})();
+"""
+
+
+def test_a_background_refresh_of_the_same_preview_keeps_the_retained_owner():
+    """Greptile P1: re-opening the retained path is not a new preview."""
+    proc = _run_node(_gate_harness(_SAME_PATH_REFRESH_DRIVER))
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["retainedAfterCollapse"] == "browse", (
+        f"precondition: the collapse must record the browse owner: {out}"
+    )
+    assert out["retainedAfterSameRefresh"] == "browse", (
+        f"a background refresh of the SAME preview discarded the recorded ownership, so a "
+        f"later sync would reopen the deliberately collapsed drawer as preview-owned and "
+        f"its X would close the drawer instead of returning to the tree (Greptile P1): {out}"
+    )
+    assert out["modeAfterSync"] == "closed", (
+        f"the collapse must still count as deliberate after the refresh: {out}"
+    )
+    assert out["modeAfterExplicitReopen"] == "browse", (
+        f"the explicit reopen must still restore the recorded owner: {out}"
+    )
+    # control: a different file while collapsed does supersede the owner
+    assert out["retainedBeforeOther"] == "browse", out
+    assert out["retainedAfterOther"] is None, (
+        f"a DIFFERENT file must still retire the previous preview's ownership, otherwise "
+        f"the next open would restore `browse` for a preview nobody reached from the "
+        f"tree: {out}"
+    )
+    assert out["modeAfterOtherSync"] == "preview", (
+        f"with no retained owner the historical reopen applies: {out}"
+    )
