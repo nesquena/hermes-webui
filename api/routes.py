@@ -23858,12 +23858,15 @@ def _start_chat_stream_for_session(
         diag.stage("stale_stream_cleanup") if diag else None
         _clear_stale_stream_state(s)
 
+    consumed_goal_continuation = False
+    consumed_bg_task_completion = False
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
     # so the next chat/start for this session is automatically treated as goal-related.
     if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
+        consumed_goal_continuation = True
 
     # process_complete wakeup (ours-original, Option B): if this session has a
     # pending process_complete marker (set by api/background_process.py drain),
@@ -23872,6 +23875,7 @@ def _start_chat_stream_for_session(
     # either server-side (Option Z) or via the PR #2279 next-turn drain.
     if s.session_id in PENDING_BG_TASK_COMPLETIONS:
         PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+        consumed_bg_task_completion = True
 
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
@@ -24040,6 +24044,10 @@ def _start_chat_stream_for_session(
                             exc._chat_start_cleanup_result = cleanup_result
                         except Exception:
                             pass
+                    if consumed_goal_continuation:
+                        PENDING_GOAL_CONTINUATION.add(s.session_id)
+                    if consumed_bg_task_completion:
+                        PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
                     if journal_event:
                         try:
                             from api.turn_journal import append_turn_journal_event

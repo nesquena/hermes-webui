@@ -110,6 +110,25 @@ def test_eager_rejected_before_stream_registration_retry_reload_has_one_new_prom
     ]
 
 
+def test_rejected_start_restores_pending_continuation_markers(
+    issue7193_env, monkeypatch
+):
+    session = new_session(workspace=str(issue7193_env.parent), profile="profile-a")
+    routes.PENDING_GOAL_CONTINUATION.add(session.session_id)
+    routes.PENDING_BG_TASK_COMPLETIONS.add(session.session_id)
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    assert session.session_id in routes.PENDING_GOAL_CONTINUATION
+    assert session.session_id in routes.PENDING_BG_TASK_COMPLETIONS
+
+
 def test_rejected_start_waits_for_concurrent_draft_writer_until_cleanup(
     issue7193_env, monkeypatch
 ):
