@@ -8,7 +8,6 @@ import math
 import os
 import secrets
 import stat
-import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -267,8 +266,10 @@ def _read_process_open_paths(
     for fd_entry in fd_entries:
         try:
             raw_target = os.readlink(fd_entry.path)
-        except OSError:
-            continue
+        except OSError as exc:
+            if exc.errno in {errno.ENOENT, errno.ESRCH}:
+                continue
+            return None, "unreadable"
         if not raw_target.startswith("/"):
             continue
         canonical = _canonical_path(raw_target)
@@ -1323,14 +1324,35 @@ def validate_report_destination(
     return destination
 
 
-def _verify_directory_handle(parent: Path, dir_fd: int) -> None:
-    """Prove the opened descriptor is the resolved parent directory."""
-    fd_stat = os.fstat(dir_fd)
-    path_stat = os.stat(parent)
-    if not stat.S_ISDIR(fd_stat.st_mode):
-        raise ValueError("report parent is not a directory")
-    if (fd_stat.st_dev, fd_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
-        raise ValueError("report parent changed while opening")
+def _open_report_parent(parent: Path) -> int:
+    """Walk/create every parent component with pinned, no-follow handles."""
+    if not parent.is_absolute() or not parent.anchor:
+        raise ValueError("report parent must be absolute")
+    components = parent.parts[1:]
+    if any(component in {"", ".", ".."} for component in components):
+        raise ValueError("report parent contains an unsafe component")
+
+    dir_flags = os.O_RDONLY | os.O_CLOEXEC
+    dir_flags |= getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    current_fd = os.open(parent.anchor, dir_flags)
+    try:
+        for component in components:
+            try:
+                child_fd = os.open(component, dir_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                os.mkdir(component, 0o700, dir_fd=current_fd)
+                child_fd = os.open(component, dir_flags, dir_fd=current_fd)
+            child_info = os.fstat(child_fd)
+            if not stat.S_ISDIR(child_info.st_mode):
+                os.close(child_fd)
+                raise ValueError("report parent component is not a directory")
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
 
 
 def _write_report_via_dirfd(
@@ -1338,13 +1360,9 @@ def _write_report_via_dirfd(
     destination: Path,
 ) -> None:
     """Create and replace the report relative to a pinned parent handle."""
-    dir_flags = os.O_RDONLY | os.O_CLOEXEC
-    dir_flags |= getattr(os, "O_DIRECTORY", 0)
-    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
-    dir_fd = os.open(destination.parent, dir_flags)
+    dir_fd = _open_report_parent(destination.parent)
     temporary_name: str | None = None
     try:
-        _verify_directory_handle(destination.parent, dir_fd)
         try:
             existing = os.stat(
                 destination.name,
@@ -1404,48 +1422,6 @@ def _write_report_via_dirfd(
             os.close(dir_fd)
 
 
-def _write_report_via_paths(payload: str, destination: Path) -> None:
-    """Portable fallback for platforms without ``dir_fd`` support."""
-    try:
-        existing = os.lstat(destination)
-    except FileNotFoundError:
-        existing = None
-    if existing is not None and not stat.S_ISREG(existing.st_mode):
-        raise ValueError("report destination exists and is not a regular file")
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-        dir=destination.parent,
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        try:
-            os.chmod(temporary_path, 0o600)
-        except OSError:
-            pass
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, destination)
-        if os.name != "nt":
-            directory_descriptor = os.open(
-                destination.parent,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
-    except Exception:
-        try:
-            os.close(file_descriptor)
-        except OSError:
-            pass
-        temporary_path.unlink(missing_ok=True)
-        raise
-
-
 def write_report_atomic(
     report: dict[str, Any],
     path: str | Path,
@@ -1462,7 +1438,6 @@ def write_report_atomic(
         path,
         forbidden_roots=forbidden_roots,
     )
-    destination.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         report,
         ensure_ascii=False,
@@ -1479,4 +1454,4 @@ def write_report_atomic(
     ):
         _write_report_via_dirfd(payload, destination)
     else:
-        _write_report_via_paths(payload, destination)
+        raise OSError("secure dirfd-relative report publication is unavailable")
