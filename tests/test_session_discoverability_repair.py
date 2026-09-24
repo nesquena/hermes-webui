@@ -1,3 +1,4 @@
+import errno
 import json
 import sqlite3
 import subprocess
@@ -146,6 +147,61 @@ def test_repair_discoverability_apply_backs_up_and_repairs_safe_findings(tmp_pat
     assert f"{stale}.json" in backed_up
     assert "_index.json" in backed_up
     assert "state.db" in backed_up
+
+
+def test_materialize_sidecar_fsync_failure_invalidates_absent_cached_owner(
+    tmp_path,
+    monkeypatch,
+):
+    from api import models
+
+    sid = "state-only-partially-published"
+    db = _state_db(
+        tmp_path,
+        [{"id": sid, "source": "webui", "message_count": 1}],
+        {sid: 1},
+    )
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    cached = models.Session(session_id=sid, workspace=str(tmp_path), messages=[])
+    with models.LOCK:
+        models.SESSIONS.clear()
+        models.SESSIONS[sid] = cached
+
+    real_fsync = models._fsync_sidecar_directory
+    attempts = 0
+
+    def fail_first_directory_fsync(directory):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EIO, "directory fsync failed after link")
+        real_fsync(directory)
+
+    monkeypatch.setattr(
+        models,
+        "_fsync_sidecar_directory",
+        fail_first_directory_fsync,
+    )
+    result = repair_session_discoverability(
+        tmp_path,
+        state_db_path=db,
+        dry_run=False,
+        backup_dir=tmp_path / "backup",
+    )
+
+    target = tmp_path / f"{sid}.json"
+    assert result["ok"] is False
+    assert target.exists()
+    assert json.loads(target.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 1
+    with models.LOCK:
+        assert sid not in models.SESSIONS
+
+    reloaded = models.Session.load(sid)
+    assert reloaded is not None
+    reloaded.messages.append({"role": "assistant", "content": "retry works"})
+    reloaded.save(skip_index=True)
+    assert json.loads(target.read_text(encoding="utf-8"))["_sidecar_generation_v1"] == 2
 
 
 def test_clear_sidecar_cli_flag_never_silently_overwrites_successful_save(
