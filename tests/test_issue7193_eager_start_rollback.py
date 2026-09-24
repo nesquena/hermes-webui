@@ -100,13 +100,20 @@ def test_eager_rejected_before_stream_registration_retry_reload_has_one_new_prom
     ]
 
 
-def test_rejected_eager_start_is_not_revived_by_startup_recovery(issue7193_env, monkeypatch):
+@pytest.mark.parametrize("existing_session", [True, False], ids=["existing", "hidden-empty"])
+def test_rejected_eager_start_is_not_revived_by_startup_recovery(
+    issue7193_env, monkeypatch, existing_session
+):
     from api.session_recovery import (
         inspect_session_recovery_status,
         recover_all_sessions_on_startup,
     )
 
-    session = _saved_retry_session(issue7193_env)
+    session = (
+        _saved_retry_session(issue7193_env)
+        if existing_session
+        else new_session(workspace=str(issue7193_env.parent), profile="profile-a")
+    )
     original_messages = copy.deepcopy(session.messages)
     monkeypatch.setattr(
         routes,
@@ -118,7 +125,9 @@ def test_rejected_eager_start_is_not_revived_by_startup_recovery(issue7193_env, 
         _start(session, workspace=issue7193_env / "workspace")
 
     live = Session.load(session.session_id)
-    assert [row["content"] for row in _user_rows(live)] == ["retry me"]
+    assert [row["content"] for row in _user_rows(live)] == (
+        ["retry me"] if existing_session else []
+    )
     assert live.intentional_shrink_generation
     status = inspect_session_recovery_status(live.path)
     assert status["recommend"] == "no_action"
