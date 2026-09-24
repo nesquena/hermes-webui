@@ -23,13 +23,33 @@ def source_slice(text, start_marker, end_marker, path):
     return text[start:end]
 
 
+def source_block(text, start_marker, path):
+    start = text.find(start_marker)
+    assert start >= 0, f'{path}: missing start marker {start_marker!r}'
+    brace = text.find('{', start)
+    assert brace >= 0, f'{path}: missing block for {start_marker!r}'
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == '{':
+            depth += 1
+        elif text[index] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    raise AssertionError(f'{path}: unterminated block for {start_marker!r}')
+
+
 def replay_probe(restored_scene, count, skip_unkeyed=True, has_rows=True):
     sessions = (ROOT / 'static/sessions.js').read_text()
     ui = (ROOT / 'static/ui.js').read_text()
-    replay = source_slice(
-        sessions, 'const liveToolReplayId=(tc)=>', '    let didReconnect=false;',
-        'static/sessions.js',
+    replay_id = source_slice(
+        sessions, 'const liveToolReplayId=(tc)=>', ';', 'static/sessions.js',
     )
+    replay = '\n'.join((
+        replay_id,
+        'let restoredAnchorScene=restoredScene;',
+        source_block(sessions, 'const replayPersistedLiveToolCards=(opts)=>{', 'static/sessions.js') + ';',
+    ))
     append = source_slice(
         ui, 'function appendLiveToolCard(', '\nfunction _findLatestLiveAssistantByBurst',
         'static/ui.js',
@@ -42,7 +62,7 @@ tools.push({name:'read_file',done:true});
 let redraws=0, appended=[];
 const sandbox={
   S:{session:{session_id:'session'},activeStreamId:'run',toolCalls:tools},
-  sid:'session',activeStreamId:'run',INFLIGHT:{},restoredAnchorScene:opts.restored_scene,
+  sid:'session',activeStreamId:'run',INFLIGHT:{},restoredScene:opts.restored_scene,
   document:{getElementById:()=>({querySelector:()=>opts.has_rows?{}:null})},
   isFinalAnswerOnlyMode:()=>false,
   isLiveAnchorActivitySceneOwner:()=>true,

@@ -37,6 +37,21 @@ def _function_body(src: str, name: str) -> str:
     return source[source.find("{") :]
 
 
+def _block_source(src: str, marker: str) -> str:
+    start = src.find(marker)
+    assert start != -1, f"{marker} not found"
+    brace = src.find("{", start)
+    depth = 0
+    for i, ch in enumerate(src[brace:]):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : brace + i + 1]
+    raise AssertionError(f"{marker} block unterminated")
+
+
 # ─── Shared helper contract ────────────────────────────────────────────────
 
 def test_merge_pending_session_message_is_a_global_helper():
@@ -99,11 +114,11 @@ def test_refreshSession_uses_shared_helper():
 def test_loadSession_inflight_reattach_merges_pending_user_before_render():
     """Regression for the #2341 contract: loadSession INFLIGHT branch must call
     the shared helper and render afterwards."""
-    start = SESSIONS_JS.find("if(INFLIGHT[sid]){")
-    assert start != -1, "loadSession INFLIGHT branch not found"
-    end = SESSIONS_JS.find("}else{", start)
-    assert end != -1, "loadSession INFLIGHT branch end not found"
-    block = SESSIONS_JS[start:end]
+    load_session = _function_source(SESSIONS_JS, "loadSession")
+    block = _block_source(
+        load_session,
+        "if(INFLIGHT[sid]){\n    _ensureInflightLiveAssistantMessage",
+    )
 
     merge_pos = block.find("_mergePendingSessionMessage")
     render_pos = block.find("renderMessages(")
