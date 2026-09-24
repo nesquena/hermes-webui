@@ -132,6 +132,55 @@ def test_private_state_db_provenance_can_reorder_terminal_conflict_row():
     ]
 
 
+def test_state_db_prefix_replay_keeps_anonymous_cross_second_rows():
+    sidecar = _assistant("repeated", 100.0)
+    replay = _assistant("repeated", 101.0)
+
+    assert models.merge_session_messages_append_only(
+        [sidecar], [replay], incoming_provenance="state_db",
+    ) == [sidecar, replay]
+
+
+def test_state_db_prefix_replay_keeps_same_second_and_shared_identity_mirrors():
+    cases = [
+        (_assistant("same", 100.0), _assistant("same", 100.0)),
+        (_assistant("same", 100.25), _assistant("same", 100.75)),
+        (_assistant("same", None), _assistant("same", 101.0)),
+        (
+            _assistant("same", 100.0, id="message-1"),
+            _assistant("same", 101.0, id="message-1"),
+        ),
+        (
+            _assistant("same", 100.0, _state_db_row_id=42),
+            _assistant("same", 101.0, _state_db_row_id=42),
+        ),
+        (
+            _assistant("same", 100.0, _active_turn_token="turn:1"),
+            _assistant("same", 101.0, _active_turn_token="turn:1"),
+        ),
+    ]
+
+    for sidecar, replay in cases:
+        assert models.merge_session_messages_append_only(
+            [sidecar], [replay], incoming_provenance="state_db",
+        ) == [sidecar]
+
+
+def test_unverified_prefix_replay_still_dedupes_nonuniform_restamps():
+    sidecar = [
+        _assistant("first", 100.0),
+        _assistant("second", 101.0),
+        _assistant("third", 102.0),
+    ]
+    restamped = [
+        _assistant("first", 103.0),
+        _assistant("second", 105.0),
+        _assistant("third", 108.0),
+    ]
+
+    assert models.merge_session_messages_append_only(sidecar, restamped) == sidecar
+
+
 def test_compression_child_stable_ids_remain_after_restamped_parent(monkeypatch):
     """Child-sidecar sequence is authoritative even when parent timestamps are later."""
     parent = SimpleNamespace(

@@ -13030,6 +13030,40 @@ def _merge_session_messages_append_only_impl(
             and str(msg.get("role", "")).lower() == "user"
         )
 
+    def _prefix_replay_identity_compatible(target, source):
+        if not _message_private_identity_compatible(target, source):
+            return False
+        if incoming_provenance != "state_db":
+            return True
+        target_timestamp, target_timestamp_valid = _message_exact_timestamp_details(target)
+        source_timestamp, source_timestamp_valid = _message_exact_timestamp_details(source)
+        if (
+            not target_timestamp_valid
+            or not source_timestamp_valid
+            or target_timestamp is None
+            or source_timestamp is None
+            or _normalized_message_timestamp_for_key(target_timestamp)
+            == _normalized_message_timestamp_for_key(source_timestamp)
+        ):
+            return True
+
+        for identity_details in (
+            _stable_message_identity_details,
+            _state_db_row_identity_details,
+        ):
+            target_identity, target_valid = identity_details(target)
+            source_identity, source_valid = identity_details(source)
+            if (
+                target_valid
+                and source_valid
+                and target_identity is not None
+                and target_identity == source_identity
+            ):
+                return True
+        target_token = target.get("_active_turn_token") if isinstance(target, dict) else None
+        source_token = source.get("_active_turn_token") if isinstance(source, dict) else None
+        return bool(target_token and target_token == source_token)
+
     for source_message in state_messages:
         preserve_native_image_row = (
             isinstance(source_message, dict)
@@ -13195,7 +13229,9 @@ def _merge_session_messages_append_only_impl(
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
             if (
-                _message_private_identity_compatible(sidecar_visible_messages[state_replay_idx], msg)
+                _prefix_replay_identity_compatible(
+                    sidecar_visible_messages[state_replay_idx], msg
+                )
                 and (visible_key == expected_visible_key or _has_visible_duplicate(
                     visible_key, {expected_visible_key}
                 ))
@@ -13314,7 +13350,7 @@ def _merge_session_messages_append_only_impl(
             sidecar_visible_keys,
             sidecar_visible_lookup,
         )
-        if matched_visible_key is not None and _message_private_identity_compatible(
+        if matched_visible_key is not None and _prefix_replay_identity_compatible(
             merged_by_visible_key.get(matched_visible_key), msg,
         ):
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
