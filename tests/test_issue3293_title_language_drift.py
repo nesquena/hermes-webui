@@ -71,6 +71,35 @@ def test_cjk_start_english_title_is_rejected():
     assert _title_language_mismatch("如何修复这个错误问题", "Fixing the Bug") is True
 
 
+def test_cjk_start_mixed_cjk_latin_title_is_allowed():
+    """CJK conversations frequently embed English product/technical terms in
+    titles (e.g. 'WeChat Pay 回调失败排查').  As long as the title also
+    contains CJK characters, Latin borrowed terms should not trigger rejection.
+    Regression test for #7693."""
+    from api.streaming import _title_language_mismatch
+
+    # Pure CJK user, CJK title with English product name
+    assert _title_language_mismatch(
+        "微信支付回调一直失败怎么办", "WeChat Pay 回调失败排查"
+    ) is False
+    # CJK user, CJK title with English tech term
+    assert _title_language_mismatch(
+        "如何修复这个错误问题", "Python 代码修复"
+    ) is False
+    # Mixed CJK+Latin user, mixed title
+    assert _title_language_mismatch(
+        "prores raw是否能选择压缩？", "ProRes RAW 压缩选项与 BRAW 对比"
+    ) is False
+
+
+def test_cjk_start_pure_latin_title_still_rejected():
+    """A purely Latin title for a CJK conversation is still a genuine drift."""
+    from api.streaming import _title_language_mismatch
+
+    assert _title_language_mismatch("如何修复这个错误问题", "Fixing the Bug") is True
+    assert _title_language_mismatch("如何修复这个错误问题", "Python Error Guide") is True
+
+
 # ── regression guards: legitimate same-script titles must NOT be rejected ───
 
 def test_english_start_english_title_allowed():

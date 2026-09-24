@@ -505,6 +505,13 @@ def annotate_media_snapshots(
     if allowed_predicate is None:
         allowed_predicate = media_capture_allowed
     media_re = _re.compile(r"MEDIA:([^\s\)\]]+)")
+    # #7680 re-gate (9/22): two-pass scan. First strip backtick
+    # wrappers (`` `MEDIA:path` `` → ``MEDIA:path``) so the bare
+    # class below does not consume the closing backtick as part of
+    # the path. Then the bare class (no backtick in the exclusion
+    # set) captures the full filename even when the path itself
+    # contains a backtick (e.g. ``report`final.png``).
+    backtick_re = _re.compile(r"`MEDIA:([^`\s]+)`")
     captured = 0
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
@@ -530,6 +537,7 @@ def annotate_media_snapshots(
         if not text_parts:
             continue
         text = "\n".join(text_parts)
+        text = backtick_re.sub(lambda m: f"MEDIA:{m.group(1)}", text)
         refs = media_re.findall(text)
         if not refs:
             continue

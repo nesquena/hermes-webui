@@ -68,6 +68,21 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return default
     return value if value >= minimum else default
 
+
+def _env_int_clamped(name: str, default: int, *, minimum: int = 1, maximum: int) -> int:
+    """Like ``_env_int``, then clamp a valid override to ``maximum``."""
+    value = _env_int(name, default, minimum=minimum)
+    if not str(os.getenv(name) or "").strip():
+        return value
+    return min(value, maximum)
+
+
+# Sidebar recency window. Resolved here, before profile init, so a profile
+# .env cannot override a server-wide resource bound. Clamped at 200.
+CLI_VISIBLE_SESSION_LIMIT = _env_int_clamped(
+    "HERMES_WEBUI_VISIBLE_SESSION_LIMIT", 20, maximum=200,
+)
+
 # ── TLS/HTTPS config (optional, env-overridable) ────────────────────────────
 TLS_CERT = os.getenv("HERMES_WEBUI_TLS_CERT", "").strip() or None
 TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
@@ -83,10 +98,19 @@ STATE_DIR = (
     .resolve()
 )
 
+
+def _resolve_settings_file(state_dir: Path) -> Path:
+    """Resolve an optional per-instance settings file without splitting session state."""
+    configured = os.getenv("HERMES_WEBUI_SETTINGS_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return state_dir / "settings.json"
+
+
 SESSION_DIR = STATE_DIR / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
 SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
-SETTINGS_FILE = STATE_DIR / "settings.json"
+SETTINGS_FILE = _resolve_settings_file(STATE_DIR)
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
 
@@ -1904,28 +1928,44 @@ _PROVIDER_MODELS = {
         {"id": "big-pickle", "label": "Big Pickle"},
     ],
     # OpenCode Go — flat-rate models via opencode.ai/go ($10/month).
-    # Synced 2026-07-08 from the public Go docs and documented models endpoint.
-    # Keep preview/free-only Zen models out of this Go picker snapshot.
+    # Fallback only: the live Hermes CLI catalog (Go-specific
+    # /zen/go/v1/models probe, core v0.20.5+) leads (#1240, #5311).
+    # Mirrors Hermes core's curated opencode-go list
+    # (hermes_cli/models_catalog_static.py, core main as of 2026-09-10).
+    # Core's 2026-09-09 sync dropped `ox-alpha-free` (Go relay delisted it:
+    # GET /zen/go/v1/models omits it, POST → 401) and added `glm-5.3-flash`
+    # and `muse-spark-1.3-contributor`. Core owns the sync duty against the
+    # live endpoint; WebUI mirrors.
     "opencode-go": [
-        {"id": "minimax-m3",       "label": "MiniMax M3"},
-        {"id": "minimax-m2.7",     "label": "MiniMax M2.7"},
-        {"id": "minimax-m2.5",     "label": "MiniMax M2.5"},
-        {"id": "kimi-k2.7-code",   "label": "Kimi K2.7 Code"},
-        {"id": "kimi-k2.6",        "label": "Kimi K2.6"},
-        {"id": "kimi-k2.5",        "label": "Kimi K2.5"},
-        {"id": "glm-5.2",          "label": "GLM-5.2"},
-        {"id": "glm-5.1",          "label": "GLM-5.1"},
-        {"id": "glm-5",            "label": "GLM-5"},
-        {"id": "deepseek-v4-pro",  "label": "DeepSeek V4 Pro"},
-        {"id": "deepseek-v4-flash","label": "DeepSeek V4 Flash"},
-        {"id": "qwen3.7-max",      "label": "Qwen3.7 Max"},
-        {"id": "qwen3.7-plus",     "label": "Qwen3.7 Plus"},
-        {"id": "qwen3.6-plus",     "label": "Qwen3.6 Plus"},
-        {"id": "qwen3.5-plus",     "label": "Qwen3.5 Plus"},
-        {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
-        {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
-        {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
-        {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
+        {"id": "kimi-k3",                  "label": "Kimi K3"},
+        {"id": "kimi-k2.7-code",           "label": "Kimi K2.7 Code"},
+        {"id": "kimi-k2.6",                "label": "Kimi K2.6"},
+        {"id": "kimi-k2.5",                "label": "Kimi K2.5"},
+        {"id": "gpt-5.6-luna",             "label": "GPT 5.6 Luna"},
+        {"id": "grok-4.5",                 "label": "Grok 4.5"},
+        {"id": "glm-5.3",                  "label": "GLM-5.3"},
+        {"id": "glm-5.3-flash",            "label": "GLM-5.3 Flash"},
+        {"id": "glm-5.2",                  "label": "GLM-5.2"},
+        {"id": "glm-5.1",                  "label": "GLM-5.1"},
+        {"id": "glm-5",                    "label": "GLM-5"},
+        {"id": "mimo-v2.5-pro",            "label": "MiMo V2.5 Pro"},
+        {"id": "mimo-v2.5",                "label": "MiMo V2.5"},
+        {"id": "mimo-v2-pro",              "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni",             "label": "MiMo V2 Omni"},
+        {"id": "minimax-m3",               "label": "MiniMax M3"},
+        {"id": "minimax-m2.7",             "label": "MiniMax M2.7"},
+        {"id": "minimax-m2.5",             "label": "MiniMax M2.5"},
+        {"id": "deepseek-v4-pro",          "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-v4-flash",        "label": "DeepSeek V4 Flash"},
+        {"id": "qwen3.8-max",              "label": "Qwen3.8 Max"},
+        {"id": "qwen3.7-max",              "label": "Qwen3.7 Max"},
+        {"id": "qwen3.7-plus",             "label": "Qwen3.7 Plus"},
+        {"id": "qwen3.6-plus",             "label": "Qwen3.6 Plus"},
+        {"id": "qwen3.5-plus",             "label": "Qwen3.5 Plus"},
+        {"id": "hy3",                      "label": "HY3"},
+        {"id": "hy3-preview",              "label": "HY3 Preview"},
+        {"id": "muse-spark-1.2-contributor", "label": "Muse Spark 1.2 Contributor"},
+        {"id": "muse-spark-1.3-contributor", "label": "Muse Spark 1.3 Contributor"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:
@@ -6927,8 +6967,8 @@ def _configured_model_badges_from_static_catalog(
     for entry in configured_entries:
         provider = entry["provider"]
         model = entry["model"]
-        raw_candidates = []
-        for candidate in (model, f"{provider}/{model}", f"@{provider}:{model}"):
+        raw_candidates: list[str] = []
+        for candidate in (model, f"@{provider}:{model}"):
             if candidate and candidate not in raw_candidates:
                 raw_candidates.append(candidate)
 
@@ -8374,6 +8414,26 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     return []
 
 
+def _hermes_cli_supports_opencode_go_live_catalog() -> bool:
+    """Whether the installed Agent has Go-specific model discovery.
+
+    Hermes core versions before 0.20.5 route ``opencode-go`` through a
+    generic public catalog. That lookup can return a convincing non-empty
+    list containing models the Go relay rejects with 404, so absence or an
+    unparseable/prerelease version must fail closed to WebUI's static Go list.
+    """
+    try:
+        import hermes_cli
+
+        version = str(getattr(hermes_cli, "__version__", "")).strip()
+    except Exception:
+        return False
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return False
+    return tuple(int(part) for part in match.groups()) >= (0, 20, 5)
+
+
 def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> list[dict]:
     """Convert Hermes CLI model ids into WebUI picker model entries."""
     formatter = _format_ollama_label if provider_id in ("ollama", "ollama-cloud") else None
@@ -8582,10 +8642,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for entry in configured_entries:
                 provider = entry["provider"]
                 model = entry["model"]
-                raw_candidates = []
+                raw_candidates: list[str] = []
                 for candidate in (
                     model,
-                    f"{provider}/{model}",
                     f"@{provider}:{model}",
                 ):
                     if candidate and candidate not in raw_candidates:
@@ -9771,12 +9830,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not raw_models:
                         if pid == "moa":
                             raw_models = _moa_preset_models_from_config(cfg)
-                        elif pid == "opencode-go":
-                            # Skip live /v1/models probe for OpenCode Go — it
-                            # returns models from the public catalog that are
-                            # not enabled on the Go tier, causing 404 when
-                            # selected. Use the curated static list only. (#5311)
-                            pass
+                        elif (
+                            pid == "opencode-go"
+                            and not _hermes_cli_supports_opencode_go_live_catalog()
+                        ):
+                            # Before core v0.20.5 this resolver returned the
+                            # generic public catalog, including models that
+                            # 404 on the Go tier. Use the curated Go fallback.
+                            raw_models = []
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,
@@ -11431,7 +11492,13 @@ _SETTINGS_DEFAULTS = {
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
     "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
-    "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
+    # #7622 (round 3): language is intentionally absent from the defaults so
+    # `load_settings()` reports `None` for a fresh install.  This lets the
+    # client distinguish "no preference" from an explicit saved choice,
+    # so a user who genuinely picked English (and has `language: "en"`
+    # persisted on disk) is no longer overridden by the browser hint on
+    # their first hydration.  When a user picks a locale in the Settings
+    # modal the value is written here and the field is set explicitly.
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
@@ -11672,6 +11739,16 @@ def load_settings() -> dict:
             settings["default_model_provider"] = str(model_cfg.get("provider"))
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
+    # #7622/#7730 (round 4): keep the tri-state signal explicit.  `language`
+    # is intentionally absent from `_SETTINGS_DEFAULTS` (see above), so
+    # without this line a fresh install's returned dict would OMIT the key
+    # entirely and the API payload would carry no `language` field.  Emit an
+    # explicit `None` (serialized as JSON `null`) so the client receives the
+    # three-way signal it trusts: `null` = no preference, "en" = explicitly
+    # saved English, any other code = explicitly chosen locale.  Stored
+    # values (including a legacy English pick written before this change)
+    # win via the merge above and are never touched here.
+    settings.setdefault("language", None)
     return settings
 
 
@@ -11679,6 +11756,15 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
     "simplified_tool_calling",
+} | {
+    # #7622 (round 3): `language` is intentionally absent from
+    # `_SETTINGS_DEFAULTS` so a fresh install returns `None` for
+    # `settings["language"]` and the client can distinguish "no
+    # preference" from an explicit saved choice.  But the user
+    # MUST still be able to pick a locale in the Settings modal,
+    # so we add it back to the explicit allow-list here.  The
+    # existing BCP-47 validation at save-time still applies.
+    "language",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
