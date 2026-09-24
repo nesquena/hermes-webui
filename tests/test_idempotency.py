@@ -40,6 +40,16 @@ from types import SimpleNamespace
 import pytest
 
 
+# Sentinels for ``run_handler`` in the fixture below. They
+# distinguish "no Idempotency-Key header at all" / "no
+# ``idempotency_key`` body field" (the legacy absence path) from
+# "header present with explicit value X" / "body field present with
+# value Y" (the malformed-but-present path that the #7435 review
+# requires us to reject with 400).
+_SENTINEL_NO_HEADER = object()
+_SENTINEL_NO_BODY = object()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -71,7 +81,6 @@ class _FakePostHandler:
         self.command = "POST"
         self.path = path
         self.client_address = ("127.0.0.1", 12345)
-
     def send_response(self, status):
         self.status = status
 
@@ -230,9 +239,24 @@ def idem_env(tmp_path, monkeypatch):
     recorder = _RunRecorder()
     monkeypatch.setattr(routes, "_start_run", recorder)
 
-    def run_handler(body: dict, *, key_header: str | None = None, key_body: str | None = None) -> tuple[int, dict]:
-        handler = _FakePostHandler(body, headers={"Idempotency-Key": key_header} if key_header else None)
-        if key_body is not None and "idempotency_key" not in body:
+    def run_handler(
+        body: dict,
+        *,
+        key_header=_SENTINEL_NO_HEADER,
+        key_body: object = _SENTINEL_NO_BODY,
+    ) -> tuple[int, dict]:
+        # Two sentinels distinguish:
+        #   * "no Idempotency-Key header at all" (the legacy path);
+        #   * "header present, value=<key_header>" (which may be
+        #     the empty string, whitespace, or a non-string — the
+        #     malformed path the #7435 review requires us to
+        #     reject explicitly).
+        if key_header is _SENTINEL_NO_HEADER:
+            idem_headers = None
+        else:
+            idem_headers = {"Idempotency-Key": key_header}
+        handler = _FakePostHandler(body, headers=idem_headers)
+        if key_body is not _SENTINEL_NO_BODY and "idempotency_key" not in body:
             body = dict(body)
             body["idempotency_key"] = key_body
         # Stub ``j`` so the route returns a dict we can introspect
@@ -392,8 +416,10 @@ def test_replay_works_after_process_restart(idem_env):
     re-read of the durable file. The new in-memory state must already
     contain the completed record (loaded from disk), so a retry
     replays the same identity without starting a new turn."""
+    from api.idempotency import build_storage_key
     body = {"session_id": "idem-session", "message": "hello"}
     key = "post-restart-key"
+    stored_key = build_storage_key(key)
 
     s1, p1 = idem_env.run_handler(body, key_header=key)
     assert s1 == 200
@@ -401,11 +427,16 @@ def test_replay_works_after_process_restart(idem_env):
     expected_stream = p1["stream_id"]
     expected_turn = p1["turn_id"]
 
-    # Sanity: the durable file actually contains the record.
+    # Sanity: the durable file actually contains the record. The
+    # on-disk key is profile-namespaced (the route is the single
+    # source of truth for the namespace; tests resolve the same
+    # value via ``build_storage_key``).
     assert idem_env.store.path.exists()
     on_disk = json.loads(idem_env.store.path.read_text(encoding="utf-8"))
     on_disk_keys = [r["key"] for r in on_disk.get("records", [])]
-    assert key in on_disk_keys
+    assert stored_key in on_disk_keys
+    # And the raw key is NOT stored unprefixed.
+    assert key not in on_disk_keys
 
     # Simulate a restart: a fresh in-memory state, forced reload from
     # the same durable file.
@@ -416,6 +447,7 @@ def test_replay_works_after_process_restart(idem_env):
     # The store should have the record back, with status=complete.
     rec = idem_env.store.lookup(key)
     assert rec is not None
+    assert rec.key == stored_key
     assert rec.status == "complete"
     assert rec.stream_id == expected_stream
     assert rec.turn_id == expected_turn
@@ -512,9 +544,10 @@ def test_expired_key_fails_explicitly(idem_env):
     do NOT silently re-admit a turn with the same key, because that
     could double-bill a caller that just hadn't realized the prior
     claim had aged out."""
-    from api.idempotency import compute_request_fingerprint
+    from api.idempotency import build_storage_key, compute_request_fingerprint
     body = {"session_id": "idem-session", "message": "hello"}
     key = "expiry-key"
+    stored_key = build_storage_key(key)
 
     # Seed a record that is already past TTL. The fingerprint must
     # match what the new request will compute, otherwise we'd hit
@@ -524,7 +557,7 @@ def test_expired_key_fails_explicitly(idem_env):
     rec = idem_env.store.lookup(key)
     assert rec is not None
     rec.claimed_at = 0.0  # 1970-01-01 — well past any reasonable TTL
-    idem_env.store._records.move_to_end(key)
+    idem_env.store._records.move_to_end(stored_key)
     idem_env.store._persist_locked()
 
     s, p = idem_env.run_handler(body, key_header=key)
@@ -583,11 +616,15 @@ def test_body_field_wins_over_header(idem_env):
 
 
 def test_invalid_key_returns_400(idem_env):
-    """Oversize / non-printable keys must be rejected with 400. They
-    are caller errors, not duplicates; we don't want to silently
-    bind them. (Empty / whitespace-only keys are treated as "no
-    key" by the extractor and fall through to the legacy path —
-    that's intentional, the browser never sends a key.)"""
+    """Oversize / non-printable / malformed keys must be rejected
+    with 400. They are caller errors, not duplicates; we don't want
+    to silently bind them.
+
+    Per the #7435 review: a transport that explicitly supplied a
+    value (even empty / whitespace / non-string) is a malformed
+    key and is rejected with 400. True absence (no header, no body
+    field) keeps the legacy no-idempotency path.
+    """
     # 400-bound: non-empty, but malformed
     bad_keys = [
         "has space in it",        # ASCII space (0x20) is outside 0x21-0x7E
@@ -606,23 +643,486 @@ def test_invalid_key_returns_400(idem_env):
             f"invalid key {bad!r} admitted a turn"
         )
 
-    # "No key" path: empty / whitespace-only — these go through the
-    # extractor's "no key" branch and behave like a legacy request
-    # (admitting a fresh turn each time). The contract explicitly
-    # says: "Existing clients that omit the key retain their current
-    # behavior." An empty-string Idempotency-Key is a no-op, not an
-    # error.
-    for empty in ("", "    "):
+    # Present-but-malformed: empty / whitespace-only / non-string.
+    # The contract is explicit: an explicit value is a malformed
+    # key, NOT "no key" (no key = true absence on BOTH transports).
+    # A stray ``Idempotency-Key:  `` header from a misconfigured
+    # client must surface a 400, not silently fall through to the
+    # legacy path that would admit a turn.
+    #
+    # We do not include ``None`` in this set: Python's HTTP parser
+    # never produces ``None`` as a header value, and our test
+    # handler uses ``None`` as the "no header at all" sentinel.
+    # A non-string body field is tested separately below.
+    for malformed in ("", "    ", 12345, []):
         before = len(idem_env.recorder.calls)
         s, p = idem_env.run_handler(
             {"session_id": "idem-session", "message": "hello"},
-            key_header=empty,
+            key_header=malformed,
         )
-        # Legacy: succeeds, admits a turn.
-        assert s == 200, f"empty key {empty!r} should be treated as no key; got {s}"
-        assert len(idem_env.recorder.calls) == before + 1, (
-            f"empty key {empty!r} did not admit a turn (legacy behavior broken)"
+        assert s == 400, (
+            f"present-but-malformed key {malformed!r} should 400, not fall "
+            f"through to legacy; got {s}: {p}"
         )
+        assert "idempotency" in (p.get("error") or "").lower() or "key" in (p.get("error") or "").lower()
+        assert len(idem_env.recorder.calls) == before, (
+            f"malformed key {malformed!r} admitted a turn"
+        )
+
+    # Non-string body field: the body explicitly carries a
+    # ``idempotency_key`` whose value is not a string. Per the
+    # contract, an explicit value is a malformed key — 400, not
+    # legacy. A real client that JSON-encodes the wrong type
+    # should fix its request, not silently fall through to the
+    # no-idempotency path.
+    for malformed_body in (12345, [], {"x": 1}, True):
+        before = len(idem_env.recorder.calls)
+        body = {"session_id": "idem-session", "message": "hello"}
+        # Insert the body field directly so the fixture's
+        # ``key_body is not _SENTINEL_NO_BODY`` check still
+        # triggers.
+        body["idempotency_key"] = malformed_body
+        s, p = idem_env.run_handler(body)
+        assert s == 400, (
+            f"present-but-malformed body key {malformed_body!r} should 400, "
+            f"not fall through to legacy; got {s}: {p}"
+        )
+        assert len(idem_env.recorder.calls) == before, (
+            f"malformed body key {malformed_body!r} admitted a turn"
+        )
+
+    # True absence: omit both the Idempotency-Key header and the
+    # ``idempotency_key`` body field. This is the legacy path — a
+    # fresh turn is admitted every time. (The default
+    # ``run_handler`` behaviour: no header at all.)
+    body = {"session_id": "idem-session", "message": "hello"}
+    before = len(idem_env.recorder.calls)
+    s, p = idem_env.run_handler(body)
+    assert s == 200
+    assert len(idem_env.recorder.calls) == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Findings from the #7435 review (idempotency fail-closed hardening)
+# ---------------------------------------------------------------------------
+#
+# 1. ``_persist_locked()`` previously swallowed OSError and returned
+#    silently; ``claim()`` and ``complete()`` then told the route the
+#    record was durably stored. A crash between the in-memory
+#    mutation and the durable write would resurrect the claim on
+#    restart and admit a duplicate turn on retry.
+# 2. ``_evict_to_cap_locked()`` evicted the oldest record regardless
+#    of TTL, dropping live claims (or completed records the caller
+#    might still retry) under a runaway-caller cap. The store now
+#    refuses to evict unexpired records and surfaces 503 when full.
+# 3. Storage keys and fingerprints were not scoped to the active
+#    profile; the same raw key under two different profiles would
+#    collide. The store now namespaces storage keys AND bakes the
+#    server-resolved profile into the fingerprint.
+# 4. ``extract_key()`` downgraded a present-but-empty header or
+#    non-string body field to "no key" (legacy), letting a
+#    misconfigured client silently skip idempotency and admit
+#    duplicate turns. The route now rejects malformed-but-present
+#    keys with 400.
+# 5. The behavioural tests below prove each fix end-to-end through
+#    ``_handle_chat_start`` (no source-string assertions).
+
+
+def test_persist_failure_during_claim_rolls_back_and_returns_503(
+    idem_env, monkeypatch
+):
+    """Finding 1: when ``_persist_locked()`` raises during ``claim()``,
+    the in-memory mutation must be rolled back and the route must
+    return 503. The agent-start recorder must show NO admitted turn.
+
+    Without rollback, a process restart (or a retry from the caller)
+    would resurrect the claim from the durable file, blocking
+    legitimate retries with ``IdempotencyInFlight`` and admitting
+    a duplicate turn on a different retry path.
+    """
+    from api import idempotency as idem_mod
+
+    # Simulate a disk failure: every persist call raises. The
+    # closure captures the store instance because instance
+    # attributes set via ``monkeypatch.setattr`` don't auto-bind
+    # ``self`` the way class methods do.
+    store_ref = idem_env.store
+
+    def boom_persist():
+        raise idem_mod.IdempotencyStoreUnavailable("simulated disk full")
+    monkeypatch.setattr(store_ref, "_persist_locked", boom_persist)
+
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "persist-fail-claim-key"
+    s, p = idem_env.run_handler(body, key_header=key)
+    assert s == 503, f"expected 503 on persist failure, got {s}: {p}"
+    assert p.get("code") == "idempotency_store_unavailable"
+    assert p.get("idempotency_key") == key
+    # Critical: no turn admitted.
+    assert len(idem_env.recorder.calls) == 0, (
+        f"persist failure admitted a turn: {len(idem_env.recorder.calls)} calls"
+    )
+    # Critical: in-memory state was rolled back — the next call
+    # with the same key (after the disk recovers) can claim
+    # cleanly. A bug that left a phantom in-memory record would
+    # return IdempotencyInFlight on the retry, even though the
+    # durable store never saw the claim.
+    stored = idem_env.store.lookup_stored(
+        idem_mod.build_storage_key(key)
+    )
+    assert stored is None, (
+        f"in-memory record leaked after persist failure: {stored!r}"
+    )
+
+
+def test_persist_failure_during_complete_rolls_back_and_returns_503(
+    idem_env, monkeypatch
+):
+    """Finding 1 (complete path): when the persist inside
+    ``complete()`` fails, the in-memory record is restored to its
+    prior (pending) state and the route returns 503. The
+    ``idem_completed`` flag MUST remain False so the finally
+    clause can release the claim and the next retry is a fresh
+    attempt, not a replay of an unpersisted completion.
+
+    Note: a retry that arrives after a failed complete will see
+    no complete record, admit a new turn, and the caller has to
+    reconcile the duplicate. That is unavoidable — the agent
+    already ran — but the 503 surfaces the durability gap so the
+    caller can decide. The test only pins the
+    rollback-and-503 invariants.
+    """
+    from api import idempotency as idem_mod
+
+    # Let the first call succeed: claim + complete writes a
+    # completed record.
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "persist-fail-complete-key"
+    s, p = idem_env.run_handler(body, key_header=key)
+    assert s == 200
+    assert p["stream_id"] == "stream-1"
+    assert len(idem_env.recorder.calls) == 1
+
+    # Simulate a disk failure starting on the SECOND persist
+    # call (which is the complete's persist — the first is the
+    # claim's persist, which must succeed for the agent to
+    # actually start).
+    state = {"call_count": 0, "fail_from": 2}
+    original_persist = idem_env.store._persist_locked
+
+    def flaky_persist():
+        state["call_count"] += 1
+        if state["call_count"] >= state["fail_from"]:
+            raise idem_mod.IdempotencyStoreUnavailable("simulated disk full")
+        return original_persist()
+    monkeypatch.setattr(idem_env.store, "_persist_locked", flaky_persist)
+
+    # Second call: fresh key to force a new claim+complete cycle.
+    key2 = "persist-fail-complete-key-2"
+    s, p = idem_env.run_handler(
+        {"session_id": "idem-session", "message": "second"},
+        key_header=key2,
+    )
+    assert s == 503, f"expected 503 on complete persist failure, got {s}: {p}"
+    assert p.get("code") == "idempotency_store_unavailable"
+    assert p.get("idempotency_key") == key2
+    # Critical: the recorder shows the agent was admitted (the
+    # worker thread started — we can't unsay that) but the route
+    # told the caller 503 so the caller can reconcile. The
+    # in-memory record was rolled back to pending.
+    assert len(idem_env.recorder.calls) == 2, (
+        f"second turn should have started before persist failed: "
+        f"{len(idem_env.recorder.calls)} calls"
+    )
+    # Stored state: rolled back to pending (NOT complete), so a
+    # retry does not replay the broken completion.
+    rec = idem_env.store.lookup(key2)
+    assert rec is not None, (
+        "in-memory record was popped instead of rolled back to pending"
+    )
+    assert rec.status == "pending", (
+        f"expected status pending after rollback, got {rec.status!r}"
+    )
+    assert rec.completed_at == 0.0, (
+        f"expected completed_at cleared, got {rec.completed_at!r}"
+    )
+
+
+def test_cap_never_evicts_unexpired_record(idem_env, monkeypatch):
+    """Finding 2: a cap-full store must NEVER evict an unexpired
+    record. ``_evict_to_cap_locked`` should only drop records
+    past their TTL, and if the cap is still exceeded after that
+    sweep, claim() must raise ``IdempotencyStoreUnavailable``
+    (→ 503) so the caller can back off rather than silently
+    re-admitting a turn whose claim was evicted out from under
+    it.
+
+    A pending record is even more sensitive: evicting it would
+    let a concurrent retry see no record, claim again, and start
+    a second turn.
+    """
+    from api import idempotency as idem_mod
+
+    # Build a tiny store with cap=2 so we can saturate it.
+    tiny_store = idem_mod.IdempotencyStore(
+        path=idem_env.store.path,
+        ttl_seconds=3600,  # 1h, so seeded records are "unexpired"
+        max_records=2,
+    )
+    # Reuse the module-level singleton for the route.
+    from api.idempotency import set_idempotency_store
+    set_idempotency_store(tiny_store)
+
+    # Seed two completed records. Both unexpired.
+    fingerprint = idem_mod.compute_request_fingerprint(
+        {"session_id": "idem-session", "message": "hello"}
+    )
+    tiny_store.claim("a-key", fingerprint)
+    tiny_store.complete(
+        "a-key",
+        session_id="idem-session", stream_id="s1", turn_id="t1",
+        response_status=200, response_payload={},
+    )
+    tiny_store.claim("b-key", fingerprint)
+    tiny_store.complete(
+        "b-key",
+        session_id="idem-session", stream_id="s2", turn_id="t2",
+        response_status=200, response_payload={},
+    )
+    assert len(tiny_store._records) == 2
+
+    # Third claim: cap is full, no expired records to evict.
+    # Must raise IdempotencyStoreUnavailable.
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        tiny_store.claim("c-key", fingerprint)
+    # The two original records are still present (not evicted
+    # under the cap).
+    assert tiny_store.lookup("a-key") is not None
+    assert tiny_store.lookup("b-key") is not None
+
+    # End-to-end through the route: same 503 contract.
+    s, p = idem_env.run_handler(
+        {"session_id": "idem-session", "message": "hello"},
+        key_header="c-key-route",
+    )
+    assert s == 503
+    assert p.get("code") == "idempotency_store_unavailable"
+
+
+def test_cap_does_not_evict_pending_record(idem_env):
+    """Finding 2 (pending): a PENDING record is also
+    non-evictable. The first sweep in ``_evict_to_cap_locked``
+    skips them so an in-flight claim never gets silently dropped
+    while the route is mid-turn.
+
+    We seed a pending record (claim() but no complete()) and a
+    completed record, fill the cap, then try a new claim. The
+    pending record must survive the cap sweep.
+    """
+    from api import idempotency as idem_mod
+
+    tiny_store = idem_mod.IdempotencyStore(
+        path=idem_env.store.path,
+        ttl_seconds=3600,
+        max_records=2,
+    )
+    from api.idempotency import set_idempotency_store
+    set_idempotency_store(tiny_store)
+
+    # Pending claim.
+    tiny_store.claim("pending-key", "fp-pending")
+    # Completed claim.
+    tiny_store.claim("done-key", "fp-done")
+    tiny_store.complete(
+        "done-key",
+        session_id="idem-session", stream_id="s", turn_id="t",
+        response_status=200, response_payload={},
+    )
+    assert len(tiny_store._records) == 2
+
+    # Cap-full with one pending, one complete. New claim must
+    # raise, NOT evict the pending record.
+    with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
+        tiny_store.claim("overflow-key", "fp-overflow")
+
+    pending_rec = tiny_store.lookup("pending-key")
+    assert pending_rec is not None, "pending record was evicted under cap"
+    assert pending_rec.status == "pending"
+
+
+def test_two_profiles_same_raw_key_are_isolated(idem_env, monkeypatch):
+    """Finding 3: two profile contexts using the same raw key
+    must NOT collide. Storage key includes the server-resolved
+    profile; fingerprint includes the same profile. Replaying
+    the same raw key under a different profile is treated as a
+    new claim, not a replay.
+
+    The client-supplied ``profile`` field in the body is
+    intentionally ignored — only the server's
+    ``_get_active_profile_name`` matters.
+    """
+    from api.idempotency import build_storage_key
+
+    body_a = {"session_id": "idem-session", "message": "hello", "profile": "alpha"}
+    body_b = {"session_id": "idem-session", "message": "hello", "profile": "beta"}
+    raw_key = "shared-raw-key"
+
+    # First request under profile "alpha". The client hint
+    # ``profile: alpha`` is ignored — the server resolves the
+    # active profile via ``_get_active_profile_name``.
+    monkeypatch.setattr(
+        idem_env.routes, "_get_active_profile_name", lambda: "alpha"
+    )
+    s1, p1 = idem_env.run_handler(body_a, key_header=raw_key)
+    assert s1 == 200
+    assert p1["stream_id"] == "stream-1"
+    # Capture the alpha storage key BEFORE the profile switch —
+    # ``lookup`` will use the current profile to namespace, which
+    # is what we want to test against.
+    alpha_stored_key = build_storage_key(raw_key, profile="alpha")
+    assert idem_env.store.lookup_stored(alpha_stored_key) is not None
+    assert idem_env.store.lookup_stored(alpha_stored_key).key == alpha_stored_key
+
+    # Second request, same raw key, same body, but the active
+    # profile is now "beta". Must be a NEW claim, not a replay.
+    monkeypatch.setattr(
+        idem_env.routes, "_get_active_profile_name", lambda: "beta"
+    )
+    s2, p2 = idem_env.run_handler(body_b, key_header=raw_key)
+    assert s2 == 200
+    assert p2["stream_id"] == "stream-2", (
+        f"profile-scoped isolation broken: stream_id={p2['stream_id']!r} "
+        f"(expected a fresh turn under profile 'beta')"
+    )
+    # And the alpha record is untouched.
+    beta_stored_key = build_storage_key(raw_key, profile="beta")
+    assert idem_env.store.lookup_stored(alpha_stored_key) is not None
+    assert idem_env.store.lookup_stored(alpha_stored_key).key == alpha_stored_key
+    assert idem_env.store.lookup_stored(beta_stored_key) is not None
+    assert idem_env.store.lookup_stored(beta_stored_key).key == beta_stored_key
+
+    # Two distinct records, neither was a replay.
+    on_disk = json.loads(idem_env.store.path.read_text(encoding="utf-8"))
+    keys = {r["key"] for r in on_disk.get("records", [])}
+    assert alpha_stored_key in keys
+    assert beta_stored_key in keys
+
+    # Third request: same raw key, profile "alpha" again —
+    # REPLAYS the alpha record, not the beta one. (The
+    # fingerprint matches because the server-resolved profile
+    # is the same.)
+    monkeypatch.setattr(
+        idem_env.routes, "_get_active_profile_name", lambda: "alpha"
+    )
+    s3, p3 = idem_env.run_handler(body_a, key_header=raw_key)
+    assert s3 == 200
+    assert p3["stream_id"] == "stream-1", (
+        "alpha retry should replay the alpha record, not a new turn"
+    )
+    assert p3.get("replayed_from_idempotency_key") is True
+
+
+def test_malformed_header_value_returns_400_no_turn(idem_env):
+    """Finding 4: a present-but-malformed Idempotency-Key header
+    must 400, not silently fall through to the legacy
+    no-idempotency path."""
+    for bad in ("", "   ", "x" * 201, "has space", "tab\there"):
+        before = len(idem_env.recorder.calls)
+        s, p = idem_env.run_handler(
+            {"session_id": "idem-session", "message": "hello"},
+            key_header=bad,
+        )
+        assert s == 400, (
+            f"malformed header value {bad!r} should 400; got {s}: {p}"
+        )
+        assert len(idem_env.recorder.calls) == before, (
+            f"malformed header {bad!r} admitted a turn"
+        )
+
+
+def test_malformed_body_field_returns_400_no_turn(idem_env):
+    """Finding 4: a present-but-malformed ``idempotency_key``
+    body field (empty string, non-string) must 400, not
+    silently fall through to legacy."""
+    # Empty string in the body field.
+    body = {"session_id": "idem-session", "message": "hello", "idempotency_key": ""}
+    before = len(idem_env.recorder.calls)
+    s, p = idem_env.run_handler(body)
+    assert s == 400
+    assert len(idem_env.recorder.calls) == before
+
+    # Non-string body field. Set directly so JSON parsing would
+    # not reject it; the route's validator must.
+    for bad in (12345, ["list"], {"dict": 1}, True, None):
+        body = {"session_id": "idem-session", "message": "hello", "idempotency_key": bad}
+        before = len(idem_env.recorder.calls)
+        s, p = idem_env.run_handler(body)
+        assert s == 400, (
+            f"malformed body key {bad!r} should 400; got {s}: {p}"
+        )
+        assert len(idem_env.recorder.calls) == before, (
+            f"malformed body key {bad!r} admitted a turn"
+        )
+
+
+def test_true_absence_keeps_legacy_path(idem_env):
+    """Finding 4 (negative): true absence on BOTH transports —
+    no Idempotency-Key header AND no ``idempotency_key`` body
+    field — must keep the legacy no-idempotency path. Two such
+    requests in a row each admit a fresh turn.
+    """
+    body = {"session_id": "idem-session", "message": "hello"}
+    s1, p1 = idem_env.run_handler(body)
+    s2, p2 = idem_env.run_handler(body)
+    assert s1 == 200 and s2 == 200
+    assert p1["stream_id"] != p2["stream_id"]
+    assert p1["turn_id"] != p2["turn_id"]
+    # And the store stayed empty — no claim was ever made.
+    assert list(idem_env.store.keys()) == []
+
+
+def test_directory_creation_failure_returns_503(idem_env, monkeypatch):
+    """Finding 1 (deeper): a mkdir failure on the store dir
+    must also surface 503, not be silently swallowed. The test
+    forces ``path.parent.mkdir`` to raise ``PermissionError``
+    and asserts the route returns 503 with no admitted turn.
+    """
+
+    # Force the store dir to be un-creatable. We swap the
+    # ``mkdir`` method on the resolved path's parent (a
+    # ``Path`` object) with a stub that always raises
+    # ``PermissionError`` — mirroring the real-world failure
+    # of a read-only / no-permission mount.
+    real_mkdir = type(idem_env.store._path.parent).mkdir
+
+    def fail_mkdir(self, *args, **kwargs):
+        raise PermissionError(f"simulated: cannot create {self}")
+
+    monkeypatch.setattr(
+        type(idem_env.store._path.parent),
+        "mkdir",
+        fail_mkdir,
+    )
+
+    try:
+        s, p = idem_env.run_handler(
+            {"session_id": "idem-session", "message": "hello"},
+            key_header="mkdir-fail-key",
+        )
+    finally:
+        # Always restore the real mkdir so other tests aren't
+        # affected by our global monkeypatch.
+        monkeypatch.setattr(
+            type(idem_env.store._path.parent),
+            "mkdir",
+            real_mkdir,
+        )
+
+    assert s == 503, f"expected 503 on mkdir failure, got {s}: {p}"
+    assert p.get("code") == "idempotency_store_unavailable"
+    assert len(idem_env.recorder.calls) == 0, (
+        f"mkdir failure admitted a turn: {len(idem_env.recorder.calls)} calls"
+    )
 
 
 # ---------------------------------------------------------------------------

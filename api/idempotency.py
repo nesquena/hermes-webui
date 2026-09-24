@@ -84,11 +84,48 @@ class IdempotencyInFlight(Exception):
     deterministic message; caller can retry once the first completes."""
 
 
+class IdempotencyStoreUnavailable(Exception):
+    """The durable store could not be written; the in-memory state has
+    been rolled back so the caller can retry without risking a
+    duplicate turn. Route maps this to 503."""
+
+
+class IdempotencyKeyMalformed(Exception):
+    """A transport explicitly supplied a key (header or body field)
+    that is empty / whitespace-only / not a string. This is distinct
+    from "no key" (true absence) — a malformed-but-present key is a
+    caller error and must be refused with 400, never silently
+    downgraded to the legacy no-idempotency path."""
+
+
+# Sentinel returned by ``extract_key`` when the key is truly absent
+# on BOTH transports. Distinct from ``None`` (which is a valid
+# caller-supplied value: ``"idempotency_key": null`` in JSON) so the
+# route can tell "no key" (legacy path) from "key present but
+# null" (malformed → 400). Exported so the route can compare
+# against it without going through ``__globals__``.
+_IDEM_KEY_ABSENT = object()
+IDEM_KEY_ABSENT = _IDEM_KEY_ABSENT
+
+
+# Helper used both by the module and by the route to namespace raw
+# keys with the server-resolved active profile. Stored in
+# ``_namespace_separator`` (not a constant exposed via API) so it
+# can never collide with a well-formed ASCII key (printable ASCII
+# keys cannot contain the pipe character — see ``validate_key``).
+_NAMESPACE_SEP = "|"
+
+
 @dataclass
 class IdempotencyRecord:
     key: str
     request_fingerprint: str
     status: str = STATUS_PENDING
+    # Profile namespace this record is bound to. Server-resolved at
+    # claim time; never taken from the client. The storage key is
+    # ``f"{profile}{NAMESPACE_SEP}{raw_key}"`` so two profiles using
+    # the same raw key get independent records.
+    profile: str = "default"
     session_id: str = ""
     stream_id: str = ""
     turn_id: str = ""
@@ -108,6 +145,7 @@ class IdempotencyRecord:
             key=str(raw.get("key") or ""),
             request_fingerprint=str(raw.get("request_fingerprint") or ""),
             status=str(raw.get("status") or STATUS_PENDING),
+            profile=str(raw.get("profile") or "default"),
             session_id=str(raw.get("session_id") or ""),
             stream_id=str(raw.get("stream_id") or ""),
             turn_id=str(raw.get("turn_id") or ""),
@@ -118,13 +156,18 @@ class IdempotencyRecord:
         )
 
 
-def compute_request_fingerprint(body: dict[str, Any]) -> str:
+def compute_request_fingerprint(body: dict[str, Any], profile: str = "default") -> str:
     """Hash the side-effect-relevant fields of a chat-start body.
 
     Volatile / presentation fields are excluded so cosmetic differences
     (e.g. client_ts, idempotency_key itself, profile hint) don't trigger
     a conflict. The goal: a "logically the same" retry collides as the
     same fingerprint; a deliberately different prompt does not.
+
+    The profile is the SERVER-resolved active profile (never the
+    client hint), so two profiles sending the same body under the
+    same raw key produce distinct fingerprints and are isolated by
+    profile in the durable store.
     """
     side_effect_fields = (
         "session_id",
@@ -141,7 +184,7 @@ def compute_request_fingerprint(body: dict[str, Any]) -> str:
         "prompt",
         "prompt_index",
     )
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"__profile": str(profile or "default")}
     for name in side_effect_fields:
         if name in body:
             normalized[name] = body[name]
@@ -153,63 +196,138 @@ def compute_request_fingerprint(body: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def validate_key(raw: Any) -> str:
-    """Return the trimmed key or raise ``IdempotencyKeyMissing``.
+def resolve_active_profile() -> str:
+    """Return the server-resolved active profile namespace.
 
-    Accepts only non-empty printable ASCII; bounded to ``MAX_KEY_LENGTH``.
+    This is the SINGLE source of truth for the profile used to
+    namespace idempotency records; the client hint is intentionally
+    ignored. Lazy import keeps ``api.idempotency`` from pulling
+    ``api.routes`` at module load (which would create a cycle when
+    ``api.routes`` imports from this module).
+    """
+    try:
+        from api.routes import _get_active_profile_name
+        name = _get_active_profile_name()
+    except Exception:
+        name = "default"
+    if not name:
+        name = "default"
+    return str(name)
+
+
+def build_storage_key(raw_key: str, profile: str | None = None) -> str:
+    """Combine the server-resolved profile with the validated raw key.
+
+    The separator (ASCII pipe) is outside the printable-ASCII key
+    charset enforced by ``validate_key``, so it can never collide
+    with a caller-supplied key and we can always split the stored
+    key back into ``(profile, raw_key)`` if needed.
+    """
+    ns = str(profile or resolve_active_profile() or "default")
+    return f"{ns}{_NAMESPACE_SEP}{raw_key}"
+
+
+def split_storage_key(stored_key: str) -> tuple[str, str]:
+    """Inverse of ``build_storage_key``; best-effort for diagnostics."""
+    if _NAMESPACE_SEP in stored_key:
+        profile, _, raw = stored_key.partition(_NAMESPACE_SEP)
+        return profile, raw
+    return "default", stored_key
+
+
+def validate_key(raw: Any) -> str:
+    """Return the trimmed key or raise the appropriate exception.
+
+    Distinguishes two error classes so the route can map them onto
+    different HTTP status codes:
+
+    * ``IdempotencyKeyMalformed`` (400) — the caller explicitly
+      supplied a value that is empty / whitespace-only / not a
+      string / over-length / has disallowed characters. A
+      malformed-but-present key is a caller error and must NOT be
+      silently downgraded to the legacy no-idempotency path.
+
+    * ``IdempotencyKeyMissing`` (also 400) — kept for backward
+      compat with code that still calls ``validate_key`` with
+      ``None``; the route's own absence check should normally
+      short-circuit before reaching this.
     """
     if raw is None:
         raise IdempotencyKeyMissing("idempotency key required")
     if not isinstance(raw, str):
-        raise IdempotencyKeyMissing("idempotency key must be a string")
+        raise IdempotencyKeyMalformed(
+            "idempotency key must be a string"
+        )
     key = raw.strip()
     if not key:
-        raise IdempotencyKeyMissing("idempotency key required")
+        raise IdempotencyKeyMalformed(
+            "idempotency key is empty or whitespace-only"
+        )
     if len(key) > MAX_KEY_LENGTH:
-        raise IdempotencyKeyMissing(
+        raise IdempotencyKeyMalformed(
             f"idempotency key too long (>{MAX_KEY_LENGTH} chars)"
         )
     # Printable ASCII only (no whitespace, no control chars). Reject
-    # anything outside 0x21-0x7E.
+    # anything outside 0x21-0x7E. Pipe (0x7C) is excluded implicitly
+    # because it's used by the storage key namespace separator and
+    # must never appear in a caller-supplied key — ``build_storage_key``
+    # depends on this for an unambiguous round-trip.
     for ch in key:
         if ord(ch) < 0x21 or ord(ch) > 0x7E:
-            raise IdempotencyKeyMissing(
+            raise IdempotencyKeyMalformed(
                 "idempotency key must be printable ASCII (0x21-0x7E)"
             )
     return key
 
 
-def extract_key(handler: Any, body: dict[str, Any]) -> str | None:
-    """Pull the caller-supplied key from the header OR the body field.
+def extract_key(handler: Any, body: dict[str, Any]) -> object:
+    """Pull the caller-supplied raw key from the header OR the body field.
 
-    Body field wins (per the contract — header is the universal transport,
-    body is the explicit opt-in). Returns ``None`` when neither is present
-    OR when the value is empty / whitespace-only, so the route knows to
-    skip idempotency entirely (legacy behavior).
+    Returns one of three categories:
+
+    * ``IDEM_KEY_ABSENT`` — the key is truly absent on BOTH
+      transports (no Idempotency-Key header, no
+      ``idempotency_key`` body field). The route treats this as
+      "no key" and falls through to the legacy
+      no-idempotency path.
+
+    * A present value (any Python object, including ``None``,
+      ``""``, non-string, etc.) — the caller explicitly
+      supplied a value on at least one transport. The route
+      passes the value to ``validate_key`` which raises
+      ``IdempotencyKeyMalformed`` → 400 for any
+      non-validated form. Per the #7435 review: a transport
+      that explicitly supplied a value must NOT be silently
+      downgraded to legacy behavior — that would let a
+      misconfigured client cause duplicate turns.
+
+    Body field wins when present (per the contract — header is
+    the universal transport, body is the explicit opt-in).
     """
-    header_value = None
+    header_value = IDEM_KEY_ABSENT
+    header_present = False
     if handler is not None:
         headers = getattr(handler, "headers", None)
         if headers is not None:
             try:
-                header_value = headers.get("Idempotency-Key")
+                if "Idempotency-Key" in headers:
+                    header_present = True
+                    header_value = headers.get("Idempotency-Key")
             except Exception:
-                header_value = None
-    body_value = body.get("idempotency_key") if isinstance(body, dict) else None
-    # Body wins.
-    chosen = body_value if body_value not in (None, "") else header_value
-    if chosen is None:
-        return None
-    # Treat empty / whitespace-only as "no key" so a stray
-    # ``Idempotency-Key:  `` header from a misconfigured client does
-    # not surface a 400. Validation of the actual content (length,
-    # charset) happens later in ``validate_key``.
-    if not isinstance(chosen, str):
-        return None
-    stripped = chosen.strip()
-    if not stripped:
-        return None
-    return chosen
+                header_value = IDEM_KEY_ABSENT
+                header_present = False
+    body_value = IDEM_KEY_ABSENT
+    body_present = False
+    if isinstance(body, dict):
+        if "idempotency_key" in body:
+            body_present = True
+            body_value = body.get("idempotency_key")
+    # Body wins when present.
+    if body_present:
+        return body_value
+    if header_present:
+        return header_value
+    return IDEM_KEY_ABSENT
 
 
 def _state_dir() -> Path:
@@ -324,25 +442,62 @@ class IdempotencyStore:
             self._records.pop(k, None)
 
     def _evict_to_cap_locked(self) -> None:
-        """Bound the in-memory map by the configured cap; oldest first."""
-        while len(self._records) > self._max_records:
-            oldest_key, _ = self._records.popitem(last=False)
-            logger.debug(
-                "idempotency: cap %d reached, evicted key %s",
-                self._max_records, oldest_key,
+        """Bound the in-memory map by the configured cap.
+
+        Only drops records whose ``claimed_at`` is past TTL; an
+        unexpired record is NEVER evicted under a cap. Pending
+        records (status == ``STATUS_PENDING``) are also never
+        evicted — they hold an in-flight claim that the caller
+        will need to replay. If the cap is still exceeded after
+        every expired record has been dropped, the store is full
+        and the call must fail closed (the route will surface a
+        503 and the caller can retry with a different key or
+        after the next expiry sweep).
+        """
+        if self._max_records <= 0:
+            return
+        if len(self._records) <= self._max_records:
+            return
+        cutoff = time.time() - self._ttl_seconds if self._ttl_seconds > 0 else None
+        # First sweep: drop only expired records. Collect the
+        # candidate keys first so we don't mutate the dict during
+        # iteration. We also refuse to evict pending records
+        # regardless of age — a claim that's still in flight
+        # would be lost, admitting a duplicate turn on retry.
+        evictable = []
+        for k, r in self._records.items():
+            if r.status == STATUS_PENDING:
+                continue
+            if cutoff is not None and r.claimed_at and r.claimed_at >= cutoff:
+                continue
+            evictable.append(k)
+        for k in evictable:
+            self._records.pop(k, None)
+        if len(self._records) > self._max_records:
+            raise IdempotencyStoreUnavailable(
+                f"idempotency store at cap ({self._max_records}); "
+                f"refusing to evict unexpired records"
             )
 
     def _persist_locked(self) -> None:
-        """Atomically rewrite the durable file. Must hold the lock."""
+        """Atomically rewrite the durable file. Must hold the lock.
+
+        Raises ``IdempotencyStoreUnavailable`` on any directory /
+        write / rename failure. Callers (claim, complete) are
+        responsible for rolling back their in-memory mutation in the
+        except block, so a write failure leaves no trace of the
+        partial mutation. This is the only way to honour the
+        contract: a record that the durable store never
+        acknowledged must not be returned to the caller as if it
+        had been.
+        """
         path = self._path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            logger.warning(
-                "idempotency: could not create store dir %s: %s",
-                path.parent, exc,
-            )
-            return
+            raise IdempotencyStoreUnavailable(
+                f"could not create store dir {path.parent}: {exc}"
+            ) from exc
         payload = {
             "version": 1,
             "saved_at": time.time(),
@@ -361,18 +516,19 @@ class IdempotencyStore:
                     pass
             os.replace(tmp_path, path)
         except OSError as exc:
-            logger.warning(
-                "idempotency: failed to persist store to %s: %s",
-                path, exc,
-            )
             try:
                 if tmp_path.exists():
                     tmp_path.unlink()
             except OSError:
                 pass
-            return
+            raise IdempotencyStoreUnavailable(
+                f"failed to persist store to {path}: {exc}"
+            ) from exc
         # Try to fsync the directory so the rename is durable across
-        # power loss on filesystems that support it.
+        # power loss on filesystems that support it. A failure here
+        # is not fatal: the data is on disk, the rename succeeded;
+        # the only thing at risk is the directory entry's mtime /
+        # atime, which is irrelevant for our reader.
         try:
             dir_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
             try:
@@ -387,6 +543,14 @@ class IdempotencyStore:
     def claim(self, key: str, fingerprint: str) -> IdempotencyRecord:
         """Atomically claim ``key`` for ``fingerprint``.
 
+        The supplied ``key`` is a validated raw key (printable ASCII,
+        length-bounded, non-empty) — this method namespaces it with
+        the server-resolved active profile before any lookup or
+        write. The fingerprint MUST already include the same profile
+        (see ``compute_request_fingerprint``) so two profiles
+        sending the same raw key produce different fingerprints and
+        are isolated.
+
         Returns:
             * a new ``STATUS_PENDING`` record if this is the first claim;
             * the stored record if a previous claim matches the fingerprint
@@ -398,23 +562,40 @@ class IdempotencyStore:
               silently re-admitting a potentially duplicate turn);
             * raises ``IdempotencyInFlight`` on a still-pending duplicate
               (so the caller can return 409 and ask the user to retry
-              once the first attempt completes).
+              once the first attempt completes);
+            * raises ``IdempotencyStoreUnavailable`` if the durable
+              write failed; the in-memory mutation is rolled back so
+              the caller can retry without risking a duplicate turn.
         """
         self._ensure_loaded()
+        stored_key = build_storage_key(key)
+        profile = stored_key.split(_NAMESPACE_SEP, 1)[0]
         with self._lock:
-            existing = self._records.get(key)
+            existing = self._records.get(stored_key)
             if existing is None:
                 rec = IdempotencyRecord(
-                    key=key,
+                    key=stored_key,
                     request_fingerprint=fingerprint,
                     status=STATUS_PENDING,
+                    profile=profile,
                     claimed_at=time.time(),
                 )
-                self._records[key] = rec
+                self._records[stored_key] = rec
                 # Move to the end of the LRU ordering.
-                self._records.move_to_end(key)
-                self._evict_to_cap_locked()
-                self._persist_locked()
+                self._records.move_to_end(stored_key)
+                try:
+                    self._evict_to_cap_locked()
+                    self._persist_locked()
+                except IdempotencyStoreUnavailable:
+                    # Roll back the in-memory mutation: the durable
+                    # store never saw the record, so neither should
+                    # the caller. Without this rollback a transient
+                    # write failure would leave a phantom claim
+                    # that the next process restart would resurrect
+                    # from disk (or fail to, depending on whether
+                    # the file write raced with the rename).
+                    self._records.pop(stored_key, None)
+                    raise
                 return rec
             # Existing record: check whether it has aged out BEFORE
             # any other comparison. The contract is "fail explicitly
@@ -437,7 +618,7 @@ class IdempotencyStore:
                 )
             # Refresh LRU position so an actively-replayed key is not
             # evicted under a cap.
-            self._records.move_to_end(key)
+            self._records.move_to_end(stored_key)
             if existing.status == STATUS_PENDING:
                 raise IdempotencyInFlight(
                     f"idempotency key {key!r} is currently in flight"
@@ -457,14 +638,50 @@ class IdempotencyStore:
     ) -> IdempotencyRecord:
         """Persist the result of a successful claim so retries can replay it.
 
-        Idempotent on the (session_id, stream_id, turn_id) triple: if the
-        stored record already matches, this is a no-op. Otherwise the
-        stored record is overwritten (last-writer-wins on completion).
+        ``key`` is the validated raw key (NOT the namespaced storage
+        key); this method applies the same profile namespace that
+        ``claim`` did, so a record written by ``claim`` is reachable
+        by ``complete`` even after a process restart (where the
+        in-memory state was lost). The namespacing is idempotent: a
+        repeated call with the same raw key produces the same storage
+        key.
+
+        Idempotent on the (session_id, stream_id, turn_id) triple: if
+        the stored record already matches, this is a no-op (apart from
+        the rewrite for durability). Otherwise the stored record is
+        overwritten (last-writer-wins on completion).
+
+        On a durable write failure the in-memory state is restored
+        to its prior value (so a retry sees the same record) and
+        ``IdempotencyStoreUnavailable`` is raised. The route must
+        NOT mark the request ``idem_completed`` until this method
+        returns successfully — otherwise a 503 from a persist
+        failure would look indistinguishable from a successful
+        completion to a retrying client.
         """
         self._ensure_loaded()
+        stored_key = build_storage_key(key)
+        profile = stored_key.split(_NAMESPACE_SEP, 1)[0]
         with self._lock:
-            existing = self._records.get(key)
+            existing = self._records.get(stored_key)
             now = time.time()
+            # Snapshot the prior state so a persist failure can be
+            # rolled back to byte-for-byte the same record.
+            prior: IdempotencyRecord | None = None
+            if existing is not None:
+                prior = IdempotencyRecord(
+                    key=existing.key,
+                    request_fingerprint=existing.request_fingerprint,
+                    status=existing.status,
+                    profile=existing.profile,
+                    session_id=existing.session_id,
+                    stream_id=existing.stream_id,
+                    turn_id=existing.turn_id,
+                    response_status=existing.response_status,
+                    response_payload=dict(existing.response_payload or {}),
+                    claimed_at=existing.claimed_at,
+                    completed_at=existing.completed_at,
+                )
             if existing is None:
                 # No pending claim — synthesize a complete record so a
                 # post-hoc retry that arrives after a process restart
@@ -474,9 +691,10 @@ class IdempotencyStore:
                 # always call ``claim`` first, so this branch is a
                 # defense-in-depth fallback only.
                 rec = IdempotencyRecord(
-                    key=key,
+                    key=stored_key,
                     request_fingerprint="",
                     status=STATUS_COMPLETE,
+                    profile=profile,
                     session_id=session_id,
                     stream_id=stream_id,
                     turn_id=turn_id,
@@ -485,7 +703,7 @@ class IdempotencyStore:
                     claimed_at=now,
                     completed_at=now,
                 )
-                self._records[key] = rec
+                self._records[stored_key] = rec
             else:
                 existing.status = STATUS_COMPLETE
                 existing.session_id = session_id
@@ -495,9 +713,19 @@ class IdempotencyStore:
                 existing.response_payload = dict(response_payload or {})
                 existing.completed_at = now
                 rec = existing
-            self._records.move_to_end(key)
-            self._evict_to_cap_locked()
-            self._persist_locked()
+            self._records.move_to_end(stored_key)
+            try:
+                self._evict_to_cap_locked()
+                self._persist_locked()
+            except IdempotencyStoreUnavailable:
+                # Roll back the in-memory mutation. If there was a
+                # prior record, restore it byte-for-byte; if the
+                # complete() synthesized a new record, drop it.
+                if prior is not None:
+                    self._records[stored_key] = prior
+                else:
+                    self._records.pop(stored_key, None)
+                raise
             return rec
 
     def release(self, key: str) -> None:
@@ -506,27 +734,61 @@ class IdempotencyStore:
         A completed record is NEVER released — that's the whole point of
         idempotency: the original result must be replayable forever (up
         to TTL) so a retry after a lost response still gets identity.
+
+        ``key`` is the validated raw key; the storage key is computed
+        via ``build_storage_key`` so the same profile namespace is
+        used as the one the original claim wrote under.
         """
         self._ensure_loaded()
+        stored_key = build_storage_key(key)
         with self._lock:
-            existing = self._records.get(key)
+            existing = self._records.get(stored_key)
             if existing is None:
                 return
             if existing.status == STATUS_PENDING:
-                self._records.pop(key, None)
-                self._persist_locked()
+                self._records.pop(stored_key, None)
+                try:
+                    self._persist_locked()
+                except IdempotencyStoreUnavailable:
+                    # The release itself couldn't be durably
+                    # recorded, but the in-memory state IS
+                    # updated. The caller is on the path to
+                    # returning a 503 anyway; don't re-raise —
+                    # a transient write failure here would only
+                    # mask the original 503 with a worse error.
+                    logger.warning(
+                        "idempotency: release persist failed for key %r",
+                        key,
+                    )
 
     def lookup(self, key: str) -> IdempotencyRecord | None:
         """Return the stored record for ``key`` or ``None`` if absent / expired.
 
-        Does not raise; useful for diagnostics and tests.
+        ``key`` is the validated raw key; the same profile namespace
+        is applied as for claim/complete. Does not raise; useful for
+        diagnostics and tests.
+        """
+        self._ensure_loaded()
+        stored_key = build_storage_key(key)
+        with self._lock:
+            self._evict_expired_locked()
+            rec = self._records.get(stored_key)
+            if rec is not None:
+                self._records.move_to_end(stored_key)
+            return rec
+
+    def lookup_stored(self, stored_key: str) -> IdempotencyRecord | None:
+        """Lookup using the FULL storage key (already profile-prefixed).
+
+        Used by tests and diagnostics that already know the namespaced
+        form. Production code should call ``lookup`` with the raw key.
         """
         self._ensure_loaded()
         with self._lock:
             self._evict_expired_locked()
-            rec = self._records.get(key)
+            rec = self._records.get(stored_key)
             if rec is not None:
-                self._records.move_to_end(key)
+                self._records.move_to_end(stored_key)
             return rec
 
     def keys(self) -> Iterable[str]:

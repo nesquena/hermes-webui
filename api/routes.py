@@ -57,14 +57,18 @@ from api.compression_recovery import (
     is_generic_continuation_intent,
 )
 from api.idempotency import (
+    IDEM_KEY_ABSENT,
     IdempotencyConflict,
     IdempotencyInFlight,
     IdempotencyKeyExpired,
+    IdempotencyKeyMalformed,
     IdempotencyKeyMissing,
+    IdempotencyStoreUnavailable,
     build_response_payload as _idem_build_response_payload,
     compute_request_fingerprint as _idem_compute_fingerprint,
     extract_key as _idem_extract_key,
     get_idempotency_store,
+    resolve_active_profile as _idem_resolve_active_profile,
     validate_key as _idem_validate_key,
 )
 from api.session_events import (
@@ -24638,13 +24642,27 @@ def _handle_chat_start(handler, body, diag=None):
     idem_claim_record = None  # filled in only if a key was supplied
     idem_validated_key: str | None = None
     idem_completed = False  # flipped True only after a successful start
-    if idem_key:
+    # ``_idem_extract_key`` returns ``IDEM_KEY_ABSENT`` when the
+    # key is truly absent on both transports; any other value
+    # means the caller explicitly supplied something and we must
+    # route it through validation (which rejects empty /
+    # non-string / oversize with 400, per the #7435 review).
+    if idem_key is not IDEM_KEY_ABSENT:
         try:
             idem_validated_key = _idem_validate_key(idem_key)
+        except IdempotencyKeyMalformed as exc:
+            # The caller explicitly supplied a key (header or body
+            # field) that is empty / whitespace / non-string /
+            # over-length / has disallowed chars. Per #7435 review:
+            # never silently downgrade to legacy behavior — return
+            # 400 so the client can fix its request and retry.
+            return bad(handler, str(exc), 400)
         except IdempotencyKeyMissing as exc:
             return bad(handler, str(exc), 400)
         try:
-            fingerprint = _idem_compute_fingerprint(body)
+            fingerprint = _idem_compute_fingerprint(
+                body, profile=_idem_resolve_active_profile()
+            )
         except Exception:
             fingerprint = ""
         try:
@@ -24673,6 +24691,21 @@ def _handle_chat_start(handler, body, diag=None):
                     "code": "idempotency_key_expired",
                     "idempotency_key": idem_validated_key,
                 }, status=410)
+            except IdempotencyStoreUnavailable as exc:
+                # Persistent store couldn't durably commit the new
+                # claim; the in-memory state has been rolled back.
+                # Surface 503 so the caller retries with the same
+                # key — a fresh claim will be admitted on the next
+                # attempt (no phantom record survives).
+                logger.warning(
+                    "idempotency: claim persist failed for key %r: %s",
+                    idem_validated_key, exc,
+                )
+                return j(handler, {
+                    "error": "idempotency store unavailable; retry",
+                    "code": "idempotency_store_unavailable",
+                    "idempotency_key": idem_validated_key,
+                }, status=503)
             except Exception as exc:  # corrupt store / disk error
                 # Don't admit silently; refuse explicitly so the caller
                 # can retry rather than risk a duplicate turn.
@@ -25043,6 +25076,15 @@ def _handle_chat_start(handler, body, diag=None):
         # original identity instead of admitting a second turn. Anything
         # else (4xx/5xx) is a refused start; the finally block below
         # releases the claim so the caller can retry.
+        #
+        # CRITICAL: ``idem_completed`` is only flipped True AFTER
+        # ``complete()`` returns successfully. If the durable write
+        # fails, complete() rolls back the in-memory mutation and
+        # raises IdempotencyStoreUnavailable; we surface 503 to the
+        # caller so they know the durability guarantee was broken.
+        # A retry with the same key will see no record (rollback
+        # succeeded) and admit a fresh turn — the caller decides
+        # what to do with the duplicate (cancel one, etc).
         if (
             idem_claim_record is not None
             and idem_validated_key is not None
@@ -25059,6 +25101,22 @@ def _handle_chat_start(handler, body, diag=None):
                     response_payload=response,
                 )
                 idem_completed = True
+            except IdempotencyStoreUnavailable as exc:
+                # Durable write failed AFTER the agent turn was
+                # admitted. The in-memory state is rolled back to
+                # the prior pending record (or removed if there
+                # was none). We MUST NOT set idem_completed=True;
+                # a retry must see a fresh claim, not a replay of
+                # an unpersisted completion.
+                logger.warning(
+                    "idempotency: complete() persist failed for key %r: %s",
+                    idem_validated_key, exc,
+                )
+                return j(handler, {
+                    "error": "idempotency store unavailable; turn started but could not be recorded for replay",
+                    "code": "idempotency_store_unavailable",
+                    "idempotency_key": idem_validated_key,
+                }, status=503)
             except Exception as exc:
                 logger.warning(
                     "idempotency: complete() failed for key %r: %s",
