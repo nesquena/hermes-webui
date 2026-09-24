@@ -1684,28 +1684,18 @@ async function newSession(flash, options={}){
 }
 
 /**
- * Self-heal: clear the stuck session ID from localStorage and URL when a
- * loadSession() call failed during boot (no currentSid). This prevents the
- * browser from retrying the same dead session on every refresh.
+ * Self-heal a boot load that failed without proof the session is gone.
+ * Clear this document's selection and URL, but leave the shared fallback
+ * eligible for a fresh document to retry after a transient server/network
+ * error. An authoritative 404 (or deletion) separately rejects the SID via
+ * _forgetActiveSession(sid). Do not permanently reject a valid SID here.
  *
- * Called from loadSession() after 401 redirect (undefined data) or any
- * non-404 error (400, 403, 500, network). The 404 path has its own
- * inline self-heal; this helper consolidates the non-404 cases.
- *
- * Only clears when !currentSid — no session is active on screen, so
- * the stored ID is definitely stale. When currentSid is set (already
- * viewing a session), a non-404 failure could be a transient server error
- * and the session may still exist on the server; wiping localStorage in
- * that case is unnecessarily destructive (#4028 follow-up).
- *
- * A click into a *different* dead session (currentSid && currentSid!==sid)
- * must not run it: localStorage and the URL still point at the live session
- * (both are only updated on a successful load), so wiping them would log
- * the user out of a healthy session (#2782).
+ * No action when another session is on screen: the successful selection
+ * and URL must remain intact after a failed navigation (#2782, #4028).
  */
 function _clearStuckSessionOnBoot(sid, currentSid){
   if(!currentSid){
-    try{ _forgetActiveSession(sid); }catch(_){ }
+    try{ _forgetActiveSession(); }catch(_){ }
     try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
 }
