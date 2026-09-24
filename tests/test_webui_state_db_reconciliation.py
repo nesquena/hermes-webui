@@ -3061,7 +3061,7 @@ def test_display_restamp_requires_shared_strong_identity(field):
 
 
 @pytest.mark.parametrize('action', ['helper', 'get', 'branch'])
-def test_display_unambiguous_idless_restamped_replay(monkeypatch, tmp_path, action):
+def test_display_idless_restamped_suffix_preserves_rows(monkeypatch, tmp_path, action):
     import api.models as models
     import api.routes as routes
     from types import SimpleNamespace
@@ -3082,8 +3082,17 @@ def test_display_unambiguous_idless_restamped_replay(monkeypatch, tmp_path, acti
         dict(role='user', content='second prompt', timestamp=101.3),
         dict(role='assistant', content='second answer', timestamp=101.4),
     ]
-    assert all('id' not in row and 'message_id' not in row for row in primary + incoming)
-    expected = [(row['role'], row['content'], row['timestamp']) for row in primary]
+    assert all(
+        not any(key in row for key in (
+            'id', 'message_id', '_row_id', '_state_db_row_id', '_db_row_id',
+            'state_db_row_id', '_active_turn_token',
+        ))
+        for row in primary + incoming
+    )
+    expected = [
+        (row['role'], row['content'], row['timestamp'])
+        for row in primary + incoming
+    ]
 
     if action == 'helper':
         rows = routes._merged_session_messages_for_display(
@@ -3092,7 +3101,6 @@ def test_display_unambiguous_idless_restamped_replay(monkeypatch, tmp_path, acti
     else:
         source = _install_test_session(monkeypatch, tmp_path, 'idless_restamped', primary)
         source.session_source = 'messaging'
-        source.context_messages = list(primary)
         source.save()
         monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
         monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: incoming)
@@ -3114,11 +3122,17 @@ def test_display_unambiguous_idless_restamped_replay(monkeypatch, tmp_path, acti
             assert handler.status == 200
             rows = models.Session.load(handler.response_json['session_id']).messages
 
-    assert len(rows) == 5
+    assert len(rows) == 9
     assert [(row['role'], row['content'], row['timestamp']) for row in rows] == expected
     assert all('_active_turn_token' not in row for row in rows)
     assert '_turnUsage' not in rows[2]
     assert '_turnDuration' not in rows[2]
+    assert [
+        (row['role'], row['content'], row['timestamp'])
+        for row in routes._merged_session_messages_for_display(
+            SimpleNamespace(messages=primary), incoming,
+        )
+    ] == expected
     if action == 'helper':
         truncated = models.merge_session_display_messages(
             primary,
@@ -3183,6 +3197,70 @@ def test_display_idless_replay_rejects_noncontiguous_or_ambiguous_sequences(prim
     from api.models import merge_session_display_messages
 
     assert len(merge_session_display_messages(primary, incoming)) == len(primary) + len(incoming)
+
+
+def test_display_idless_replay_does_not_hide_equal_length_repeated_turn():
+    from api.models import merge_session_display_messages
+
+    primary = [
+        dict(role='user', content='Repeat', timestamp=1.0),
+        dict(role='assistant', content='Done', timestamp=1.1),
+    ]
+    incoming = [
+        dict(role='user', content='Repeat', timestamp=2.0),
+        dict(role='assistant', content='Done', timestamp=2.1),
+    ]
+
+    merged = merge_session_display_messages(primary, incoming)
+
+    assert merged == primary + incoming
+
+
+def test_display_idless_four_row_repeated_exchange_preserves_both_sequences():
+    from api.models import merge_session_display_messages
+
+    cases = [
+        (
+            [
+                dict(role='assistant', content='prior', timestamp=100),
+                dict(role='user', content='first', timestamp=101),
+                dict(role='assistant', content='first answer', timestamp=102),
+                dict(role='user', content='second', timestamp=103),
+                dict(role='assistant', content='second answer', timestamp=104),
+            ],
+            [
+                dict(role='user', content='first', timestamp=201),
+                dict(role='assistant', content='first answer', timestamp=202),
+                dict(role='user', content='second', timestamp=203),
+                dict(role='assistant', content='second answer', timestamp=204),
+            ],
+        ),
+        (
+            [
+                dict(role='assistant', content='lead', timestamp=100),
+                dict(role='user', content='Repeat', timestamp=101),
+                dict(role='assistant', content='Done', timestamp=102),
+                dict(role='user', content='Next', timestamp=103),
+                dict(role='assistant', content='NextDone', timestamp=104),
+            ],
+            [
+                dict(role='user', content='Repeat', timestamp=201),
+                dict(role='assistant', content='Done', timestamp=202),
+                dict(role='user', content='Next', timestamp=203),
+                dict(role='assistant', content='NextDone', timestamp=204),
+            ],
+        ),
+    ]
+
+    for primary, incoming in cases:
+        assert all(
+            not any(key in row for key in (
+                'id', 'message_id', '_row_id', '_state_db_row_id', '_db_row_id',
+                'state_db_row_id', '_active_turn_token',
+            ))
+            for row in primary + incoming
+        )
+        assert merge_session_display_messages(primary, incoming) == primary + incoming
 
 
 def test_display_blank_separator_dedupe_requires_safe_same_turn_identity():

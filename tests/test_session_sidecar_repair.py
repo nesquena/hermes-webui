@@ -47,13 +47,21 @@ def _isolate_stream_state():
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.STREAM_SESSION_OWNERS.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.STREAM_PARTIAL_TEXT.clear()
+    config.STREAM_REASONING_TEXT.clear()
+    config.STREAM_LIVE_TOOL_CALLS.clear()
     config.ACTIVE_RUNS.clear()
     yield
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.STREAM_SESSION_OWNERS.clear()
+    config.SESSION_WRITEBACK_OWNERS.clear()
     config.STREAM_PARTIAL_TEXT.clear()
+    config.STREAM_REASONING_TEXT.clear()
+    config.STREAM_LIVE_TOOL_CALLS.clear()
     config.ACTIVE_RUNS.clear()
 
 
@@ -822,6 +830,80 @@ class TestNonEmptyMessagesPendingCleared:
         assert len(error_msgs) == 1
         assert "partial output above was recovered" in error_msgs[0]["content"]
         assert "no agent output was recovered" not in error_msgs[0]["content"]
+
+    def test_gateway_terminal_error_keeps_captured_turn_identity_after_cleanup(
+        self, monkeypatch, tmp_path,
+    ):
+        import api.gateway_chat as gateway_chat
+
+        sid = "gateway_terminal_turn_identity"
+        stream_id = "gateway_terminal_turn_identity_stream"
+        started_at = 1234567890.25
+        session = _make_session(
+            session_id=sid,
+            workspace=str(tmp_path),
+            model="test-model",
+            model_provider="test-provider",
+        )
+        session.pending_user_message = "Current gateway request"
+        session.pending_started_at = started_at
+        session.active_stream_id = stream_id
+        session.save()
+        monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+        monkeypatch.setitem(config.STREAM_PARTIAL_TEXT, stream_id, "Partial gateway output")
+
+        payload = gateway_chat._settle_gateway_terminal_error(
+            sid,
+            stream_id,
+            str(tmp_path),
+            "test-model",
+            "test-provider",
+            "gateway exploded",
+        )
+
+        expected_token = streaming.build_active_turn_token(stream_id, started_at)
+        user = next(row for row in session.messages if row.get("role") == "user")
+        partial = next(row for row in session.messages if row.get("_partial"))
+        error = next(row for row in session.messages if row.get("_error"))
+        assert user["_active_turn_token"] == expected_token
+        assert partial["_active_turn_token"] == expected_token
+        assert error["_active_turn_token"] == expected_token
+        assert session.active_stream_id is None
+        assert session.pending_user_message is None
+        assert all(
+            "_active_turn_token" not in row
+            for row in payload["session"]["messages"]
+        )
+
+    def test_gateway_terminal_error_does_not_settle_successor_stream(
+        self, monkeypatch, tmp_path,
+    ):
+        import api.gateway_chat as gateway_chat
+
+        session = _make_session(
+            session_id="gateway_terminal_successor",
+            workspace=str(tmp_path),
+            messages=[{"role": "user", "content": "Successor prompt"}],
+        )
+        session.pending_user_message = "Successor prompt"
+        session.pending_started_at = 1234567890.25
+        session.active_stream_id = "successor_stream"
+        monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: session)
+        before_messages = [dict(message) for message in session.messages]
+
+        payload = gateway_chat._settle_gateway_terminal_error(
+            session.session_id,
+            "stale_stream",
+            str(tmp_path),
+            "test-model",
+            "test-provider",
+            "stale gateway error",
+        )
+
+        assert payload is None
+        assert session.messages == before_messages
+        assert session.pending_user_message == "Successor prompt"
+        assert session.active_stream_id == "successor_stream"
 
     @pytest.mark.parametrize("sidecar_shape", ["non_empty", "core", "empty"])
     def test_gateway_terminal_error_cold_recovery_keeps_turn_identity_and_order(

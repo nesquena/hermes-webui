@@ -1036,11 +1036,13 @@ def _resume_gateway_run_for_session(session) -> bool:
 
 def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
     from api.streaming import (
+        _active_turn_authority,
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
         _provider_error_payload,
         _session_payload_with_full_messages,
         _snapshot_and_append_partial_on_error,
+        _stamp_active_turn_activity,
         _terminal_turn_duration,
     )
 
@@ -1048,6 +1050,11 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session = get_session(session_id)
         if not _stream_writeback_is_current(session, stream_id):
             return None
+        active_turn_identity = _active_turn_authority(
+            session,
+            stream_id,
+            getattr(session, "pending_user_message", None),
+        )
         error_classification = _classify_provider_error(terminal_error)
         error_payload = _provider_error_payload(
             terminal_error,
@@ -1055,7 +1062,10 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification.get("hint", ""),
         )
         turn_duration = _terminal_turn_duration(session)
-        _materialize_pending_user_turn_before_error(session)
+        _materialize_pending_user_turn_before_error(
+            session,
+            active_turn_identity=active_turn_identity,
+        )
         session.active_stream_id = None
         session.gateway_run = None
         session.pending_user_message = None
@@ -1063,7 +1073,11 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.pending_started_at = None
         session.pending_user_source = None
         try:
-            _snapshot_and_append_partial_on_error(session, stream_id)
+            _snapshot_and_append_partial_on_error(
+                session,
+                stream_id,
+                active_turn_identity=active_turn_identity,
+            )
         except Exception:
             logger.debug("Failed to snapshot gateway partials on terminal error", exc_info=True)
         error_message = {
@@ -1075,6 +1089,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             "timestamp": int(time.time()),
             "_error": True,
         }
+        _stamp_active_turn_activity(error_message, active_turn_identity)
         if turn_duration is not None:
             error_message["_turnDuration"] = turn_duration
         if error_payload.get("details"):

@@ -3011,9 +3011,14 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
             if (
                 previous_partial_sig == sig
                 and (
-                    previous_partial_token is None
-                    or token is None
-                    or previous_partial_token == token
+                    # Legacy untagged partials may collapse with one another,
+                    # but a tagged partial must never be swallowed by an
+                    # untagged neighbour (or vice versa).
+                    (previous_partial_token is None and token is None)
+                    or (
+                        previous_partial_token is not None
+                        and previous_partial_token == token
+                    )
                 )
             ):
                 changed = True
@@ -12288,41 +12293,6 @@ def merge_session_display_messages(
                 row.get("tool_name") or row.get("name") or "",
                 json.dumps(row.get("_partial_tool_calls") or [], sort_keys=True, default=str))
 
-    def unambiguous_replay_suffix():
-        if (
-            not 1 < len(incoming) <= len(primary)
-            or not all(isinstance(row, dict) for row in primary + incoming)
-        ):
-            return False
-        sidecar_keys = [public_key(row) for row in primary]
-        replay_keys = [public_key(row) for row in incoming]
-        if (
-            sidecar_keys[-len(incoming):] != replay_keys
-            or len(set(sidecar_keys)) != len(sidecar_keys)
-            or len(set(replay_keys)) != len(replay_keys)
-        ):
-            return False
-
-        sidecar_suffix = primary[-len(incoming):]
-        previous_sidecar_time = previous_replay_time = None
-        for target, source in zip(sidecar_suffix, incoming, strict=True):
-            target_identity = _message_private_identity_key(target)
-            source_identity = _message_private_identity_key(source)
-            target_time = _message_timestamp_as_float(target)
-            source_time = _message_timestamp_as_float(source)
-            if (
-                target_identity[1] is not None or source_identity[1] is not None
-                or target_identity[2] is not None or source_identity[2] is not None
-                or (source_identity[0] is not None and source_identity[0] != target_identity[0])
-                or not _message_private_identity_compatible(target, source)
-                or target_time is None or source_time is None or source_time <= target_time
-                or (previous_sidecar_time is not None and target_time < previous_sidecar_time)
-                or (previous_replay_time is not None and source_time < previous_replay_time)
-            ):
-                return False
-            previous_sidecar_time, previous_replay_time = target_time, source_time
-        return True
-
     if truncation_watermark is not None or truncation_boundary is not None:
         # Probe a shallow sidecar copy so filtering cannot promote metadata onto
         # the real rows. Accepted mirrors continue through the display merge,
@@ -12339,14 +12309,6 @@ def merge_session_display_messages(
             row for row in incoming
             if id(row) in retained_ids or id(row) in matched_input_ids
         ]
-
-    # A unique, contiguous ID-less replay suffix can survive nonuniform time
-    # shifts; sequence evidence never grants cross-time metadata ownership.
-    if unambiguous_replay_suffix():
-        for target, source in zip(primary[-len(incoming):], incoming, strict=True):
-            if _message_display_mirror_compatible(target, source):
-                _merge_session_display_metadata(target, source)
-        return primary
 
     if not primary:
         return merge_session_messages_append_only([], incoming)

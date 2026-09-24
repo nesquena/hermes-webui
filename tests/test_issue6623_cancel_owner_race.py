@@ -304,6 +304,46 @@ def test_issue6623_delayed_cancel_finalizer_gated_by_stream_ownership():
     assert streaming._session_has_cancel_marker(s3) is True
 
 
+def test_delayed_cancel_finalizer_preserves_captured_token_after_pending_cleanup():
+    """A delayed worker must not lose ownership after cancel_stream clears state."""
+    sid = "delayed-token-finalizer"
+    stream_id = "delayed-token-stream"
+    started_at = 123.25
+    s = Session(session_id=sid, messages=[])
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Stop this turn"
+    s.pending_attachments = []
+    s.pending_started_at = started_at
+    s.pending_user_source = "webui"
+    s.save()
+    models.SESSIONS[sid] = s
+    config.register_session_writeback_owner(sid, stream_id)
+    identity = streaming._active_turn_authority(s, stream_id, s.pending_user_message)
+
+    # Model the eager cleanup performed by cancel_stream() before the worker
+    # reaches its delayed finalizer.
+    s.active_stream_id = None
+    s.pending_user_message = None
+    s.pending_attachments = []
+    s.pending_started_at = None
+    s.pending_user_source = None
+
+    streaming._finalize_cancelled_turn(
+        s,
+        ephemeral=False,
+        stream_id=stream_id,
+        active_turn_identity=identity,
+    )
+
+    reloaded = Session.load(sid)
+    errors = [row for row in reloaded.messages if row.get("_error")]
+    assert len(errors) == 1
+    assert errors[0]["_active_turn_token"] == streaming.build_active_turn_token(
+        stream_id,
+        started_at,
+    )
+
+
 def test_issue6623_recent_cancel_not_reaped_despite_old_started_at(tmp_path, monkeypatch):
     """RE-GATE control for the cancellation-age anchor: a just-cancelled turn
     whose ORIGINAL started_at is far past the 180s unwind ceiling must NOT be

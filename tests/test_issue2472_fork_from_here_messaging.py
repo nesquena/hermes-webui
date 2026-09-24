@@ -97,6 +97,7 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
         "second prompt",
         "second answer",
     ]
+    assert [m.get("message_id") for m in merged] == [None, "u1", "a1", "u2", "a2"]
 
 
 def test_branch_handler_uses_merged_messaging_messages_for_keep_count():

@@ -205,6 +205,6 @@ def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
     guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
 
     assert guard in block
-    assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(s)")
+    assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(")
     assert block.index(guard) < block.index("s.active_stream_id = None")
     assert block.index(guard) < block.index("s.messages.append(_error_message)")

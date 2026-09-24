@@ -83,6 +83,20 @@ def test_load_partial_dedupe_preserves_foreign_turn_tokens():
     assert changed is False
 
 
+def test_load_partial_dedupe_does_not_treat_untagged_rows_as_wildcards():
+    import api.models as models
+
+    untagged = _tool_partial()
+    current = _tool_partial(token="current:1")
+    foreign = _tool_partial(token="foreign:1")
+    rows = [untagged, current, foreign]
+
+    collapsed, changed = models._collapse_adjacent_duplicate_partials(rows)
+
+    assert collapsed == rows
+    assert changed is False
+
+
 def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatch):
     import api.models as models
 
