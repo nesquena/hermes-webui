@@ -916,14 +916,21 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
         skill_matches_platform,
     )
 
+    # A missing local skills directory must NOT suppress plugin-registered
+    # skills. Plugin skills (e.g. obra/superpowers via `hermes plugins install
+    # obra/superpowers --enable`) are visible to the agent's
+    # skill_view('plugin:skill') even when ~/.hermes/skills has never been
+    # created, so /api/skills must surface them in the same shape the agent
+    # does (#7770). We still create the directory for backward compatibility
+    # (a user with no local skills now has a writable home for new ones) and
+    # then fall through to the directory-scan + plugin-merge path below. The
+    # search_dirs filter returns an empty list because the freshly-created
+    # dir has no SKILL.md children, so the loop body is a no-op and
+    # plugin-merge still runs.
+    created_local_dir = False
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
-        return {
-            "success": True,
-            "skills": [],
-            "categories": [],
-            "message": f"No skills found. Skills directory created at {skills_dir}/",
-        }
+        created_local_dir = True
 
     all_skills = []
     seen_names: set[str] = set()
@@ -998,7 +1005,14 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     if all_skills:
         result["hint"] = "Use skill_view(name) to see full content, tags, and linked files"
     else:
-        result["message"] = "No skills found in skills/ directory."
+        if created_local_dir:
+            # Mirror the pre-#7770 user-facing notice: a first-time /api/skills
+            # call that finds no local skills and no plugin skills still gets
+            # the "directory created" hint so the Settings panel does not
+            # appear silently broken.
+            result["message"] = f"No skills found. Skills directory created at {skills_dir}/"
+        else:
+            result["message"] = "No skills found in skills/ directory."
     return result
 
 
@@ -12789,6 +12803,21 @@ def _list_plugin_skills_for_response(manager=None) -> list:
         pm = manager if manager is not None else _get_plugin_manager_for_visibility()
     except Exception:
         return []
+    # Mirror ``_plugin_visibility_payload`` at api/routes.py:12885: a fresh
+    # WebUI process that has not yet driven an agent turn (or opened the
+    # Settings → Plugins tab) sits on an empty ``_plugin_skills`` registry
+    # because the agent's contract only populates it during discovery. The
+    # visibility panel therefore explicitly calls
+    # ``manager.discover_and_load(force=False)`` before reading the registry.
+    # /api/skills must do the same so a cold-start tab does not silently drop
+    # plugin-registered skills (e.g. obra/superpowers) from both the listing
+    # AND the slash-command autocomplete (#7770). The call is best-effort: a
+    # discovery failure must not 500 /api/skills — the same fail-soft posture
+    # the rest of this helper already enforces.
+    try:
+        pm.discover_and_load(force=False)
+    except Exception:
+        pass
     try:
         entries = pm.list_plugin_skill_metadata() or []
     except Exception:
