@@ -88,6 +88,19 @@ def test_gruvbox_i18n_lists_skin_in_all_locales():
     assert I18N_JS.count("gruvbox)") + I18N_JS.count("gruvbox）") == 15
 
 
+def test_gruvbox_overrides_do_not_shadow_base_selector_substrings():
+    # Other tests slice style.css between base rules via literal find()s, e.g.
+    # tests/test_session_touch_actions.py slices from '.session-swipe-action-stack{'
+    # to '.session-swipe-badge{'. A gruvbox override written as
+    # '... .session-swipe-badge{' would shadow the first '.session-swipe-badge{'
+    # occurrence and blank that slice. Keep the brace on its own line so the
+    # literal base-selector substring only matches the real base rule.
+    assert ':root[data-skin="gruvbox"] .session-swipe-badge{' not in CSS
+    assert ':root.dark[data-skin="gruvbox"] .session-swipe-badge{' not in CSS
+    assert ':root[data-skin="gruvbox"] .session-swipe-badge\n' in CSS
+    assert ':root.dark[data-skin="gruvbox"] .session-swipe-badge\n' in CSS
+
+
 def test_gruvbox_light_and_dark_text_pairs_meet_wcag_aa():
     # Every text token must clear 4.5:1 against every surface it can render on,
     # including the toast context (token color over a 14% self-mix on surface).
