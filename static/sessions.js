@@ -7787,10 +7787,11 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // parent is also a subagent. An absent parent_source means the parent fell
       // outside the import window, so that child keeps its top-level fallback.
       // During search, a known parent may be absent only because it did not match;
-      // keep the matching child reachable as an orphan result in that case.
-      if(child&&_isChildSession(child)&&(
+      // keep every matching child reachable as an orphan result in that case,
+      // including children carrying the cross-surface marker.
+      if(child&&_isChildSession(child)&&!searchActive&&(
         child._cross_surface_child_session||
-        (!searchActive&&childIsDelegatedSubagent&&String(child.parent_source||'').trim().toLowerCase()==='subagent')
+        (childIsDelegatedSubagent&&String(child.parent_source||'').trim().toLowerCase()==='subagent')
       )) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
