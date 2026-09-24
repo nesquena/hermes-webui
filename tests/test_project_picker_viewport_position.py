@@ -159,7 +159,8 @@ const api = async () => ({});
 const showToast = () => {};
 const showPromptDialog = async () => null;
 const renderSessionList = async () => {};
-const renderSessionListFromCache = () => {};
+let repaints = 0;
+const renderSessionListFromCache = () => { repaints += 1; };
 const t = key => key;
 let nextTask = 0;
 const frames = new Map();
@@ -678,3 +679,61 @@ console.log(JSON.stringify({firstRemoved: first.removed, live, closed: placement
     assert data["closed"]["observers"] == 0
     assert data["closed"]["listenerCounts"] == {"window": 0, "visualViewport": 0, "document": 0}
     assert data["timers"] == 0
+
+
+_REPAINT_REPLAY_PREFIX = """
+let _sessionListRepaintDeferredByPicker = false;
+"""
+
+
+def test_skipped_sidebar_repaint_is_replayed_once_when_the_picker_closes():
+    # renderSessionListFromCache() skips while the picker is open (so background
+    # churn such as the 60s relative-time refresh cannot tear the picker's anchor
+    # away mid-choice) and sets the deferral flag; the picker's teardown must
+    # replay exactly one repaint so the sidebar does not stay stale.
+    data = _run_picker_cases(_REPAINT_REPLAY_PREFIX + """
+openPicker(260);
+_sessionListRepaintDeferredByPicker = true;   // a repaint was skipped while open
+const whileOpen = repaints;
+docEmitter.dispatch('click', {target: {}});   // outside click closes it
+flushTimers();
+console.log(JSON.stringify({whileOpen, afterClose: repaints,
+  flagCleared: _sessionListRepaintDeferredByPicker === false,
+  removed: placement().removed}));
+""")
+    assert data["whileOpen"] == 0
+    assert data["removed"] is True
+    assert data["afterClose"] == 1, "closing the picker must replay the skipped repaint once"
+    assert data["flagCleared"] is True
+
+
+def test_no_repaint_replay_when_nothing_was_skipped():
+    data = _run_picker_cases(_REPAINT_REPLAY_PREFIX + """
+openPicker(260);
+docEmitter.dispatch('click', {target: {}});
+flushTimers();
+console.log(JSON.stringify({repaints}));
+""")
+    assert data["repaints"] == 0
+
+
+def test_replacement_picker_inherits_a_pending_repaint_deferral():
+    # Opening a second picker retires the first; the deferred repaint must not
+    # fire under the new picker (that would detach its anchor) and must not be
+    # dropped either: it replays when the replacement closes.
+    data = _run_picker_cases(_REPAINT_REPLAY_PREFIX + """
+openPicker(260);
+_sessionListRepaintDeferredByPicker = true;
+openPicker(260);                                // replacement
+flushTimers();
+const underReplacement = repaints;
+const stillDeferred = _sessionListRepaintDeferredByPicker;
+docEmitter.dispatch('click', {target: {}});
+flushTimers();
+console.log(JSON.stringify({underReplacement, stillDeferred, afterClose: repaints,
+  flagCleared: _sessionListRepaintDeferredByPicker === false}));
+""")
+    assert data["underReplacement"] == 0
+    assert data["stillDeferred"] is True
+    assert data["afterClose"] == 1
+    assert data["flagCleared"] is True

@@ -5523,7 +5523,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // NEVER skip when recovering from a skeleton or error-banner DOM state: those
   // are rendered outside the signature path, so an identical-signature match
   // would leave the skeleton/error on screen instead of the real list. (Codex #5467)
-  const _canRenderNow = !_renamingSid && !_sessionActionMenu;
+  const _canRenderNow = !_renamingSid && !_sessionActionMenu && !(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null);
   const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
   if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
@@ -7687,6 +7687,10 @@ function renderSessionListFromCache(){
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
   if(_sessionActionMenu) return;
+  // Same for the "Move to project" picker opened from that menu: rebuilding the
+  // rows removes its anchor, and the picker closes itself when its row goes away.
+  // Remember the skipped repaint so closing the picker replays it.
+  if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null){ if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=true; return; }
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -9203,6 +9207,9 @@ const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c
 // any later viewport change — can retire the previous one's listeners instead
 // of leaking a handler that repositions a detached element.
 let _projectPickerTeardown=null;
+// Set when a sidebar repaint was skipped because the project picker was open, so the
+// picker's teardown can replay it (same contract as the ⋮ menu guard, minus the lost repaint).
+let _sessionListRepaintDeferredByPicker=false;
 
 function _showProjectPicker(session, anchorEl){
   // Close any existing picker. Its teardown, not just element removal, has to
@@ -9425,6 +9432,19 @@ function _showProjectPicker(session, anchorEl){
     document.removeEventListener('scroll',onScroll,true);
     document.removeEventListener('click',onOutsideClick);
     picker.remove();
+    // Replay a sidebar repaint that was skipped while this picker was open, once
+    // no other picker has taken over (next tick, after any selection handler has
+    // written its cache update). typeof-guarded so the function stays
+    // self-contained for the extracted-function Node harness.
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+      setTimeout(()=>{
+        // A replacement picker opened in the meantime inherits the deferral and
+        // replays it when it closes; keep the flag set until someone replays it.
+        if(_projectPickerTeardown!==null||!_sessionListRepaintDeferredByPicker) return;
+        _sessionListRepaintDeferredByPicker=false;
+        if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      },0);
+    }
   };
   window.addEventListener('resize',onViewportChange);
   if(visualViewport){
