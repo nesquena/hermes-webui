@@ -57,6 +57,7 @@ _HELPER_CONSTS = (
     "INFLIGHT_STATE_KEY_BASE",
     "ACTIVE_SESSION_KEY_LEGACY",
     "ACTIVE_SESSION_TOMBSTONE_BASE",
+    "ACTIVE_SESSION_REJECTED_BASE",
     "TAB_ACTIVE_SESSION_MIRROR_KEY",
     "TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY",
     "TAB_INFLIGHT_MIRROR_KEY",
@@ -67,7 +68,6 @@ _HELPER_FUNCS = (
     "function _newTabId",
     "function _scopedTabKey",
     "function _mirrorTabValue",
-    "function _expiredInflightOwners",
     "function _gcOrphanTabKeys",
     "function _releaseTabId",
     "function _hermesTabId",
@@ -75,6 +75,8 @@ _HELPER_FUNCS = (
     "function _inflightStateKey",
     "function _activeSessionKey",
     "function _activeSessionTombstoneKey",
+    "function _legacyProfile",
+    "function _rejectedSessionKey",
     "function _rememberActiveSession",
     "function _rememberedActiveSession",
     "function _forgetActiveSession",
@@ -122,6 +124,7 @@ function makeTab(){
 }
 
 const localStorage = makeStorage();
+const S = {activeProfile:'default', activeProfileIsDefault:true, _legacyProfileResolved:true};
 let __tab = makeTab();
 const sessionStorage = {
   getItem: (k) => __tab.store.getItem(k),
@@ -497,12 +500,9 @@ console.log(JSON.stringify({{idOriginal, idClone, originalKept, weirdKept, idBef
     assert out["markerSid"] is None
 
 
-def test_crash_orphans_past_the_reader_window_are_collected_without_pagehide():
-    """Defect 3: a tab killed without a non-persisted pagehide (crash, iOS
-    bfcache eviction, Chrome tab discard) writes no release marker, so its
-    scoped inflight marker + up-to-1.5 MB state used to survive forever.
-    Once both validated timestamps are beyond the reader's ten-minute
-    acceptance window nobody can recover them, and the GC collects them."""
+def test_crash_orphans_without_release_remain_owned_despite_reader_expiry():
+    """Ten-minute reader expiry cannot prove that a foreign owner stopped
+    writing: crash/discard orphans remain until independently released."""
     script = f"""
 {_HARNESS}
 {_helpers()}
@@ -513,9 +513,9 @@ const put = (owner, markerTs, stateUpdatedAt) => {{
   if (stateUpdatedAt !== undefined) localStorage.setItem(INFLIGHT_STATE_KEY_BASE + '::' + owner, JSON.stringify({{['s-' + owner]:{{streamId:'st', updated_at: stateUpdatedAt, tabId: owner}}}}));
   localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY + '::' + owner, 's-' + owner);
 }};
-// Crashed 11 minutes ago, never released: collectable.
+// Apparently crashed 11 minutes ago; without release it could still write.
 put('crashed', stamp(TEN_MIN + 60_000), stamp(TEN_MIN + 60_000));
-// Crashed, marker only / state only: collectable too.
+// Marker only / state only: also owner-protected.
 put('marker-only', stamp(TEN_MIN + 1), undefined);
 put('state-only', undefined, stamp(TEN_MIN + 1));
 // Fresh (still inside the window): keep.
@@ -548,11 +548,9 @@ report.liveMarkerKept = has(INFLIGHT_KEY_BASE, liveId);
 console.log(JSON.stringify(report));
 """
     out = _run(script)
-    assert out["crashed"] == {"marker": False, "state": False, "active": True}, (
-        "crash orphans past the reader window must be collected (active pointer is tiny and stays)"
-    )
-    assert out["marker-only"]["marker"] is False
-    assert out["state-only"]["state"] is False
+    assert out["crashed"] == {"marker": True, "state": True, "active": True}
+    assert out["marker-only"]["marker"] is True
+    assert out["state-only"]["state"] is True
     assert out["recent"] == {"marker": True, "state": True, "active": True}, "recent state must be preserved"
     assert out["coherent"] == {"marker": True, "state": True, "active": True}, (
         "an old marker with a fresh snapshot is a live stream; both keys must be retained"
@@ -561,6 +559,50 @@ console.log(JSON.stringify(report));
     assert out["not-json"] == {"marker": True, "state": True, "active": True}, "unparseable payloads fail closed"
     assert out["legacyKept"], "ownerless legacy keys are never touched"
     assert out["liveMarkerKept"], "the running document's own keys are never aged out"
+
+
+def test_gc_never_deletes_a_foreign_snapshot_refreshed_after_age_scan():
+    """A's stale age verdict cannot authorize deletion after B saves fresh bytes."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const tabA=makeTab(), tabB=makeTab();
+useTab(tabA); _hermesTabId();
+useTab(tabB); const owner=_hermesTabId();
+const markerKey=INFLIGHT_KEY_BASE+'::'+owner;
+const stateKey=INFLIGHT_STATE_KEY_BASE+'::'+owner;
+const old=__now-_INFLIGHT_ACCEPT_WINDOW_MS-10;
+const oldMarker=JSON.stringify({{sid:'s',streamId:'stream',ts:old}});
+const oldState=JSON.stringify({{s:{{streamId:'stream',updated_at:old,tabId:owner}}}});
+const freshMarker=JSON.stringify({{sid:'s',streamId:'stream',ts:__now}});
+const freshState=JSON.stringify({{s:{{streamId:'stream',updated_at:__now,tabId:owner}}}});
+localStorage.setItem(markerKey,oldMarker); localStorage.setItem(stateKey,oldState);
+const rawGet=localStorage.getItem, rawSet=localStorage.setItem, rawKey=localStorage.key;
+let sawOldMarker=false, sawOldState=false, rewrote=false;
+localStorage.getItem=(key)=>{{
+  const value=rawGet(key);
+  if(key===markerKey && value===oldMarker) sawOldMarker=true;
+  if(key===stateKey && value===oldState) sawOldState=true;
+  return value;
+}};
+localStorage.key=(i)=>{{
+  const key=rawKey(i);
+  if(sawOldMarker && sawOldState && !rewrote){{
+    rewrote=true;
+    useTab(tabB); rawSet(markerKey,freshMarker); rawSet(stateKey,freshState); useTab(tabA);
+  }}
+  return key;
+}};
+useTab(tabA); _gcOrphanTabKeys();
+// A safe GC may skip the age scan altogether. Still check its behavior after
+// a foreign save; the old GC runs the barrier in the classify -> delete gap.
+if(!rewrote){{useTab(tabB); rawSet(markerKey,freshMarker); rawSet(stateKey,freshState);}}
+console.log(JSON.stringify({{rewrote,marker:rawGet(markerKey),state:rawGet(stateKey)}}));
+"""
+    out = _run(script)
+    assert out["marker"] is not None and out["state"] is not None
+    assert json.loads(out["marker"])["ts"] == 1_000_000
+    assert json.loads(out["state"])["s"]["updated_at"] == 1_000_000
 
 
 def test_legacy_key_still_written_for_first_paint_fallback():
@@ -869,14 +911,14 @@ console.log(JSON.stringify({{afterForget, afterRewrite, afterReopen}}));
     )
 
 
-def test_forget_without_proof_keeps_shared_fallback_but_proven_dead_sid_is_cleared():
+def test_forget_without_proof_keeps_fallback_but_proven_dead_sid_is_rejected():
     """Gate RED defect 2 (2026-09-17): `_forgetActiveSession(expectedSid)`.
 
     Forgetting document-local state alone never touches the ownerless shared
     slot (content equality is not authority). But a caller that names the SID
     it has just PROVEN dead (404 / delete / profile-switch self-heal) must
-    release the shared slot when it still holds exactly that SID: otherwise
-    every later fresh document re-adopts the dead SID, 404s and loops.
+    reject the SID on a separate profile-aware key, not delete the slot:
+    otherwise every later fresh document re-adopts it, 404s and loops.
     """
     script = f"""
 {_HARNESS}
@@ -895,12 +937,12 @@ const healingTab = makeTab();
 useTab(healingTab);
 const adopted = _rememberedActiveSession();
 _forgetActiveSession(adopted);
-const clearedOnExactMatch = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
+const keptOnExactMatch = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
 const healingTabAfter = _rememberedActiveSession();
 // A brand-new document must NOT re-adopt the verified-dead SID.
 useTab(makeTab());
 const freshRestore = _rememberedActiveSession();
-console.log(JSON.stringify({{keptWithoutProof, keptOnMismatch, adopted, clearedOnExactMatch, healingTabAfter, freshRestore}}));
+console.log(JSON.stringify({{keptWithoutProof, keptOnMismatch, adopted, keptOnExactMatch, healingTabAfter, freshRestore}}));
 """
     out = _run(script)
     assert out["keptWithoutProof"] == "shared-session", (
@@ -910,8 +952,8 @@ console.log(JSON.stringify({{keptWithoutProof, keptOnMismatch, adopted, clearedO
         "a non-matching proven-dead SID must leave the shared fallback alone"
     )
     assert out["adopted"] == "shared-session"
-    assert out["clearedOnExactMatch"] is None, (
-        "the exact SID the caller proved dead must be removed from the shared slot"
+    assert out["keptOnExactMatch"] == "shared-session", (
+        "a dead SID must be rejected without removing a concurrently rewritable slot"
     )
     assert out["healingTabAfter"] is None
     assert out["freshRestore"] is None, (
@@ -919,12 +961,49 @@ console.log(JSON.stringify({{keptWithoutProof, keptOnMismatch, adopted, clearedO
     )
 
 
-def test_boot_self_heal_paths_run_real_helper_with_the_dead_sid():
-    """Behaviour-level 404/delete regressions (gate RED defect 2).
+def test_proven_dead_sid_cannot_delete_a_concurrent_newer_fallback():
+    """A reads X; B writes Y; A resumes. The fresh document must get Y."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const tabA = makeTab();
+const tabB = makeTab();
+useTab(tabA); _rememberActiveSession('dead-X');
+const rawGet = localStorage.getItem;
+const rawSet = localStorage.setItem;
+let interleaved = false;
+localStorage.getItem = (key) => {{
+  const value = rawGet(key);
+  if(key === ACTIVE_SESSION_KEY_LEGACY && value === 'dead-X' && !interleaved) {{
+    interleaved = true;
+    useTab(tabB); _rememberActiveSession('valid-Y'); useTab(tabA);
+  }}
+  return value;
+}};
+localStorage.setItem = (key, value) => {{
+  if(key.startsWith('hermes-webui-rejected-sid::') && !interleaved) {{
+    interleaved = true;
+    useTab(tabB); _rememberActiveSession('valid-Y'); useTab(tabA);
+  }}
+  return rawSet(key, value);
+}};
+useTab(tabA); _forgetActiveSession('dead-X');
+if(!interleaved) {{ useTab(tabB); _rememberActiveSession('valid-Y'); }}
+const sharedAfter = rawGet(ACTIVE_SESSION_KEY_LEGACY);
+useTab(makeTab()); const fresh = _rememberedActiveSession();
+console.log(JSON.stringify({{interleaved, sharedAfter, fresh}}));
+"""
+    out = _run(script)
+    assert out["interleaved"], "the pause must be inside A's invalidation path"
+    assert out["sharedAfter"] == "valid-Y"
+    assert out["fresh"] == "valid-Y"
 
-    Executes the real `_clearStuckSessionOnBoot` from sessions.js against the
-    real ui.js helpers (no hand-written `_forgetActiveSession` stub), and pins
-    every self-heal/delete caller to pass the SID it proved dead.
+
+def test_boot_self_heal_paths_reject_the_stuck_sid_for_future_boots():
+    """Boot self-heal avoids retrying the same failing SID on every reload.
+
+    Execute real `_clearStuckSessionOnBoot` against real ui.js helpers;
+    404/delete callers also name their rejected SID.
     """
     clear_stuck = _function_body(SESSIONS_SRC, "function _clearStuckSessionOnBoot")
     script = f"""
@@ -953,8 +1032,8 @@ console.log(JSON.stringify({{savedAtBoot, legacyAfterBootHeal, nextDocument, rep
 """
     out = _run(script)
     assert out["savedAtBoot"] == "dead-sid"
-    assert out["legacyAfterBootHeal"] is None, "boot self-heal must release the dead shared SID"
-    assert out["nextDocument"] is None, "the next document must not re-adopt the dead SID"
+    assert out["legacyAfterBootHeal"] == "dead-sid", "shared slot is never removed by another document"
+    assert out["nextDocument"] is None, "the next boot must not loop on the same failed SID"
     assert out["replaced"] == 1
     assert out["legacyAfterMidSession"] == "live-sid"
     assert out["ownAfterMidSession"] == "live-sid"
@@ -969,13 +1048,12 @@ console.log(JSON.stringify({{savedAtBoot, legacyAfterBootHeal, nextDocument, rep
     assert "_forgetActiveSession(activeSid)" in messages_src, "send() 404 self-heal must name the dead sid"
 
 
-def test_profile_switch_boot_releases_the_pre_switch_sid_for_the_next_document():
+def test_profile_switch_boot_rejects_old_sid_only_for_the_target_profile():
     """`?profile=` → new document regression (gate RED defect 2).
 
     Runs the real boot.js cleanup statement against the real helpers: after a
-    completed profile switch the pre-switch SID must be released from the
-    shared slot, so a brand-new document does not restore the other profile's
-    conversation, 404 and loop.
+    completed profile switch the pre-switch SID must be rejected for the
+    target profile, without deleting a valid source-profile fallback.
     """
     statement = re.search(
         r"if\(_rememberedActiveSession\(\)===_savedLocalBeforeProfileSwitch\) _forgetActiveSession\([^)]*\);",
@@ -989,21 +1067,42 @@ def test_profile_switch_boot_releases_the_pre_switch_sid_for_the_next_document()
 {_HARNESS}
 {_helpers()}
 localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'profile-a-session');
+S.activeProfile='profile-a';
 useTab(makeTab());
 const _savedLocalBeforeProfileSwitch=_rememberedActiveSession();   // as boot.js does
 // ... switchToProfile('b') completed and changed the profile ...
+S.activeProfile='profile-b';
 {statement.group(0)}
 const savedLocal=_rememberedActiveSession();
 const legacyAfter = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
 useTab(makeTab());
 const nextDocument = _rememberedActiveSession();
-console.log(JSON.stringify({{before:_savedLocalBeforeProfileSwitch, savedLocal, legacyAfter, nextDocument}}));
+S.activeProfile='profile-a';
+useTab(makeTab());
+const sourceDocument = _rememberedActiveSession();
+console.log(JSON.stringify({{before:_savedLocalBeforeProfileSwitch, savedLocal, legacyAfter, nextDocument, sourceDocument}}));
 """
     out = _run(script)
     assert out["before"] == "profile-a-session"
     assert out["savedLocal"] is None
-    assert out["legacyAfter"] is None, "the pre-switch SID must be released from the shared slot"
+    assert out["legacyAfter"] == "profile-a-session", "switch must not remove the source profile's fallback"
     assert out["nextDocument"] is None, "a new document must not restore the other profile's session"
+    assert out["sourceDocument"] == "profile-a-session", "source profile still owns the SID"
+
+
+def test_unresolved_profile_must_not_adopt_ownerless_fallback():
+    script = f"""
+{_HARNESS}
+{_helpers()}
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY,'foreign-session');
+S._legacyProfileResolved=false;
+useTab(makeTab());
+const restored=_rememberedActiveSession();
+const scoped=localStorage.getItem(_activeSessionKey());
+console.log(JSON.stringify({{restored,scoped}}));
+"""
+    out = _run(script)
+    assert out == {"restored": None, "scoped": None}
 
 
 def test_legacy_session_is_adopted_once_into_scoped_storage():

@@ -130,9 +130,23 @@ names the session, a reload may open without its previous selection and the
 user must select the durable conversation from the sidebar. In-flight browser
 cache recovery is unavailable across that ambiguous boundary; durable session
 transcript and run-journal replay remain the recovery sources when a session is
-explicitly reopened. Old scoped caches remain for bounded garbage collection,
-not for adoption by a new document. This deliberately sacrifices seamless
+explicitly reopened. Old scoped caches are never adopted by a new document.
+They are collected only after the owner's non-persisted pagehide release marker
+exceeds its grace window. Reader age alone cannot authorize deletion of another
+document's mutable inflight state; crashes/discards without a release can retain
+orphan snapshots and consume browser quota. The owner still rejects snapshots
+beyond the reader's ten-minute window. This deliberately sacrifices seamless
 reload recovery rather than granting a duplicated tab another tab's authority.
+
+A session ID invalidated by a 404/delete or failed boot restore is rejected
+through a key scoped to the resolved profile and ID, not removed from the
+shared legacy fallback slot: another tab may have written a newer session
+between comparison and deletion. Profile
+switches reject the source ID in the target profile without invalidating the
+source profile. The existing failed-boot self-heal still prevents repeated
+auto-restoration after non-404 failures; an unresolved profile does not adopt
+the ownerless fallback.
+Older clients unaware of rejection keys can still read the legacy slot.
 
 This RFC remains `Proposed` because its broader cross-layer contract also covers
 model-context reconstruction, compression handoff, session metadata, and future
