@@ -10470,12 +10470,30 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                     # back to the prior turn's verdict when the live
                     # mirror no longer carries this call (the two-turn
                     # regression case).
-                    _is_error = bool(live_tc.get('is_error', False)) if live_tc else None
+                    # #7358 round 7 (re-gate 9/23): treat a live record
+                    # that LACKS ``is_error`` as ``None`` (unknown)
+                    # rather than ``False`` (default in the previous
+                    # ``bool(... , False)`` call). The round-6 default
+                    # silently inverted an unknown classification into
+                    # a success, which masked the round-7 case where
+                    # the structured callback's helper never wrote the
+                    # verdict (the live record was pre-marked ``done``
+                    # by the legacy suppression branch and the
+                    # helper's done-guard skipped the per-tid write).
+                    # The prior-tc fallback is symmetric: missing on
+                    # the prior also yields ``None`` (unknown). The
+                    # final default to ``False`` below remains so the
+                    # downstream ``tool_calls`` entry is always a
+                    # concrete bool — the "unknown" state is the
+                    # intermediate, propagated so the caller can
+                    # distinguish a never-determined verdict from a
+                    # determined-False one if it chooses to.
+                    _is_error = live_tc.get('is_error') if live_tc else None
                     if _is_error is None:
                         _prior_tc = prior_by_tid.get(tid)
                         if _prior_tc is not None:
-                            _is_error = bool(_prior_tc.get('is_error', False))
-                        else:
+                            _is_error = _prior_tc.get('is_error')
+                        if _is_error is None:
                             _is_error = False
                     tool_calls.append({
                         'name': name,
@@ -10503,6 +10521,13 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
             # from the live mirror, so the live classification wins.
             # Prior-turn verdicts only apply when the live mirror is
             # absent, which the main path above already handles.
+            # #7358 round 7 (re-gate 9/23): symmetric with the main
+            # path above — missing ``is_error`` on the live record
+            # is ``None`` (unknown) rather than ``False``. The final
+            # default to ``False`` keeps the stored value concrete.
+            _live_is_error = live_tc.get('is_error')
+            if _live_is_error is None:
+                _live_is_error = False
             tool_calls.append({
                 'name': live_tc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
@@ -10512,7 +10537,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                 # The live-fallback branch is the only source of this
                 # row's identity, so it must carry the live is_error too
                 # (Finding 2, fallback summaries).
-                'is_error': bool(live_tc.get('is_error', False)),
+                'is_error': _live_is_error,
             })
 
     return tool_calls
@@ -13128,6 +13153,27 @@ def _run_agent_streaming(
             # ``"error"`` key name and a guardrail_refusal read both stay
             # correctly classified as the Agent intended.
             _authoritative_is_error_by_tid = {}
+            # #7358 round 7 (re-gate 9/23): FIFO queue of no-ID verdicts
+            # staged from ``tool_progress_callback`` events that lack
+            # ``cb_kwargs['tool_call_id']`` (the live path on Hermes Agent
+            # 0.21.x — the cross-repo fix in
+            # ``hermes-agent/agent/tool_executor.py`` that threads
+            # ``tool_call_id`` into the cb_kwargs is still pending). The
+            # paired structured ``tool_complete_callback`` that fires
+            # immediately after supplies the real ``tool_call_id``, so
+            # it dequeues the next entry and applies the staged verdict
+            # to the matching live row. Without this, the suppression
+            # branch's name-based reverse walk pre-marks the WRONG
+            # live row done (the newest not-done one), and the
+            # structured callback's ``done`` guard at
+            # ``api/streaming.py:7942`` then skips the per-tid write —
+            # so two concurrent same-name completions swap verdicts and
+            # the persisted summary silently loses the real ``is_error``.
+            # Pre-marking is replaced with a position-preserving stage,
+            # so the structured callback is the only writer to the
+            # live row and the verdict reaches the persisted summary
+            # even when the Agent omits ``tool_call_id``.
+            _staged_no_tid_verdicts = []  # list[dict{name,is_error,snippet,duration}]
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -13292,35 +13338,56 @@ def _run_agent_streaming(
                     # this tool.
                     _cb_is_error = cb_kwargs.get('is_error')
                     if _cb_is_error is not None:
-                        # #7358 round 6 (re-gate 9/23): prefer the per-call
+                        # #7358 round 7 (re-gate 9/23): prefer the per-call
                         # tool_call_id when the Agent passes it through
-                        # cb_kwargs. The name-based fallback below matches
-                        # the most recent not-done live entry, which is
-                        # wrong for two concurrent same-name tools (the
-                        # second completion steals the first's verdict).
-                        # The full fix lives in hermes-agent's
-                        # ``tool_executor.py`` (which must thread
-                        # ``tool_call_id`` into the cb_kwargs for the
-                        # legacy ``tool_progress_callback``); until that
-                        # lands, mark the fallback entry ``done`` so the
-                        # second completion walks past it.
+                        # cb_kwargs. The legacy Agent path (no tid) STAGES
+                        # the verdict on a FIFO queue and the paired
+                        # structured ``on_tool_complete`` consumes it by
+                        # the real tid. The structured callback is the
+                        # only writer to the live row, so the verdict
+                        # reaches the persisted summary even when the
+                        # Agent omits ``tool_call_id``. The cross-repo
+                        # fix that would thread ``tool_call_id`` into
+                        # the cb_kwargs of the legacy callback lives in
+                        # ``hermes-agent/agent/tool_executor.py``; once
+                        # that lands, the fast-path below activates
+                        # with no further change here. The previous
+                        # round's behaviour — name-based reverse walk
+                        # that pre-marked the matched entry ``done``
+                        # — caused two failure modes the reviewer
+                        # pinned in the 9/23 re-gate:
+                        #   1. The reverse walk takes the newest
+                        #      not-done row, so two concurrent same-name
+                        #      completions swap verdicts.
+                        #   2. The pre-marked ``done`` makes the
+                        #      structured callback's helper see
+                        #      ``live_tc['done'] is True`` and skip the
+                        #      per-tid write, so the persisted
+                        #      summary silently loses the real
+                        #      ``is_error``.
+                        # The FIFO stage fixes both without depending
+                        # on the unshipped Agent change.
                         _cb_tid = cb_kwargs.get('tool_call_id') or ''
                         if _cb_tid:
                             _authoritative_is_error_by_tid[_cb_tid] = bool(_cb_is_error)
                         else:
-                            for _live_tc in reversed(_live_tool_calls):
-                                if _live_tc.get('done'):
-                                    continue
-                                if not name or _live_tc.get('name') == name:
-                                    _tid = _live_tc.get('tid') or ''
-                                    if _tid:
-                                        _authoritative_is_error_by_tid[_tid] = bool(_cb_is_error)
-                                    # #7358 round 6: claim the entry so a
-                                    # second same-name completion walks
-                                    # past it instead of overwriting the
-                                    # first call's verdict.
-                                    _live_tc['done'] = True
-                                    break
+                            # #7358 round 7: stage the no-ID verdict
+                            # and the progress event's result together
+                            # in a FIFO queue. The structured callback
+                            # will dequeue the next entry by position
+                            # (FIFO matches the Agent's paired
+                            # production order) and apply the verdict
+                            # to the live row identified by the
+                            # real ``tool_call_id``. Do NOT pre-mark
+                            # any live row ``done`` — that would
+                            # starve the structured callback's helper
+                            # of the per-tid write.
+                            _staged_no_tid_verdicts.append({
+                                'name': name,
+                                'is_error': bool(_cb_is_error),
+                                'snippet': cb_kwargs.get('result'),
+                                'duration': cb_kwargs.get('duration'),
+                            })
                     return
 
                 if event_type == 'tool.completed':
@@ -13477,6 +13544,55 @@ def _run_agent_streaming(
                         _is_error_override = None
                         if tool_call_id:
                             _is_error_override = _authoritative_is_error_by_tid.pop(tool_call_id, None)
+                        # #7358 round 7 (re-gate 9/23): consume the
+                        # next staged no-tid verdict from the FIFO
+                        # queue. The Agent invokes progress and
+                        # complete callbacks in PAIRS and in
+                        # production order, so the dequeued entry
+                        # belongs to this ``tool_call_id`` — the
+                        # name match is a defensive guard, not the
+                        # primary key. This is the only way to carry
+                        # the legacy-callback verdict (no tid) onto
+                        # the correct live row without depending on
+                        # the unshipped Agent change that would
+                        # thread ``tool_call_id`` into the
+                        # ``tool_progress_callback`` cb_kwargs. Pop
+                        # the entry on consume so a stale stage
+                        # from a prior tool can never leak into a
+                        # later, different tool — same discipline
+                        # as the round-5 pop on
+                        # ``_authoritative_is_error_by_tid``.
+                        _staged_verdict = None
+                        if _staged_no_tid_verdicts:
+                            for _i, _sv in enumerate(_staged_no_tid_verdicts):
+                                if not _sv.get('name') or _sv.get('name') == name:
+                                    _staged_verdict = _staged_no_tid_verdicts.pop(_i)
+                                    break
+                        if _is_error_override is None and _staged_verdict is not None:
+                            _is_error_override = _staged_verdict.get('is_error')
+                        # When the staged verdict carries a result
+                        # snippet (the Agent passed it through
+                        # ``cb_kwargs['result']``), apply it to the
+                        # live row so the SSE payload and the
+                        # persisted summary agree with the staged
+                        # verdict's source of truth. The structured
+                        # helper computes its own snippet from
+                        # ``function_result`` (a JSON string the
+                        # Agent forwards), but a flat text snippet
+                        # from the progress event wins when the
+                        # structured payload is absent or empty.
+                        if _staged_verdict is not None and tool_call_id:
+                            _staged_snippet = _staged_verdict.get('snippet')
+                            if _staged_snippet:
+                                for _live_tc in _live_tool_calls:
+                                    if _live_tc.get('tid') == tool_call_id and not _live_tc.get('snippet'):
+                                        _live_tc['snippet'] = _staged_snippet
+                                        break
+                                if stream_id in STREAM_LIVE_TOOL_CALLS:
+                                    for _shared_tc in STREAM_LIVE_TOOL_CALLS[stream_id]:
+                                        if _shared_tc.get('tid') == tool_call_id and not _shared_tc.get('snippet'):
+                                            _shared_tc['snippet'] = _staged_snippet
+                                            break
                         _emit_tool_complete_to_mirrors_and_sse(
                             tool_call_id=tool_call_id,
                             name=name,
