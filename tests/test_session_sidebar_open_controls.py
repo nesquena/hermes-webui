@@ -8,6 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
@@ -28,6 +29,19 @@ def _function_source(name: str) -> str:
         index += 1
     assert depth == 0, f"{name} body did not close"
     return SESSIONS_JS[start:index]
+
+
+def _skin_values() -> tuple[str, ...]:
+    start = BOOT_JS.index("const _SKINS=[")
+    end = BOOT_JS.index("];", start)
+    block = BOOT_JS[start:end]
+    values = []
+    for name, explicit_value in re.findall(
+        r"\{name:'([^']+)'(?:,\s*value:'([^']+)')?", block
+    ):
+        values.append(explicit_value or name.lower())
+    assert values
+    return tuple(values)
 
 
 def test_chat_panel_reuses_visible_label_as_a_heading():
@@ -263,8 +277,10 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
                       const group = row.querySelector('.session-title-group');
                       const title = row.querySelector('.session-open-control');
                       const tags = Array.from(row.querySelectorAll('.session-tag'));
+                      const shortTag = tags[0];
                       const rowStyle = getComputedStyle(row);
                       const titleStyle = getComputedStyle(title);
+                      const shortTagStyle = getComputedStyle(shortTag);
                       const groupRect = group.getBoundingClientRect();
                       const rowRect = titleRow.getBoundingClientRect();
                       return {
@@ -283,6 +299,8 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
                         tagsFitRowHeight: tags.every(tag =>
                           tag.getBoundingClientRect().height <= rowRect.height + 1
                         ),
+                        shortTagFlexShrink: shortTagStyle.flexShrink,
+                        shortTagNotTruncated: shortTag.scrollWidth <= shortTag.clientWidth + 1,
                         rowBoxShadow: rowStyle.boxShadow,
                         buttonOutlineStyle: titleStyle.outlineStyle,
                       };
@@ -298,9 +316,201 @@ def test_tagged_titles_and_focus_ring_fit_narrow_sidebar_in_browser():
         assert result["groupInsideRow"] is True
         assert result["tagsSingleLine"] is True
         assert result["tagsFitRowHeight"] is True
+        assert result["shortTagFlexShrink"] == "0"
+        assert result["shortTagNotTruncated"] is True
         assert "inset" in result["rowBoxShadow"]
         assert re.search(r"\b2px\b", result["rowBoxShadow"])
         assert result["buttonOutlineStyle"] == "none"
+
+
+def test_keyboard_focus_ring_contrast_and_attention_shadow_compose_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar focus contrast browser test")
+
+    appearances = [
+        {"skin": skin, "dark": dark}
+        for skin in _skin_values()
+        for dark in (False, True)
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 420, "height": 240})
+        page.set_content(
+            """
+            <!doctype html>
+            <html>
+              <body>
+                <div class="probe">
+                  <div class="session-item active" data-sid="session-a">
+                    <div class="session-text">
+                      <div class="session-title-row">
+                        <div class="session-title-group">
+                          <button type="button" class="session-title session-open-control" data-sid="session-a">
+                            Visible conversation title
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <span class="focus-color-probe"></span>
+                <span class="warning-color-probe"></span>
+                <span class="error-color-probe"></span>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(
+            content="""
+              body{margin:0;background:var(--bg)}
+              .probe{margin:8px;width:300px}
+              body,.session-item{transition:none!important}
+              .focus-color-probe{background:var(--focus-ring-strong)}
+              .warning-color-probe{background:var(--warning)}
+              .error-color-probe{background:var(--error)}
+            """
+        )
+        page.keyboard.press("Tab")
+        control = page.locator(".session-open-control")
+        assert control.evaluate("el => el.matches(':focus-visible')") is True
+        page.wait_for_timeout(200)
+
+        results = page.evaluate(
+            """
+            appearances => {
+              const html = document.documentElement;
+              const row = document.querySelector('.session-item');
+              const focusProbe = document.querySelector('.focus-color-probe');
+              const warningProbe = document.querySelector('.warning-color-probe');
+              const errorProbe = document.querySelector('.error-color-probe');
+
+              const parseColor = value => {
+                const match = value.match(/rgba?\\(([^)]+)\\)/);
+                if (!match) return null;
+                const parts = match[1].split(',').map(part => Number.parseFloat(part.trim()));
+                return [parts[0], parts[1], parts[2], parts.length > 3 ? parts[3] : 1];
+              };
+              const composite = (front, back) => {
+                const alpha = front[3] + back[3] * (1 - front[3]);
+                if (alpha === 0) return [0, 0, 0, 0];
+                return [
+                  (front[0] * front[3] + back[0] * back[3] * (1 - front[3])) / alpha,
+                  (front[1] * front[3] + back[1] * back[3] * (1 - front[3])) / alpha,
+                  (front[2] * front[3] + back[2] * back[3] * (1 - front[3])) / alpha,
+                  alpha,
+                ];
+              };
+              const effectiveBackground = element => {
+                const layers = [];
+                for (let current = element; current; current = current.parentElement) {
+                  const color = parseColor(getComputedStyle(current).backgroundColor);
+                  if (color) layers.push(color);
+                }
+                let result = [255, 255, 255, 1];
+                for (let index = layers.length - 1; index >= 0; index -= 1) {
+                  result = composite(layers[index], result);
+                }
+                return result;
+              };
+              const channel = value => {
+                const normalized = value / 255;
+                return normalized <= 0.04045
+                  ? normalized / 12.92
+                  : Math.pow((normalized + 0.055) / 1.055, 2.4);
+              };
+              const luminance = color =>
+                0.2126 * channel(color[0]) +
+                0.7152 * channel(color[1]) +
+                0.0722 * channel(color[2]);
+              const contrast = (first, second) => {
+                const a = luminance(first);
+                const b = luminance(second);
+                return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+              };
+              const closeColor = (first, second) =>
+                first && second && first.slice(0, 3).every((value, index) =>
+                  Math.abs(value - second[index]) < 1
+                );
+              const shadowColors = value =>
+                Array.from(value.matchAll(/rgba?\\([^)]+\\)/g), match => parseColor(match[0]));
+
+              return appearances.map(appearance => {
+                html.className = appearance.dark ? 'dark' : '';
+                html.dataset.skin = appearance.skin;
+                row.className = 'session-item active';
+
+                const rowBackground = effectiveBackground(row);
+                const focusColor = parseColor(getComputedStyle(focusProbe).backgroundColor);
+                const focusShadow = getComputedStyle(row).boxShadow;
+                const focusShadowColors = shadowColors(focusShadow);
+                const focusComposite = focusColor
+                  ? composite(focusColor, rowBackground)
+                  : null;
+
+                const states = [
+                  ['needs-attention', warningProbe],
+                  ['attention-clarify', warningProbe],
+                  ['attention-approval', errorProbe],
+                ].map(([state, stateProbe]) => {
+                  row.className = `session-item active ${state}`;
+                  const shadow = getComputedStyle(row).boxShadow;
+                  const colors = shadowColors(shadow);
+                  const stateColor = parseColor(getComputedStyle(stateProbe).backgroundColor);
+                  return {
+                    state,
+                    shadow,
+                    hasFocusColor: colors.some(color => closeColor(color, focusColor)),
+                    hasStateColor: colors.some(color => closeColor(color, stateColor)),
+                    shadowCount: colors.length,
+                  };
+                });
+                row.className = 'session-item active';
+
+                return {
+                  ...appearance,
+                  focusColor,
+                  focusComposite,
+                  rowBackground,
+                  focusShadow,
+                  focusShadowUsesStrongColor: focusShadowColors.some(color =>
+                    closeColor(color, focusColor)
+                  ),
+                  contrast: focusComposite ? contrast(focusComposite, rowBackground) : 0,
+                  states,
+                };
+              });
+            }
+            """,
+            appearances,
+        )
+        browser.close()
+
+    failures = []
+    for result in results:
+        appearance = f"{result['skin']}/{'dark' if result['dark'] else 'light'}"
+        if result["contrast"] < 3:
+            failures.append(
+                f"{appearance}: contrast={result['contrast']:.2f} "
+                f"focus={result['focusColor']} background={result['rowBackground']}"
+            )
+        if not result["focusShadowUsesStrongColor"]:
+            failures.append(f"{appearance}: strong focus color is absent from box-shadow")
+        for state in result["states"]:
+            if state["shadowCount"] < 2:
+                failures.append(f"{appearance}/{state['state']}: shadows did not compose")
+            if not state["hasFocusColor"]:
+                failures.append(f"{appearance}/{state['state']}: focus ring is missing")
+            if not state["hasStateColor"]:
+                failures.append(f"{appearance}/{state['state']}: attention stripe is missing")
+
+    assert not failures, "\n".join(failures)
 
 
 def test_tagged_inline_rename_preserves_input_width_in_narrow_sidebar():

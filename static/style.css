@@ -9,7 +9,7 @@
     --bg:#FEFCF7;--sidebar:#FAF7F0;--border:#E0D8C8;--border2:rgba(0,0,0,0.15);
     --text:#1A1610;--muted:#5C5344;--accent:#B8860B;--blue:#0288A8;--gold:#8B6508;--code-bg:#F5F0E5;
     --surface:#F3EEE3;--topbar-bg:rgba(250,247,240,.98);--main-bg:rgba(254,252,247,0.5);
-    --focus-ring:rgba(184,134,11,.35);--focus-glow:rgba(184,134,11,.1);
+    --focus-ring:rgba(184,134,11,.35);--focus-glow:rgba(184,134,11,.1);--focus-ring-strong:var(--text);
     --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
     --strong:#0F0D08;--em:#5C5344;--code-text:#8b4513;--code-inline-bg:rgba(0,0,0,.06);--pre-text:#1A1610;
     --accent-hover:#996F08;--accent-bg:rgba(184,134,11,0.08);--accent-bg-strong:rgba(184,134,11,0.15);--accent-text:#8B6508;
@@ -974,7 +974,7 @@
      conversation with no keyboard-specific indicator. Restore the 2px focus ring
      at higher specificity + `!important` when the row's open-control is
      keyboard-focused. */
-  :root[data-skin="geist-contrast"] .session-item.active:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring-strong)!important;}
   :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
   :root[data-skin="geist-contrast"] .session-item.active .session-title,
   :root[data-skin="geist-contrast"] .session-item.active .session-meta,
@@ -1665,7 +1665,20 @@
   .session-title{flex:1 1 auto;min-width:6ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
   .session-open-control{cursor:pointer;}
   .session-open-control:focus-visible{outline:none;}
-  .session-item:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring);}
+  /* Session rows need an opaque, 3:1 keyboard indicator. The shared
+     --focus-ring token is deliberately translucent for glow-style controls;
+     --focus-ring-strong follows each skin's already contrast-safe text token. */
+  .session-item:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring-strong);}
+  /* Preserve the attention owner while the row also owns keyboard focus.
+     Put the 3px state stripe first so it remains visible above the 2px ring. */
+  .session-item.needs-attention:has(.session-open-control:focus-visible),
+  .session-item.attention-clarify:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--warning),inset 0 0 0 2px var(--focus-ring-strong);}
+  .session-item.attention-approval:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--error),inset 0 0 0 2px var(--focus-ring-strong);}
+  /* Geist Contrast's active-row shadow is !important, so its combined states
+     need the same cascade strength rather than losing either indicator. */
+  :root[data-skin="geist-contrast"] .session-item.active.needs-attention:has(.session-open-control:focus-visible),
+  :root[data-skin="geist-contrast"] .session-item.active.attention-clarify:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--warning),inset 0 0 0 2px var(--focus-ring-strong)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active.attention-approval:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--error),inset 0 0 0 2px var(--focus-ring-strong)!important;}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -5727,7 +5740,7 @@ main.main > #mainPlugin{display:none;}
 .session-tree-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;font-size:9px;font-weight:700;padding:0 4px;border-radius:8px;background:rgba(99,179,237,.2);color:#63b3ed;margin-left:auto;flex-shrink:0;user-select:none;}
 
 /* ── Session tags ── */
-.session-tag{display:inline-block;flex:0 1 auto;min-width:0;max-width:10ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;font-weight:600;padding:1px 5px;margin-left:0;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
+.session-tag{display:inline-block;flex:0 0 auto;min-width:0;max-width:10ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;font-weight:600;padding:1px 5px;margin-left:0;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
 .session-tag:hover{background:rgba(99,179,237,.35);}
 
 /* ── File rename input ── */
