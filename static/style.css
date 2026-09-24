@@ -1381,7 +1381,8 @@
   :root.dark[data-skin="gruvbox"] button.send-btn:not(:disabled),
   :root.dark[data-skin="gruvbox"] .toolsets-apply-btn,
   :root.dark[data-skin="gruvbox"] .cancel-btn,
-  :root.dark[data-skin="gruvbox"] .session-swipe-badge{color:#1D2021;}
+  :root.dark[data-skin="gruvbox"] .session-swipe-badge
+  {color:#1D2021;}
   /* Translucent-accent controls: give them the solid accent fill so the dark
      ink has a bright surface (matches the verdigris dark .new-chat-btn pattern);
      leaving them translucent would render dark ink over a dark background. */
@@ -1415,9 +1416,9 @@
   :root.dark[data-skin="gruvbox"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
   :root.dark[data-skin="gruvbox"] .tool-card-running-dot{background:var(--accent);}
   /* Bare --accent as text fails on cream (streaming session title): route to accent-text */
-  :root[data-skin="gruvbox"] .session-item.streaming .session-title{color:var(--accent-text);}
   /* Light swipe fills are dark olive/umber/sangria — white ink passes, dark ink fails */
-  :root[data-skin="gruvbox"] .session-swipe-badge{color:#FBF1C7;}
+  :root[data-skin="gruvbox"] .session-swipe-badge
+  {color:#FBF1C7;}
   /* Tree viewer + diff: semantic tokens (kept on gruvbox family by the palette) */
   :root[data-skin="gruvbox"] .tree-key,
   :root[data-skin="gruvbox"] .diff-block .diff-plus{color:var(--accent-text);}
