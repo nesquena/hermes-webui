@@ -596,10 +596,15 @@ localStorage.key=(i)=>{{
 useTab(tabA); _gcOrphanTabKeys();
 // A safe GC may skip the age scan altogether. Still check its behavior after
 // a foreign save; the old GC runs the barrier in the classify -> delete gap.
-if(!rewrote){{useTab(tabB); rawSet(markerKey,freshMarker); rawSet(stateKey,freshState);}}
-console.log(JSON.stringify({{rewrote,marker:rawGet(markerKey),state:rawGet(stateKey)}}));
+const retainedOld=rawGet(markerKey)===oldMarker && rawGet(stateKey)===oldState;
+if(!rewrote){{
+  // With no age scan the GC must leave even expired foreign bytes untouched.
+  useTab(tabB); rawSet(markerKey,freshMarker); rawSet(stateKey,freshState);
+}}
+console.log(JSON.stringify({{rewrote,retainedOld,marker:rawGet(markerKey),state:rawGet(stateKey)}}));
 """
     out = _run(script)
+    assert out["rewrote"] or out["retainedOld"], "GC without an age scan must retain foreign bytes"
     assert out["marker"] is not None and out["state"] is not None
     assert json.loads(out["marker"])["ts"] == 1_000_000
     assert json.loads(out["state"])["s"]["updated_at"] == 1_000_000
