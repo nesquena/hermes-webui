@@ -276,7 +276,18 @@ def test_open_picker_preserves_search_and_custom_inputs():
 
 
 def test_live_models_coalescing_and_sessions_hydration_tracking():
-    """Defect 3: Sessions hydration uses tracker and _fetchLiveModels coalesces in-flight fetches."""
+    """Defect 3 & follow-ups: Sessions hydration uses tracker, _fetchLiveModels coalesces in-flight fetches,
+    _liveModelCache strictly enforces profile-scoped keys without cross-profile provider fallback,
+    and hydration failures do not clear newer in-flight hydrations."""
     assert "window._trackModelCatalogHydration" in SESSIONS_JS
     assert "_liveModelInFlight" in UI_JS
+    # Strict profile scoping: no cross-profile un-scoped fallback
+    assert "_liveModelCache[provider]" not in UI_JS
+    # Guard against stale hydration failure wiping newer in-flight request
+    assert "expectedCurrent!==undefined && window._modelDropdownReady!==expectedCurrent" in BOOT_JS
+
+    # Runtime contract documentation
+    doc = (ROOT / "docs" / "architecture" / "models-cache-invalidation.md").read_text(encoding="utf-8")
+    assert "Client-side model picker hydration and live cache contract" in doc
+
 

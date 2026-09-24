@@ -3669,7 +3669,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   };
   const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>{
     const hydrateProfile=(typeof S!=='undefined'&&S.activeProfile)?S.activeProfile:null;
-    return populateModelDropdown({
+    let promise;
+    promise = populateModelDropdown({
       preferProfileDefaultOnFreshBoot:true,
       ...(redirectIfUnauth?{redirectIfUnauth}:{}),
     }).then(()=>{
@@ -3709,10 +3710,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if(S.session) syncTopbar();
       else if(typeof syncReasoningChip==='function') syncReasoningChip();
     }).catch(e=>{
-      if(typeof _trackModelCatalogHydration==='function') _trackModelCatalogHydration(null);
-      else window._modelDropdownReady=null;
+      if(typeof _trackModelCatalogHydration==='function') _trackModelCatalogHydration(null, promise);
+      else if(window._modelDropdownReady===promise) window._modelDropdownReady=null;
       throw e;
     });
+    return promise;
   };
   // Mirrors whether the hydration cached at window._modelDropdownReady has
   // SETTLED. Promise state is not synchronously observable, so the starters
@@ -3723,8 +3725,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // added later, e.g. OpenRouter stealth/ox-alpha) and the composer picker
   // would report "No models found" for those until a hard refresh (#7227).
   let _modelCatalogHydrationSettled=false;
-  const _trackModelCatalogHydration=(next)=>{
+  const _trackModelCatalogHydration=(next, expectedCurrent=undefined)=>{
     if(!next){
+      if(expectedCurrent!==undefined && window._modelDropdownReady!==expectedCurrent){
+        return window._modelDropdownReady;
+      }
       window._modelDropdownReady=null;
       _modelCatalogHydrationSettled=false;
       return null;

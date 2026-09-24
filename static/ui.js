@@ -3910,7 +3910,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, requestedProfile
     : ((typeof S!=='undefined'&&S.activeProfile)?S.activeProfile:'default');
   const cacheKey=`${currentProfile}::${provider}`;
 
-  const cached=_liveModelCache[cacheKey]||_liveModelCache[provider];
+  const cached=_liveModelCache[cacheKey];
   if(cached){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==currentProfile) return;
@@ -3931,7 +3931,6 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, requestedProfile
         const data=await _liveRes.json();
         if(!data.models||!data.models.length) return null;
         _liveModelCache[cacheKey]=data.models;
-        _liveModelCache[provider]=data.models;
         return data.models;
       }catch(e){
         console.debug('[hermes] Live model fetch failed for',provider,e.message);
