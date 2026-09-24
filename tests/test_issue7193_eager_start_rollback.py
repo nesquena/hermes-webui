@@ -307,7 +307,11 @@ def test_rejected_start_with_unreadable_entry_backup_restores_session_and_backup
     )
 
     with pytest.raises(RuntimeError, match="stream registration rejected"):
-        _start(session, workspace=issue7193_env / "workspace")
+        _start(
+            session,
+            workspace=issue7193_env / "workspace",
+            msg="new unreadable backup prompt",
+        )
 
     assert session.__dict__ == before
     assert Session.load(session.session_id).messages == before["messages"]
@@ -613,6 +617,50 @@ def test_unknown_backup_sidecar_restore_failure_skips_save_and_preserves_error(
 
     assert session.__dict__ == before
     assert len(save_calls) == 1
+    assert backup_path.read_bytes() == entry_backup
+
+
+def test_compression_recovery_restore_skips_save_for_unreadable_backup(
+    issue7193_env, monkeypatch
+):
+    from api.compression_recovery import stamp_compression_exhausted_recovery
+
+    session, backup_path, entry_backup = _saved_session_with_recovery_backup(issue7193_env)
+    stamp_compression_exhausted_recovery(session, message="Context length exceeded.")
+    session.save(touch_updated_at=False)
+    entry_messages = copy.deepcopy(session.messages)
+    session.messages = entry_messages + [{"role": "user", "content": "new prompt"}]
+    session.context_messages = copy.deepcopy(session.messages)
+    session.save(touch_updated_at=False)
+    session.messages = entry_messages
+    session.context_messages = copy.deepcopy(entry_messages)
+    recovery = copy.deepcopy(session.compression_recovery)
+    session.compression_recovery = {}
+    session.recommended_recovery_action = None
+    real_read_bytes = Path.read_bytes
+    real_save = models.Session.save
+    backup_read_failed = False
+    save_calls = []
+
+    def fail_backup_read(path):
+        nonlocal backup_read_failed
+        if path == backup_path and not backup_read_failed:
+            backup_read_failed = True
+            raise OSError("backup read unavailable")
+        return real_read_bytes(path)
+
+    def record_save(self, *args, **kwargs):
+        save_calls.append(kwargs)
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(routes.Path, "read_bytes", fail_backup_read)
+    monkeypatch.setattr(models.Session, "save", record_save)
+
+    assert routes._restore_chat_start_compression_recovery(session, recovery) is None
+
+    assert session.compression_recovery == recovery
+    assert session.recommended_recovery_action == recovery["recommended_action"]
+    assert save_calls == []
     assert backup_path.read_bytes() == entry_backup
 
 

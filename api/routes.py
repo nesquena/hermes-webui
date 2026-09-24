@@ -24875,6 +24875,33 @@ def _is_silent_control_message(message) -> bool:
     return str(message or "").strip() == "[SILENT]"
 
 
+def _restore_chat_start_compression_recovery(session, recovery):
+    """Restore recovery metadata without replacing an unreadable backup."""
+    session.compression_recovery = recovery
+    session.recommended_recovery_action = recovery.get("recommended_action")
+    backup_path = Path(session.path).with_suffix(".json.bak")
+    try:
+        backup_path.read_bytes()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug(
+            "Skipped compression recovery save because backup is unreadable for %s",
+            getattr(session, "session_id", None),
+            exc_info=True,
+        )
+        return None
+    try:
+        session.save()
+    except Exception as restore_err:
+        logger.exception(
+            "failed to restore compression recovery after chat start rejection for %s",
+            getattr(session, "session_id", None),
+        )
+        return restore_err
+    return None
+
+
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
@@ -25173,14 +25200,7 @@ def _handle_chat_start(handler, body, diag=None):
         def _restore_cleared_recovery():
             if recovery_cleared_for_start is None:
                 return None
-            s.compression_recovery = recovery_cleared_for_start
-            s.recommended_recovery_action = recovery_cleared_for_start.get("recommended_action")
-            try:
-                s.save()
-            except Exception as restore_err:
-                logger.exception("failed to restore compression recovery after chat start rejection for %s", getattr(s, "session_id", None))
-                return restore_err
-            return None
+            return _restore_chat_start_compression_recovery(s, recovery_cleared_for_start)
 
         if recovery and regeneration is None:
             recovery_cleared_for_start = copy.deepcopy(recovery)
