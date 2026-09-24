@@ -162,3 +162,61 @@ def test_unreadable_fd_table_makes_scan_incomplete_but_keeps_cwd_evidence(
     assert scan.unreadable_count == 1
     # cwd evidence is retained: the process still blocks the worktree.
     assert scan.blocking_process_count(worktree) == 1
+
+
+@pytest.mark.parametrize("failure_errno", [errno.EACCES, errno.EPERM, errno.EIO])
+def test_denied_fd_link_read_makes_process_scan_incomplete(
+    tmp_path,
+    monkeypatch,
+    failure_errno,
+):
+    """A readable fd table is still incomplete when one link is denied."""
+    proc_root = tmp_path / "proc"
+    elsewhere = tmp_path / "elsewhere"
+    held_file = tmp_path / "worktree" / "held.txt"
+    elsewhere.mkdir()
+    held_file.parent.mkdir()
+    held_file.write_text("held\n", encoding="utf-8")
+    _proc_cwd(proc_root, 701, elsewhere)
+    _proc_fd(proc_root, 701, held_file)
+    real_readlink = os.readlink
+
+    def denied_fd_readlink(path):
+        candidate = Path(path)
+        if candidate.parent.name == "fd":
+            raise OSError(failure_errno, "denied", str(path))
+        return real_readlink(path)
+
+    monkeypatch.setattr(os, "readlink", denied_fd_readlink)
+
+    scan = scan_process_cwds(proc_root)
+
+    assert scan.available is True
+    assert scan.complete is False
+    assert scan.unreadable_count == 1
+    assert scan.process_count == 1
+
+
+@pytest.mark.parametrize("failure_errno", [errno.ENOENT, errno.ESRCH])
+def test_disappeared_fd_link_is_benign(tmp_path, monkeypatch, failure_errno):
+    proc_root = tmp_path / "proc"
+    cwd = tmp_path / "worktree"
+    cwd.mkdir()
+    _proc_cwd(proc_root, 702, cwd)
+    _proc_fd(proc_root, 702, cwd / "gone.txt")
+    real_readlink = os.readlink
+
+    def disappearing_fd_readlink(path):
+        candidate = Path(path)
+        if candidate.parent.name == "fd":
+            raise OSError(failure_errno, "gone", str(path))
+        return real_readlink(path)
+
+    monkeypatch.setattr(os, "readlink", disappearing_fd_readlink)
+
+    scan = scan_process_cwds(proc_root)
+
+    assert scan.available is True
+    assert scan.complete is True
+    assert scan.unreadable_count == 0
+    assert scan.process_count == 1

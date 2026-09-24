@@ -79,7 +79,9 @@ confirmed:
    timestamp.
 8. A complete `/proc` scan finds no process whose canonical cwd equals or is
    below the worktree path, and no process holding an open file descriptor
-   inside the worktree regardless of its cwd.
+   inside the worktree regardless of its cwd. Only `ENOENT`/`ESRCH` while
+   reading an individual FD link is treated as a process-exit race; permission
+   denial or any other FD read error makes the entire process scan incomplete.
 9. The health endpoint responds successfully with `active_runs == 0`.
 
 The creation-time Hermes worktree lock PID is bookkeeping, not independent
@@ -104,6 +106,10 @@ Before publishing any eligibility verdict, the classifier also:
 - rejects split indexes with `KEEP_UNCERTAIN` (`split_index_present`) because
   the main index contains only a delta and cannot be audited without composing
   its mutable shared index;
+- checks the linked worktree Git directory for `index.lock` before
+  classification and again after final pin revalidation. A present lock means
+  Git may be writing the index and produces `KEEP_UNCERTAIN`
+  (`index_lock_present`) rather than a clean eligibility verdict;
 - counts submodule gitlinks: any gitlink produces `KEEP_UNCERTAIN`
   (`submodules_present`) because top-level probes cannot see inside it;
 - rejects branch-exclusive merge commits unless the resulting tree is proven
@@ -114,6 +120,10 @@ Before publishing any eligibility verdict, the classifier also:
   during the audit downgrades the verdict to `KEEP_UNCERTAIN`
   (`pin_revalidation_failed`) instead of certifying stale evidence. A worktree
   already locked at the initial listing is kept as `worktree_locked`.
+
+Git stdout is read incrementally under the global 1 MiB cap. The subprocess is
+terminated as soon as it crosses the cap; output is never fully spooled and
+then measured.
 
 Missing or invalid dates, unreadable or malformed sidecars, contradictory
 duplicate records, invalid workspace paths, an incomplete process scan, a
@@ -130,10 +140,14 @@ per-candidate mutation result and makes no claim that a worktree or branch was
 changed.
 
 The JSON report is written through a mode-`0600` temporary file in the
-destination directory. The file is flushed and synced, atomically replaced,
-then the parent directory is synced on supported POSIX systems. `--json` prints
-the same report to stdout; otherwise stdout contains a one-line summary and the
-report path.
+destination directory. Every parent component is opened or created relative
+to a pinned no-follow directory handle; a symlink at any level aborts the
+write. Target inspection, temporary creation, replacement, and cleanup are all
+relative to the final pinned parent handle. The file is flushed and synced,
+atomically replaced, then the parent directory is synced. Platforms without
+the required directory-handle operations fail closed instead of using a
+path-based fallback. `--json` prints the same report to stdout; otherwise
+stdout contains a one-line summary and the report path.
 
 Reports contain only operational metadata: session IDs, profile, worktree
 identity, normalized timestamps and age, verdicts, reasons, health/process

@@ -517,6 +517,35 @@ def test_oversized_git_output_fails_closed_instead_of_consuming_memory(
     assert "git_output_oversized" in decision.reasons
 
 
+def test_oversized_git_output_is_rejected_while_streaming(
+    tmp_path,
+    monkeypatch,
+):
+    """Round-4: the global cap must stop real Git before output is spooled."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/streaming-output-cap")
+    monkeypatch.setattr(gc_git, "_GIT_OUTPUT_LIMIT", 8)
+    monkeypatch.setattr(
+        gc_git.tempfile,
+        "TemporaryFile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Git output must not be spooled before applying the cap")
+        ),
+    )
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/streaming-output-cap",
+        case["repo"],
+    )
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert decision.reasons == ("git_output_oversized",)
+
+
 def test_dirty_path_stored_only_in_split_index_fails_closed(tmp_path):
     """Round-3: a shared-index-only path must never disappear from the scan."""
     case = make_remote_repo(tmp_path)
@@ -596,3 +625,50 @@ def test_lock_added_after_initial_scan_invalidates_eligibility(tmp_path, monkeyp
     assert decision.verdict == KEEP_UNCERTAIN
     assert decision.eligible is False
     assert "pin_revalidation_failed" in decision.reasons
+
+
+def test_index_lock_present_is_never_eligible(tmp_path):
+    """Round-4: an in-progress index write cannot be certified as clean."""
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/index-lock")
+    git_dir = Path(_git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+    (git_dir / "index.lock").write_bytes(b"")
+
+    decision = classify_git_worktree(worktree, "gc/index-lock", case["repo"])
+
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert decision.reasons == ("index_lock_present",)
+
+
+def test_index_lock_added_before_publication_invalidates_eligibility(
+    tmp_path,
+    monkeypatch,
+):
+    """Round-4: final publication rechecks the real linked-worktree gitdir."""
+    import api.worktree_gc_git as gc_git
+
+    case = make_remote_repo(tmp_path)
+    worktree = add_worktree(case, tmp_path, "gc/index-lock-toctou")
+    git_dir = Path(_git(worktree, "rev-parse", "--absolute-git-dir").stdout.strip())
+    real_pins_still_valid = gc_git._pins_still_valid
+    inserted = {"done": False}
+
+    def insert_lock_before_publication(*args, **kwargs):
+        valid = real_pins_still_valid(*args, **kwargs)
+        (git_dir / "index.lock").write_bytes(b"")
+        inserted["done"] = True
+        return valid
+
+    monkeypatch.setattr(gc_git, "_pins_still_valid", insert_lock_before_publication)
+
+    decision = classify_git_worktree(
+        worktree,
+        "gc/index-lock-toctou",
+        case["repo"],
+    )
+
+    assert inserted["done"] is True
+    assert decision.verdict == KEEP_UNCERTAIN
+    assert decision.eligible is False
+    assert "index_lock_present" in decision.reasons

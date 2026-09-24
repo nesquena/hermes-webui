@@ -30,6 +30,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -324,9 +325,9 @@ def _run_git(
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an allowlisted read-only Git command with hard-bounded output.
 
-    Both streams are spooled to a temporary file so a hostile or corrupt
-    repository cannot exhaust memory; output beyond ``_GIT_OUTPUT_LIMIT``
-    fails closed instead of being parsed.
+    Stdout is drained in bounded chunks.  The subprocess is killed as soon as
+    the cap is crossed, so neither memory nor temporary storage can grow with
+    hostile output.  Stderr is discarded because it is never report evidence.
     """
     if not _read_only_git_args(args):
         raise _GitInvocationError("git_command_not_allowed")
@@ -334,26 +335,69 @@ def _run_git(
     try:
         hooks_path = tempfile.mkdtemp(prefix="hermes-webui-worktree-git-hooks-")
         argv = _git_argv(args, hooks_path)
-        with tempfile.TemporaryFile(
-            prefix="hermes-webui-worktree-git-out-",
-        ) as spool:
-            result = subprocess.run(
-                argv,
-                cwd=str(cwd),
-                shell=False,
-                stdout=spool,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=timeout,
-                env=_clean_git_env(),
-            )
-            spool.seek(0)
-            bounded_stdout = spool.read(_GIT_OUTPUT_LIMIT + 1)
-        if len(bounded_stdout) > _GIT_OUTPUT_LIMIT:
+        process = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_clean_git_env(),
+        )
+        assert process.stdout is not None
+        stdout = process.stdout
+        output = bytearray()
+        oversized = threading.Event()
+        read_errors: list[OSError] = []
+
+        def drain_stdout() -> None:
+            try:
+                while True:
+                    chunk = stdout.read(64 * 1024)
+                    if not chunk:
+                        return
+                    remaining = _GIT_OUTPUT_LIMIT + 1 - len(output)
+                    if remaining > 0:
+                        output.extend(chunk[:remaining])
+                    if len(output) > _GIT_OUTPUT_LIMIT:
+                        oversized.set()
+                        try:
+                            process.kill()
+                        except OSError:
+                            pass
+                        return
+            except OSError as exc:
+                read_errors.append(exc)
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
+        reader = threading.Thread(
+            target=drain_stdout,
+            name="worktree-gc-git-stdout",
+            daemon=True,
+        )
+        reader.start()
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait()
+            reader.join()
+            raise _GitInvocationError("git_timeout") from exc
+        reader.join()
+        stdout.close()
+        if read_errors:
+            raise _GitInvocationError("git_invocation_failed") from read_errors[0]
+        bounded_stdout = bytes(output)
+        if oversized.is_set() or len(bounded_stdout) > _GIT_OUTPUT_LIMIT:
             raise _GitInvocationError("git_output_oversized")
         return subprocess.CompletedProcess(
-            result.args,
-            result.returncode,
+            argv,
+            returncode,
             bounded_stdout,
             b"",
         )
@@ -674,6 +718,40 @@ def _worktree_record(
     return matches[0], None
 
 
+def _worktree_git_dir(worktree_path: Path) -> tuple[Path | None, str | None]:
+    """Resolve the linked worktree's administrative directory."""
+    try:
+        result = _run_git(["rev-parse", "--absolute-git-dir"], worktree_path)
+    except _GitInvocationError as exc:
+        return None, exc.code
+    if result.returncode != 0 or not result.stdout.endswith(b"\n"):
+        return None, "git_dir_unresolvable"
+    raw_git_dir = result.stdout[:-1]
+    if not raw_git_dir or b"\0" in raw_git_dir:
+        return None, "git_dir_unparseable"
+    try:
+        git_dir = _decode_path(raw_git_dir)
+    except (OSError, RuntimeError, ValueError):
+        return None, "git_dir_unparseable"
+    if not git_dir.is_absolute():
+        return None, "git_dir_unparseable"
+    return git_dir, None
+
+
+def _index_lock_reason(worktree_path: Path) -> str | None:
+    """Return a blocking reason when index-write state cannot be excluded."""
+    git_dir, error = _worktree_git_dir(worktree_path)
+    if error or git_dir is None:
+        return error or "git_dir_unresolvable"
+    try:
+        os.stat(git_dir / "index.lock", follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "index_lock_unreadable"
+    return "index_lock_present"
+
+
 def _read_index_bytes(index_path: Path) -> tuple[bytes, int] | str:
     """Read the index file without following symlinks, with a hard size cap.
 
@@ -843,21 +921,9 @@ def _parse_index(data: bytes) -> list[_IndexEntry]:
 
 def _index_snapshot(worktree_path: Path) -> tuple[_IndexSnapshot | None, str | None]:
     """Read the worktree index directly; never through content-hashing Git."""
-    try:
-        result = _run_git(["rev-parse", "--absolute-git-dir"], worktree_path)
-    except _GitInvocationError as exc:
-        return None, exc.code
-    if result.returncode != 0 or not result.stdout.endswith(b"\n"):
-        return None, "git_dir_unresolvable"
-    raw_git_dir = result.stdout[:-1]
-    if not raw_git_dir or b"\0" in raw_git_dir:
-        return None, "git_dir_unparseable"
-    try:
-        git_dir = _decode_path(raw_git_dir)
-    except (OSError, RuntimeError, ValueError):
-        return None, "git_dir_unparseable"
-    if not git_dir.is_absolute():
-        return None, "git_dir_unparseable"
+    git_dir, git_dir_error = _worktree_git_dir(worktree_path)
+    if git_dir_error or git_dir is None:
+        return None, git_dir_error or "git_dir_unresolvable"
     read_result = _read_index_bytes(git_dir / "index")
     if isinstance(read_result, str):
         return None, read_result
@@ -1308,6 +1374,15 @@ def classify_git_worktree(
                 eligible=False,
                 reasons=(*reasons, "pin_revalidation_failed"),
             )
+        if eligible:
+            lock_reason = _index_lock_reason(worktree_path)
+            if lock_reason is not None:
+                return _decision(
+                    **audit,
+                    verdict=KEEP_UNCERTAIN,
+                    eligible=False,
+                    reasons=(*reasons, lock_reason),
+                )
         return _decision(
             **audit,
             verdict=verdict,
@@ -1353,6 +1428,10 @@ def classify_git_worktree(
         return result(KEEP_UNCERTAIN, "worktree_not_listed")
     if worktree_record.locked:
         return result(KEEP_UNCERTAIN, "worktree_locked")
+
+    index_lock_reason = _index_lock_reason(worktree_path)
+    if index_lock_reason is not None:
+        return result(KEEP_UNCERTAIN, index_lock_reason)
 
     worktree_head_oid = _worktree_head_oid(worktree_path)
     if worktree_head_oid is None:

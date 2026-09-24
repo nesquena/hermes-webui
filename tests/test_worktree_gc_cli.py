@@ -333,3 +333,45 @@ def test_report_destination_fifo_is_rejected_without_blocking(tmp_path):
 
     with pytest.raises(ValueError):
         write_report_atomic({"new": True}, fifo)
+
+
+def test_report_intermediate_parent_symlink_swap_cannot_redirect_write(
+    tmp_path,
+    monkeypatch,
+):
+    """Every parent component is pinned/no-follow at the point of publication."""
+    safe = tmp_path / "safe"
+    movable_parent = safe / "reports"
+    report_parent = movable_parent / "daily"
+    report_parent.mkdir(parents=True)
+    destination = report_parent / "report.json"
+
+    forbidden = tmp_path / "forbidden-repo"
+    redirected_parent = forbidden / "daily"
+    redirected_parent.mkdir(parents=True)
+    redirected = redirected_parent / destination.name
+    original = '{"repository": "must-stay-intact"}\n'
+    redirected.write_text(original, encoding="utf-8")
+
+    real_dumps = json.dumps
+    swapped = {"done": False}
+
+    def swap_intermediate_parent(*args, **kwargs):
+        if not swapped["done"]:
+            moved_aside = safe / "reports-before-swap"
+            movable_parent.rename(moved_aside)
+            os.symlink(forbidden, movable_parent)
+            swapped["done"] = True
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", swap_intermediate_parent)
+
+    with pytest.raises((OSError, ValueError)):
+        write_report_atomic(
+            {"new": True},
+            destination,
+            forbidden_roots=(forbidden,),
+        )
+
+    assert swapped["done"] is True
+    assert redirected.read_text(encoding="utf-8") == original
