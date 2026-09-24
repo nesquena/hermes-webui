@@ -1948,3 +1948,59 @@ def test_runtime_inplace_expand_with_preexisting_options_reveals_them(_driver_pa
     assert out["showAllGone"], (
         "After expansion, the 'Show all' row should be gone even when some overflow options pre-existed"
     )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_restored_overflow_row_updates_collapsed_decorated_heading_count(
+    _dropdown_driver_path,
+):
+    """Restoring an OpenRouter overflow model moves it into the group, so the
+    collapsed "(a of b)" heading must count it as shown, not keep the load-time a."""
+    model = "nex-agi/nex-n2.5-pro:free"
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter (1 of 3)",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/visible", "label": "Visible"}],
+                "extra_models": [
+                    {"id": model, "label": "Nex N2.5 Pro Free"},
+                    {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
+                ],
+            },
+        ],
+        "selectedValue": "openrouter/visible",
+        "restoreModel": f"@openrouter:{model}",
+        "restoreProvider": "openrouter",
+        "searchTerm": "",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+    heading_text = "\n".join(item["textContent"] for item in out["initial"])
+
+    assert out["restoration"]["firstRestore"] == model
+    assert "OpenRouter (2 of 3)" in heading_text, (
+        f"Collapsed heading must count the restored row as shown; got {heading_text!r}."
+    )
+    assert "OpenRouter (1 of 3)" not in heading_text
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_unrestored_decorated_heading_is_left_verbatim(_dropdown_driver_path):
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter (1 of 3)",
+                "provider_id": "openrouter",
+                "models": [{"id": "openrouter/visible", "label": "Visible"}],
+                "extra_models": [
+                    {"id": "nex-agi/nex-n2.5-pro:free", "label": "Nex N2.5 Pro Free"},
+                    {"id": "nex-agi/nex-n2.5-pro:thinking", "label": "Nex N2.5 Pro Thinking"},
+                ],
+            },
+        ],
+        "selectedValue": "openrouter/visible",
+        "searchTerm": "",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+    heading_text = "\n".join(item["textContent"] for item in out["initial"])
+    assert "OpenRouter (1 of 3)" in heading_text, heading_text

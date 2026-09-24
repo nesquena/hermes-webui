@@ -4783,7 +4783,18 @@ function renderModelDropdown(){
         // so hoisted-configured models aren't double-counted. (#3691)
         const count=hiddenCount?0:groupRows.length;
         const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
-        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
+        // The backend's "(a of b)" is fixed at load time. Restoring an overflow model
+        // moves it from the hidden tail into the group, so recompute "a" from what is
+        // still hidden; otherwise the collapsed heading undercounts the rows below it.
+        let collapsedLabel=meta.label;
+        const _ofMatch=hiddenCount?String(meta.label||'').match(/\((\d+)\s+of\s+(\d+)\)\s*$/):null;
+        if(_ofMatch){
+          const total=Number(_ofMatch[2]);
+          const stillHidden=_modelData.filter(m=>m.groupKey===groupKey&&m.hiddenByDefault).length;
+          const shown=Math.max(0,Math.min(total,total-stillHidden));
+          if(shown!==Number(_ofMatch[1])) collapsedLabel=`${_plainLabel} (${shown} of ${total})`;
+        }
+        heading.textContent=count>1?`${_plainLabel} (${count})`:collapsedLabel;
         dd.appendChild(heading);
         const wrapper=document.createElement('div');
         wrapper.className='model-group-body';
