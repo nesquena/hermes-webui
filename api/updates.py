@@ -251,7 +251,7 @@ def _run_git(args, cwd, timeout=10):
             env,
             executable=git_executable,
         )
-        env = noninteractive_git_env(cwd, env, executable=git_executable)
+        env = noninteractive_git_env(cwd, env, executable=git_executable, args=args)
     try:
         r = subprocess.run(
             noninteractive_git_argv(

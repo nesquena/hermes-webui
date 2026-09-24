@@ -202,13 +202,47 @@ def trusted_git_credential_config(
     )
 
 
+def _git_shell_path(executable: str, cwd: str | Path, env: dict[str, str]) -> str:
+    """Use Git's shell, including its bundled shell on native Windows."""
+    try:
+        result = subprocess.run(
+            [executable, "var", "GIT_SHELL_PATH"], cwd=str(cwd), env=env,
+            capture_output=True, text=True, timeout=10,
+            creationflags=windows_hide_flags(),
+        )
+        if result.returncode == 0 and (result.stdout or "").strip():
+            return result.stdout.strip()
+        # Older Git has no GIT_SHELL_PATH variable. Its POSIX default is /bin/sh;
+        # Git for Windows installs usr/bin/sh.exe alongside its mingw tree.
+        if sys.platform == "win32":
+            result = subprocess.run(
+                [executable, "--exec-path"], cwd=str(cwd), env=env,
+                capture_output=True, text=True, timeout=10,
+                creationflags=windows_hide_flags(),
+            )
+            if result.returncode == 0:
+                for parent in Path(result.stdout.strip()).parents:
+                    shell = parent / "usr" / "bin" / "sh.exe"
+                    if shell.is_file():
+                        return str(shell)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "/bin/sh" if sys.platform != "win32" else "git-shell-path-is-unavailable"
+
+
 def noninteractive_git_env(
     cwd: str | Path,
     env: dict[str, str],
     *,
     executable: str = "git",
+    args: list[str] | None = None,
 ) -> dict[str, str]:
-    """Force SSH batch mode while preserving a trusted custom SSH command."""
+    """Force SSH batch mode; probe custom commands only for SSH destinations."""
+    if args is not None:
+        url = _remote_url_for_command(args, cwd, env, executable=executable)
+        if not url or not _is_ssh_remote(url):
+            # Keep checkout SSH commands suppressed even when no probe is needed.
+            return {**env, "GIT_SSH_COMMAND": "ssh -oBatchMode=yes", "GIT_SSH_VARIANT": "ssh"}
     trusted_commands = tuple(
         value
         for scope, value in _scoped_git_config_values(
@@ -264,7 +298,7 @@ def noninteractive_git_env(
         # configuration, not connect. Never probe checkout-selected commands.
         try:
             with subprocess.Popen(
-                ["sh", "-c", f"{ssh_command} -G -oBatchMode=yes localhost"],
+                [_git_shell_path(executable, cwd, env), "-c", f"{ssh_command} -G -oBatchMode=yes localhost"],
                 cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=(os.name != "nt"),
@@ -389,10 +423,9 @@ def _remote_url_for_command(
     executable: str,
 ) -> str | None:
     remote = _explicit_remote_arg(args)
+    push = bool(args and args[0] == "push")
     if not remote:
-        branch = None
-        # The WebUI callers use origin when no explicit remote is present. Honor
-        # an explicit current-branch remote before falling back to origin.
+        branch_name = ""
         try:
             head = subprocess.run(
                 [executable, "symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -403,12 +436,34 @@ def _remote_url_for_command(
             head = None
         if head is not None and head.returncode == 0:
             branch_name = (head.stdout or "").strip()
-            branch = _git_config_value(
-                cwd, env, f"branch.{branch_name}.remote", executable=executable,
-            ) or branch
-        remote = branch or "origin"
+        keys = []
+        if push:
+            if branch_name:
+                keys.append(f"branch.{branch_name}.pushRemote")
+            keys.append("remote.pushDefault")
+        if branch_name:
+            keys.append(f"branch.{branch_name}.remote")
+        for key in keys:
+            remote = _git_config_value(cwd, env, key, executable=executable)
+            if remote:
+                break
+        remote = remote or "origin"
     if remote == ".":
         return ""
+    # Named push remotes use pushurl (and pushInsteadOf), not their fetch URL.
+    # An explicit URL destination is not a remote name, so keep Git's own
+    # resolution (ls-remote --get-url echoes it back) as the fallback.
+    if push:
+        try:
+            resolved = subprocess.run(
+                [executable, "remote", "get-url", "--push", remote],
+                cwd=str(cwd), shell=False, capture_output=True, text=True,
+                timeout=10, env=env, creationflags=windows_hide_flags(),
+            )
+            if resolved.returncode == 0:
+                return (resolved.stdout or "").strip() or None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
     # --get-url performs only Git's configured URL rewrite; it does not contact
     # the remote. This exposes a repo-local url.*.insteadOf that turns an
     # apparently HTTPS remote into git:// before the proxy guard decides.
@@ -512,6 +567,17 @@ def sanitize_git_diagnostic(
     if len(sanitized) > limit:
         sanitized = sanitized[:limit].rstrip() + "…"
     return sanitized
+
+
+def _is_ssh_remote(remote: str) -> bool:
+    if _REMOTE_HELPER_RE.match(remote):
+        return False
+    if _URL_REMOTE_RE.match(remote):
+        return remote.lower().startswith("ssh://")
+    # A Windows drive prefix is a local path, not an scp host.
+    if re.match(r"^[A-Za-z]:[\\/]", remote):
+        return False
+    return _SCP_SSH_REMOTE_RE.match(remote) is not None
 
 
 def is_safe_diagnostic_remote(remote: str) -> bool:

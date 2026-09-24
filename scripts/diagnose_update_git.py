@@ -21,6 +21,7 @@ from api.subprocess_utils import (  # noqa: E402
     noninteractive_git_env,
     noninteractive_git_argv,
     sanitize_git_diagnostic,
+    repository_git_proxy_blocks,
     trusted_git_credential_config,
     windows_hide_flags,
 )
@@ -100,7 +101,6 @@ def main() -> int:
         env,
         executable=git,
     )
-    env = noninteractive_git_env(checkout, env, executable=git)
     try:
         origin = _run(
             ["remote", "get-url", "origin"],
@@ -125,6 +125,15 @@ def main() -> int:
                 error=True,
             )
             return 1
+        if repository_git_proxy_blocks(["fetch", "origin"], checkout, env, executable=git):
+            _emit(
+                "Update Git diagnostic failed: repository-configured core.gitProxy is not allowed",
+                sensitive_paths=sensitive, error=True,
+            )
+            return 1
+        env = noninteractive_git_env(
+            checkout, env, executable=git, args=["ls-remote", origin_url],
+        )
         origin_path = urlsplit(origin_url).path
         sensitive = (*sensitive, origin_url, origin_path)
 

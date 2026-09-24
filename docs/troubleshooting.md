@@ -287,7 +287,9 @@ Git versions before 2.26. A trusted user/system `core.sshCommand` is retained wi
 its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
 as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
 to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
-supported. Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
+supported. Push checks follow `branch.<name>.pushRemote`, `remote.pushDefault`,
+`branch.<name>.remote`, then `origin`, and honor the selected remote's `pushurl`.
+Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
 transport prefix names a helper command.
 
 **Diagnostic.** Run the project diagnostic for each checkout named by the update status:
@@ -296,7 +298,8 @@ transport prefix names a helper command.
 python3 scripts/diagnose_update_git.py /path/to/checkout
 ```
 
-The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms, then probes the captured
+The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms,
+applies the update runner's proxy guard in the original checkout, then probes the captured
 URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
 reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
 checkout paths, origin paths, URL credentials, tokens, and secret query values.
@@ -305,7 +308,9 @@ checkout paths, origin paths, URL credentials, tokens, and secret query values.
 an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
 it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
 commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
-fails closed. Custom-named commands get a five-second, stdin-disabled `-G` configuration probe;
+fails closed. Only SSH destinations trigger the five-second, stdin-disabled `-G`
+configuration probe for custom-named commands; local paths and HTTP(S) never invoke
+the SSH wrapper. The probe uses Git's resolved shell rather than requiring `sh` on PATH;
 only a successful probe enables OpenSSH batch mode. Explicit interactive `BatchMode` options
 (including whitespace forms such as `-o 'BatchMode no'`) fail closed rather than relying on
 a later option to override OpenSSH's first-value semantics. Failed/unknown probes fail closed.

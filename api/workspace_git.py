@@ -190,7 +190,7 @@ def _run_git(
     credential_config = ()
     if args and args[0] in {"fetch", "pull", "push", "ls-remote"}:
         credential_config = trusted_git_credential_config(cwd, run_env)
-        run_env = noninteractive_git_env(cwd, run_env)
+        run_env = noninteractive_git_env(cwd, run_env, args=args)
     effective_destructive = destructive and workspace_git_destructive_enabled()
     hardened_destructive_path = effective_destructive or force_destructive_hardening
     attributes_file = None
