@@ -9910,6 +9910,21 @@ def _snapshot_parent_replays_nothing(parent_meta) -> bool:
     return watermark_timestamp == 0
 
 
+_LINEAGE_REPLAY_PROOF_FIELDS = frozenset({
+    "parent_session_id",
+    "pre_compression_snapshot",
+    "truncation_watermark",
+})
+
+
+def _metadata_stub_has_lineage_replay_proof(parent_meta) -> bool:
+    """Return whether a cheap stub materially carried every lineage proof field."""
+    prefix_fields = getattr(parent_meta, "_metadata_prefix_fields", None)
+    return isinstance(prefix_fields, (set, frozenset)) and (
+        _LINEAGE_REPLAY_PROOF_FIELDS <= prefix_fields
+    )
+
+
 def _older_ancestors_provably_replay_nothing(
     sentinel_meta, *, seen, max_hops, load_metadata=None
 ) -> bool:
@@ -9941,6 +9956,12 @@ def _older_ancestors_provably_replay_nothing(
     seen = set(seen)
     current = sentinel_meta
     for _ in range(max(0, int(max_hops))):
+        # load_metadata_only() constructs a Session and constructor defaults can
+        # look like real false/empty metadata. Both successful proof exits below
+        # are valid only when every field they depend on was materially present
+        # before the messages stop key. Unknown key order must full-load instead.
+        if not _metadata_stub_has_lineage_replay_proof(current):
+            return False
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id:
             return True
@@ -9948,6 +9969,8 @@ def _older_ancestors_provably_replay_nothing(
             return False
         parent_meta = load_metadata(parent_id)
         if parent_meta is None:
+            return False
+        if not _metadata_stub_has_lineage_replay_proof(parent_meta):
             return False
         if not getattr(parent_meta, "pre_compression_snapshot", False):
             # The full walk breaks here without appending a segment: nothing

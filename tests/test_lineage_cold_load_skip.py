@@ -694,6 +694,74 @@ def _contents(rows):
     return [str(m.get("content", "")) for m in rows]
 
 
+def _move_sidecar_field_after_messages(path, field):
+    """Rewrite one valid top-level field immediately after ``messages``."""
+    import json
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    value = raw.pop(field)
+    reordered = {}
+    for key, item in raw.items():
+        reordered[key] = item
+        if key == "messages":
+            reordered[field] = value
+    serialized = json.dumps(reordered, ensure_ascii=False, indent=2)
+    assert serialized.index('"messages"') < serialized.index(f'"{field}"')
+    path.write_text(serialized, encoding="utf-8")
+
+
+def _get_paginated_session_payload(routes, Session, child, monkeypatch):
+    """Drive the real 30-row ``GET /api/session`` route in the isolated store."""
+    import json
+    from io import BytesIO
+    from urllib.parse import urlparse
+
+    import api.config as config
+    import api.models as models
+
+    session_dir = routes.SESSION_DIR
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(
+        config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False
+    )
+    monkeypatch.setattr(
+        models, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False
+    )
+    # Cold cache: the route must resolve the child from disk in the isolated
+    # session dir, then stitch the lineage itself.
+    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)(), raising=False)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS, raising=False)
+    routes._lineage_display_cache.clear()
+    routes._display_merge_cache.clear()
+
+    class _Handler:
+        def __init__(self, path):
+            self.path = path
+            self.headers = {}
+            self.client_address = ("127.0.0.1", 12345)
+            self.status = None
+            self.wfile = BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            pass
+
+        def end_headers(self):
+            pass
+
+        def log_message(self, *args, **kwargs):
+            pass
+
+    handler = _Handler(
+        f"/api/session?session_id={child.session_id}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+    assert handler.status == 200, handler.wfile.getvalue()[:300]
+    return json.loads(handler.wfile.getvalue().decode("utf-8"))["session"]
+
+
 def test_contributing_ancestor_above_zero_watermark_snapshot_is_kept(
     deep_lineage, monkeypatch
 ):
@@ -812,58 +880,12 @@ def test_paginated_session_route_keeps_history_above_zero_watermark_snapshot(
     (6 visible rows) fits inside the 30-row window and the absolute payload is
     fully determined: every row, in order, offset 0, not truncated.
     """
-    import json
-    from io import BytesIO
-    from urllib.parse import urlparse
-
-    import api.config as config
-    import api.models as models
-
     routes, Session, child = deep_lineage(
         hops=2, sentinel={1}, ancestor_rows=2, child_rows=2
     )
-    session_dir = routes.SESSION_DIR
-    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
-    monkeypatch.setattr(
-        config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False
+    payload = _get_paginated_session_payload(
+        routes, Session, child, monkeypatch
     )
-    monkeypatch.setattr(
-        models, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False
-    )
-    # Cold cache: the route must resolve the child from disk in the isolated
-    # session dir, then stitch the lineage itself.
-    monkeypatch.setattr(models, "SESSIONS", type(models.SESSIONS)(), raising=False)
-    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS, raising=False)
-    routes._lineage_display_cache.clear()
-    routes._display_merge_cache.clear()
-
-    class _Handler:
-        def __init__(self, path):
-            self.path = path
-            self.headers = {}
-            self.client_address = ("127.0.0.1", 12345)
-            self.status = None
-            self.wfile = BytesIO()
-
-        def send_response(self, status):
-            self.status = status
-
-        def send_header(self, key, value):
-            pass
-
-        def end_headers(self):
-            pass
-
-        def log_message(self, *args, **kwargs):
-            pass
-
-    handler = _Handler(
-        f"/api/session?session_id={child.session_id}&messages=1&resolve_model=0&msg_limit=30"
-    )
-    routes.handle_get(handler, urlparse(handler.path))
-
-    assert handler.status == 200, handler.wfile.getvalue()[:300]
-    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))["session"]
 
     # Absolute window: oldest contributing rows, then the sentinel snapshot's
     # own rows, then the continuation — nothing dropped, nothing reordered.
@@ -882,3 +904,64 @@ def test_paginated_session_route_keeps_history_above_zero_watermark_snapshot(
     assert payload["_messages_offset"] == 0
     assert payload["_messages_truncated"] is False
     assert payload["message_count"] == 6
+
+
+@pytest.mark.parametrize(
+    ("sidecar_id", "late_field"),
+    [
+        ("anc_0", "pre_compression_snapshot"),
+        ("anc_1", "parent_session_id"),
+    ],
+    ids=["late-snapshot-flag", "late-parent-id"],
+)
+def test_paginated_route_fails_closed_when_lineage_proof_field_follows_messages(
+    deep_lineage, monkeypatch, sidecar_id, late_field
+):
+    """A prefix stub may not turn an absent proof field into a constructor default.
+
+    The complete sidecar is valid, but moving either proof-bearing field after
+    ``messages`` makes it unavailable to ``load_metadata_only()``. The shortcut
+    must decline and the real route must retain the older contributing rows.
+    """
+    routes, Session, child = deep_lineage(
+        hops=2, sentinel={1}, ancestor_rows=4, child_rows=2
+    )
+    _move_sidecar_field_after_messages(
+        routes.SESSION_DIR / f"{sidecar_id}.json", late_field
+    )
+    loaded = _counting_load(routes, Session, monkeypatch)
+
+    payload = _get_paginated_session_payload(routes, Session, child, monkeypatch)
+
+    assert _contents(payload["messages"]) == [
+        "anc0-0",
+        "anc0-1",
+        "anc0-2",
+        "anc0-3",
+        "anc1-0",
+        "anc1-1",
+        "anc1-2",
+        "anc1-3",
+        "child-0",
+        "child-1",
+    ]
+    assert [m["role"] for m in payload["messages"]] == ["user", "assistant"] * 5
+    assert payload["_messages_offset"] == 0
+    assert payload["_messages_truncated"] is False
+    assert payload["message_count"] == 10
+    assert [sid for sid in loaded if sid.startswith("anc_")] == ["anc_1", "anc_0"]
+
+
+def test_paginated_route_keeps_fast_path_with_complete_prefix_proof(
+    deep_lineage, monkeypatch
+):
+    """Positive control: complete all-sentinel prefixes still avoid full loads."""
+    routes, Session, child = deep_lineage(
+        hops=2, sentinel=True, ancestor_rows=4, child_rows=2
+    )
+    loaded = _counting_load(routes, Session, monkeypatch)
+
+    payload = _get_paginated_session_payload(routes, Session, child, monkeypatch)
+
+    assert _contents(payload["messages"]) == ["child-0", "child-1"]
+    assert [sid for sid in loaded if sid.startswith("anc_")] == []

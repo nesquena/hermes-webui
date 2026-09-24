@@ -1456,6 +1456,9 @@ class Session:
         self._metadata_post_collapse_message_count = _parse_nonnegative_json_int(
             _raw_post_collapse_count
         )
+        # Populated only by load_metadata_only() from the keys actually parsed
+        # before the messages stop key. Full Session objects keep the empty set.
+        self._metadata_prefix_fields = frozenset()
 
     @property
     def path(self):
@@ -1751,9 +1754,16 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # Preserve what the cheap prefix materially proved. Session(...)
+            # fills absent keys from constructor defaults, so consumers making
+            # correctness decisions from a metadata-only stub must be able to
+            # distinguish "present with a false/empty value" from "not read
+            # because this key followed messages in an older/foreign layout".
+            metadata_prefix_fields = frozenset(parsed)
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
+            session._metadata_prefix_fields = metadata_prefix_fields
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
@@ -1785,6 +1795,7 @@ class Session:
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
+                    session._metadata_prefix_fields = metadata_prefix_fields
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
                     return session
