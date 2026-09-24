@@ -23332,6 +23332,15 @@ def _cleanup_chat_start_launch_failure(
     lock_held: bool = False,
 ) -> None:
     """Release state registered before a worker thread successfully starts."""
+    cleanup_result = {
+        "backup_provenance": backup_provenance,
+        "backup_unknown": (
+            backup_provenance is not None
+            and backup_provenance[3]
+            and backup_provenance[4] is None
+        ),
+        "sidecar_restored": False,
+    }
     try:
         clear_session_writeback_owner_if_owned(session.session_id, stream_id)
         unregister_stream_owner(stream_id)
@@ -23358,14 +23367,10 @@ def _cleanup_chat_start_launch_failure(
 
         restore_session_state(canonical, snapshot)
         compensation_succeeded = False
-        backup_unknown = (
-            backup_provenance is not None
-            and backup_provenance[3]
-            and backup_provenance[4] is None
-        )
-        if backup_unknown:
+        if cleanup_result["backup_unknown"]:
             try:
                 _restore_chat_start_entry_sidecar(backup_provenance)
+                cleanup_result["sidecar_restored"] = True
             except Exception:
                 logger.debug(
                     "Failed to restore chat-start entry sidecar for %s",
@@ -23402,6 +23407,7 @@ def _cleanup_chat_start_launch_failure(
             stream_id,
             exc_info=True,
         )
+    return cleanup_result
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -23991,7 +23997,7 @@ def _start_chat_stream_for_session(
                         daemon=True,
                     )
                     thr.start()
-                except Exception:
+                except Exception as exc:
                     if backend_is_gateway and stream_id:
                         try:
                             from api.gateway_chat import _finish_gateway_run_starting
@@ -24005,14 +24011,20 @@ def _start_chat_stream_for_session(
                                 stream_id,
                                 exc_info=True,
                             )
+                    cleanup_result = None
                     if snapshot is not None and stream_id:
-                        _cleanup_chat_start_launch_failure(
+                        cleanup_result = _cleanup_chat_start_launch_failure(
                             s,
                             stream_id,
                             snapshot,
                             backup_provenance=backup_provenance,
                             lock_held=True,
                         )
+                    if cleanup_result is not None:
+                        try:
+                            exc._chat_start_cleanup_result = cleanup_result
+                        except Exception:
+                            pass
                     if journal_event:
                         try:
                             from api.turn_journal import append_turn_journal_event
@@ -24875,10 +24887,22 @@ def _is_silent_control_message(message) -> bool:
     return str(message or "").strip() == "[SILENT]"
 
 
-def _restore_chat_start_compression_recovery(session, recovery):
+def _restore_chat_start_compression_recovery(session, recovery, cleanup_result=None):
     """Restore recovery metadata without replacing an unreadable backup."""
     session.compression_recovery = recovery
     session.recommended_recovery_action = recovery.get("recommended_action")
+    if cleanup_result and cleanup_result.get("backup_unknown"):
+        if not cleanup_result.get("sidecar_restored"):
+            try:
+                _restore_chat_start_entry_sidecar(cleanup_result["backup_provenance"])
+            except Exception:
+                logger.debug(
+                    "Skipped compression recovery save because sidecar restore failed for %s",
+                    getattr(session, "session_id", None),
+                    exc_info=True,
+                )
+                return None
+        return _save_chat_start_compression_recovery(session)
     backup_path = Path(session.path).with_suffix(".json.bak")
     try:
         backup_path.read_bytes()
@@ -24891,6 +24915,10 @@ def _restore_chat_start_compression_recovery(session, recovery):
             exc_info=True,
         )
         return None
+    return _save_chat_start_compression_recovery(session)
+
+
+def _save_chat_start_compression_recovery(session):
     try:
         session.save()
     except Exception as restore_err:
@@ -25197,10 +25225,15 @@ def _handle_chat_start(handler, body, diag=None):
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
         recovery_cleared_for_start = None
+        recovery_restore_error = None
         def _restore_cleared_recovery():
             if recovery_cleared_for_start is None:
                 return None
-            return _restore_chat_start_compression_recovery(s, recovery_cleared_for_start)
+            return _restore_chat_start_compression_recovery(
+                s,
+                recovery_cleared_for_start,
+                getattr(recovery_restore_error, "_chat_start_cleanup_result", None),
+            )
 
         if recovery and regeneration is None:
             recovery_cleared_for_start = copy.deepcopy(recovery)
@@ -25211,6 +25244,7 @@ def _handle_chat_start(handler, body, diag=None):
                 **start_run_kwargs,
             )
         except Exception as exc:
+            recovery_restore_error = exc
             if not getattr(exc, "_regeneration_accepted", False):
                 _restore_cleared_recovery()
             raise
