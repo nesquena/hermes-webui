@@ -117,7 +117,10 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
             return MagicMock(returncode=0, stdout='abcdef1\n', stderr='')
         if git_args == ['rev-parse', '--short', 'origin/master']:
             return MagicMock(returncode=0, stdout='fedcba9\n', stderr='')
-        if git_args == ['remote', 'get-url', 'origin']:
+        if git_args in (
+            ['remote', 'get-url', 'origin'],
+            ['ls-remote', '--get-url', 'origin'],
+        ):
             return MagicMock(
                 returncode=0,
                 stdout='https://github.com/nesquena/hermes-webui.git\n',
