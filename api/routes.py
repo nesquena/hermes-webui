@@ -8286,13 +8286,21 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
-def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
+def _lookup_cli_session_metadata(
+    session_id: str,
+    *,
+    all_profiles: bool = False,
+    requested_profile: str | None = None,
+) -> dict:
     if not session_id:
         return {}
     try:
         for row in get_cli_sessions(all_profiles=all_profiles):
-            if row.get("session_id") == session_id:
-                return row
+            if row.get("session_id") != session_id:
+                continue
+            if requested_profile and not _profiles_match(row.get("profile"), requested_profile):
+                continue
+            return row
     except Exception:
         return {}
     return {}
@@ -8762,12 +8770,12 @@ def _load_branch_source_or_refuse(handler, sid: str):
 
 
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
-    cli_meta = _lookup_cli_session_metadata(session_id)
+    cli_meta = _lookup_cli_session_metadata(session_id, requested_profile=requested_profile)
     if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
         return cli_meta
     if not allow_all_profiles:
         return {}
-    cli_meta = _lookup_cli_session_metadata(session_id, all_profiles=True)
+    cli_meta = _lookup_cli_session_metadata(session_id, all_profiles=True, requested_profile=requested_profile)
     if cli_meta and requested_profile and not _profiles_match(cli_meta.get("profile"), requested_profile):
         return {}
     return cli_meta or {}
@@ -17531,7 +17539,8 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
-                msgs = get_cli_session_messages(sid, profile=archive_profile)
+                _arch_profile = archive_profile or cli_meta.get("profile") or None
+                msgs = get_cli_session_messages(sid, profile=_arch_profile)
                 if not msgs:
                     return bad(handler, "Session not found", 404)
                 s = import_cli_session(
@@ -17539,7 +17548,7 @@ def handle_post(handler, parsed) -> bool:
                     cli_meta.get("title") or title_from(msgs, "CLI Session"),
                     msgs,
                     cli_meta.get("model") or "unknown",
-                    profile=archive_profile or cli_meta.get("profile"),
+                    profile=_arch_profile,
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )

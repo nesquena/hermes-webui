@@ -85,8 +85,11 @@ def _foreign_cli_row(session_id):
 def _install_foreign_row(monkeypatch, session_id, lookups, reads):
     """Row is invisible to the active profile and only found with all_profiles."""
 
-    def fake_lookup(session_id_, *, all_profiles=False):
+    def fake_lookup(session_id_, *, all_profiles=False, **kwargs):
         lookups.append((session_id_, all_profiles))
+        requested_profile = kwargs.get("requested_profile")
+        if requested_profile and not routes._profiles_match(FOREIGN_PROFILE, requested_profile):
+            return {}
         return _foreign_cli_row(session_id) if all_profiles else {}
 
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", fake_lookup)
@@ -363,4 +366,213 @@ def test_archive_then_restore_materialized_sidecar_round_trip(tmp_path, monkeypa
     )
     assert handled_unauthorized is True
     assert captured_unauthorized.get("status") in (404, 409), captured_unauthorized
+
+
+def test_archive_duplicate_session_id_selects_matching_profile_order_a_then_b(
+    tmp_path, monkeypatch
+):
+    """When get_cli_sessions(all_profiles=True) returns duplicate session IDs across profiles
+    in order [profile-a, profile-b], archiving with requested profile-b selects profile-b."""
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    session_id = "duplicate_cli_session_123"
+    profile_a = "profile-alpha"
+    profile_b = "profile-beta"
+
+    row_a = {
+        "session_id": session_id,
+        "profile": profile_a,
+        "title": "Title from Profile A",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "model": "model-a",
+        "created_at": 1700000010.0,
+        "updated_at": 1700000020.0,
+        "message_count": 1,
+    }
+    row_b = {
+        "session_id": session_id,
+        "profile": profile_b,
+        "title": "Title from Profile B",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "model": "model-b",
+        "created_at": 1700000030.0,
+        "updated_at": 1700000040.0,
+        "message_count": 1,
+    }
+
+    # active profile has no sessions; all_profiles returns row_a then row_b
+    def fake_get_cli_sessions(all_profiles=False):
+        if not all_profiles:
+            return []
+        return [row_a, row_b]
+
+    reads = []
+    def fake_messages(session_id_, profile=None):
+        reads.append((session_id_, profile))
+        if profile == profile_b:
+            return [{"role": "user", "content": "from B"}]
+        return [{"role": "user", "content": "from A"}]
+
+    monkeypatch.setattr(routes, "get_cli_sessions", fake_get_cli_sessions)
+    monkeypatch.setattr(routes, "get_cli_session_messages", fake_messages)
+    monkeypatch.setattr(routes, "_is_subagent_child_session_id", lambda sid: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda meta: False)
+
+    handled, captured, published = _archive(
+        monkeypatch,
+        {
+            "session_id": session_id,
+            "archived": True,
+            "profile": profile_b,
+            "all_profiles": 1,
+        },
+    )
+
+    assert handled is True
+    assert captured.get("status") == 200, captured
+    assert reads == [(session_id, profile_b)]
+
+    sidecar = _sidecar(session_dir, session_id)
+    assert sidecar is not None
+    assert sidecar["profile"] == profile_b
+    assert sidecar["archived"] is True
+    assert sidecar["title"] == "Title from Profile B"
+    assert sidecar["model"] == "model-b"
+
+    assert published
+    assert published[0][1].get("profile") == profile_b
+    assert published[0][1].get("session_id") == session_id
+
+
+def test_archive_duplicate_session_id_selects_matching_profile_reverse_order(
+    tmp_path, monkeypatch
+):
+    """Control: reverse order [profile-b, profile-a] also selects profile-b when requested."""
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    session_id = "duplicate_cli_session_reverse"
+    profile_a = "profile-alpha"
+    profile_b = "profile-beta"
+
+    row_a = {
+        "session_id": session_id,
+        "profile": profile_a,
+        "title": "Title from Profile A",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "model": "model-a",
+        "created_at": 1700000010.0,
+        "updated_at": 1700000020.0,
+        "message_count": 1,
+    }
+    row_b = {
+        "session_id": session_id,
+        "profile": profile_b,
+        "title": "Title from Profile B",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "model": "model-b",
+        "created_at": 1700000030.0,
+        "updated_at": 1700000040.0,
+        "message_count": 1,
+    }
+
+    def fake_get_cli_sessions(all_profiles=False):
+        if not all_profiles:
+            return []
+        return [row_b, row_a]
+
+    reads = []
+    def fake_messages(session_id_, profile=None):
+        reads.append((session_id_, profile))
+        if profile == profile_b:
+            return [{"role": "user", "content": "from B"}]
+        return [{"role": "user", "content": "from A"}]
+
+    monkeypatch.setattr(routes, "get_cli_sessions", fake_get_cli_sessions)
+    monkeypatch.setattr(routes, "get_cli_session_messages", fake_messages)
+    monkeypatch.setattr(routes, "_is_subagent_child_session_id", lambda sid: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda meta: False)
+
+    handled, captured, published = _archive(
+        monkeypatch,
+        {
+            "session_id": session_id,
+            "archived": True,
+            "profile": profile_b,
+            "all_profiles": 1,
+        },
+    )
+
+    assert handled is True
+    assert captured.get("status") == 200, captured
+    assert reads == [(session_id, profile_b)]
+
+    sidecar = _sidecar(session_dir, session_id)
+    assert sidecar is not None
+    assert sidecar["profile"] == profile_b
+    assert sidecar["archived"] is True
+    assert published
+    assert published[0][1].get("profile") == profile_b
+
+
+def test_archive_duplicate_session_id_missing_profile_returns_404(
+    tmp_path, monkeypatch
+):
+    """When duplicate IDs exist in profiles A and B, requesting nonexistent profile C yields 404."""
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    session_id = "duplicate_cli_session_missing"
+    profile_a = "profile-alpha"
+    profile_b = "profile-beta"
+
+    row_a = {
+        "session_id": session_id,
+        "profile": profile_a,
+        "title": "Title from Profile A",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "model": "model-a",
+        "created_at": 1700000010.0,
+        "updated_at": 1700000020.0,
+        "message_count": 1,
+    }
+    row_b = {
+        "session_id": session_id,
+        "profile": profile_b,
+        "title": "Title from Profile B",
+        "source_tag": "cli",
+        "raw_source": "cli",
+        "model": "model-b",
+        "created_at": 1700000030.0,
+        "updated_at": 1700000040.0,
+        "message_count": 1,
+    }
+
+    def fake_get_cli_sessions(all_profiles=False):
+        if not all_profiles:
+            return []
+        return [row_a, row_b]
+
+    reads = []
+    monkeypatch.setattr(routes, "get_cli_sessions", fake_get_cli_sessions)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid, profile=None: reads.append((sid, profile)))
+    monkeypatch.setattr(routes, "_is_subagent_child_session_id", lambda sid: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda meta: False)
+
+    handled, captured, published = _archive(
+        monkeypatch,
+        {
+            "session_id": session_id,
+            "archived": True,
+            "profile": "profile-gamma",
+            "all_profiles": 1,
+        },
+    )
+
+    assert handled is True
+    assert captured.get("status") == 404, captured
+    assert reads == []
+    assert _sidecar(session_dir, session_id) is None
+    assert published == []
+
 
