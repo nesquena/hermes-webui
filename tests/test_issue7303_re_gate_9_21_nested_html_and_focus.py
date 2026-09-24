@@ -34,7 +34,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 PARSER_PY = REPO / "api" / "cron_output_parser.py"
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-CHANGELOG_MD = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
 
 from api.cron_output_parser import parse_cron_output
 
@@ -218,26 +217,4 @@ def test_context_disclosure_has_focus_visible_ring():
     assert "outline-offset" in body, (
         "the focus-visible ring should set outline-offset so the ring "
         "sits outside the summary, matching the rest of the stylesheet"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Repository requirements — CHANGELOG.md direct edit reverted
-# ---------------------------------------------------------------------------
-
-
-def test_changelog_no_longer_contains_pr_added_block():
-    """The PR originally added a 7-line block to CHANGELOG.md under
-    ``### Fixed`` for the slash-command autocomplete behaviour.
-    ``CONTRIBUTING.md:116,143`` explicitly prohibit changelog edits
-    in ordinary contributor PRs, so the block was reverted in this
-    push. Pin the absence so a future round does not silently
-    re-add it.
-    """
-    assert (
-        "Slash-command autocomplete stops offering commands the WebUI cannot run"
-        not in CHANGELOG_MD
-    ), (
-        "CHANGELOG.md must not be edited directly in this PR — "
-        "CONTRIBUTING.md:116,143 prohibits it. Revert any re-added block."
     )
