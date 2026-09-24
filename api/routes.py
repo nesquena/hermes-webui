@@ -2551,14 +2551,6 @@ def _build_session_list_cache_payload(
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
-    webui_session_count = sum(
-        1 for s in full_scoped_all_sources
-        if not _is_cli_session_for_settings(s)
-    )
-    cli_session_count = sum(
-        1 for s in full_scoped_all_sources
-        if _is_cli_session_for_settings(s)
-    )
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
     scoped = _filter_sidebar_source(full_scoped_all_sources)
@@ -2577,6 +2569,37 @@ def _build_session_list_cache_payload(
             scoped = visible_rows_for_page + archived_rows_for_page[
                 normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
             ]
+            # #6624: source badge counts computed after archived_limit/archived_offset
+            # truncation so badges match the post-pagination sets.
+            webui_vis = [s for s in visible_scoped if not s.get("archived") and not _is_cli_session_for_settings(s)]
+            webui_arch = [s for s in archived_scoped if s.get("archived") and not _is_cli_session_for_settings(s)][
+                normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
+            ]
+            webui_session_count = len(webui_vis) + len(webui_arch)
+
+            cli_vis = [s for s in visible_scoped if not s.get("archived") and _is_cli_session_for_settings(s)]
+            cli_arch = [s for s in archived_scoped if s.get("archived") and _is_cli_session_for_settings(s)][
+                normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
+            ]
+            cli_session_count = len(cli_vis) + len(cli_arch)
+        else:
+            webui_session_count = sum(
+                1 for s in full_scoped_all_sources
+                if not _is_cli_session_for_settings(s)
+            )
+            cli_session_count = sum(
+                1 for s in full_scoped_all_sources
+                if _is_cli_session_for_settings(s)
+            )
+    else:
+        webui_session_count = sum(
+            1 for s in full_scoped_all_sources
+            if not _is_cli_session_for_settings(s)
+        )
+        cli_session_count = sum(
+            1 for s in full_scoped_all_sources
+            if _is_cli_session_for_settings(s)
+        )
     sidebar_reference_sessions: list[dict] = []
     if not include_archived:
         sidebar_reference_sessions = _hidden_archived_sidebar_reference_sessions(

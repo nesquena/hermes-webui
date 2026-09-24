@@ -219,3 +219,48 @@ def test_gateway_sse_snapshot_uses_resolved_limit(monkeypatch):
     resolved = routes._resolve_cli_visible_session_limit(routes.load_settings())
     fake_get_cli_sessions(visible_session_limit=resolved)
     assert captured["visible_session_limit"] == 75
+
+
+def test_session_counts_computed_after_archived_limit_pagination(monkeypatch):
+    """#6624 re-gate: webui_session_count / cli_session_count must be computed
+    after archived_limit/offset pagination to match the returned rows, while
+    retaining unbounded archived_*_count totals for 'Load more'."""
+    # 1 visible webui, 4 archived webui (total 5 webui); 2 visible cli, 3 archived cli (total 5 cli)
+    rows = _session_rows(webui_count=5, cli_count=5, archived_webui_count=4, archived_cli_count=3)
+    _install_common_monkeypatches(monkeypatch, rows)
+
+    # 1. Paged WebUI request with archived_limit=3: 1 visible + 3 archived = 4 rows returned
+    handler = _handle_sessions("http://example.com/api/sessions?include_archived=1&archived_limit=3&sidebar_source=webui")
+    assert handler.status == 200
+    body = handler.json_body()
+    assert len(body["sessions"]) == 4
+    assert body["webui_session_count"] == 4
+    assert body["archived_webui_count"] == 4  # unbounded retained for "Load more"
+
+    # 2. Boundary: archived_limit=0 -> only visible rows returned
+    handler = _handle_sessions("http://example.com/api/sessions?include_archived=1&archived_limit=0&sidebar_source=webui")
+    body = handler.json_body()
+    assert len(body["sessions"]) == 1
+    assert body["webui_session_count"] == 1
+    assert body["archived_webui_count"] == 4
+
+    # 3. Unbounded request: no archived_limit -> all 5 rows returned, count=5
+    handler = _handle_sessions("http://example.com/api/sessions?include_archived=1&sidebar_source=webui")
+    body = handler.json_body()
+    assert len(body["sessions"]) == 5
+    assert body["webui_session_count"] == 5
+    assert body["archived_webui_count"] == 4
+
+    # 4. Profile-scoped: only rows matching active profile count
+    routes._session_list_cache_clear()
+    profile_rows = _session_rows(webui_count=5, cli_count=5, archived_webui_count=4, archived_cli_count=3)
+    for r in profile_rows[:2]:
+        r["profile"] = "other_profile"
+    _install_common_monkeypatches(monkeypatch, profile_rows)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    handler = _handle_sessions("http://example.com/api/sessions?include_archived=1&sidebar_source=webui")
+    body = handler.json_body()
+    # 2 webui rows belonged to other_profile, so 3 remain
+    assert body["webui_session_count"] == 3
+
