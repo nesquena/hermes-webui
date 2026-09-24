@@ -267,6 +267,11 @@ per-SID thread and cross-process authority. This includes normal `Session.save()
 writes, backup recovery, and discoverability repairs. Existing sidecars are
 fenced by their generation plus exact digest; first publication is create-or-fail,
 so a stale alias or repair cannot overwrite a sidecar that appeared concurrently.
+The digest is recomputed in chunks on each save, while only the bounded JSON
+metadata prefix is parsed for the generation. This avoids decoding a large
+transcript on every save but intentionally keeps a linear file scan: a cached
+prefix or file stat alone cannot detect an external same-generation body rewrite.
+Legacy layouts with metadata after messages fall back to a full parse.
 Out-of-band replacements increment `_sidecar_generation_v1` and invalidate cached
 aliases before later saves can proceed.
 

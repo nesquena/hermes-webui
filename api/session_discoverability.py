@@ -454,6 +454,7 @@ def _clear_sidecar_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backe
         _invalidate_cached_session_generation,
         _read_sidecar_revision,
         _session_sidecar_authority,
+        _sidecar_revision_from_bytes,
     )
 
     with _session_sidecar_authority(sid, session_dir=session_dir):
@@ -472,8 +473,26 @@ def _clear_sidecar_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backe
         payload["_sidecar_generation_v1"] = revision.generation + 1
         if _read_sidecar_revision(path, sid) != revision:
             return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "skipped": "stale_generation"}
-        _atomic_write_json(path, payload)
-        _fsync_sidecar_directory(path.parent)
+        intended = _sidecar_revision_from_bytes(
+            sid, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            parsed=payload,
+        )
+        try:
+            _atomic_write_json(path, payload)
+            _fsync_sidecar_directory(path.parent)
+        except OSError:
+            # The rename can have completed before the directory fsync fails.
+            # A cached alias still claiming the old revision may not write again.
+            try:
+                visible = _read_sidecar_revision(path, sid)
+            except OSError:
+                visible = None
+            if visible == intended:
+                _invalidate_cached_session_generation(sid, expected_revision=revision)
+            elif visible != revision:
+                # Foreign or unreadable publication: do not leave an old owner.
+                _invalidate_cached_session_generation(sid, expected_revision=revision)
+            raise
         _invalidate_cached_session_generation(sid)
         return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": True, "backup": backup}
 
