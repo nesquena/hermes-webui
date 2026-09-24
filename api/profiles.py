@@ -56,6 +56,11 @@ _loaded_profile_env_keys: set[str] = set()
 # process-global _active_profile.
 _tls = threading.local()
 
+# Home of the profile this process serves as its own (set by init_profile_state).
+# Streaming turns mirror their profile into os.environ['HERMES_HOME'], so the live
+# env var is not a stable identity; see _pin_process_profile_home().
+_PROCESS_PROFILE_HOME: Optional[str] = None
+
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
 _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
 
@@ -1360,6 +1365,8 @@ def profile_env_for_background_worker(
 def profile_env_for_active_request_readonly(
     purpose: str = "provider/model read",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    include_root: bool = False,
 ):
     """Apply the active per-request profile's env to thread-local state only (#3957).
 
@@ -1376,11 +1383,18 @@ def profile_env_for_active_request_readonly(
     process-global ``os.environ``.
 
     No-ops for the default/root profile, which is the common single-profile
-    deployment case.
+    deployment case, unless ``include_root`` is set: callers whose Hermes Agent
+    reads must not follow a streaming turn's mirrored ``HERMES_HOME`` (MCP
+    runtime status/reload) bind the root profile's home explicitly too.
+
+    Yields True when the context-local Hermes-home override is installed for
+    the resolved profile, else False (no-op, older agent, or resolution error).
     """
     profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
+    if include_root and not profile:
+        profile = "default"
+    if not profile or (_is_root_profile(profile) and not include_root):
+        yield False
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
@@ -1396,7 +1410,7 @@ def profile_env_for_active_request_readonly(
             purpose,
             exc_info=True,
         )
-        yield
+        yield False
         return
     try:
         from hermes_constants import (
@@ -1440,7 +1454,7 @@ def profile_env_for_active_request_readonly(
                     purpose,
                     exc_info=True,
                 )
-        yield
+        yield home_override_installed
     finally:
         if _has_scope and _secret_scope_mod is not None:
             try:
@@ -1529,8 +1543,14 @@ def profile_scope_for_detached_worker(
 
 
 def _set_hermes_home(home: Path):
-    """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
+    """Set HERMES_HOME env var and monkey-patch cached module-level paths.
+
+    Every process-wide home change (startup, ``switch_profile(process_wide=True)``)
+    goes through here, so the process-profile pin used for MCP routing decisions
+    is updated in the same step and cannot drift from ``HERMES_HOME``.
+    """
     os.environ['HERMES_HOME'] = str(home)
+    _pin_process_profile_home(home)
 
     patch_skill_home_modules(home)
 
@@ -1610,9 +1630,43 @@ def init_profile_state() -> None:
     else:
         _active_profile = _read_active_profile_file()
         home = get_active_hermes_home()
-    _set_hermes_home(home)
+    _set_hermes_home(home)  # also pins the process-profile home (MCP routing anchor)
     install_cron_scheduler_profile_isolation()
     _reload_dotenv(home)
+
+
+def _pin_process_profile_home(home: Path) -> None:
+    """Record the profile home this process serves as its own, for WebUI and Hermes Agent.
+
+    Called from ``_set_hermes_home()`` so startup and process-wide profile switches
+    keep one owner for the value. Hermes Agent keys MCP connections and registry
+    overlays by profile only when a task serves a *routed* profile: the context-local
+    Hermes-home override differs from the process home. Streaming turns mirror their
+    profile into ``os.environ['HERMES_HOME']`` for legacy readers, which makes every
+    turn's own profile look like the process profile, so same-named MCP servers of
+    different profiles share one bare-name connection. Agents exposing
+    ``hermes_constants.pin_process_hermes_home`` take a stable anchor instead; older
+    agents keep following the env var, and ``get_process_profile_home()`` still gives
+    WebUI the anchor to detect that skew.
+    """
+    global _PROCESS_PROFILE_HOME
+    _PROCESS_PROFILE_HOME = str(home)
+    try:
+        import hermes_constants
+        pin = getattr(hermes_constants, 'pin_process_hermes_home', None)
+        if callable(pin):
+            pin(str(home))
+    except Exception:
+        logger.debug("Hermes Agent process-home pin unavailable", exc_info=True)
+
+
+def get_process_profile_home() -> Path:
+    """Return the profile home this WebUI process serves as its own (stable per process)."""
+    if _PROCESS_PROFILE_HOME:
+        return Path(_PROCESS_PROFILE_HOME)
+    if _INITIAL_HERMES_HOME:
+        return Path(_INITIAL_HERMES_HOME).expanduser()
+    return _DEFAULT_HERMES_HOME
 
 
 def switch_profile(name: str, *, process_wide: bool = True) -> dict:

@@ -3011,12 +3011,54 @@ function _getOptionProviderId(opt){
     return group.dataset.provider;
   }
   const value=String(opt.value||'');
-  if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@') && value.includes(':')){
+    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    if(value.startsWith('@custom:')){
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
+      const firstColon=afterCustom.indexOf(':');
+      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
+      return 'custom:'+afterCustom;
+    }
+    // Other @provider:model — provider is up to first colon
+    return value.slice(1,value.indexOf(':'));
+  }
   return '';
 }
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
-  if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@')&&value.includes(':')){
+    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    if(value.startsWith('@custom:')){
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
+      const firstColon=afterCustom.indexOf(':');
+      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
+      return 'custom:'+afterCustom;
+    }
+    // Other @provider:model — provider is up to first colon
+    return value.slice(1,value.indexOf(':'));
+  }
   return '';
 }
 function _modelPickerOptionIdentity(modelId, providerId){
@@ -3027,9 +3069,19 @@ function _modelPickerOptionIdentity(modelId, providerId){
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
     }else if(value.startsWith('@custom:')){
-      const namedProvider=value.substring('@custom:'.length);
-      const splitAt=namedProvider.indexOf(':');
-      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      let splitAt=-1;
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          splitAt=parts[0].length + 1 + parts[1].length;
+        }
+      }
+      if(splitAt<0) splitAt=afterCustom.indexOf(':');
+      value=splitAt>=0 ? afterCustom.substring(splitAt+1) : afterCustom;
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -3093,7 +3145,25 @@ function _modelStateForSelect(sel, modelId){
     // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
-    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+    // Normally-rendered catalog options only carry the qualified
+    // @custom:<slug>:<model> value — data-model is set solely by the fallback
+    // injection path (_ensureModelOptionInDropdown). When it is missing, strip
+    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
+    // the model id (#6884). The prefix must come from the option metadata's
+    // authoritative provider (routedProvider), NOT from explicitProvider: the
+    // latter re-parses the value at its LAST colon, so a colon-bearing model
+    // id like @custom:backup:model-a:free would otherwise strip to just
+    // "free" (re-gate on the #6221 family). Only custom providers are
+    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
+    // provider namespace and must be preserved (#1771).
+    const effectiveProvider=routedProvider||explicitProvider;
+    const effectiveProviderLc=effectiveProvider.toLowerCase();
+    const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
+    const explicitPrefix=`@${effectiveProvider}:`;
+    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+      ?value.slice(explicitPrefix.length)
+      :value;
+    return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
@@ -4513,7 +4583,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  const _isSelectedModelRow=(m)=>{
+    const _rowModel=String((m&&m.value)||'');
+    const _rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const _stateModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const _stateProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    // Normalize both sides to the same model/provider identity. Catalog rows
+    // carry the qualified @custom:<slug>:<model> value while the outgoing
+    // state model is bare (#6884) — a raw string comparison would leave no
+    // row marked active/"Selected" after a restore. _modelPickerOptionIdentity
+    // is the same identity used for picker dedup, so the row that survives is
+    // exactly the one the send path resolves.
+    const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'
+      ?_modelPickerOptionIdentity(model,provider)
+      :String(model||'');
+    return _norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)
+      &&_rowProvider===_stateProvider;
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
