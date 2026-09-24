@@ -219,7 +219,7 @@ def test_eager_thread_start_failure_retry_reload_has_one_new_prompt(issue7193_en
     ("field", "value"),
     [
         ("title", "Original title"),
-        ("workspace", "C:\\original-workspace"),
+        ("workspace", None),
         ("model", "original-model"),
         ("model_provider", "original-provider"),
         ("messages", [{"role": "user", "content": "saved message"}]),
@@ -235,6 +235,8 @@ def test_eager_thread_start_failure_retry_reload_has_one_new_prompt(issue7193_en
 )
 def test_rejected_start_restores_snapshot_field(issue7193_env, monkeypatch, field, value):
     session = _saved_retry_session(issue7193_env)
+    if field == "workspace":
+        value = str(issue7193_env.parent / "original-workspace")
     setattr(session, field, copy.deepcopy(value))
     session.save(touch_updated_at=False)
     before = copy.deepcopy(session.__dict__)
