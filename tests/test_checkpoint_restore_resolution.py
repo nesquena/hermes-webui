@@ -13,8 +13,9 @@ a guessed index`` (stale sidecar stamps on legacy rows):
   * durable store unavailable -> empty plan (stamp-only fallback)
   * annotate_restore_targets copies rows, never mutates the transcript
 
-Harness style mirrors tests/test_checkpoint_restore_path.py — tmp sidecar
-store + tmp state.db, no sockets.
+The session_ops end-to-end block runs against a REAL state.db (built through
+the same SessionDB API the agent uses) so the commit goes through the Agent's
+transaction authority — production-composed per the PR #7075 review.
 """
 import json
 import sqlite3
@@ -164,8 +165,29 @@ def test_annotate_copies_and_never_mutates(plan_env):
 
 
 # --------------------------------------------------------------------------
-# session_ops end-to-end on a tmp sidecar store + tmp state.db
+# session_ops end-to-end on a tmp sidecar store + REAL tmp state.db
 # --------------------------------------------------------------------------
+
+def _seed_state_db(state_db, sid: str, rows):
+    """Build the tmp state.db through the real SessionDB API; returns row ids."""
+    from hermes_state import SessionDB
+    db = SessionDB(state_db)
+    try:
+        db.ensure_session(sid, source="webui-test")
+        return [db.append_message(sid, role, content) for role, content in rows]
+    finally:
+        db.close()
+
+
+def _active_ids(state_db, sid):
+    conn = sqlite3.connect(state_db)
+    try:
+        return sorted(r[0] for r in conn.execute(
+            "SELECT id FROM messages WHERE session_id=? "
+            "AND (active IS NULL OR active != 0)", (sid,)).fetchall())
+    finally:
+        conn.close()
+
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
@@ -176,14 +198,11 @@ def env(tmp_path, monkeypatch):
     sessions_dir.mkdir()
     state_db = tmp_path / "state.db"
 
-    conn = sqlite3.connect(state_db)
-    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
-                 "role TEXT, content TEXT, active INTEGER DEFAULT 1)")
-    rows = [(11, sid, "user", "first prompt"), (12, sid, "assistant", "answer 1"),
-            (13, sid, "user", "second prompt"), (14, sid, "assistant", "answer 2")]
-    conn.executemany("INSERT INTO messages VALUES (?,?,?,?,1)", rows)
-    conn.commit()
-    conn.close()
+    u1, a1, u2, a2 = _seed_state_db(state_db, sid, [
+        ("user", "first prompt"), ("assistant", "answer 1"),
+        ("user", "second prompt"), ("assistant", "answer 2"),
+    ])
+    ids = {"u1": u1, "a1": a1, "u2": u2, "a2": a2}
 
     s = Session(session_id=sid)
     s.title = "display restore test"
@@ -198,43 +217,20 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SESSION_DIR", str(sessions_dir))
     monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db)
-    monkeypatch.setattr(models, "get_state_db_session_messages",
-                        lambda session_id, **kw: _read_state_rows(state_db, session_id))
+    monkeypatch.setattr(models, "_agent_state_db_path", lambda **kw: state_db)
     s.save()
     monkeypatch.setitem(models.SESSIONS, sid, s)
-    return SimpleNamespace(sid=sid, session=s, state_db=str(state_db))
-
-
-def _read_state_rows(state_db, session_id):
-    conn = sqlite3.connect(state_db)
-    try:
-        rows = conn.execute(
-            "SELECT id, role, content FROM messages WHERE session_id=? "
-            "AND (active IS NULL OR active != 0) ORDER BY id", (session_id,)).fetchall()
-    finally:
-        conn.close()
-    return [{"id": rid, "role": role, "content": content, "active": 1}
-            for rid, role, content in rows]
-
-
-def _active_ids(state_db, sid):
-    conn = sqlite3.connect(state_db)
-    try:
-        return sorted(r[0] for r in conn.execute(
-            "SELECT id FROM messages WHERE session_id=? AND (active IS NULL OR active != 0)",
-            (sid,)).fetchall())
-    finally:
-        conn.close()
+    return SimpleNamespace(sid=sid, session=s, state_db=state_db, ids=ids)
 
 
 def test_display_addressed_restore_by_message_id(env):
     res = session_ops.restore_checkpoint_to_display_message(env.sid, message_id="u2")
     assert res["restore_mode"] == "exact"
-    assert res["restored_to_row_id"] == 13
-    assert res["archived_state_row_ids"] == [13, 14]
+    assert res["restored_to_row_id"] == env.ids["u2"]
+    assert res["archived_state_row_ids"] == [env.ids["u2"], env.ids["a2"]]
     assert res["new_message_count"] == 2
     assert [m["content"] for m in env.session.messages] == ["first prompt", "answer 1"]
-    assert _active_ids(env.state_db, env.sid) == [11, 12]
+    assert _active_ids(env.state_db, env.sid) == [env.ids["u1"], env.ids["a1"]]
     # context_messages (model-facing transcript) aligned to the same prefix
     ctx = env.session.context_messages
     assert isinstance(ctx, list)
@@ -245,7 +241,7 @@ def test_display_addressed_restore_by_message_id(env):
 def test_display_addressed_restore_by_msg_idx_with_ts(env):
     res = session_ops.restore_checkpoint_to_display_message(
         env.sid, msg_idx=2, message_ts=102.0)
-    assert res["restored_to_row_id"] == 13
+    assert res["restored_to_row_id"] == env.ids["u2"]
     assert res["new_message_count"] == 2
 
 
@@ -264,9 +260,10 @@ def test_display_addressed_restore_unknown_message_id_refused(env):
 
 def test_display_addressed_restore_to_first_message_wipes_tail(env):
     res = session_ops.restore_checkpoint_to_display_message(env.sid, message_id="u1")
-    assert res["restored_to_row_id"] == 11
+    assert res["restored_to_row_id"] == env.ids["u1"]
     assert res["new_message_count"] == 0
-    assert res["archived_state_row_ids"] == [11, 12, 13, 14]
+    assert res["archived_state_row_ids"] == [
+        env.ids["u1"], env.ids["a1"], env.ids["u2"], env.ids["a2"]]
     assert _active_ids(env.state_db, env.sid) == []
 
 
@@ -286,7 +283,7 @@ def test_display_addressed_restore_archives_before_sidecar(env, monkeypatch):
     def boom(*a, **k):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(session_ops, "_archive_state_db_suffix", boom)
+    monkeypatch.setattr(session_ops, "_commit_rewind_via_authority", boom)
     with pytest.raises(sqlite3.OperationalError):
         session_ops.restore_checkpoint_to_display_message(env.sid, message_id="u2")
     assert len(env.session.messages) == 4
@@ -313,7 +310,18 @@ def test_reader_exposes_ids_without_api_content(env):
     otherwise anchor validation and suffix archiving silently no-op."""
     rows = session_ops._read_active_state_db_rows(env.sid)
     assert rows is not None
-    assert [r["id"] for r in rows] == [11, 12, 13, 14]
-    assert session_ops._state_db_active_rows_from(env.sid, 13) == [13, 14]
-    assert session_ops._state_db_active_rows_after(env.sid, 13) == [13, 14]
-    assert session_ops._state_db_active_row_by_id(env.sid, 13)["role"] == "user"
+    assert [r["id"] for r in rows] == [
+        env.ids["u1"], env.ids["a1"], env.ids["u2"], env.ids["a2"]]
+    assert session_ops._durable_active_id_set(env.sid) == {
+        env.ids["u1"], env.ids["a1"], env.ids["u2"], env.ids["a2"]}
+
+
+def test_durable_paths_do_not_hand_roll_state_db_writes(env):
+    """PR #7075 review item #2: the module must not UPDATE state.db directly —
+    durable mutations go through the Agent's transaction authority."""
+    import inspect
+    src = inspect.getsource(session_ops)
+    assert "_archive_state_db_suffix" not in src
+    assert "UPDATE messages SET active=0" not in src
+    assert "rewind_to_message" in src          # the Agent authority
+    assert "replace_messages" in src           # the Agent authority

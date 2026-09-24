@@ -1,6 +1,10 @@
 """Session-mutation operations for slash commands (/retry, /undo) and
 read-only aggregators (/status, /usage). Operates on the webui's own
-JSON Session store (api/models.py), not on hermes-agent's SQLite.
+JSON Session store (api/models.py). Durable history mutations (checkpoint
+restore, per-message delete) additionally go through hermes-agent's SessionDB
+transaction authority — SessionDB.rewind_to_message / replace_messages — as
+of the PR #7075 review rework (see _commit_rewind_via_authority and
+_commit_durable_delete); nothing here hand-rolls SQLite writes.
 
 Behavior parity reference: gateway/run.py:_handle_*_command in
 the hermes-agent repo.
@@ -19,6 +23,28 @@ from api.models import get_session, SESSIONS
 logger = logging.getLogger(__name__)
 
 AUTO_TITLE_LABELS = {'untitled', 'new chat'}
+
+
+class CheckpointBusyError(ValueError):
+    """A live turn / compression currently owns the transcript.
+
+    Raised by the checkpoint-restore / per-message-delete durable paths when
+    the Agent's in-transaction guard refuses because a non-stale turn lease or
+    a compression lock is held (or the session is closed by compression).
+    Nothing was written; the caller can retry once the turn finishes. The
+    routes map this to 409 so the client can tell "retry later" apart from
+    "bad target" (400).
+    """
+
+
+class CheckpointStaleError(ValueError):
+    """The transcript moved under the caller's snapshot.
+
+    Raised when the Agent's in-transaction CAS rejects the durable write
+    (active-set identity / target payload changed), or when display rows
+    cannot be attributed to the durable transcript because the view is stale.
+    Nothing was written; the client should reload the session and retry.
+    """
 
 
 def _row_signature(row: Any) -> tuple[str, ...] | None:
@@ -542,36 +568,8 @@ def delete_message_at_signature(
     Raises:
         ValueError: ``message_id`` not found in ``s.messages`` or unknown scope.
     """
-    if scope not in ("single", "pair"):
-        raise ValueError(f"scope must be 'single' or 'pair', got {scope!r}")
     history = list(session.messages or [])
-    target_idx: int | None = None
-    for i, row in enumerate(history):
-        if isinstance(row, dict) and row.get('id') == message_id:
-            target_idx = i
-            break
-    if target_idx is None:
-        raise ValueError(f"message_id {message_id!r} not found in session")
-
-    # Compute the set of display ids to drop.
-    drop_ids: set[str] = {message_id}
-    if scope == "pair":
-        role = history[target_idx].get('role')
-        if role == 'user':
-            # Drop the user + the immediately-following assistant (if present).
-            sibling = history[target_idx + 1] if target_idx + 1 < len(history) else None
-            if isinstance(sibling, dict) and sibling.get('role') == 'assistant':
-                sibling_id = sibling.get('id')
-                if sibling_id:
-                    drop_ids.add(sibling_id)
-        elif role == 'assistant':
-            # Drop the assistant + the immediately-preceding user (if present).
-            sibling = history[target_idx - 1] if target_idx - 1 >= 0 else None
-            if isinstance(sibling, dict) and sibling.get('role') == 'user':
-                sibling_id = sibling.get('id')
-                if sibling_id:
-                    drop_ids.add(sibling_id)
-        # For tool/system/tombstone rows or missing siblings, pair collapses to single.
+    drop_ids, target_idx = _delete_display_drop_plan(session, message_id, scope)
 
     # Splice display messages.
     old_msg_count = len(history)
@@ -605,7 +603,20 @@ def delete_message_at_signature(
 
 
 def delete_message(session_id: str, message_id: str, scope: str = "pair") -> dict[str, Any]:
-    """Drop a single message (or its pair) from a session, persisting via disk.
+    """Drop a single message (or its pair) from display + context + the DURABLE transcript.
+
+    Contributor rework for PR #7075 review item #4: the delete is no longer
+    sidecar-only. When the session has a durable transcript, the durable rows
+    the display delete maps to are removed FIRST through the Agent's
+    transaction authority (``SessionDB.replace_messages(archive_dropped=True,
+    reject_active_turn_lease=True)`` — soft-archive mode with the in-txn
+    live-turn guard); the sidecar is then spliced and published from the
+    committed result. A publication failure after the durable commit is
+    fail-closed: the session is flagged for resync and the correction is
+    recorded in a crash-safe marker (``api/durable_sync``) that every later
+    load re-applies — stale sidecar data can never resurrect the removed
+    rows. Sessions without a durable transcript keep the historic
+    sidecar-only splice (there is nothing durable to update).
 
     Public entry point. Acquires the session agent lock and serializes the
     read-modify-write of ``s.messages`` + ``s.context_messages`` against the
@@ -615,14 +626,70 @@ def delete_message(session_id: str, message_id: str, scope: str = "pair") -> dic
     Raises:
         KeyError: session not found.
         ValueError: message_id not found OR unknown scope.
+        CheckpointBusyError: a live turn / compression owns the transcript.
+        CheckpointStaleError: the target cannot be attributed to the durable
+            transcript (reload and retry).
+        RuntimeError: durable write or sidecar publication failed (fail-closed;
+            the durable store may already carry the commit).
     """
     with _get_session_agent_lock(session_id):
         s = get_session(session_id)  # acquires LOCK transiently
         with LOCK:
             # Stale-object guard — see retry_last for the rationale.
             s = SESSIONS.get(session_id, s)
+            all_rows = list(s.messages or [])
+            drop_ids, target_idx = _delete_display_drop_plan(s, message_id, scope)
+            first_drop_idx = min(
+                (
+                    i for i, m in enumerate(all_rows)
+                    if isinstance(m, dict) and m.get('id') in drop_ids
+                ),
+                default=None,
+            )
+        # --- DURABLE FIRST (Agent transaction authority) ---------------------
+        # Only when the session actually has durable rows; a pre-persistence
+        # session keeps the historic sidecar-only behavior. Any refusal here
+        # aborts BEFORE the sidecar is touched — no split state.
+        durable_synced = False
+        durable_drop: list[int] = []
+        if _durable_rows_exist(s):
+            plan = _plan_durable_delete(s, session_id, message_id, scope)
+            drop_row_ids = [int(x) for x in (plan.get("drop_row_ids") or [])]
+            if drop_row_ids:
+                _commit_durable_delete(s, session_id, drop_row_ids)
+                durable_drop = drop_row_ids
+                durable_synced = True
+        # --- SIDECAR SPLICE from the committed durable state -----------------
+        with LOCK:
+            s = SESSIONS.get(session_id, s)  # re-bind after the durable write
             result = delete_message_at_signature(s, message_id, scope)
-        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+            if first_drop_idx is not None:
+                # replace_messages re-inserts the divergent suffix (from the
+                # hole onward) with NEW ids: the old stamps there would point
+                # at archived rows — clear them so the next load re-derives
+                # the fresh identities from the durable transcript.
+                _strip_row_stamps((s.messages or [])[first_drop_idx:])
+            if durable_synced:
+                # Precise pass: whatever replace_messages re-inserted or
+                # archived, no display row may keep a stamp that is no longer
+                # an active durable row (loads and restore both fail closed
+                # on stale stamps — clear them proactively).
+                committed = _durable_active_id_set(session_id)
+                if committed is not None:
+                    for row in (s.messages or []):
+                        stamp = _display_stamp_int(row)
+                        if stamp is not None and stamp not in committed:
+                            _strip_row_stamps([row])
+        marker_fields = {
+            "drop_display_ids": result["removed_message_ids"],
+            "archived_row_ids": [int(x) for x in durable_drop],
+            "profile": getattr(s, "profile", None),
+        }
+        _publish_session_sidecar(
+            s, session_id, marker_kind="delete", marker_fields=marker_fields
+        )
+    result["durable_synced"] = durable_synced
+    result["durable_removed_row_ids"] = [int(x) for x in durable_drop]
     return result
 
 
@@ -771,65 +838,656 @@ def _state_db_active_row_by_id(session_id: str, row_id: int):
     return None
 
 
-def _state_db_active_rows_after(session_id: str, row_id: int) -> list[int]:
-    """Durable ids of the ACTIVE rows at/after ``row_id`` in state.db.
+def _session_state_db_path(session):
+    """Resolve the Agent state.db path for *session* (profile-aware).
 
-    Uses the *state.db* id order of the matched row — not the sidecar ordinal
-    — so the archived suffix is exactly the durable transcript that follows
-    the checkpoint. Returns [] when the anchor row is not active/present.
+    Mirrors ``api/checkpoint_map.load_active_user_rows``' resolution so the
+    resolver and the write path always address the SAME database (a profile
+    mismatch here would read one transcript and archive another).
     """
-    rows = _read_active_state_db_rows(session_id)
-    if not rows:
-        return []
-    anchor_idx = None
-    for i, r in enumerate(rows):
-        if r["id"] == row_id:
-            anchor_idx = i
-            break
-    if anchor_idx is None:
-        return []
-    return [r["id"] for r in rows[anchor_idx:]]
-
-
-def _state_db_active_rows_from(session_id: str, first_row_id: int) -> list[int]:
-    """Durable ids of every ACTIVE row at/after ``first_row_id`` (inclusive).
-
-    Id order is transcript order in state.db, so "all active rows with
-    ``id >= cut``" is exactly the durable suffix a restore soft-archives.
-    Returns [] when nothing matches or when state.db is unavailable.
-    """
-    rows = _read_active_state_db_rows(session_id)
-    if not rows:
-        return []
-    return [r["id"] for r in rows if r["id"] >= first_row_id]
-
-
-def _archive_state_db_suffix(session_id: str, archived_ids: list[int]) -> None:
-    """Soft-archive (``active=0``) the given durable rows in a single tx.
-
-    Raises on any failure — callers treat that as a hard restore failure so the
-    sidecar is never left claiming success over an unmodified durable transcript
-    (the dual-store fail-open bug the maintainers flagged). Runs in autocommit
-    off mode; the whole UPDATE is one transaction and commits only on success.
-    """
-    if not archived_ids:
-        return
-    from api.models import _active_state_db_path
-    import sqlite3
-    db_path = _active_state_db_path()
-    if not db_path or not os.path.exists(str(db_path)):
-        raise RuntimeError("state.db not available for checkpoint archive")
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
     try:
-        with conn:  # one transaction; commits on clean exit, rolls back on raise
-            placeholders = ",".join("?" for _ in archived_ids)
-            conn.execute(
-                "UPDATE messages SET active=0 "
-                "WHERE session_id=? AND id IN (%s) AND active=1" % placeholders,
-                [session_id, *archived_ids],
+        from api.models import _agent_state_db_path
+        return _agent_state_db_path(profile=getattr(session, "profile", None) or None)
+    except Exception:
+        return None
+
+
+def _open_session_authority(session):
+    """Open the Agent's authoritative SessionDB for *session*, or ``None``.
+
+    Contributor rework for PR #7075 review item #2: every durable transcript
+    mutation in this module goes through this handle
+    (``SessionDB.rewind_to_message`` / ``SessionDB.replace_messages``) — the
+    Agent's transaction authority owns cut validation, the active-set CAS, the
+    live-turn-lease / compression guards and the message counters, instead of
+    the WebUI hand-rolling its own ``SELECT``/``UPDATE`` path around them.
+    Callers must ``close()`` the handle.
+    """
+    try:
+        from hermes_state import SessionDB
+    except Exception:
+        return None
+    db_path = _session_state_db_path(session)
+    if not db_path:
+        return None
+    try:
+        return SessionDB(db_path)
+    except Exception:
+        logger.warning(
+            "checkpoint: state.db authority unavailable for %s",
+            getattr(session, "session_id", "?"),
+            exc_info=True,
+        )
+        return None
+
+
+def _durable_rows_exist(session) -> bool:
+    """Cheap read-only probe: does state.db hold ANY row for this session?
+
+    Decides whether the delete path needs a durable rewrite at all. It
+    deliberately does NOT open the write-capable SessionDB for sessions with
+    no durable rows (a pre-persistence session keeps its historic sidecar-only
+    behavior rather than us faking a durable write against an empty store).
+    """
+    sid = getattr(session, "session_id", None)
+    if not sid:
+        return False
+    db_path = _session_state_db_path(session)
+    if not db_path or not os.path.exists(str(db_path)):
+        return False
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1", (str(sid),)
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def _durable_active_id_set(session_id: str):
+    """Ids of currently-active durable rows (reader semantics), or ``None``."""
+    rows = _read_active_state_db_rows(session_id)
+    if rows is None:
+        return None
+    return {int(r["id"]) for r in rows}
+
+
+def _display_stamp_int(message):
+    """Durable id stamped on a display row (``_row_id`` family), or ``None``."""
+    if not isinstance(message, dict):
+        return None
+    for key in ("_row_id", "_db_persisted_row_id", "row_id"):
+        raw = message.get(key)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _strip_row_stamps(rows) -> None:
+    """Drop durable-id stamps a durable rewrite has invalidated.
+
+    ``replace_messages(archive_dropped=True)`` archives the divergent suffix
+    and re-inserts it with NEW ids; the old stamps on the corresponding
+    display rows would point at archived rows. Clearing them makes the next
+    load/merge re-derive the fresh identities from the durable transcript
+    instead of trusting stale ids.
+    """
+    for row in rows or []:
+        if isinstance(row, dict):
+            for key in ("_row_id", "_db_persisted_row_id", "row_id"):
+                row.pop(key, None)
+
+
+def _busy_exceptions() -> tuple:
+    """The Agent's transcript-contention exception classes (empty if absent)."""
+    try:
+        from hermes_state import SessionCompressionInProgressError
+        from hermes_state_errors import (
+            CompressionSessionClosedError,
+            SessionTurnLeaseLostError,
+        )
+        return (
+            SessionCompressionInProgressError,
+            CompressionSessionClosedError,
+            SessionTurnLeaseLostError,
+        )
+    except Exception:
+        return ()
+
+
+def _raise_mapped_authority_error(exc: BaseException) -> None:
+    """Map the Agent transaction's errors onto the WebUI error taxonomy.
+
+    Never returns: translates to CheckpointBusyError / CheckpointStaleError,
+    or re-raises the original exception.
+    """
+    busy = _busy_exceptions()
+    if busy and isinstance(exc, busy):
+        if type(exc).__name__ == "SessionTurnLeaseLostError":
+            raise CheckpointBusyError(
+                "Session has an active turn; wait for it to finish before retrying."
+            ) from exc
+        raise CheckpointBusyError(
+            "Session history is locked by compression (or is closed by it); "
+            "retry once compression finishes."
+        ) from exc
+    if isinstance(exc, RuntimeError):
+        # rewind_to_message / replace_messages raise RuntimeError for the
+        # in-txn CAS rejections ("active transcript changed ..." / "rewind
+        # target changed ..."): the caller's view is stale, not the request.
+        raise CheckpointStaleError(
+            "The transcript changed since this view was rendered; "
+            "reload the session and retry."
+        ) from exc
+    raise exc
+
+
+def _commit_rewind_via_authority(session, session_id: str, cut_row_id: int):
+    """Soft-archive the durable suffix through ``SessionDB.rewind_to_message``.
+
+    Mirrors ``SessionDB.rewind_user_turn``'s CAS protocol (the ONE rewind
+    implementation behind the CLI, the gateway and the TUI):
+      * the canonical live payload of the target row pins the message
+        (presentation-only metadata changes do not invalidate it),
+      * an ordered snapshot of the active ids pins the active set,
+      * the write re-validates both INSIDE its transaction, enforces the
+        live-turn-lease and compression guards there, and updates the
+        message counters and ``rewind_count``.
+
+    Returns ``(archived_ids, survivor_ids)``. The archived set is derived from
+    the CAS-verified snapshot: every active row with ``id >= cut`` — exactly
+    the rows the transaction soft-archived (the same inclusive-cut contract as
+    the gateway's truncate-before path). Raises CheckpointBusyError /
+    CheckpointStaleError / ValueError; RuntimeError when the durable authority
+    itself is unavailable.
+    """
+    db = _open_session_authority(session)
+    if db is None:
+        raise RuntimeError(
+            "state.db authority unavailable; refusing to archive the durable transcript"
+        )
+    try:
+        try:
+            stored = db.get_messages_as_conversation(session_id, include_row_ids=True)
+        except Exception as exc:
+            raise RuntimeError(f"could not read the durable transcript: {exc}") from exc
+        from agent.context_compressor import user_originated_turn_view
+        target_row = None
+        for message in stored:
+            if message.get("_row_id") == cut_row_id:
+                target_row = message
+                break
+        if target_row is None:
+            raise CheckpointStaleError(
+                "The selected message is not in the durable transcript; "
+                "reload the session and retry."
             )
+        stored_view = user_originated_turn_view(target_row)
+        if stored_view is None:
+            # Present but not a user-originated turn: a bad target (400-class),
+            # not a stale view.
+            raise ValueError(
+                f"restore target must be a user-originated turn (row {int(cut_row_id)})"
+            )
+        try:
+            expected_active_ids = [int(i) for i in db.get_active_message_ids(session_id)]
+        except Exception as exc:
+            raise RuntimeError(f"could not snapshot the durable active set: {exc}") from exc
+        try:
+            db.rewind_to_message(
+                session_id,
+                int(cut_row_id),
+                expected_active_ids=expected_active_ids,
+                expected_target_content=stored_view.get("content"),
+            )
+        except Exception as exc:  # noqa: BLE001 - mapped below, never swallowed
+            _raise_mapped_authority_error(exc)
+            raise
+        archived = [i for i in expected_active_ids if i >= int(cut_row_id)]
+        survivors = [i for i in expected_active_ids if i < int(cut_row_id)]
+        committed_ids = _durable_active_id_set(session_id)
+        if committed_ids is not None and not set(survivors) <= committed_ids:
+            # Post-commit verification: a survivor row must still be active.
+            # (A concurrently appended row is fine — ids grow above the cut.)
+            raise RuntimeError(
+                "durable transcript did not retain its survivor prefix; refusing to publish"
+            )
+        return archived, survivors
     finally:
-        conn.close()
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _delete_display_drop_plan(session, message_id: str, scope: str):
+    """Display-side drop plan: ``(drop_ids, target_idx)`` for a delete.
+
+    Extracted so the durable planner and the sidecar splice share ONE
+    definition of what the delete targets (drift between the two would delete
+    different rows in the two stores).
+    """
+    if scope not in ("single", "pair"):
+        raise ValueError(f"scope must be 'single' or 'pair', got {scope!r}")
+    history = list(session.messages or [])
+    target_idx = None
+    for i, row in enumerate(history):
+        if isinstance(row, dict) and row.get('id') == message_id:
+            target_idx = i
+            break
+    if target_idx is None:
+        raise ValueError(f"message_id {message_id!r} not found in session")
+    drop_ids: set[str] = {message_id}
+    if scope == "pair":
+        role = history[target_idx].get('role')
+        if role == 'user':
+            sibling = history[target_idx + 1] if target_idx + 1 < len(history) else None
+            if isinstance(sibling, dict) and sibling.get('role') == 'assistant':
+                sibling_id = sibling.get('id')
+                if sibling_id:
+                    drop_ids.add(sibling_id)
+        elif role == 'assistant':
+            sibling = history[target_idx - 1] if target_idx - 1 >= 0 else None
+            if isinstance(sibling, dict) and sibling.get('role') == 'user':
+                sibling_id = sibling.get('id')
+                if sibling_id:
+                    drop_ids.add(sibling_id)
+        # For tool/system/tombstone rows or missing siblings, pair collapses to single.
+    return drop_ids, target_idx
+
+
+def _norm_head(value, limit: int = 400) -> str:
+    """Normalized head of a message's text for lenient identity matching."""
+    if isinstance(value, list):
+        value = " ".join(
+            part.get("text") or "" for part in value
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    if not isinstance(value, str) or not value:
+        return ""
+    import re as _re
+    head = value[:600].replace("\r\n", "\n").replace("\r", "\n")
+    return _re.sub(r"\s+", " ", head).strip()[:limit]
+
+
+def _lenient_row_match(display_row, durable_row) -> bool:
+    """Role + normalized-content identity between display and durable rows."""
+    if not isinstance(display_row, dict) or not isinstance(durable_row, dict):
+        return False
+    if str(display_row.get('role') or '') != str(durable_row.get('role') or ''):
+        return False
+    a, b = _norm_head(display_row.get('content')), _norm_head(durable_row.get('content'))
+    if not a or not b:
+        return not a and not b
+    return a == b
+
+
+def _plan_durable_delete(session, session_id: str, message_id: str, scope: str) -> dict:
+    """Resolve the durable rows a per-message delete must remove.
+
+    Attribution order (fail-closed; refusing beats deleting wrong rows):
+      1. a still-valid ``_row_id`` stamp on the target display row,
+      2. the content-anchored display→durable walk shared with the restore
+         resolver (``api/checkpoint_map.build_restore_plan``; a user turn's
+         ``exact`` cut IS its durable row),
+      3. positional mapping of the assistant bubble inside its turn stretch
+         (i-th assistant display row ↔ i-th assistant durable row between the
+         same two user rows) plus the assistant's contiguous tool run — and
+         the same for a pair-sibling.
+    Returns ``{"drop_row_ids": [...], "target_row_id": int|None}``. Raises
+    CheckpointStaleError when the target (or its pair sibling) cannot be
+    attributed to the durable transcript.
+    """
+    db = _open_session_authority(session)
+    if db is None:
+        raise RuntimeError("state.db authority unavailable; refusing the durable delete")
+    try:
+        stored = db.get_messages_as_conversation(session_id, include_row_ids=True)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+    rows = [m for m in stored if isinstance(m, dict)]
+    ordered_ids = [m.get("_row_id") for m in rows if isinstance(m.get("_row_id"), int)]
+    by_id = {
+        m.get("_row_id"): m for m in rows if isinstance(m.get("_row_id"), int)
+    }
+    history = [m for m in (session.messages or []) if isinstance(m, dict)]
+
+    from api.checkpoint_map import build_restore_plan
+    plan = build_restore_plan(session, history) or {}
+
+    def _stamp_valid(idx):
+        if not (0 <= idx < len(history)):
+            return None
+        rid = _display_stamp_int(history[idx])
+        if rid is None or rid not in by_id:
+            return None
+        return rid if _lenient_row_match(history[idx], by_id[rid]) else None
+
+    def _user_row_id(display_idx):
+        if display_idx is None:
+            return None
+        entry = plan.get(display_idx) or {}
+        if entry.get('cut_row_id') is not None and entry.get('mode') == 'exact':
+            return int(entry['cut_row_id'])
+        return _stamp_valid(display_idx)
+
+    def _prev_user_idx(display_idx):
+        for j in range(display_idx - 1, -1, -1):
+            if history[j].get('role') == 'user':
+                return j
+        return None
+
+    def _next_user_idx(display_idx):
+        for j in range(display_idx + 1, len(history)):
+            if history[j].get('role') == 'user':
+                return j
+        return None
+
+    def _assistant_run(row_id):
+        """[assistant row_id] + the contiguous tool rows that answer it."""
+        if row_id not in ordered_ids:
+            return []
+        pos = ordered_ids.index(row_id)
+        run = [row_id]
+        for rid in ordered_ids[pos + 1:]:
+            if by_id[rid].get('role') == 'tool':
+                run.append(rid)
+            else:
+                break
+        return run
+
+    def _assistant_run_for(display_idx):
+        """Durable run ids for an assistant display row, or None (stale)."""
+        stamped = _stamp_valid(display_idx)
+        if stamped is not None and by_id[stamped].get('role') == 'assistant':
+            return _assistant_run(stamped)
+        prev_u, next_u = _prev_user_idx(display_idx), _next_user_idx(display_idx)
+        lo = _user_row_id(prev_u) if prev_u is not None else None
+        if prev_u is not None and lo is None:
+            return None
+        hi = _user_row_id(next_u) if next_u is not None else None
+        if next_u is not None and hi is None:
+            return None
+        durable_run_heads = [
+            rid for rid in ordered_ids
+            if by_id[rid].get('role') == 'assistant'
+            and (lo is None or rid > lo) and (hi is None or rid < hi)
+        ]
+        display_rows = [
+            j for j in range(len(history))
+            if history[j].get('role') == 'assistant'
+            and (prev_u is None or j > prev_u) and (next_u is None or j < next_u)
+        ]
+        if len(display_rows) != len(durable_run_heads):
+            return None
+        try:
+            k = display_rows.index(display_idx)
+        except ValueError:
+            return None
+        return _assistant_run(durable_run_heads[k])
+
+    drop_ids, target_idx = _delete_display_drop_plan(session, message_id, scope)
+    target_display = history[target_idx]
+    role = str(target_display.get('role') or '')
+    drop_row_ids: list[int] = []
+    target_row_id = None
+    if role == 'user':
+        target_row_id = _user_row_id(target_idx)
+        if target_row_id is None:
+            raise CheckpointStaleError(
+                "Could not attribute this message to the durable transcript; "
+                "reload the session and retry."
+            )
+        drop_row_ids.append(target_row_id)
+        if scope == 'pair':
+            sibling_idx = target_idx + 1 if (
+                target_idx + 1 < len(history)
+                and history[target_idx + 1].get('role') == 'assistant'
+            ) else None
+            if sibling_idx is not None:
+                run = _assistant_run_for(sibling_idx)
+                if run is None:
+                    raise CheckpointStaleError(
+                        "Could not attribute the paired reply to the durable "
+                        "transcript; reload the session and retry."
+                    )
+                drop_row_ids.extend(run)
+    elif role == 'assistant':
+        run = _assistant_run_for(target_idx)
+        if run is None:
+            raise CheckpointStaleError(
+                "Could not attribute this reply to the durable transcript; "
+                "reload the session and retry."
+            )
+        target_row_id = run[0]
+        drop_row_ids.extend(run)
+        if scope == 'pair':
+            sibling_idx = target_idx - 1 if (
+                target_idx - 1 >= 0 and history[target_idx - 1].get('role') == 'user'
+            ) else None
+            if sibling_idx is not None:
+                sibling_row_id = _user_row_id(sibling_idx)
+                if sibling_row_id is None:
+                    raise CheckpointStaleError(
+                        "Could not attribute the paired prompt to the durable "
+                        "transcript; reload the session and retry."
+                    )
+                drop_row_ids.insert(0, sibling_row_id)
+    else:
+        stamped = _stamp_valid(target_idx)
+        if stamped is None:
+            raise CheckpointStaleError(
+                "Could not attribute this message to the durable transcript; "
+                "reload the session and retry."
+            )
+        target_row_id = stamped
+        drop_row_ids.append(stamped)
+    seen: set[int] = set()
+    drop_row_ids = [rid for rid in drop_row_ids if not (rid in seen or seen.add(rid))]
+    return {"drop_row_ids": drop_row_ids, "target_row_id": target_row_id}
+
+
+def _commit_durable_delete(session, session_id: str, drop_row_ids: list[int]) -> dict:
+    """Remove the resolved rows from the durable transcript atomically.
+
+    Uses ``SessionDB.replace_messages(archive_dropped=True)`` — the
+    rewind/edit/regenerate primitive: dropped rows are SOFT-archived
+    (``active=0``, recoverable) rather than DELETE'd, the in-order kept prefix
+    keeps its ids, and the divergent suffix is archived + re-inserted.
+    ``reject_active_turn_lease=True`` runs the in-transaction live-turn guard;
+    the same call enforces the compression guards and updates the counters.
+    """
+    db = _open_session_authority(session)
+    if db is None:
+        raise RuntimeError("state.db authority unavailable; refusing the durable delete")
+    try:
+        try:
+            stored = db.get_messages_as_conversation(session_id, include_row_ids=True)
+        except Exception as exc:
+            raise RuntimeError(f"could not read the durable transcript: {exc}") from exc
+        drop = {int(x) for x in drop_row_ids}
+        kept = [
+            m for m in stored
+            if not (isinstance(m.get("_row_id"), int) and m["_row_id"] in drop)
+        ]
+        if len(kept) == len(stored):
+            raise CheckpointStaleError(
+                "The durable rows for this message are already gone; "
+                "reload the session and retry."
+            )
+        try:
+            db.replace_messages(
+                session_id, kept, archive_dropped=True, reject_active_turn_lease=True
+            )
+        except Exception as exc:  # noqa: BLE001 - mapped below, never swallowed
+            _raise_mapped_authority_error(exc)
+            raise
+        return {"dropped": sorted(drop), "kept_count": len(kept)}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _publish_session_sidecar(session, session_id: str, *, marker_kind: str, marker_fields: dict) -> None:
+    """Persist the mutated sidecar after a durable commit; fail CLOSED.
+
+    The sidecar was rebuilt from the COMMITTED durable result, so a failed
+    save must not be reported as success: retry once, then flag the session
+    (``needs_state_resync``) and write the crash-safe resync marker
+    (``api/durable_sync``) whose correction every later load re-applies —
+    stale on-disk sidecar data can never resurrect the removed suffix. Raises
+    RuntimeError when the publish persistently fails.
+    """
+    last_exc: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            session.save()
+            try:
+                session.needs_state_resync = False
+            except Exception:
+                pass
+            return
+        except Exception as exc:  # noqa: BLE001 - retried once, then surfaced
+            last_exc = exc
+            logger.warning(
+                "checkpoint: sidecar publish attempt %d failed for %s: %s",
+                attempt, session_id, exc,
+            )
+    try:
+        session.needs_state_resync = True
+    except Exception:
+        pass
+    try:
+        from api import durable_sync
+        durable_sync.write_resync_marker(
+            session_id, kind=marker_kind, **marker_fields
+        )
+    except Exception:
+        logger.error(
+            "checkpoint: could not write resync marker for %s", session_id, exc_info=True
+        )
+    raise RuntimeError(
+        "The durable transcript was updated but the WebUI transcript could not "
+        "be saved; the session is flagged for resync — reload before continuing."
+    ) from last_exc
+
+
+def _fail_closed_after_durable_commit(session, session_id, *, marker_kind, marker_fields, message):
+    """Flag + mark + raise for post-commit local failures (verification etc.)."""
+    try:
+        session.needs_state_resync = True
+    except Exception:
+        pass
+    try:
+        from api import durable_sync
+        durable_sync.write_resync_marker(session_id, kind=marker_kind, **marker_fields)
+    except Exception:
+        logger.error(
+            "checkpoint: resync marker write failed for %s", session_id, exc_info=True
+        )
+    raise RuntimeError(message)
+
+
+def _commit_and_publish_restore(session, session_id: str, *, keep: int, cut_row_id, mode: str) -> dict[str, Any]:
+    """Commit a checkpoint restore and publish the sidecar from the result.
+
+    Order (the dual-store contract from the PR #7075 review):
+      1. DURABLE FIRST — the inclusive-cut soft archive goes through the Agent
+         transaction authority (:func:`_commit_rewind_via_authority`); any
+         refusal (bad target, CAS, live turn, compression) aborts with the
+         sidecar untouched.
+      2. PUBLISH FROM THE COMMITTED RESULT — the sidecar is truncated to the
+         display prefix and re-validated against the committed survivor id
+         set; a mismatch between the committed state and the display view is
+         itself fail-closed (flag + marker + raise), and the persist itself
+         goes through :func:`_publish_session_sidecar` (retry, then flag +
+         marker + raise).
+
+    Returns the restore-result dict shared by both entry points.
+    """
+    archived_ids: list[int] = []
+    survivor_ids: list[int] = []
+    if cut_row_id is not None:
+        archived_ids, survivor_ids = _commit_rewind_via_authority(
+            session, session_id, int(cut_row_id)
+        )
+    marker_fields = {
+        "keep_index": int(keep),
+        "survivor_row_ids": [int(x) for x in survivor_ids],
+        "archived_row_ids": [int(x) for x in archived_ids],
+        "durable_cut_row_id": int(cut_row_id) if cut_row_id is not None else None,
+        "profile": getattr(session, "profile", None),
+    }
+    with LOCK:
+        s = SESSIONS.get(session_id, session)
+        history = list(s.messages or [])
+        if keep > len(history):
+            _fail_closed_after_durable_commit(
+                s, session_id, marker_kind="restore", marker_fields=marker_fields,
+                message="session transcript changed during checkpoint archive; retry",
+            )
+        survivor_messages = history[:keep]
+        if cut_row_id is not None:
+            committed_ids = _durable_active_id_set(session_id)
+            committed = committed_ids if committed_ids is not None else set(survivor_ids)
+            for row in survivor_messages:
+                stamp = _display_stamp_int(row)
+                if stamp is not None and stamp not in committed:
+                    _fail_closed_after_durable_commit(
+                        s, session_id, marker_kind="restore", marker_fields=marker_fields,
+                        message=(
+                            "the displayed transcript diverged from the committed "
+                            "durable state; reload before restoring"
+                        ),
+                    )
+        old_count = len(history)
+        s.messages = survivor_messages
+        _stamp_intentional_shrink_generation(s, old_count, len(s.messages))
+        s.truncation_watermark = _truncation_watermark_for(s.messages)
+        s.truncation_boundary = s.truncation_watermark
+        ctx = getattr(s, 'context_messages', None)
+        if isinstance(ctx, list) and ctx:
+            aligned_ctx = truncate_context_for_display_keep(ctx, history, keep)
+            if aligned_ctx is not None:
+                s.context_messages = aligned_ctx
+        marker_fields["watermark"] = s.truncation_watermark
+        marker_fields["boundary"] = s.truncation_boundary
+    _publish_session_sidecar(
+        s, session_id, marker_kind="restore", marker_fields=marker_fields
+    )
+    survivor_row_ids = [_display_stamp_int(m) for m in (s.messages or [])]
+    logger.info(
+        "checkpoint_restore %s: mode=%s cut_row=%s, messages %d->%d, archived_state_rows=%d",
+        session_id, mode, cut_row_id, old_count, len(s.messages), len(archived_ids),
+    )
+    return {
+        'restored_to_row_id': cut_row_id,
+        'restore_mode': mode,
+        'archive_mode': 'archive' if archived_ids else 'display-only',
+        'old_message_count': old_count,
+        'new_message_count': len(s.messages),
+        'archived_state_row_ids': archived_ids,
+        'survivor_user_row_ids': survivor_row_ids,
+        'survivor_row_id_map': {
+            str(rid): rid for rid in survivor_row_ids if rid is not None
+        },
+    }
 
 
 def _sidecar_row_matches_durable(sidecar_row: dict, durable_row: dict) -> bool:
@@ -870,9 +1528,12 @@ def restore_checkpoint_at_row_id(session_id: str, target_row_id: int) -> dict[st
       * read-only and live-turn sessions are refused **before any write**.
       * the anchor row must be an ACTIVE durable user row whose content matches
         the sidecar row (guards stale / wrong-role / cross-session ids).
-      * state.db soft-archive (``active=0``) is committed FIRST; the WebUI
-        sidecar is written ONLY from the committed survivor transcript. Any
-        durable-write failure aborts the whole restore (no partial success).
+      * state.db soft-archive (``active=0``) is committed FIRST through the
+        Agent's transaction authority (SessionDB.rewind_to_message: in-txn
+        target + active-set CAS validation, live-turn/compression guards,
+        message counters); the WebUI sidecar is written ONLY from the committed
+        survivor transcript. Any durable-write failure aborts the whole
+        restore (no partial success).
       * the archived suffix is computed from the state.db ordinal, so tool /
         reasoning / compaction rows diverging from the sidecar cannot make this
         archive the wrong durable rows.
@@ -881,7 +1542,9 @@ def restore_checkpoint_at_row_id(session_id: str, target_row_id: int) -> dict[st
         KeyError: session not found
         PermissionError: read-only session
         ValueError: bad id type, unknown / inactive / wrong-role / non-user row,
-                    content mismatch, or an active turn in flight
+                    or content mismatch
+        CheckpointBusyError: a live turn / compression owns the transcript
+        CheckpointStaleError: the durable transcript changed under the view
         RuntimeError: durable write failed (restore aborted, sidecar untouched)
     """
     if isinstance(target_row_id, bool) or not isinstance(target_row_id, int):
@@ -951,62 +1614,16 @@ def restore_checkpoint_at_row_id(session_id: str, target_row_id: int) -> dict[st
                     "refusing to cut on a mismatched checkpoint"
                 )
 
-            # Compute the durable suffix to archive from the STATE.DB ordinal.
-            archived_state_ids = _state_db_active_rows_after(session_id, target_row_id)
             keep = target_idx
 
-        # --- DURABLE WRITE FIRST (fail closed) ---
-        # Outside the global LOCK (a busy state.db must not stall all WebUI
-        # mutations) but inside the per-session agent lock, which serializes
-        # every other writer of this session. If the archive raises, we abort
-        # BEFORE touching the in-memory transcript or the sidecar file →
-        # no dual-store divergence, no partial success.
-        _archive_state_db_suffix(session_id, archived_state_ids)
-
-        # --- SIDE CAR WRITE from the committed survivor transcript ---
-        with LOCK:
-            s = SESSIONS.get(session_id, s)  # re-bind after the durable write
-            history = s.messages or []
-            # Re-resolve the cut point on the bound instance: the transcript is
-            # frozen for us (agent lock) but be defensive — an empty/changed
-            # history here means something unexpected happened; abort cleanly.
-            if keep > len(history):
-                raise RuntimeError(
-                    "session transcript changed during checkpoint archive; retry"
-                )
-            survivor_messages = history[:keep]
-            survivor_row_ids: list[int | None] = [
-                (int(m['_row_id']) if isinstance(m, dict)
-                 and m.get('_row_id') is not None else None)
-                for m in survivor_messages
-            ]
-            old_count = len(history)
-            s.messages = survivor_messages
-            _stamp_intentional_shrink_generation(s, old_count, len(s.messages))
-            s.truncation_watermark = _truncation_watermark_for(s.messages)
-            s.truncation_boundary = s.truncation_watermark
-
-            ctx = getattr(s, 'context_messages', None)
-            if isinstance(ctx, list) and ctx:
-                aligned_ctx = truncate_context_for_display_keep(ctx, history, keep)
-                if aligned_ctx is not None:
-                    s.context_messages = aligned_ctx
-        s.save()
-
-    logger.info(
-        "checkpoint_restore %s: row_id=%d, messages %d->%d, archived_state_rows=%d",
-        session_id, target_row_id, old_count, len(s.messages), len(archived_state_ids),
-    )
-    return {
-        'restored_to_row_id': target_row_id,
-        'old_message_count': old_count,
-        'new_message_count': len(s.messages),
-        'archived_state_row_ids': archived_state_ids,
-        'survivor_user_row_ids': survivor_row_ids,
-        'survivor_row_id_map': {
-            str(rid): rid for rid in survivor_row_ids if rid is not None
-        },
-    }
+        # --- DURABLE COMMIT + FAIL-CLOSED PUBLICATION -----------------------
+        # The durable soft archive goes through the Agent's transaction
+        # authority (SessionDB.rewind_to_message: in-txn target/CAS validation
+        # + live-turn/compression guards) and the sidecar is published
+        # strictly from its committed result — see _commit_and_publish_restore.
+        return _commit_and_publish_restore(
+            s, session_id, keep=keep, cut_row_id=target_row_id, mode="durable-row-id",
+        )
 
 
 def restore_checkpoint_to_display_message(
@@ -1026,16 +1643,21 @@ def restore_checkpoint_to_display_message(
     stamp went stale after a history rewrite — can still be restored.
 
     Resolution modes: ``exact`` / ``anchor`` / ``anchor-next`` archive the
-    durable suffix from the resolved cut row; ``display-only`` archives nothing
-    (no durable row is attributable to the target or later) and only truncates
-    the sidecar + model context. The durable archive is committed FIRST; any
-    failure aborts before the sidecar is touched (dual-store fail-closed).
+    durable suffix from the resolved cut row through the Agent's transaction
+    authority; ``display-only`` archives nothing (no durable row is
+    attributable to the target or later) and only truncates the sidecar +
+    model context. The durable archive is committed FIRST; any failure aborts
+    before the sidecar is touched (dual-store fail-closed), and a sidecar
+    publish failure after the commit is fail-closed via the resync marker
+    (``api/durable_sync.py``).
 
     Raises:
         KeyError: session not found
         PermissionError: read-only session
         ValueError: bad/missing target address, stale view, unresolvable
-                    message, or an active turn in flight
+                    message
+        CheckpointBusyError: a live turn / compression owns the transcript
+        CheckpointStaleError: the durable transcript changed under the view
         RuntimeError: durable write failed (restore aborted, sidecar untouched)
     """
     if row_id is not None and (isinstance(row_id, bool) or not isinstance(row_id, int)):
@@ -1151,67 +1773,16 @@ def restore_checkpoint_to_display_message(
                     cut_row_id = row_id
                     mode = 'legacy-stamp'
 
-            # Compute the durable suffix to archive from the resolved cut row.
-            archived_state_ids = (
-                _state_db_active_rows_from(session_id, int(cut_row_id))
-                if cut_row_id is not None else []
-            )
             keep = target_idx
 
-        # --- DURABLE WRITE FIRST (fail closed) ---
-        # Outside the global LOCK (a busy state.db must not stall all WebUI
-        # mutations) but inside the per-session agent lock, which serializes
-        # every other writer of this session. If the archive raises, we abort
-        # BEFORE touching the in-memory transcript or the sidecar file →
-        # no dual-store divergence, no partial success.
-        _archive_state_db_suffix(session_id, archived_state_ids)
-
-        # --- SIDE CAR WRITE from the committed survivor transcript ---
-        with LOCK:
-            s = SESSIONS.get(session_id, s)  # re-bind after the durable write
-            history = s.messages or []
-            # Re-resolve the cut point on the bound instance: the transcript is
-            # frozen for us (agent lock) but be defensive — an empty/changed
-            # history here means something unexpected happened; abort cleanly.
-            if keep > len(history):
-                raise RuntimeError(
-                    "session transcript changed during checkpoint archive; retry"
-                )
-            survivor_messages = history[:keep]
-            survivor_row_ids: list[int | None] = [
-                (int(m['_row_id']) if isinstance(m, dict)
-                 and m.get('_row_id') is not None else None)
-                for m in survivor_messages
-            ]
-            old_count = len(history)
-            s.messages = survivor_messages
-            _stamp_intentional_shrink_generation(s, old_count, len(s.messages))
-            s.truncation_watermark = _truncation_watermark_for(s.messages)
-            s.truncation_boundary = s.truncation_watermark
-
-            ctx = getattr(s, 'context_messages', None)
-            if isinstance(ctx, list) and ctx:
-                aligned_ctx = truncate_context_for_display_keep(ctx, history, keep)
-                if aligned_ctx is not None:
-                    s.context_messages = aligned_ctx
-        s.save()
-
-    logger.info(
-        "checkpoint_restore %s: display_idx=%s mode=%s cut_row=%s, messages %d->%d, archived_state_rows=%d",
-        session_id, keep, mode, cut_row_id, old_count, len(s.messages), len(archived_state_ids),
-    )
-    return {
-        'restored_to_row_id': cut_row_id,
-        'restore_mode': mode,
-        'archive_mode': 'archive' if archived_state_ids else 'display-only',
-        'old_message_count': old_count,
-        'new_message_count': len(s.messages),
-        'archived_state_row_ids': archived_state_ids,
-        'survivor_user_row_ids': survivor_row_ids,
-        'survivor_row_id_map': {
-            str(rid): rid for rid in survivor_row_ids if rid is not None
-        },
-    }
+        # --- DURABLE COMMIT + FAIL-CLOSED PUBLICATION -----------------------
+        # The durable soft archive goes through the Agent's transaction
+        # authority (SessionDB.rewind_to_message: in-txn target/CAS validation
+        # + live-turn/compression guards) and the sidecar is published
+        # strictly from its committed result — see _commit_and_publish_restore.
+        return _commit_and_publish_restore(
+            s, session_id, keep=keep, cut_row_id=cut_row_id, mode=mode,
+        )
 
 
 def undo_last(session_id: str) -> dict[str, Any]:

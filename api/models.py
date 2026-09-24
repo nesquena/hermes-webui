@@ -1563,6 +1563,16 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # Compensate a durable commit whose sidecar publish failed (checkpoint
+        # restore / per-message delete): the resync marker records the exact
+        # committed correction, and this load re-applies it BEFORE the stale
+        # on-disk transcript can be served (or re-imported). Best-effort by
+        # contract — a bad marker must never brick the load (api/durable_sync).
+        try:
+            from api.durable_sync import apply_resync_marker
+            apply_resync_marker(session)
+        except Exception:
+            logger.debug("durable resync marker apply failed for %s", sid, exc_info=True)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
