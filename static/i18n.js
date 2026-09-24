@@ -5,6 +5,14 @@
 
 const LOCALES = {
   en: {
+    vault_unlock_title: 'Password manager',
+    vault_locked: 'locked',
+    vault_unlocked: 'unlocked',
+    vault_master_password: 'Master password',
+    vault_unlock_btn: 'Unlock',
+    vault_lock_btn: 'Lock',
+    vault_unlocking: 'Unlocking…',
+    vault_unlock_failed: 'Unlock failed',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
@@ -1828,6 +1836,14 @@ const LOCALES = {
   },
 
   it: {
+    vault_unlock_title: 'Gestore password',
+    vault_locked: 'bloccato',
+    vault_unlocked: 'sbloccato',
+    vault_master_password: 'Password principale',
+    vault_unlock_btn: 'Sblocca',
+    vault_lock_btn: 'Blocca',
+    vault_unlocking: 'Sblocco…',
+    vault_unlock_failed: 'Sblocco non riuscito',
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3633,6 +3649,14 @@ const LOCALES = {
   },
 
   ja: {
+    vault_unlock_title: 'パスワードマネージャー',
+    vault_locked: 'ロック中',
+    vault_unlocked: 'ロック解除済み',
+    vault_master_password: 'マスターパスワード',
+    vault_unlock_btn: 'ロック解除',
+    vault_lock_btn: 'ロック',
+    vault_unlocking: 'ロック解除中…',
+    vault_unlock_failed: 'ロック解除に失敗しました',
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -5443,6 +5467,14 @@ const LOCALES = {
   },
 
   ru: {
+    vault_unlock_title: 'Менеджер паролей',
+    vault_locked: 'заблокирован',
+    vault_unlocked: 'разблокирован',
+    vault_master_password: 'Мастер-пароль',
+    vault_unlock_btn: 'Разблокировать',
+    vault_lock_btn: 'Заблокировать',
+    vault_unlocking: 'Разблокировка…',
+    vault_unlock_failed: 'Не удалось разблокировать',
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -7227,6 +7259,14 @@ const LOCALES = {
   },
 
   es: {
+    vault_unlock_title: 'Gestor de contraseñas',
+    vault_locked: 'bloqueado',
+    vault_unlocked: 'desbloqueado',
+    vault_master_password: 'Contraseña maestra',
+    vault_unlock_btn: 'Desbloquear',
+    vault_lock_btn: 'Bloquear',
+    vault_unlocking: 'Desbloqueando…',
+    vault_unlock_failed: 'No se pudo desbloquear',
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -8978,6 +9018,14 @@ const LOCALES = {
   },
 
   de: {
+    vault_unlock_title: 'Passwortmanager',
+    vault_locked: 'gesperrt',
+    vault_unlocked: 'entsperrt',
+    vault_master_password: 'Master-Passwort',
+    vault_unlock_btn: 'Entsperren',
+    vault_lock_btn: 'Sperren',
+    vault_unlocking: 'Wird entsperrt…',
+    vault_unlock_failed: 'Entsperren fehlgeschlagen',
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10723,6 +10771,14 @@ const LOCALES = {
   },
 
   zh: {
+    vault_unlock_title: '密码管理器',
+    vault_locked: '已锁定',
+    vault_unlocked: '已解锁',
+    vault_master_password: '主密码',
+    vault_unlock_btn: '解锁',
+    vault_lock_btn: '锁定',
+    vault_unlocking: '正在解锁…',
+    vault_unlock_failed: '解锁失败',
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12462,6 +12518,14 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    vault_unlock_title: '密碼管理器',
+    vault_locked: '已鎖定',
+    vault_unlocked: '已解鎖',
+    vault_master_password: '主密碼',
+    vault_unlock_btn: '解鎖',
+    vault_lock_btn: '鎖定',
+    vault_unlocking: '正在解鎖…',
+    vault_unlock_failed: '解鎖失敗',
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -14270,6 +14334,14 @@ const LOCALES = {
   },
 
   pt: {
+    vault_unlock_title: 'Gerenciador de senhas',
+    vault_locked: 'bloqueado',
+    vault_unlocked: 'desbloqueado',
+    vault_master_password: 'Senha mestra',
+    vault_unlock_btn: 'Desbloquear',
+    vault_lock_btn: 'Bloquear',
+    vault_unlocking: 'Desbloqueando…',
+    vault_unlock_failed: 'Falha ao desbloquear',
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15894,6 +15966,14 @@ const LOCALES = {
     wiki_not_configured: 'Wiki not configured',
   },
   ko: {
+    vault_unlock_title: '비밀번호 관리자',
+    vault_locked: '잠김',
+    vault_unlocked: '잠금 해제됨',
+    vault_master_password: '마스터 비밀번호',
+    vault_unlock_btn: '잠금 해제',
+    vault_lock_btn: '잠그기',
+    vault_unlocking: '잠금 해제 중…',
+    vault_unlock_failed: '잠금 해제 실패',
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17689,6 +17769,14 @@ const LOCALES = {
   },
 
   fr: {
+    vault_unlock_title: 'Gestionnaire de mots de passe',
+    vault_locked: 'verrouillé',
+    vault_unlocked: 'déverrouillé',
+    vault_master_password: 'Mot de passe principal',
+    vault_unlock_btn: 'Déverrouiller',
+    vault_lock_btn: 'Verrouiller',
+    vault_unlocking: 'Déverrouillage…',
+    vault_unlock_failed: 'Échec du déverrouillage',
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -19467,6 +19555,14 @@ const LOCALES = {
   },
 
   cs: {
+    vault_unlock_title: 'Správce hesel',
+    vault_locked: 'zamčeno',
+    vault_unlocked: 'odemčeno',
+    vault_master_password: 'Hlavní heslo',
+    vault_unlock_btn: 'Odemknout',
+    vault_lock_btn: 'Zamknout',
+    vault_unlocking: 'Odemykání…',
+    vault_unlock_failed: 'Odemknutí se nezdařilo',
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
     sessions_source_cli: 'Relace CLI ({0})',
@@ -21231,6 +21327,14 @@ const LOCALES = {
     tool_summary_join: _i18nToolSummaryJoinCs,
   },
   tr: {
+    vault_unlock_title: 'Parola yöneticisi',
+    vault_locked: 'kilitli',
+    vault_unlocked: 'kilidi açık',
+    vault_master_password: 'Ana parola',
+    vault_unlock_btn: 'Kilidi aç',
+    vault_lock_btn: 'Kilitle',
+    vault_unlocking: 'Kilit açılıyor…',
+    vault_unlock_failed: 'Kilit açılamadı',
 
 
 
@@ -23031,6 +23135,14 @@ const LOCALES = {
   
   },
   pl: {
+    vault_unlock_title: 'Menedżer haseł',
+    vault_locked: 'zablokowany',
+    vault_unlocked: 'odblokowany',
+    vault_master_password: 'Hasło główne',
+    vault_unlock_btn: 'Odblokuj',
+    vault_lock_btn: 'Zablokuj',
+    vault_unlocking: 'Odblokowywanie…',
+    vault_unlock_failed: 'Nie udało się odblokować',
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -24831,6 +24943,14 @@ const LOCALES = {
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
   },
   vi: {
+    vault_unlock_title: 'Trình quản lý mật khẩu',
+    vault_locked: 'đã khóa',
+    vault_unlocked: 'đã mở khóa',
+    vault_master_password: 'Mật khẩu chính',
+    vault_unlock_btn: 'Mở khóa',
+    vault_lock_btn: 'Khóa',
+    vault_unlocking: 'Đang mở khóa…',
+    vault_unlock_failed: 'Mở khóa thất bại',
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',

@@ -14241,6 +14241,13 @@ def handle_get(handler, parsed) -> bool:
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
 
+    if parsed.path == "/api/vault/status":
+        from api import vault_unlock
+        try:
+            return j(handler, vault_unlock.status())
+        except vault_unlock.VaultUnavailable:
+            return j(handler, {"backends": []})
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
@@ -15429,6 +15436,20 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return proxy_result
+
+    if parsed.path in ("/api/vault/unlock", "/api/vault/lock"):
+        from api import vault_unlock
+        body = read_body(handler) or {}
+        backend = str(body.get("backend") or "")
+        try:
+            if parsed.path == "/api/vault/unlock":
+                result, status = vault_unlock.unlock(backend, str(body.get("master_password") or ""))
+                return j(handler, result, status=status)
+            return j(handler, vault_unlock.lock(backend or None))
+        except vault_unlock.VaultUnavailable as exc:
+            return j(handler, {"success": False, "error": str(exc)}, status=501)
+        finally:
+            body.clear()
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
