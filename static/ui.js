@@ -3963,7 +3963,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
     const slashRoutedId=rawId.slice(slashPrefix.length);
     if(slashRoutedId&&(entries||[]).some(entry=>
-      (String(entry.providerId||'').toLowerCase()===provider||_entryProvider(entry)===provider)
+      _entryProvider(entry)===provider
       &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
     )) return true;
   }
