@@ -1929,7 +1929,14 @@ function _setNewSessionPending(pending){
   for (let i=0;i<ids.length;i++){
     const btn=$(ids[i]);
     if(!btn) continue;
-    btn.disabled=!!pending;
+    if(btn.tagName==='A'){
+      // A link has no native disabled property. Keep its pending behavior in
+      // sync with the titlebar button while creation is in flight.
+      btn.setAttribute('aria-disabled',pending?'true':'false');
+      btn.tabIndex=pending?-1:0;
+    }else{
+      btn.disabled=!!pending;
+    }
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
   const statusEl=$('composerStatus');

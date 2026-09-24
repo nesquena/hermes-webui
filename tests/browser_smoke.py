@@ -79,6 +79,103 @@ def _wait_for_health(timeout=30):
     return False
 
 
+def _check_new_chat_middle_click(browser):
+    """Chromium must open the native link in a new tab without touching this chat."""
+    ctx = browser.new_context(base_url=BASE)
+    try:
+        page = ctx.new_page()
+        page.goto("/", wait_until="load")
+        page.locator("#btnNewChat").click()
+        page.wait_for_url("**/session/*", timeout=15000)
+        page.wait_for_function(
+            "document.querySelector('#btnNewChat').getAttribute('aria-disabled') !== 'true'",
+            timeout=15000,
+        )
+        original_url = page.url
+        original_id = original_url.split("/session/", 1)[1].split("?", 1)[0]
+        page.locator("#msg").fill("Draft stays in the original tab")
+
+        with ctx.expect_page(timeout=5000) as opened:
+            page.locator("#btnNewChat").click(button="middle")
+        new_page = opened.value
+        new_page.wait_for_url("**/session/*", timeout=15000)
+        new_id = new_page.url.split("/session/", 1)[1].split("?", 1)[0]
+        assert new_id != original_id, "middle click reopened the same session"
+        assert page.url == original_url, "middle click navigated the original tab"
+        assert page.locator("#msg").input_value() == "Draft stays in the original tab"
+        assert new_page.locator("#msg").input_value() == "", "draft leaked into the new tab"
+
+        # An ordinary click on a reusable empty conversation must still focus
+        # the composer instead of navigating or discarding its unsent draft.
+        page.locator("#btnNewChat").click()
+        assert page.url == original_url, "ordinary click navigated away from reusable chat"
+        assert page.locator("#msg").input_value() == "Draft stays in the original tab"
+        page.locator("#btnNewChat").focus()
+        page.keyboard.press("Enter")
+        assert page.url == original_url, "keyboard activation navigated away from reusable chat"
+        assert page.locator("#msg").input_value() == "Draft stays in the original tab"
+
+        # The middle-click tab must finish booting into its own new conversation
+        # with creation no longer pending.
+        new_page.wait_for_function(
+            "previousId => typeof S !== 'undefined' && S._bootReady && S.session && "
+            "S.session.session_id === previousId && "
+            "document.querySelector('#btnNewChat').getAttribute('aria-disabled') !== 'true'",
+            arg=new_id,
+            timeout=15000,
+        )
+
+        # A link has no native disabled property. While creation is pending,
+        # actual mouse gestures must not follow it to create another session.
+        page.evaluate("_setNewSessionPending(true)")
+        try:
+            assert page.locator("#btnNewChat").get_attribute("aria-disabled") == "true"
+            box = page.locator("#btnNewChat").bounding_box()
+            assert box, "new conversation link is not visible"
+            pages_before = len(ctx.pages)
+            page.mouse.click(box["x"] + box["width"] / 2,
+                             box["y"] + box["height"] / 2, button="middle")
+            page.wait_for_timeout(250)
+            assert len(ctx.pages) == pages_before, "middle click bypassed pending state"
+            assert page.url == original_url
+        finally:
+            page.evaluate("_setNewSessionPending(false)")
+    finally:
+        ctx.close()
+
+
+def _check_nonreusable_left_click(browser):
+    """With a non-empty chat, a normal left click must still create a session here.
+
+    Runs in its own single-tab context so it verifies the link's left-click
+    behavior rather than cross-tab stream timing.
+    """
+    ctx = browser.new_context(base_url=BASE)
+    try:
+        page = ctx.new_page()
+        page.goto("/", wait_until="load")
+        page.locator("#btnNewChat").click()
+        page.wait_for_url("**/session/*", timeout=15000)
+        page.wait_for_function(
+            "document.querySelector('#btnNewChat').getAttribute('aria-disabled') !== 'true'",
+            timeout=15000,
+        )
+        first_id = page.url.split("/session/", 1)[1].split("?", 1)[0]
+        # Make the chat non-empty so the reusable-empty shortcut is bypassed.
+        page.evaluate("S.session.message_count=1")
+        page.locator("#btnNewChat").click()
+        page.wait_for_function(
+            "previousId => S.session && S.session.session_id !== previousId",
+            arg=first_id,
+            timeout=15000,
+        )
+        second_id = page.url.split("/session/", 1)[1].split("?", 1)[0]
+        assert second_id != first_id, "left click did not create a new session"
+        assert "action=new-chat" not in page.url, "ordinary click followed the native link"
+    finally:
+        ctx.close()
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -152,6 +249,16 @@ def main():
                 else:
                     print(f"OK  {path} — no console errors")
                 ctx.close()
+            try:
+                _check_new_chat_middle_click(browser)
+                print("OK  new conversation middle-click — separate tab, original draft intact")
+            except Exception as exc:
+                failures.append(f"  [new conversation middle-click] {exc}")
+            try:
+                _check_nonreusable_left_click(browser)
+                print("OK  new conversation left-click — still creates a session in this tab")
+            except Exception as exc:
+                failures.append(f"  [new conversation left click] {exc}")
             browser.close()
 
         if failures:
