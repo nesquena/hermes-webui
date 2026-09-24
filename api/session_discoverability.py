@@ -529,6 +529,7 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
             _fsync_sidecar_directory,
             _invalidate_cached_session_generation,
             _publish_sidecar_no_replace,
+            _read_sidecar_revision,
             _session_sidecar_authority,
         )
         from api.session_recovery import (
@@ -540,6 +541,9 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
         return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "error": f"recovery_import_failed:{exc}"}
     with _session_sidecar_authority(sid, session_dir=session_dir):
         if target.exists():
+            return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_exists"}
+        expected_revision = _read_sidecar_revision(target, sid)
+        if expected_revision.state != "ABSENT":
             return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_exists"}
         if _durable_tombstone_marks_deleted_webui_session(session_dir, sid):
             return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "deleted_tombstone"}
@@ -568,12 +572,36 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
             try:
                 _publish_sidecar_no_replace(tmp, target)
             except FileExistsError:
+                _invalidate_cached_session_generation(
+                    sid,
+                    expected_revision=expected_revision,
+                )
                 return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_appeared_during_repair"}
+            except OSError:
+                # The create-only link/rename may be visible even when its
+                # directory fsync fails. Fence only the cached ABSENT owner;
+                # preserve any alias that already adopted the visible revision.
+                try:
+                    visible_revision = _read_sidecar_revision(target, sid)
+                except OSError:
+                    visible_revision = None
+                if visible_revision != expected_revision:
+                    _invalidate_cached_session_generation(
+                        sid,
+                        expected_revision=expected_revision,
+                    )
+                raise
         finally:
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+        # Invalidate before index maintenance so a later index/fsync failure
+        # cannot leave an ABSENT cached owner behind a visible sidecar.
+        _invalidate_cached_session_generation(
+            sid,
+            expected_revision=expected_revision,
+        )
         index_updated = False
         index_path = session_dir / "_index.json"
         index_payload = _read_json(index_path)
@@ -590,7 +618,6 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
             _atomic_write_json(index_path, index_payload)
             _fsync_sidecar_directory(index_path.parent)
             index_updated = True
-        _invalidate_cached_session_generation(sid)
         return {
             "session_id": sid,
             "action": "materialize_sidecar_from_state_db",
