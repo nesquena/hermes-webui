@@ -7650,7 +7650,7 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
-function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
+function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions, searchActive=false){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
   const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
   const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
@@ -7839,9 +7839,11 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // the delegated raw role only when the importer confirms the missing
       // parent is also a subagent. An absent parent_source means the parent fell
       // outside the import window, so that child keeps its top-level fallback.
+      // During search, a known parent may be absent only because it did not match;
+      // keep the matching child reachable as an orphan result in that case.
       if(child&&_isChildSession(child)&&(
         child._cross_surface_child_session||
-        (childIsDelegatedSubagent&&String(child.parent_source||'').trim().toLowerCase()==='subagent')
+        (!searchActive&&childIsDelegatedSubagent&&String(child.parent_source||'').trim().toLowerCase()==='subagent')
       )) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
@@ -8323,9 +8325,9 @@ function _scopedSidebarReferenceRows(isCli, projectIdFor){
   });
 }
 
-function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
+function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, searchActive=false){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
-  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
+  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, searchActive);
 }
 
 function _attachProjectQuickCreateButton(chip, project){
@@ -8408,6 +8410,7 @@ function renderSessionListFromCache(){
   _purgeStaleInflightEntries();
   const searchQueryRaw=($('sessionSearch').value||'').trim();
   const q=searchQueryRaw.toLowerCase();
+  const searchActive=Boolean(q);
   const activeSidForSidebar=_activeSessionIdForSidebar();
   const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);
   // Merge direct session-id/link matches, title matches, then content matches (deduped).
@@ -8428,16 +8431,16 @@ function renderSessionListFromCache(){
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)]);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)], searchActive);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length
+    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)], searchActive).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)]).length
+    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)], searchActive).length
     : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
