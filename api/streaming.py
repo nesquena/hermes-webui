@@ -9164,27 +9164,26 @@ def _append_result_partial_on_error(
     if not isinstance(messages, list) or not isinstance(pre_call_context, list):
         return None
     normalized_msg_text = _normalize_user_text(msg_text)
+    current_token = (
+        active_turn_identity.get('token')
+        if isinstance(active_turn_identity, dict)
+        else None
+    )
     if _messages_have_prefix(messages, pre_call_context):
         # Append-only result: only rows after the pre-call baseline can
         # belong to this call.
         current_turn_rows = messages[len(pre_call_context):]
         baseline_has_current_user = bool(
             pre_call_context
-            and isinstance(pre_call_context[-1], dict)
-            and pre_call_context[-1].get('role') == 'user'
-            and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
-            == normalized_msg_text
+            and _active_turn_checkpoint_candidate(
+                pre_call_context[-1], active_turn_identity, msg_text
+            )
         )
         if baseline_has_current_user:
             leading_row = current_turn_rows[0] if current_turn_rows else None
             leading_token = (
                 leading_row.get('_active_turn_token')
                 if isinstance(leading_row, dict)
-                else None
-            )
-            current_token = (
-                active_turn_identity.get('token')
-                if isinstance(active_turn_identity, dict)
                 else None
             )
             if (
@@ -9246,6 +9245,10 @@ def _append_result_partial_on_error(
             and row.get('role') == 'assistant'
             and row.get('content')
             and not row.get('_error')
+            and (
+                not row.get('_active_turn_token')
+                or row.get('_active_turn_token') == current_token
+            )
         ),
         None,
     )

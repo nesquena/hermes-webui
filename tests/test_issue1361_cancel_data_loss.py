@@ -439,7 +439,7 @@ def test_current_turn_partial_upsert_stamps_only_available_exact_token():
 
 
 @pytest.mark.parametrize('result_token', [None, 'active', 'foreign'])
-def test_result_partial_preserves_existing_token_or_stamps_active_turn(result_token):
+def test_result_partial_accepts_only_current_or_unowned_token(result_token):
     token = streaming.build_active_turn_token('stream_1361', 1778098700.25)
     result_user = {'role': 'user', 'content': 'current', '_active_turn_token': token}
     assistant = {'role': 'assistant', 'content': 'partial response'}
@@ -460,9 +460,12 @@ def test_result_partial_preserves_existing_token_or_stamps_active_turn(result_to
         active_turn_identity={'token': token},
     )
 
-    assert row['_active_turn_token'] == (
-        'foreign:1' if result_token == 'foreign' else token
-    )
+    if result_token == 'foreign':
+        assert row is None
+        assert session.messages == [result_user]
+    else:
+        assert row is not None
+        assert row['_active_turn_token'] == token
 
 
 def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoint():
