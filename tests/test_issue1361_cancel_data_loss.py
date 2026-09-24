@@ -577,44 +577,22 @@ def test_stale_stream_cleanup_recovers_journaled_visible_output():
 # ── Structural guard: pin call sites of the materialize helper at error branches ──
 
 def test_materialize_helper_called_immediately_before_error_path_clears():
-    """Pin call sites of _materialize_pending_user_turn_before_error.
-
-    Catches a future refactor that drops the call from the apperror-no-response
-    or outer-Exception paths in api/streaming.py while leaving the
-    `pending_user_message = None` clearing in place — which is exactly the
-    user-turn-data-loss regression #1361 was filed for.
-
-    Strategy: count how many `pending_user_message = None` clearings have the
-    helper call within the preceding 4 lines. The success path and cancel path
-    legitimately don't need the helper. If a future refactor drops the helper
-    call from one of the error sites, this assertion fires.
-    """
+    """Pin each streaming error settlement independently before its own clear."""
     from pathlib import Path
     src = Path(__file__).parent.parent.joinpath('api', 'streaming.py').read_text(encoding='utf-8')
-    lines = src.splitlines()
-
-    helper_name = '_materialize_pending_user_turn_before_error('
-    clear_sites = [(i + 1, line) for i, line in enumerate(lines)
-                   if 'pending_user_message = None' in line]
-    assert len(clear_sites) >= 4, (
-        f"Expected ≥4 sites that clear pending_user_message; found {len(clear_sites)}. "
-        f"If api/streaming.py was refactored, re-audit this test."
-    )
-
-    sites_with_helper = []
-    for lineno, _ in clear_sites:
-        prev_block = '\n'.join(lines[max(0, lineno - 5):lineno - 1])
-        if helper_name in prev_block:
-            sites_with_helper.append(lineno)
-
-    # Both the apperror-no-response and outer-Exception paths must preserve the
-    # pending user before clearing it; the outer exception also supplies the
-    # worker-captured turn identity.
-    assert len(sites_with_helper) >= 2, (
-        f"Expected ≥2 clear sites preceded by {helper_name} within 4 lines; "
-        f"found {sites_with_helper}. PR #1760 / #1361 regression — re-wire the "
-        f"helper at the error-branch clear sites in api/streaming.py."
-    )
+    paths = {
+        'provider-error/apperror': "_result_public_error = _err_str or f'{_err_label}.'",
+        'outer-exception': '_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)',
+    }
+    for path, marker in paths.items():
+        start = src.index(marker)
+        clear = src.index('s.pending_user_message = None', start)
+        branch = src[start:clear]
+        assert re.search(
+            r"_materialize_pending_user_turn_before_error\(\s*"
+            r"s,\s*active_turn_identity=_active_turn_identity\s*\)",
+            branch,
+        ), f"{path} must materialize the pending user with captured turn identity before clearing it"
 
 
 

@@ -1245,6 +1245,22 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to put gateway event to queue")
 
+    def settle_gateway_error_event(event_payload):
+        message = str(
+            event_payload.get("message") or event_payload.get("label") or "Gateway request failed."
+        )
+        settled_payload = _settle_gateway_terminal_error(
+            session_id,
+            stream_id,
+            workspace,
+            model,
+            model_provider,
+            message,
+        )
+        if settled_payload is None:
+            return
+        put_gateway_event("apperror", {**settled_payload, **event_payload})
+
     s = None
     final_text = ""
     terminal_error = ""
@@ -1542,7 +1558,7 @@ def _run_gateway_chat_streaming(
             put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
-            put_gateway_event("apperror", {
+            settle_gateway_error_event({
                 "label": "Gateway returned no response",
                 "type": "gateway_empty_response",
                 "message": "Gateway returned no assistant message for this turn.",
@@ -1763,13 +1779,12 @@ def _run_gateway_chat_streaming(
             err_body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:
             err_body = ""
-        put_gateway_event(
-            "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+        settle_gateway_error_event(
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key()))
         )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
-        put_gateway_event("apperror", {
+        settle_gateway_error_event({
             "label": "Gateway request failed",
             "type": "gateway_error",
             "message": safe or "Gateway request failed.",

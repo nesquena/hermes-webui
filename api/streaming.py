@@ -8687,10 +8687,19 @@ def _partial_marker_already_present(messages, candidate: dict, *, before_idx: in
             isinstance(msg, dict)
             and msg.get('_partial')
             and _partial_message_signature(msg) == candidate_sig
-            and _message_private_identity_compatible(msg, candidate)
+            and _partial_turn_tokens_compatible(msg, candidate)
         ):
             return True
     return False
+
+
+def _partial_turn_tokens_compatible(existing: dict, candidate: dict) -> bool:
+    """Match partials only when both turn tokens agree or both are absent."""
+    existing_token = existing.get('_active_turn_token')
+    candidate_token = candidate.get('_active_turn_token')
+    if existing_token is None and candidate_token is None:
+        return True
+    return existing_token is not None and candidate_token is not None and existing_token == candidate_token
 
 
 def _partial_snapshot_prefers_candidate_text(current, candidate) -> bool:
@@ -8746,23 +8755,6 @@ def _upsert_current_turn_partial(
         return None
     _stamp_active_turn_activity(candidate, active_turn_identity)
     candidate_token = candidate.get('_active_turn_token')
-    active_token = (
-        active_turn_identity.get('token')
-        if isinstance(active_turn_identity, dict)
-        else None
-    )
-
-    def token_compatible(message):
-        row_token = message.get('_active_turn_token')
-        if candidate_token or row_token:
-            return bool(
-                candidate_token
-                and (
-                    row_token == candidate_token
-                    or (not row_token and candidate_token == active_token)
-                )
-            )
-        return True
 
     current_user_idx = next(
         (
@@ -8800,7 +8792,17 @@ def _upsert_current_turn_partial(
             if isinstance(messages[index], dict)
             and messages[index].get('role') == 'assistant'
             and not messages[index].get('_error')
-            and token_compatible(messages[index])
+            and (
+                _partial_turn_tokens_compatible(messages[index], candidate)
+                or (
+                    not messages[index].get('_partial')
+                    and messages[index].get('_active_turn_token') is None
+                    and isinstance(candidate_token, str)
+                    and bool(candidate_token)
+                    and isinstance(active_turn_identity, dict)
+                    and candidate_token == active_turn_identity.get('token')
+                )
+            )
             and str(messages[index].get('content') or '') == candidate_content
         ),
         None,
@@ -8812,7 +8814,7 @@ def _upsert_current_turn_partial(
         and messages[index].get('role') == 'assistant'
         and messages[index].get('_partial') is True
         and not messages[index].get('_error')
-        and token_compatible(messages[index])
+        and _partial_turn_tokens_compatible(messages[index], candidate)
     ]
     if canonical_idx is None and partial_indices:
         canonical_idx = partial_indices[-1]
