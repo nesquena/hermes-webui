@@ -5342,7 +5342,9 @@ def _filter_reasoning_efforts_for_provider(
     # operator explicitly allowlisted them. ``ultra`` is left to the
     # model-scoped default-deny below (the Agent maps it to ``max``).
     agent_ladder = _agent_provider_reasoning_ladder(provider_id, model_id)
-    if agent_ladder:
+    if agent_ladder is not None:
+        if not agent_ladder:
+            return []
         ranks = [
             VALID_REASONING_EFFORTS.index(eff)
             for eff in agent_ladder
@@ -5469,7 +5471,8 @@ def _agent_provider_reasoning_ladder(provider_id, model_id: str = "") -> tuple[s
     ``custom`` profile (and every ``custom:*`` route it serves) is excluded —
     it accepts any vocabulary, which proves nothing about the real endpoint, so
     unknown/custom lanes keep the top-tier default-deny. Falls back to the
-    static table above. ``None`` means no declared ladder.
+    static table above only for ``None`` (unknown); ``()`` authoritatively
+    means that the model accepts no reasoning parameter.
     """
     raw = str(provider_id or "").strip().lower()
     if not raw or raw == "custom" or raw.startswith("custom:"):
@@ -5493,9 +5496,8 @@ def _agent_provider_reasoning_ladder(provider_id, model_id: str = "") -> tuple[s
             declared = profile.supported_reasoning_efforts(model_id or None)
         except Exception:
             declared = None
-    if declared:
-        ladder = tuple(str(x).strip().lower() for x in declared)
-        return ladder or None
+    if declared is not None:
+        return tuple(str(x).strip().lower() for x in declared)
     entry = _AGENT_PROVIDER_REASONING_LADDERS.get(canonical)
     if entry is None:
         return None
@@ -5687,12 +5689,14 @@ def _models_dev_reasoning_efforts(
 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
     if supports_reasoning is True:
+        # models.dev's boolean proves only that reasoning exists; it does not
+        # declare a wire vocabulary or authorize provider-specific top tiers.
+        # Keep unknown-provider max/ultra default-deny active.
         return _filter_reasoning_efforts_for_provider(
             list(VALID_REASONING_EFFORTS),
             model,
             provider,
             config_data=config_data,
-            capability_confirmed=True,
         )
     if supports_reasoning is False:
         return []
@@ -6201,6 +6205,11 @@ def coerce_reasoning_effort_for_model(
     model, provider, resolved_base_url = _resolve_reasoning_context(
         model_id, provider_id, base_url, config_data=config_data
     )
+    # ProviderProfile.supported_reasoning_efforts() is tri-state. An empty
+    # tuple is a positive declaration that this model accepts no reasoning
+    # parameter, so even a persisted ``none`` must become an omitted config.
+    if _agent_provider_reasoning_ladder(provider, model) == ():
+        return ""
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
     # disabled at all — a stored 'none' must coerce to '' (provider default =
     # thinking on) so streaming does not build disabled reasoning for a model

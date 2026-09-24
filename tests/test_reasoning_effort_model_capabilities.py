@@ -420,6 +420,8 @@ def test_agent_provider_registry_ladder_is_authoritative(monkeypatch):
         "deepinfra-alias": _Profile("deepinfra"),
         "relay-lab": _Profile("relay-lab", ("none", "low", "medium", "high", "max")),
         "narrow-lab": _Profile("narrow-lab", ("low", "medium", "high")),
+        "no-reasoning-lab": _Profile("no-reasoning-lab", ()),
+        "cold-lab": _Profile("cold-lab", None),
         "custom": _Profile("custom"),
     }
     providers_mod = types.ModuleType("providers")
@@ -447,9 +449,60 @@ def test_agent_provider_registry_ladder_is_authoritative(monkeypatch):
     assert cfg.coerce_reasoning_effort_for_model(
         "max", "some-model", provider_id="narrow-lab"
     ) == "high"
+    # The Agent registry's tri-state is authoritative: () means that this
+    # model accepts no reasoning parameter, while None remains unknown and
+    # therefore keeps the normal model-name fallback.
+    assert cfg._agent_provider_reasoning_ladder(
+        "no-reasoning-lab", "deepseek-v4-flash"
+    ) == ()
+    assert cfg.resolve_model_reasoning_efforts(
+        "deepseek-v4-flash", provider_id="no-reasoning-lab"
+    ) == []
+    for effort in ("high", "none"):
+        coerced = cfg.coerce_reasoning_effort_for_model(
+            effort, "deepseek-v4-flash", provider_id="no-reasoning-lab"
+        )
+        assert coerced == ""
+        assert cfg.parse_reasoning_effort(coerced) is None
+    assert cfg._agent_provider_reasoning_ladder(
+        "cold-lab", "deepseek-v4-flash"
+    ) is None
+    assert "high" in cfg.resolve_model_reasoning_efforts(
+        "deepseek-v4-flash", provider_id="cold-lab"
+    )
+    assert cfg.coerce_reasoning_effort_for_model(
+        "high", "deepseek-v4-flash", provider_id="cold-lab"
+    ) == "high"
     # The generic custom profile accepts anything, which proves nothing.
     assert cfg.coerce_reasoning_effort_for_model(
         "max", "some-model", provider_id="custom:relay"
+    ) != "max"
+
+
+def test_models_dev_reasoning_boolean_does_not_authorize_max(monkeypatch):
+    """A generic reasoning flag proves support, not a provider's vocabulary."""
+    import sys
+    import types
+
+    agent_pkg = types.ModuleType("agent")
+    agent_pkg.__path__ = []
+    models_dev = types.ModuleType("agent.models_dev")
+    models_dev.get_model_capabilities = lambda **_kwargs: types.SimpleNamespace(  # type: ignore[attr-defined]
+        supports_reasoning=True
+    )
+    agent_pkg.models_dev = models_dev  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.models_dev", models_dev)
+    monkeypatch.setitem(sys.modules, "providers", None)
+
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "reasoning-model-v1", provider_id="boolean-only-lab"
+    )
+    assert "high" in efforts
+    assert "max" not in efforts
+    assert "ultra" not in efforts
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", "reasoning-model-v1", provider_id="boolean-only-lab"
     ) != "max"
 
 
