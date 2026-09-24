@@ -3043,7 +3043,12 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
     const byIdentity=new Map();
     for(const opt of options){
-      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
+      const provider=String(_getOptionProviderId(opt)||'').toLowerCase();
+      const value=String(opt.value||'');
+      // OpenRouter can expose distinct upstream IDs that differ only by dash/dot spelling.
+      const identity=provider==='openrouter'
+        ?value.replace(/^@openrouter:/i,'').toLowerCase()
+        :_modelPickerOptionIdentity(value,provider);
       if(!identity) continue;
       if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
       byIdentity.get(identity).push(opt);
@@ -3374,20 +3379,32 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     explicitProvider=rawModel.slice(1,rawModel.lastIndexOf(':'));
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
+  const isOpenRouterRoute=preferred==='openrouter'&&(rawModel.includes('/')||rawModel.startsWith('@'));
   if(preferred){
-    if(preferred==='custom'||preferred.startsWith('custom:')){
-      // A slash is part of a custom endpoint's upstream model ID, not a
-      // provider namespace. Match the exact routed ID (allowing only the
-      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+    if(isOpenRouterRoute||preferred==='custom'||preferred.startsWith('custom:')){
+      // Match the full routed ID. OpenRouter's slash IDs are exact; custom
+      // providers retain their legacy dash/dot spelling compatibility.
       const routeNorm=value=>{
         let routed=String(value||'');
         const prefix=`@${preferred}:`;
         if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
-        return routed.toLowerCase().replace(/-/g,'.');
+        const normalized=routed.toLowerCase();
+        return isOpenRouterRoute?normalized:normalized.replace(/-/g,'.');
       };
       const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      if(isOpenRouterRoute){
+        const exactRoute=value=>{
+          let routed=String(value||'');
+          const prefix=`@${preferred}:`;
+          if(routed.toLowerCase().startsWith(prefix.toLowerCase())) routed=routed.slice(prefix.length);
+          return routed.toLowerCase();
+        };
+        const exactProviderMatch=providerOptions.find(o=>exactRoute(o.value)===exactRoute(rawModel));
+        if(exactProviderMatch) return exactProviderMatch.value;
+      }
       const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
       if(providerMatch) return providerMatch.value;
+      if(isOpenRouterRoute) return null;
       // Legacy sessions may store only the bare suffix of a routed custom
       // option. Preserve #6195's provider-hinted repair, but only for an
       // explicit @provider: row; an unwrapped slash ID belongs to the active
@@ -3523,6 +3540,37 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
       ?_modelStateForSelect(sel,applied)
       :{model:applied,model_provider:null};
     if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  if(requestedProvider.toLowerCase()==='openrouter'&&typeof _readModelOverflowData==='function'&&sel.querySelectorAll){
+    const prefix=`@${requestedProvider}:`;
+    const routeKey=value=>{
+      let id=String(value||'');
+      if(id.toLowerCase().startsWith(prefix.toLowerCase())) id=id.slice(prefix.length);
+      return id.toLowerCase();
+    };
+    const target=routeKey(modelId);
+    for(const group of Array.from(sel.querySelectorAll('optgroup'))){
+      if(String(group.dataset&&group.dataset.provider||'').toLowerCase()!==requestedProvider.toLowerCase()) continue;
+      const extra=_readModelOverflowData(group);
+      const matches=extra.map((item,index)=>({item,index})).filter(entry=>routeKey(entry.item.id)===target);
+      const match=matches.find(entry=>String(entry.item.id)===String(modelId))||(matches.length===1?matches[0]:null);
+      if(!match) continue;
+      const opt=document.createElement('option');
+      opt.value=match.item.id;
+      opt.textContent=match.item.label||(typeof getModelLabel==='function'?getModelLabel(opt.value):opt.value);
+      if(String(opt.value).toLowerCase().startsWith(prefix.toLowerCase())){
+        opt.dataset.model=String(opt.value).slice(prefix.length);
+        opt.dataset.provider=requestedProvider;
+      }
+      group.appendChild(opt);
+      group.dataset.extraModels=JSON.stringify(extra.filter((_,index)=>index!==match.index));
+      const restored=_applyModelToDropdown(modelId,sel,requestedProvider);
+      if(restored){
+        const state=_modelStateForSelect(sel,restored);
+        if(String(state&&state.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return restored;
+      }
+      break;
+    }
   }
   const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
   const rawModel=String(modelId||'');
@@ -3763,7 +3811,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   // Keep existingNorm.has( within the #907 source slice.
   const optionIdentity=typeof _modelPickerOptionIdentity==='function'
-    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
+    ? (m,p)=>p&&String(p).trim().toLowerCase()==='openrouter'?String(m||'').replace(/^@openrouter:/i,'').toLowerCase():_modelPickerOptionIdentity(m,p)
     : (modelId,providerId)=>{
         let value=String(modelId||'');
         const provider=String(providerId||'').trim();

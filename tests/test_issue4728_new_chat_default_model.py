@@ -32,16 +32,24 @@ function extractFunction(src, signature) {
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const args = JSON.parse(process.argv[3]);
 const modelSelect = {
+  id: 'modelSelect',
   value: args.currentModel || '',
   options: [],
+  appendedOptions: [],
   selectedOptions: [{
     dataset: {
       provider: args.selectedOptionProvider || '',
     },
   }],
+  appendChild(option) {
+    this.options.push(option);
+    this.appendedOptions.push(option);
+  },
 };
 const store = new Map();
 const captured = [];
+const ensureCalls = [];
+let syncModelChipCalls = 0;
 
 function $(id) {
   return id === 'modelSelect' ? modelSelect : null;
@@ -111,10 +119,22 @@ globalThis._modelStateForSelect = (sel, modelId) => {
   };
 };
 globalThis._applyModelToDropdown = (modelId, sel, provider) => {
+  if (args.applyMissModel === modelId && !sel.options.some(option => option.value === modelId)) return null;
   sel.value = modelId;
   sel._provider = provider || null;
-  return true;
+  if (typeof globalThis.syncModelChip === 'function') globalThis.syncModelChip();
+  return modelId;
 };
+if (args.installEnsureHelper) {
+  globalThis._ensureModelOptionInDropdown = (modelId, sel, provider) => {
+    ensureCalls.push({ model: modelId, provider: provider || null });
+    if (!args.ensureReturns) return null;
+    sel.value = modelId;
+    sel._provider = provider || null;
+    globalThis.syncModelChip();
+    return modelId;
+  };
+}
 for (const name of [
   'clearLiveToolCards',
   'updateQueueBadge',
@@ -137,6 +157,7 @@ for (const name of [
 ]) {
   globalThis[name] = () => {};
 }
+globalThis.syncModelChip = () => { syncModelChipCalls += 1; };
 globalThis.loadDir = async () => null;
 globalThis._setNewSessionPending = () => {};
 globalThis.api = async (url, opts) => {
@@ -164,6 +185,9 @@ eval(extractFunction(src, 'async function newSession('));
   process.stdout.write(JSON.stringify({
     reqBody: captured[0].body,
     modelValue: modelSelect.value,
+    ensureCalls,
+    appendedOptionValues: modelSelect.appendedOptions.map(option => option.value),
+    syncModelChipCalls,
     override: globalThis._emptyComposerModelOverride,
   }));
 })().catch(err => {
@@ -262,3 +286,32 @@ def test_family_mismatched_fallback_provider_stays_null(driver_path):
 
     assert data["reqBody"]["model"] == "gpt-4o"
     assert data["reqBody"]["model_provider"] is None
+
+
+@node_test
+def test_new_session_uses_overflow_restorer_before_legacy_option_fallback(driver_path):
+    model = "nex-agi/nex-n2.5-pro:free"
+    payload = {
+        "currentModel": "openrouter/visible",
+        "selectedOptionProvider": "openrouter",
+        "emptyComposerOverride": {"model": model, "model_provider": "openrouter"},
+        "applyMissModel": model,
+    }
+    restored = _run_case(driver_path, {
+        **payload,
+        "installEnsureHelper": True,
+        "ensureReturns": True,
+    })
+
+    assert restored["reqBody"]["model"] == model
+    assert restored["reqBody"]["model_provider"] == "openrouter"
+    assert restored["ensureCalls"] == [{"model": model, "provider": "openrouter"}]
+    assert restored["appendedOptionValues"] == []
+    assert restored["modelValue"] == model
+    assert restored["syncModelChipCalls"] == 1
+
+    legacy = _run_case(driver_path, payload)
+    assert legacy["ensureCalls"] == []
+    assert legacy["appendedOptionValues"] == [model]
+    assert legacy["modelValue"] == model
+    assert legacy["syncModelChipCalls"] == 1

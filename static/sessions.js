@@ -1617,15 +1617,19 @@ async function newSession(flash, options={}){
       if(S.session.model!==modelSel.value || sessionProvider !== currentProvider){
         let sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
         if(!sessionModelApplied){
-          const opt=document.createElement('option');
-          opt.value=S.session.model;
-          opt.textContent=typeof getModelLabel==='function'?getModelLabel(S.session.model):S.session.model;
-          opt.dataset.custom='1';
-          opt.dataset.provider=sessionProvider||'';
-          modelSel.appendChild(opt);
-          sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+          if(typeof _ensureModelOptionInDropdown==='function'){
+            sessionModelApplied=_ensureModelOptionInDropdown(S.session.model,modelSel,sessionProvider);
+          }
+          if(!sessionModelApplied){
+            const opt=document.createElement('option');
+            opt.value=S.session.model;
+            opt.textContent=typeof getModelLabel==='function'?getModelLabel(S.session.model):S.session.model;
+            opt.dataset.custom='1';
+            opt.dataset.provider=sessionProvider||'';
+            modelSel.appendChild(opt);
+            sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+          }
         }
-        if(sessionModelApplied&&typeof syncModelChip==='function') syncModelChip();
       }
     }
     // Reset per-session visual state: a fresh chat is idle even if another
