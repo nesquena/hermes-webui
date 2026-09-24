@@ -10,6 +10,7 @@ import types
 import pytest
 
 import api.models as models
+import api.routes as routes
 import api.streaming as streaming
 from api.models import (
     _normalize_wakeup_rows_for_display,
@@ -542,3 +543,110 @@ def test_mixed_rejected_provenance_transfer_keeps_authoritative_wake(
     ]
     assert len(authoritative) == 1
     assert authoritative[0]["_source"] == "process_wakeup"
+
+
+@pytest.mark.parametrize("state_tail", [["delivery-b"], ["delivery-b", "delivery-a"]])
+def test_context_delta_retains_distinct_delivery_before_matching_mirror(state_tail):
+    context = [*HISTORY, _wake("delivery-a", timestamp=100.25)]
+    state = [*HISTORY, *[_wake(delivery, timestamp=100.25) for delivery in state_tail]]
+    delta = models.state_db_delta_after_context(context, state)
+    assert _delivery_ids(delta) == ["delivery-b"]
+
+
+def test_context_reconciliation_keeps_same_text_distinct_wakes():
+    context = [*HISTORY, _wake("delivery-a", timestamp=100.25)]
+    session = types.SimpleNamespace(
+        session_id="session-1", messages=list(context), context_messages=list(context),
+        truncation_watermark=None, truncation_boundary=None,
+    )
+    state = [*HISTORY, _wake("delivery-b", timestamp=100.25),
+             _wake("delivery-a", timestamp=100.25)]
+    merged = models.reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state,
+    )
+    assert _delivery_ids(merged) == ["delivery-a", "delivery-b"]
+
+
+def test_context_delta_unstamped_mirror_requires_exact_timestamp():
+    context = [*HISTORY, {"role": "user", "content": WAKE_TEXT, "timestamp": 100.5}]
+    state = [*HISTORY, _wake("delivery-b", timestamp=100.25)]
+    assert _delivery_ids(models.state_db_delta_after_context(context, state)) == ["delivery-b"]
+    exact = [*HISTORY, {"role": "user", "content": WAKE_TEXT, "timestamp": 100.25}]
+    assert models.state_db_delta_after_context(exact, state) == []
+    assert "display_kind" not in exact[-1]
+
+
+def test_messaging_longer_cli_keeps_distinct_delivery_and_prior_answer(monkeypatch):
+    sidecar = [_wake("delivery-a", timestamp=100.25)]
+    cli = [_wake("delivery-a", timestamp=100.25),
+           {"role": "assistant", "content": "prior answer", "timestamp": 100.3},
+           _wake("delivery-b", timestamp=100.25)]
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _: sidecar)
+    session = types.SimpleNamespace(messages=sidecar, truncation_watermark=None,
+                                    truncation_boundary=None)
+    merged = routes._merged_session_messages_for_display(session, cli)
+    assert _delivery_ids(merged) == ["delivery-a", "delivery-b"]
+    assert any(row.get("content") == "prior answer" for row in merged)
+
+
+def test_messaging_state_only_projects_durable_wake(monkeypatch):
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _: [])
+    result = routes._merged_session_messages_for_display(
+        types.SimpleNamespace(messages=[]), [_wake("delivery-b", timestamp=100.25)],
+    )
+    assert _delivery_ids(result) == ["delivery-b"]
+    assert result[0]["_source"] == "process_wakeup"
+
+
+def test_snapshot_prefix_distinguishes_wake_deliveries(monkeypatch):
+    parent = types.SimpleNamespace(session_id="parent", pre_compression_snapshot=True,
+                                   messages=[_wake("delivery-a", timestamp=100.25)])
+    child = types.SimpleNamespace(session_id="child", parent_session_id="parent",
+                                  messages=[_wake("delivery-b", timestamp=100.25)])
+    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent" else None)
+    result = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert _delivery_ids(result) == ["delivery-a", "delivery-b"]
+
+
+def test_lineage_parent_only_merge_distinguishes_wake_deliveries():
+    parent = types.SimpleNamespace(messages=[_wake("delivery-a", timestamp=100.25)])
+    child = types.SimpleNamespace(messages=[_wake("delivery-b", timestamp=100.25)])
+    result = routes._merged_webui_lineage_messages_for_display(
+        child, child.messages, parent_session=parent,
+    )
+    assert _delivery_ids(result) == ["delivery-a", "delivery-b"]
+
+
+def test_display_merges_same_delivery_once_and_preserves_legacy_bytes():
+    parent_row = _wake("delivery-a", timestamp=100.25)
+    child_row = _wake("delivery-a", timestamp=101.75)
+    ordinary = {"role": "user", "content": WAKE_TEXT, "timestamp": 100.25}
+    before = dict(ordinary)
+    parent = types.SimpleNamespace(messages=[parent_row, ordinary])
+    child = types.SimpleNamespace(messages=[child_row])
+    result = routes._merged_webui_lineage_messages_for_display(
+        child, child.messages, parent_session=parent,
+    )
+    assert _delivery_ids(result) == ["delivery-a"]
+    assert ordinary == before
+    assert ordinary in result
+    assert "_source" not in ordinary
+
+
+def test_context_delta_mirrored_delivery_with_different_timestamp_is_removed():
+    context = [*HISTORY, _wake("delivery-a", timestamp=100.25)]
+    state = [*HISTORY, _wake("delivery-a", timestamp=101.75)]
+    assert models.state_db_delta_after_context(context, state) == []
+
+
+def test_context_delta_legacy_timestamp_independent_prefix_unchanged():
+    context = [*HISTORY, {"role": "user", "content": "ordinary", "timestamp": 100.25}]
+    state = [*HISTORY, {"role": "user", "content": "ordinary", "timestamp": 101.75}]
+    assert models.state_db_delta_after_context(context, state) == []
+
+
+def test_context_delta_rejects_partial_wake_claim():
+    context = [*HISTORY, {"role": "user", "content": WAKE_TEXT, "timestamp": 100.25,
+                          "display_kind": "process_wakeup"}]
+    state = [*HISTORY, _wake("delivery-b", timestamp=100.25)]
+    assert _delivery_ids(models.state_db_delta_after_context(context, state)) == ["delivery-b"]
