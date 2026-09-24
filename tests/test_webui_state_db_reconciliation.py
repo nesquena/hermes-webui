@@ -3061,6 +3061,345 @@ def test_display_restamp_requires_shared_strong_identity(field):
 
 
 @pytest.mark.parametrize('action', ['helper', 'get', 'branch'])
+def test_display_unambiguous_idless_restamped_replay(monkeypatch, tmp_path, action):
+    import api.models as models
+    import api.routes as routes
+    from types import SimpleNamespace
+
+    primary = [
+        dict(role='assistant', content='prior answer', timestamp=100.0),
+        dict(role='user', content='first prompt', timestamp=101.0),
+        dict(role='assistant', content='first answer', timestamp=101.0),
+        dict(role='user', content='second prompt', timestamp=101.0),
+        dict(role='assistant', content='second answer', timestamp=101.0),
+    ]
+    incoming = [
+        dict(role='user', content='first prompt', timestamp=101.1),
+        dict(
+            role='assistant', content='first answer', timestamp=101.2,
+            _turnUsage={'output_tokens': 7}, _turnDuration=12,
+        ),
+        dict(role='user', content='second prompt', timestamp=101.3),
+        dict(role='assistant', content='second answer', timestamp=101.4),
+    ]
+    assert all('id' not in row and 'message_id' not in row for row in primary + incoming)
+    expected = [(row['role'], row['content'], row['timestamp']) for row in primary]
+
+    if action == 'helper':
+        rows = routes._merged_session_messages_for_display(
+            SimpleNamespace(messages=primary), incoming,
+        )
+    else:
+        source = _install_test_session(monkeypatch, tmp_path, 'idless_restamped', primary)
+        source.session_source = 'messaging'
+        source.context_messages = list(primary)
+        source.save()
+        monkeypatch.setattr(routes, 'get_session', lambda *a, **k: source)
+        monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *a, **k: incoming)
+        monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *a, **k: {})
+        if action == 'get':
+            handler = _GetHandler(
+                f'/api/session?session_id={source.session_id}&messages=1&resolve_model=0'
+            )
+            routes.handle_get(handler, urlparse(handler.path))
+            assert handler.status == 200
+            rows = handler.response_json['session']['messages']
+        else:
+            monkeypatch.setattr(routes, '_check_csrf', lambda _handler: True)
+            monkeypatch.setattr(routes, 'read_body', lambda _handler: {
+                'session_id': source.session_id, 'keep_count': len(primary) + len(incoming),
+            })
+            handler = _GetHandler('/api/session/branch')
+            routes.handle_post(handler, urlparse(handler.path))
+            assert handler.status == 200
+            rows = models.Session.load(handler.response_json['session_id']).messages
+
+    assert len(rows) == 5
+    assert [(row['role'], row['content'], row['timestamp']) for row in rows] == expected
+    assert all('_active_turn_token' not in row for row in rows)
+    assert '_turnUsage' not in rows[2]
+    assert '_turnDuration' not in rows[2]
+    if action == 'helper':
+        truncated = models.merge_session_display_messages(
+            primary,
+            incoming + [dict(role='user', content='Deleted suffix', timestamp=101.5)],
+            truncation_watermark=101.4,
+        )
+        assert [(row['role'], row['content'], row['timestamp']) for row in truncated] == expected
+        assert '_turnUsage' not in truncated[2]
+        assert '_turnDuration' not in truncated[2]
+
+
+@pytest.mark.parametrize('primary,incoming', [
+    (
+        [
+            dict(role='user', content='first', timestamp=1.0),
+            dict(role='assistant', content='inserted middle', timestamp=1.1),
+            dict(role='assistant', content='last', timestamp=1.2),
+        ],
+        [
+            dict(role='user', content='first', timestamp=2.0),
+            dict(role='assistant', content='last', timestamp=2.1),
+        ],
+    ),
+    (
+        [
+            dict(role='user', content='repeat', timestamp=1.0),
+            dict(role='assistant', content='done', timestamp=1.1),
+            dict(role='user', content='repeat', timestamp=1.2),
+            dict(role='assistant', content='done', timestamp=1.3),
+        ],
+        [
+            dict(role='user', content='repeat', timestamp=2.0),
+            dict(role='assistant', content='done', timestamp=2.1),
+        ],
+    ),
+    (
+        [
+            dict(role='user', content='owned', timestamp=1.0),
+            dict(role='assistant', content='answer', timestamp=1.1),
+        ],
+        [
+            dict(role='user', content='owned', timestamp=2.0, _active_turn_token='source-only'),
+            dict(role='assistant', content='answer', timestamp=2.1),
+        ],
+    ),
+    (
+        [
+            dict(role='user', content='run', timestamp=1.0),
+            dict(role='assistant', content='', timestamp=1.1, tool_calls=[
+                {'id': 'call', 'type': 'function', 'function': {'name': 'read_file', 'arguments': {'path': 'old'}}},
+            ]),
+        ],
+        [
+            dict(role='user', content='run', timestamp=2.0),
+            dict(role='assistant', content='', timestamp=2.1, tool_calls=[
+                {'id': 'call', 'type': 'function', 'function': {'name': 'read_file', 'arguments': {'path': 'new'}}},
+            ]),
+        ],
+    ),
+])
+def test_display_idless_replay_rejects_noncontiguous_or_ambiguous_sequences(primary, incoming):
+    from api.models import merge_session_display_messages
+
+    assert len(merge_session_display_messages(primary, incoming)) == len(primary) + len(incoming)
+
+
+def test_display_blank_separator_dedupe_requires_safe_same_turn_identity():
+    from api.models import merge_session_display_messages
+
+    first = dict(role='assistant', content='', timestamp=7, id='message-a')
+    second = dict(role='assistant', content='', timestamp=7, id='message-b')
+    assert merge_session_display_messages([first, second], []) == [first, second]
+    assert merge_session_display_messages([first, dict(first, _turnDuration=4)], []) == [first]
+
+    anonymous = dict(role='assistant', content='', timestamp=7)
+    assert merge_session_display_messages([anonymous, dict(anonymous)], []) == [anonymous]
+    assert merge_session_display_messages([first, dict(anonymous)], []) == [first, dict(anonymous)]
+
+
+def test_display_blank_assistant_dedupe_identity_work_is_bounded(monkeypatch):
+    import api.models as models
+
+    count = 1024
+    rows = [
+        dict(role='assistant', content='', timestamp=7, id=f'blank-{index}')
+        for index in range(count)
+    ]
+    original = models._message_private_identity_key
+    probes = 0
+
+    def counted(row):
+        nonlocal probes
+        probes += 1
+        return original(row)
+
+    monkeypatch.setattr(models, '_message_private_identity_key', counted)
+    assert models.merge_session_display_messages(rows, []) == rows
+    assert probes <= count * 4
+
+
+def test_display_blank_assistant_dedupe_respects_private_claims():
+    from api.models import merge_session_display_messages
+
+    blank = dict(role='assistant', content='', timestamp=7)
+    same_id = dict(blank, id='same')
+    owned_same_id = dict(same_id, _active_turn_token='owner:7')
+    merged = merge_session_display_messages([same_id, owned_same_id], [])
+    assert merged == [same_id]
+    assert same_id['_active_turn_token'] == 'owner:7'
+
+    distinct_claim_pairs = [
+        [blank, dict(blank, _active_turn_token='owner:7')],
+        [dict(blank, _active_turn_token='owner:a'), dict(blank, _active_turn_token='owner:b')],
+        [dict(blank, api_content='one'), dict(blank, api_content='two')],
+        [dict(blank, id='same', _active_turn_token='owner:a'),
+         dict(blank, id='same', _active_turn_token='owner:b')],
+        [dict(blank, id='same', _active_turn_token='owner:a'),
+         dict(blank, id='same', _active_turn_token='owner:b'), dict(blank, id='same')],
+        [dict(blank, id='same', api_content='one'), dict(blank, id='same', api_content='two')],
+        [dict(blank, _row_id=1), dict(blank, _row_id=2)],
+        [dict(blank, id='bad', message_id='other'), dict(blank, id='bad', message_id='other')],
+        [dict(blank, tool_name='read_file'), dict(blank, tool_name='read_file')],
+        [dict(blank, _partial_tool_calls=[{'id': 'call-a'}]),
+         dict(blank, _partial_tool_calls=[{'id': 'call-a'}])],
+    ]
+    for rows in distinct_claim_pairs:
+        assert merge_session_display_messages(rows, []) == rows
+
+
+def test_display_truncation_prefilter_does_not_promote_cross_time_metadata():
+    from api.models import merge_session_display_messages
+
+    primary = [
+        dict(role='user', content='Keep prompt', timestamp=100),
+        dict(role='assistant', content='Keep answer', timestamp=100),
+    ]
+    incoming = [
+        dict(role='user', content='Keep prompt', timestamp=101, _active_turn_token='source:101'),
+        dict(role='assistant', content='Keep answer', timestamp=102, _turnUsage={'output_tokens': 3}),
+        dict(role='user', content='Deleted suffix', timestamp=103),
+    ]
+
+    merged = merge_session_display_messages(primary, incoming, truncation_watermark=102)
+
+    assert [(row['role'], row['content'], row['timestamp']) for row in merged] == [
+        ('user', 'Keep prompt', 100),
+        ('assistant', 'Keep answer', 100),
+        ('user', 'Keep prompt', 101),
+        ('assistant', 'Keep answer', 102),
+    ]
+    assert '_active_turn_token' not in merged[0]
+    assert '_turnUsage' not in merged[1]
+    assert merged[2]['_active_turn_token'] == 'source:101'
+    assert merged[3]['_turnUsage'] == {'output_tokens': 3}
+
+    same_time = [dict(role='assistant', content='Same answer', timestamp=100)]
+    mirror = dict(same_time[0], _turnDuration=4)
+    assert merge_session_display_messages(
+        same_time, [mirror], truncation_watermark=100,
+    )[0]['_turnDuration'] == 4
+
+
+@pytest.mark.parametrize('action', ['helper', 'get', 'branch'])
+@pytest.mark.parametrize('boundary', [None, 102])
+def test_display_truncation_does_not_reintroduce_matched_rows_after_watermark(
+    monkeypatch, tmp_path, action, boundary,
+):
+    import api.models as models
+    import api.routes as routes
+
+    primary = [
+        dict(role='user', content='Keep prompt', timestamp=100),
+        dict(role='assistant', content='Keep answer', timestamp=100),
+    ]
+    incoming = [
+        dict(role='user', content='Keep prompt', timestamp=103, _active_turn_token='source:103'),
+        dict(role='assistant', content='Keep answer', timestamp=104, _turnUsage={'output_tokens': 3}),
+    ]
+
+    session = _install_test_session(monkeypatch, tmp_path, 'matched_beyond_watermark', primary)
+    session.session_source = 'messaging'
+    session.truncation_watermark = 102
+    session.truncation_boundary = boundary
+    session.context_messages = list(primary)
+    session.save()
+    monkeypatch.setattr(routes, 'get_session', lambda *_a, **_k: session)
+    monkeypatch.setattr(routes, 'get_cli_session_messages', lambda *_a, **_k: incoming)
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda *_a, **_k: {})
+
+    if action == 'helper':
+        merged = routes._merged_session_messages_for_display(session, incoming)
+    elif action == 'get':
+        handler = _GetHandler(
+            f'/api/session?session_id={session.session_id}&messages=1&resolve_model=0'
+        )
+        routes.handle_get(handler, urlparse(handler.path))
+        assert handler.status == 200
+        merged = handler.response_json['session']['messages']
+    else:
+        monkeypatch.setattr(routes, '_check_csrf', lambda _handler: True)
+        monkeypatch.setattr(routes, 'read_body', lambda _handler: {
+            'session_id': session.session_id, 'keep_count': len(primary),
+        })
+        handler = _GetHandler('/api/session/branch')
+        routes.handle_post(handler, urlparse(handler.path))
+        assert handler.status == 200
+        merged = models.Session.load(handler.response_json['session_id']).messages
+
+    assert merged == primary
+    assert '_active_turn_token' not in primary[0]
+    assert '_turnUsage' not in primary[1]
+
+
+def test_display_truncation_keeps_advanced_post_edit_tail():
+    from api.models import merge_session_display_messages
+
+    primary = [dict(role='user', content='Edited prompt', timestamp=102)]
+    incoming = [
+        dict(primary[0]),
+        dict(role='assistant', content='New answer', timestamp=103),
+    ]
+
+    merged = merge_session_display_messages(
+        primary, incoming, truncation_watermark=102, truncation_boundary=101,
+    )
+
+    assert merged == primary + [incoming[1]]
+
+
+def test_display_truncation_zero_watermark_keeps_empty_transcript():
+    from api.models import merge_session_display_messages
+
+    incoming = [dict(role='user', content='Deleted prompt', timestamp=1)]
+
+    assert merge_session_display_messages(
+        [], incoming, truncation_watermark=0,
+    ) == []
+
+
+def test_lineage_get_preserves_same_time_tool_only_partial_assistant_rows(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    parent_row = dict(role='user', content='Run both tools', timestamp=1)
+    partials = [
+        dict(
+            role='assistant', content='', timestamp=2, _partial=True,
+            _partial_tool_calls=[{'id': 'tool-a', 'name': 'read_file', 'arguments': {'path': 'a.txt'}}],
+        ),
+        dict(
+            role='assistant', content='', timestamp=2, _partial=True,
+            _partial_tool_calls=[{'id': 'tool-b', 'name': 'read_file', 'arguments': {'path': 'b.txt'}}],
+        ),
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, 'partial_lineage_parent', [parent_row])
+    child = _install_test_session(monkeypatch, tmp_path, 'partial_lineage_child', partials)
+    child.parent_session_id = parent.session_id
+    child.session_source = 'webui'
+    child.save()
+    monkeypatch.setattr(
+        routes, 'get_session',
+        lambda sid, **_k: child if sid == child.session_id else parent,
+    )
+    monkeypatch.setattr(routes, '_session_requires_cli_metadata_lookup', lambda _session: False)
+    monkeypatch.setattr(routes, 'get_state_db_session_messages', lambda *_a, **_k: [])
+
+    handler = _GetHandler(
+        f'/api/session?session_id={child.session_id}&messages=1&resolve_model=0'
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    rows = handler.response_json['session']['messages']
+    assert [
+        row['_partial_tool_calls'][0]['id']
+        for row in rows if row.get('_partial_tool_calls')
+    ] == [
+        'tool-a', 'tool-b',
+    ]
+
+
+@pytest.mark.parametrize('action', ['helper', 'get', 'branch'])
 def test_display_api_content_does_not_identify_restamped_owner(
     monkeypatch, tmp_path, action,
 ):

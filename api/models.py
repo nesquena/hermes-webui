@@ -12242,6 +12242,7 @@ def merge_session_display_messages(
     incoming = list(incoming or [])
     def dedupe_blank_assistants(rows):
         seen = {}
+        ambiguous = object()
         retained = []
         for row in rows:
             is_blank_separator = (
@@ -12249,28 +12250,104 @@ def merge_session_display_messages(
                 and row.get("role") == "assistant"
                 and not row.get("content")
                 and not row.get("reasoning")
-                and not row.get("tool_calls")
-                and not row.get("tool_call_id")
+                and not any(row.get(key) for key in (
+                    "_partial_tool_calls", "tool_calls", "tool_call_id",
+                    "tool_use_id", "tool_name", "name",
+                ))
             )
-            key = _message_timestamp_as_float(row) if is_blank_separator else None
-            existing = seen.get(key) if key is not None else None
-            if existing is not None:
-                _merge_session_display_metadata(existing, row)
-                continue
+            timestamp = _message_timestamp_as_float(row) if is_blank_separator else None
+            identity = None
+            if timestamp is not None:
+                stable_id, stable_valid = _stable_message_identity_details(row)
+                state_row_id, state_row_valid = _state_db_row_identity_details(row)
+                if stable_valid and state_row_valid:
+                    private = _message_private_identity_key(row)
+                    identity = (
+                        timestamp,
+                        stable_id if stable_id is not None or state_row_id is not None else private[0],
+                        state_row_id,
+                        None if stable_id is not None or state_row_id is not None else private[3],
+                    )
+            existing = seen.get(identity) if identity is not None else None
+            if existing is not None and existing is not ambiguous:
+                if _message_private_identity_compatible(existing, row):
+                    _merge_session_display_metadata(existing, row)
+                    continue
+                seen[identity] = ambiguous
             retained.append(row)
-            if key is not None:
-                seen[key] = row
+            if identity is not None:
+                seen.setdefault(identity, row)
         return retained
 
     primary = dedupe_blank_assistants(primary)
     incoming = dedupe_blank_assistants(incoming)
+
+    def public_key(row):
+        return (_session_message_visible_key(row, normalize_workspace_prefix=True)[:3],
+                row.get("tool_call_id"), row.get("tool_use_id"),
+                row.get("tool_name") or row.get("name") or "",
+                json.dumps(row.get("_partial_tool_calls") or [], sort_keys=True, default=str))
+
+    def unambiguous_replay_suffix():
+        if (
+            not 1 < len(incoming) <= len(primary)
+            or not all(isinstance(row, dict) for row in primary + incoming)
+        ):
+            return False
+        sidecar_keys = [public_key(row) for row in primary]
+        replay_keys = [public_key(row) for row in incoming]
+        if (
+            sidecar_keys[-len(incoming):] != replay_keys
+            or len(set(sidecar_keys)) != len(sidecar_keys)
+            or len(set(replay_keys)) != len(replay_keys)
+        ):
+            return False
+
+        sidecar_suffix = primary[-len(incoming):]
+        previous_sidecar_time = previous_replay_time = None
+        for target, source in zip(sidecar_suffix, incoming, strict=True):
+            target_identity = _message_private_identity_key(target)
+            source_identity = _message_private_identity_key(source)
+            target_time = _message_timestamp_as_float(target)
+            source_time = _message_timestamp_as_float(source)
+            if (
+                target_identity[1] is not None or source_identity[1] is not None
+                or target_identity[2] is not None or source_identity[2] is not None
+                or (source_identity[0] is not None and source_identity[0] != target_identity[0])
+                or not _message_private_identity_compatible(target, source)
+                or target_time is None or source_time is None or source_time <= target_time
+                or (previous_sidecar_time is not None and target_time < previous_sidecar_time)
+                or (previous_replay_time is not None and source_time < previous_replay_time)
+            ):
+                return False
+            previous_sidecar_time, previous_replay_time = target_time, source_time
+        return True
+
     if truncation_watermark is not None or truncation_boundary is not None:
+        # Probe a shallow sidecar copy so filtering cannot promote metadata onto
+        # the real rows. Accepted mirrors continue through the display merge,
+        # which owns identity and metadata decisions.
+        probe_primary = [dict(row) if isinstance(row, dict) else row for row in primary]
+        matched_input_ids = set()
         retained = merge_session_messages_append_only(
-            primary, incoming, truncation_watermark=truncation_watermark,
+            probe_primary, incoming, truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
+            matched_input_ids=matched_input_ids,
         )
         retained_ids = {id(row) for row in retained}
-        incoming = [row for row in incoming if id(row) in retained_ids]
+        incoming = [
+            row for row in incoming
+            if id(row) in retained_ids or id(row) in matched_input_ids
+        ]
+
+    # A unique, contiguous ID-less replay suffix can survive nonuniform time
+    # shifts; sequence evidence never grants cross-time metadata ownership.
+    if unambiguous_replay_suffix():
+        for target, source in zip(primary[-len(incoming):], incoming, strict=True):
+            if _message_display_mirror_compatible(target, source):
+                _merge_session_display_metadata(target, source)
+        return primary
+
     if not primary:
         return merge_session_messages_append_only([], incoming)
     if _session_messages_have_prefix(primary, incoming, compatible=True):
@@ -12288,10 +12365,6 @@ def merge_session_display_messages(
         for target, source in zip(primary[-len(incoming):], incoming, strict=True):
             _merge_session_display_metadata(target, source)
         return primary
-
-    def public_key(row):
-        return (_session_message_visible_key(row, normalize_workspace_prefix=True)[:3],
-                row.get("tool_call_id"), row.get("tool_name") or row.get("name") or "")
 
     def effective_times(rows):
         times = [_message_timestamp_as_float(row) for row in rows]
@@ -12426,11 +12499,14 @@ def merge_session_messages_append_only(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance: Literal["unverified", "state_db"] = "unverified",
+    matched_input_ids: set[int] | None = None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
     Thin wrapper that scopes the structured-content identity memo to this one
     call; see :func:`_merge_session_messages_append_only_impl` for the merge.
+    ``matched_input_ids`` records incoming rows matched within the retained
+    timestamp range during that merge.
     """
     token = _STRUCTURED_IDENTITY_MEMO.set({})
     try:
@@ -12440,6 +12516,7 @@ def merge_session_messages_append_only(
             truncation_watermark=truncation_watermark,
             truncation_boundary=truncation_boundary,
             incoming_provenance=incoming_provenance,
+            matched_input_ids=matched_input_ids,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -12535,6 +12612,7 @@ def _merge_session_messages_append_only_impl(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance=None,
+    matched_input_ids=None,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -12546,6 +12624,15 @@ def _merge_session_messages_append_only_impl(
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
+
+    def record_matched_input(source, *, admitted=True):
+        if matched_input_ids is not None and admitted:
+            matched_input_ids.add(id(source))
+
+    def merge_display_metadata(target, source, *, admitted=True):
+        record_matched_input(source, admitted=admitted)
+        _merge_session_display_metadata(target, source)
+
     _reconcile_api_content_sidecars(sidecar_messages, state_messages)
     # The reconciler's quarantine sets are invocation-local. Mirror the
     # identity-bucket guards here because this append-only merge has its own
@@ -12767,7 +12854,7 @@ def _merge_session_messages_append_only_impl(
                 claims.append(private)
                 deduped.append(msg)
             else:
-                _merge_session_display_metadata(rows[existing_index], msg)
+                merge_display_metadata(rows[existing_index], msg)
             # An anonymous row may accept one private claim, not conflicting
             # later claims. Keep source provenance even when display metadata
             # promotion does not copy that private field onto the target.
@@ -12893,6 +12980,7 @@ def _merge_session_messages_append_only_impl(
     def _state_row_is_truncated(
         msg, key, content_key, timestamp, checkpoint_consumed,
         *, retained_native_image_row: bool | None = None,
+        matched_prefix: bool = False,
     ):
         # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
         # past the watermark. Because Session.save() no longer auto-clears the
@@ -12945,6 +13033,8 @@ def _merge_session_messages_append_only_impl(
             )
         ):
             return True
+        if matched_prefix:
+            return False
         # When a truncation watermark is active, state.db may contain original
         # messages that were replaced by Edit (old content with old timestamp).
         # The timestamp-based filter above catches messages AFTER the watermark,
@@ -13034,6 +13124,7 @@ def _merge_session_messages_append_only_impl(
                 retained_native_image_row=retained_native_image_row,
             ):
                 continue
+            record_matched_input(source_message)
             if row_id_fast_path_allowed:
                 # This state row replays the sidecar row it resolved to, so it
                 # consumes that position in the replay sequence exactly like the
@@ -13118,12 +13209,23 @@ def _merge_session_messages_append_only_impl(
             multimodal_replay_target = None
         if multimodal_replay_target is not None:
             _copy_api_content_sidecar(multimodal_replay_target, msg)
-            _merge_session_display_metadata(multimodal_replay_target, msg)
             if (
                 state_replay_idx < len(sidecar_visible_messages)
                 and sidecar_visible_messages[state_replay_idx] is multimodal_replay_target
             ):
                 state_replay_idx += 1
+            merge_display_metadata(
+                multimodal_replay_target,
+                msg,
+                admitted=not _state_row_is_truncated(
+                    msg,
+                    key,
+                    content_key,
+                    timestamp,
+                    state_replay_idx >= len(sidecar_visible_sequence),
+                    matched_prefix=True,
+                ),
+            )
             seen_dedup_keys.add(dedup_key)
             continue
         replays_sidecar_prefix = False
@@ -13140,7 +13242,18 @@ def _merge_session_messages_append_only_impl(
                 replay_target = sidecar_visible_messages[state_replay_idx]
                 state_replay_idx += 1
         if replays_sidecar_prefix:
-            _merge_session_display_metadata(replay_target, msg)
+            merge_display_metadata(
+                replay_target,
+                msg,
+                admitted=not _state_row_is_truncated(
+                    msg,
+                    key,
+                    content_key,
+                    timestamp,
+                    state_replay_idx >= len(sidecar_visible_sequence),
+                    matched_prefix=True,
+                ),
+            )
             matched_visible_key = _matching_visible_duplicate(
                 visible_key,
                 sidecar_visible_keys,
@@ -13178,7 +13291,17 @@ def _merge_session_messages_append_only_impl(
             if not row_id_sidecar_conflict:
                 if existing_api_content is None and incoming_api_content is not None:
                     _copy_api_content_sidecar(existing, msg)
-                _merge_session_display_metadata(existing, msg)
+                merge_display_metadata(
+                    existing,
+                    msg,
+                    admitted=not _state_row_is_truncated(
+                        msg,
+                        key,
+                        content_key,
+                        timestamp,
+                        state_replay_idx >= len(sidecar_visible_sequence),
+                    ),
+                )
                 continue
         checkpoint_consumed = state_replay_idx >= len(sidecar_visible_sequence)
         if _state_row_is_truncated(
@@ -13197,7 +13320,7 @@ def _merge_session_messages_append_only_impl(
         # collapsed.  The merge key truncates to seconds; the dedup key does
         # not.
         if dedup_key in seen_dedup_keys and not duplicate_identity_conflict:
-            _merge_session_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
+            merge_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
             continue
         if (
             not duplicate_identity_conflict
@@ -13210,7 +13333,7 @@ def _merge_session_messages_append_only_impl(
             # handled true duplicates; same-second distinct messages must
             # fall through.
             if key in seen_message_keys and key[0] == "message_id":
-                _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                merge_display_metadata(merged_by_message_key.get(key), msg)
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
                 # Legacy key within sidecar timestamp range — only skip if
@@ -13219,10 +13342,10 @@ def _merge_session_messages_append_only_impl(
                 # identical content/timestamp, so an unchecked continue here
                 # would drop legitimately distinct turns.  (#3346 / PR #3665)
                 if key in seen_message_keys:
-                    _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                    merge_display_metadata(merged_by_message_key.get(key), msg)
                     continue
         if key in seen_message_keys and key[0] == "message_id" and not duplicate_identity_conflict:
-            _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+            merge_display_metadata(merged_by_message_key.get(key), msg)
             continue
         matched_visible_key = _matching_visible_duplicate(
             visible_key,
@@ -13236,7 +13359,7 @@ def _merge_session_messages_append_only_impl(
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
             if skipped_count < sidecar_count:
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
-                _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
+                merge_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
@@ -13297,7 +13420,7 @@ def _merge_session_messages_append_only_impl(
                             _remember_merged_message(msg, source="state")
                         continue
                     else:
-                        _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                        merge_display_metadata(merged_by_message_key.get(key), msg)
                         continue
                 else:
                     if msg.get("role") == "user" and content_key not in seen_content_keys:
@@ -13308,7 +13431,7 @@ def _merge_session_messages_append_only_impl(
                             seen_visible_keys.add(visible_key)
                             _remember_merged_message(msg, source="state")
                         continue
-                    _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                    merge_display_metadata(merged_by_message_key.get(key), msg)
                     continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)

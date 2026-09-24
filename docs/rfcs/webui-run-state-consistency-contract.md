@@ -160,12 +160,21 @@ user and any partial assistant output in model context before saving cleanup.
 
 A reconciliation may associate an anonymous mirror with one compatible private
 claim; later conflicting claims remain distinct. Shared stable IDs, state row
-IDs, or active tokens can establish a mirror across timestamp restamps. Equal
-nonempty provider content may accompany a mirror when timestamps agree, but
-does not establish cross-timestamp identity. Anonymous assistant output at
-different known timestamps is distinct, including in cumulative prefixes.
-Cancelled partial-output recovery deduplicates only within the current user
-turn.
+IDs, or active tokens can establish a mirror across timestamp restamps. An
+otherwise ID-less replay can match as an unambiguous contiguous suffix of the
+sidecar when the ordered role/content/tool shapes are unique, both aligned
+sequences have known monotonic timestamps, and every replay timestamp is later
+than its sidecar counterpart. The replay can cover only part of the sidecar
+suffix, and timestamp deltas need not be constant. Isolated rows, repeated
+shapes, noncontiguous alignments, and source-only active-turn tokens remain
+distinct. Rows matched only by sequence evidence never promote ownership or
+display metadata across unequal-time rows; metadata promotion still requires
+the existing per-row mirror check.
+Equal nonempty provider content may accompany a mirror when timestamps agree,
+but does not establish cross-timestamp identity. Anonymous assistant output at
+different known timestamps remains distinct outside the replay-suffix
+exception, including cumulative prefixes. Cancelled partial-output recovery
+deduplicates only within the current user turn.
 
 ## Core Invariants
 
