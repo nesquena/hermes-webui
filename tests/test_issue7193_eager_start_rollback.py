@@ -3,6 +3,7 @@
 import copy
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -71,6 +72,15 @@ def _saved_retry_session(issue7193_env):
     session.context_messages = copy.deepcopy(session.messages)
     session.save(touch_updated_at=False)
     return session
+
+
+def _saved_session_with_recovery_backup(issue7193_env):
+    session = _saved_retry_session(issue7193_env)
+    session.messages = copy.deepcopy(session.messages[:1])
+    session.context_messages = copy.deepcopy(session.messages)
+    session.save(touch_updated_at=False)
+    backup_path = session.path.with_suffix(".json.bak")
+    return session, backup_path, backup_path.read_bytes()
 
 
 def test_eager_rejected_before_stream_registration_retry_reload_has_one_new_prompt(
@@ -247,6 +257,62 @@ def test_rejected_start_preserves_entry_recovery_backup_bytes(
     status = inspect_session_recovery_status(session.path)
     assert status["recommend"] == "restore"
     assert status["bak_messages"] == 6
+
+
+def test_accepted_start_allows_unreadable_entry_backup_and_preserves_bytes(
+    issue7193_env, monkeypatch
+):
+    session, backup_path, entry_backup = _saved_session_with_recovery_backup(issue7193_env)
+    real_read_bytes = Path.read_bytes
+    failed = False
+
+    def fail_entry_backup_read(path):
+        nonlocal failed
+        if path == backup_path and not failed:
+            failed = True
+            raise OSError("backup read unavailable")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(routes.Path, "read_bytes", fail_entry_backup_read)
+
+    response = _start(session, workspace=issue7193_env / "workspace")
+
+    assert response["session_id"] == session.session_id
+    assert response["stream_id"] == session.active_stream_id
+    assert backup_path.read_bytes() == entry_backup
+
+
+def test_rejected_start_with_unreadable_entry_backup_restores_session_and_backup(
+    issue7193_env, monkeypatch
+):
+    from api.session_recovery import inspect_session_recovery_status
+
+    session, backup_path, entry_backup = _saved_session_with_recovery_backup(issue7193_env)
+    before = copy.deepcopy(session.__dict__)
+    real_read_bytes = Path.read_bytes
+    failed = False
+
+    def fail_entry_backup_read(path):
+        nonlocal failed
+        if path == backup_path and not failed:
+            failed = True
+            raise OSError("backup read unavailable")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(routes.Path, "read_bytes", fail_entry_backup_read)
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    assert session.__dict__ == before
+    assert Session.load(session.session_id).messages == before["messages"]
+    assert backup_path.read_bytes() == entry_backup
+    assert inspect_session_recovery_status(session.path)["recommend"] == "restore"
 
 
 @pytest.mark.parametrize("existing_session", [True, False], ids=["existing", "hidden-empty"])
@@ -445,6 +511,109 @@ def test_rollback_save_failure_preserves_original_initialization_error(issue7193
     assert save_calls[1].get("touch_updated_at") is False
     assert backup_path.exists()
     assert json.loads(backup_path.read_bytes()) == json.loads(before_sidecar)
+
+
+def test_rejected_submitted_turn_is_terminal_and_audit_is_clean(issue7193_env, monkeypatch):
+    from api.session_recovery import audit_session_recovery
+    from api.turn_journal import read_turn_journal
+
+    session = new_session(workspace=str(issue7193_env.parent))
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    events = read_turn_journal(session.session_id, session_dir=issue7193_env)["events"]
+    submitted = next(event for event in events if event["event"] == "submitted")
+    interrupted = next(event for event in events if event["event"] == "interrupted")
+    assert interrupted["turn_id"] == submitted["turn_id"]
+    assert interrupted["stream_id"] == submitted["stream_id"]
+    assert interrupted["reason"] == "start_compensated"
+
+    report = audit_session_recovery(issue7193_env)
+    assert report["status"] == "ok"
+    assert not any(item["kind"] == "turn_journal_pending_turn" for item in report["items"])
+
+
+def test_terminal_append_failure_preserves_original_admission_error(
+    issue7193_env, monkeypatch
+):
+    import api.turn_journal as turn_journal
+
+    session = new_session(workspace=str(issue7193_env.parent))
+    real_append = turn_journal.append_turn_journal_event
+    calls = []
+
+    def append_with_terminal_failure(session_id, event, *args, **kwargs):
+        calls.append(dict(event))
+        if event.get("event") == "interrupted":
+            raise OSError("terminal journal unavailable")
+        result = real_append(session_id, event, *args, **kwargs)
+        calls[-1]["turn_id"] = result["turn_id"]
+        return result
+
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", append_with_terminal_failure)
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    assert [event["event"] for event in calls] == ["submitted", "interrupted"]
+    assert calls[1]["turn_id"] == calls[0].get("turn_id")
+    assert session.active_stream_id is None
+    assert session.pending_user_message is None
+
+
+def test_unknown_backup_sidecar_restore_failure_skips_save_and_preserves_error(
+    issue7193_env, monkeypatch
+):
+    session, backup_path, entry_backup = _saved_session_with_recovery_backup(issue7193_env)
+    before = copy.deepcopy(session.__dict__)
+    real_read_bytes = Path.read_bytes
+    backup_read_failed = False
+    real_save = models.Session.save
+    save_calls = []
+
+    def fail_entry_backup_read(path):
+        nonlocal backup_read_failed
+        if path == backup_path and not backup_read_failed:
+            backup_read_failed = True
+            raise OSError("backup read unavailable")
+        return real_read_bytes(path)
+
+    def record_save(self, *args, **kwargs):
+        save_calls.append(kwargs)
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(routes.Path, "read_bytes", fail_entry_backup_read)
+    monkeypatch.setattr(models.Session, "save", record_save)
+    monkeypatch.setattr(
+        routes,
+        "_atomic_write_chat_start_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("entry sidecar restore failed")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "create_stream_channel",
+        lambda: (_ for _ in ()).throw(RuntimeError("stream registration rejected")),
+    )
+
+    with pytest.raises(RuntimeError, match="stream registration rejected"):
+        _start(session, workspace=issue7193_env / "workspace")
+
+    assert session.__dict__ == before
+    assert len(save_calls) == 1
+    assert backup_path.read_bytes() == entry_backup
 
 
 def test_journal_append_failure_is_best_effort(issue7193_env, monkeypatch):

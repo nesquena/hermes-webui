@@ -23314,6 +23314,15 @@ def _restore_chat_start_backup_provenance(provenance, *, compensation_succeeded:
         )
 
 
+def _restore_chat_start_entry_sidecar(provenance) -> None:
+    """Restore the entry sidecar before saving when backup bytes are unknown."""
+    sidecar_path, sidecar_bytes, _backup_path, _had_backup, _backup_bytes = provenance
+    if sidecar_bytes is None:
+        sidecar_path.unlink(missing_ok=True)
+    else:
+        _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+
+
 def _cleanup_chat_start_launch_failure(
     session,
     stream_id: str,
@@ -23349,6 +23358,21 @@ def _cleanup_chat_start_launch_failure(
 
         restore_session_state(canonical, snapshot)
         compensation_succeeded = False
+        backup_unknown = (
+            backup_provenance is not None
+            and backup_provenance[3]
+            and backup_provenance[4] is None
+        )
+        if backup_unknown:
+            try:
+                _restore_chat_start_entry_sidecar(backup_provenance)
+            except Exception:
+                logger.debug(
+                    "Failed to restore chat-start entry sidecar for %s",
+                    stream_id,
+                    exc_info=True,
+                )
+                return
         try:
             canonical.save(touch_updated_at=False)
             compensation_succeeded = True
@@ -23893,7 +23917,16 @@ def _start_chat_stream_for_session(
                     backup_path = sidecar_path.with_suffix(".json.bak")
                     sidecar_bytes = sidecar_path.read_bytes() if sidecar_path.exists() else None
                     backup_exists = backup_path.exists()
-                    backup_bytes = backup_path.read_bytes() if backup_exists else None
+                    backup_bytes = None
+                    if backup_exists:
+                        try:
+                            backup_bytes = backup_path.read_bytes()
+                        except OSError:
+                            logger.debug(
+                                "Failed to capture chat-start recovery backup %s",
+                                backup_path,
+                                exc_info=True,
+                            )
                     backup_provenance = (
                         sidecar_path,
                         sidecar_bytes,
@@ -23980,6 +24013,24 @@ def _start_chat_stream_for_session(
                             backup_provenance=backup_provenance,
                             lock_held=True,
                         )
+                    if journal_event:
+                        try:
+                            from api.turn_journal import append_turn_journal_event
+
+                            append_turn_journal_event(
+                                s.session_id,
+                                {
+                                    "event": "interrupted",
+                                    "stream_id": stream_id,
+                                    "turn_id": journal_event.get("turn_id"),
+                                    "reason": "start_compensated",
+                                },
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to close compensated turn journal event",
+                                exc_info=True,
+                            )
                     raise
                 break
         if needs_stale_cleanup:
