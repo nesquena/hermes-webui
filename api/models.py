@@ -10999,6 +10999,30 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
         _session_message_content_key(m, normalize_workspace_prefix=True)
         for m in state_messages
     ]
+    def _same_context_turn(sidecar_index, state_index):
+        if sidecar_keys[sidecar_index] != state_keys[state_index]:
+            return False
+        sidecar = sidecar_context[sidecar_index]
+        state = state_messages[state_index]
+        sidecar_delivery = _trusted_wakeup_delivery_id(sidecar)
+        state_delivery = _trusted_wakeup_delivery_id(state)
+        if sidecar_delivery and state_delivery:
+            return sidecar_delivery == state_delivery
+        if sidecar_delivery or state_delivery:
+            unstamped = state if sidecar_delivery else sidecar
+            if (
+                not isinstance(unstamped, dict)
+                or _message_display_metadata_value_present(unstamped.get("display_kind"))
+                or _message_display_metadata_value_present(unstamped.get("display_metadata"))
+            ):
+                return False
+            # Content alone must not turn a different completion into a mirror.
+            return (
+                _wakeup_exact_pair_key(sidecar) is not None
+                and _wakeup_exact_pair_key(sidecar) == _wakeup_exact_pair_key(state)
+            )
+        return True
+
     max_offset = min(len(sidecar_keys), len(state_keys))
     best_len = 0
     best_offset = 0
@@ -11007,32 +11031,30 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
         while (
             offset + length < len(sidecar_keys)
             and length < len(state_keys)
-            and sidecar_keys[offset + length] == state_keys[length]
+            and _same_context_turn(offset + length, length)
         ):
             length += 1
         if length > best_len:
             best_len = length
             best_offset = offset
 
-    # Require at least two mirrored rows. A single repeated short user message
-    # is not enough evidence that state.db starts with a mirrored context
-    # segment, but small recovered contexts often contain only a compact summary
-    # and one follow-up row; those should still use the delta path.
+    # A repeated short user message alone is not evidence of a mirrored prefix.
     if best_len < (1 if allow_single_row_prefix and best_offset == 0 else 2):
         return state_messages
 
-    # Drop only rows that can be aligned with the remaining sidecar context in
-    # order. This still tolerates stale state-only rows between mirrored context
-    # rows, but once the sidecar context is exhausted every later state row is a
-    # real delta, even if it repeats a short earlier message.
+    # Drop stale state-only legacy rows between aligned context rows, but keep
+    # every distinct trusted delivery that content-based alignment used to lose.
     sidecar_index = best_len
     state_index = best_len
+    skipped_wakes = []
     while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
-        if state_keys[state_index] == sidecar_keys[sidecar_index]:
+        if _same_context_turn(sidecar_index, state_index):
             sidecar_index += 1
+        elif _trusted_wakeup_delivery_id(state_messages[state_index]):
+            skipped_wakes.append(state_messages[state_index])
         state_index += 1
     if sidecar_index == len(sidecar_keys):
-        return state_messages[state_index:]
+        return skipped_wakes + state_messages[state_index:]
     return state_messages[best_len:]
 
 

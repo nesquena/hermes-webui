@@ -220,7 +220,11 @@ and 5; it does not mark every run-state boundary implemented.
    and full-precision timestamp, and only when the target has no partial or
    conflicting provenance. If transfer is rejected, preserve the sidecar row
    unchanged and keep the authoritative `state.db` wake as a distinct row;
-   different non-empty delivery IDs must never consume one another.
+   different non-empty delivery IDs must never consume one another. Model-facing
+   context-prefix alignment and display-only messaging/compression lineage
+   projections obey the same identity rule; a matching visible text is not a
+   substitute for a matching delivery. Legacy rows without wake provenance
+   retain their ordinary reconciliation behavior and bytes.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
