@@ -387,6 +387,7 @@ for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
+  '_qualifiedCatalogOptionMeta',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
@@ -737,6 +738,7 @@ for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
+  '_qualifiedCatalogOptionMeta',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
@@ -950,6 +952,7 @@ for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
+  '_qualifiedCatalogOptionMeta',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
@@ -1309,6 +1312,7 @@ for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
   '_isEquivalentConfiguredModelEntry',
+  '_qualifiedCatalogOptionMeta',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
