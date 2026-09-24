@@ -28,6 +28,11 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_webui_unmatched_native_image_mirror",
     "_recovered_from_run_journal",
     "_recovered_stream_id",
+    "_recovered_event_id",
+    "_pending_journal_recovery",
+    "_journal_retry_stream_id",
+    "_journal_retry_attempts",
+    "_journal_retry_first_seen_ts",
 })
 
 

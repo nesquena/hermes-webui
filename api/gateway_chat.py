@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -1037,6 +1038,7 @@ def _resume_gateway_run_for_session(session) -> bool:
 def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
     from api.streaming import (
         _active_turn_authority,
+        _build_partial_message,
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
         _provider_error_payload,
@@ -1044,6 +1046,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         _snapshot_and_append_partial_on_error,
         _stamp_active_turn_activity,
         _terminal_turn_duration,
+        _upsert_current_turn_partial,
     )
 
     with _get_session_agent_lock(session_id):
@@ -1055,6 +1058,21 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             stream_id,
             getattr(session, "pending_user_message", None),
         )
+        from api import config as _live_config
+
+        streams_lock = getattr(_live_config, "STREAMS_LOCK", STREAMS_LOCK)
+        partial_texts = getattr(_live_config, "STREAM_PARTIAL_TEXT", STREAM_PARTIAL_TEXT)
+        reasoning_texts = getattr(_live_config, "STREAM_REASONING_TEXT", STREAM_REASONING_TEXT)
+        live_tool_calls = getattr(_live_config, "STREAM_LIVE_TOOL_CALLS", STREAM_LIVE_TOOL_CALLS)
+        with streams_lock:
+            partial_text = partial_texts.get(stream_id, "")
+            reasoning_text = reasoning_texts.get(stream_id, "")
+            raw_tool_calls = list(live_tool_calls.get(stream_id, []) or [])
+            try:
+                tool_calls = copy.deepcopy(raw_tool_calls)
+            except Exception:
+                tool_calls = [dict(call) if isinstance(call, dict) else call for call in raw_tool_calls]
+
         error_classification = _classify_provider_error(terminal_error)
         error_payload = _provider_error_payload(
             terminal_error,
@@ -1066,12 +1084,6 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             session,
             active_turn_identity=active_turn_identity,
         )
-        session.active_stream_id = None
-        session.gateway_run = None
-        session.pending_user_message = None
-        session.pending_attachments = []
-        session.pending_started_at = None
-        session.pending_user_source = None
         try:
             _snapshot_and_append_partial_on_error(
                 session,
@@ -1079,7 +1091,44 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
                 active_turn_identity=active_turn_identity,
             )
         except Exception:
-            logger.debug("Failed to snapshot gateway partials on terminal error", exc_info=True)
+            logger.warning(
+                "Canonical gateway partial snapshot failed; trying captured buffers for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+            try:
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict) and not tool_call.get("done"):
+                        tool_call["done"] = True
+                        tool_call["_sealed_by_terminal_error"] = True
+                partial_message = _build_partial_message(
+                    partial_text,
+                    reasoning_text,
+                    tool_calls,
+                    active_turn_identity=active_turn_identity,
+                )
+                if partial_message is not None:
+                    if not isinstance(session.messages, list):
+                        session.messages = []
+                    partial_row = _upsert_current_turn_partial(
+                        session.messages,
+                        partial_message,
+                        active_turn_identity=active_turn_identity,
+                    )
+                    if partial_row is None:
+                        raise RuntimeError("captured gateway partial could not be upserted")
+            except Exception:
+                logger.error(
+                    "Failed to persist captured gateway partial for stream %s after canonical snapshot failure",
+                    stream_id,
+                    exc_info=True,
+                )
+        session.active_stream_id = None
+        session.gateway_run = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
         error_message = {
             "role": "assistant",
             "content": (

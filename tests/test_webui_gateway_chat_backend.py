@@ -661,7 +661,9 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert "_turnDuration" not in payload_messages[-1]
 
 
-@pytest.mark.parametrize("failure", ["empty", "http", "generic", "stale"])
+@pytest.mark.parametrize(
+    "failure", ["empty", "http", "generic", "stale", "snapshot-fallback"]
+)
 def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, failure):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -676,6 +678,11 @@ def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, fa
         "status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": [],
     })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    if failure == "snapshot-fallback":
+        def fail_partial_snapshot(*_args, **_kwargs):
+            raise RuntimeError("canonical partial snapshot failed")
+
+        monkeypatch.setattr(streaming, "_snapshot_and_append_partial_on_error", fail_partial_snapshot)
 
     events = []
 
@@ -719,6 +726,16 @@ def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, fa
                     fp=io.BytesIO(b"gateway maintenance"),
                 )
             else:
+                if failure == "snapshot-fallback":
+                    with config.STREAMS_LOCK:
+                        config.STREAM_PARTIAL_TEXT[stream_id] = "fallback visible answer"
+                        config.STREAM_REASONING_TEXT[stream_id] = "buffered reasoning"
+                        config.STREAM_LIVE_TOOL_CALLS[stream_id] = [{
+                            "name": "terminal",
+                            "args": {"command": "pytest"},
+                            "done": False,
+                            "tid": "call-fallback",
+                        }]
                 raise RuntimeError("gateway worker failed")
 
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
@@ -762,6 +779,12 @@ def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, fa
                 "message": "gateway worker failed",
                 "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
             },
+            "snapshot-fallback": {
+                "label": "Gateway request failed",
+                "type": "gateway_error",
+                "message": "gateway worker failed",
+                "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
+            },
         }[failure]
         assert len(apperrors) == 1
         payload = apperrors[0]
@@ -779,6 +802,20 @@ def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, fa
             message.get("_partial") is True and message.get("reasoning") == "buffered reasoning"
             for message in loaded.messages
         )
+        if failure == "snapshot-fallback":
+            partials = [message for message in loaded.messages if message.get("_partial") is True]
+            private_token = streaming.build_active_turn_token(stream_id, 123.25)
+            assert len(partials) == 1
+            assert partials[0]["content"] == "fallback visible answer"
+            assert partials[0]["reasoning"] == "buffered reasoning"
+            assert partials[0]["_partial_tool_calls"] == [{
+                "name": "terminal",
+                "args": {"command": "pytest"},
+                "done": True,
+                "tid": "call-fallback",
+                "_sealed_by_terminal_error": True,
+            }]
+            assert partials[0]["_active_turn_token"] == private_token
         assert any(message.get("_error") is True for message in loaded.messages)
         public_payload = json.dumps(payload)
         private_token = streaming.build_active_turn_token(stream_id, 123.25)
@@ -789,6 +826,11 @@ def test_gateway_worker_settles_failure_before_cleanup(tmp_path, monkeypatch, fa
         assert any(message.get("_partial") is True for message in public_messages)
         assert any(message.get("_error") is True for message in public_messages)
         assert all("_active_turn_token" not in message for message in public_messages)
+        if failure == "snapshot-fallback":
+            public_partial = next(message for message in public_messages if message.get("_partial"))
+            assert public_partial["content"] == "fallback visible answer"
+            assert public_partial["reasoning"] == "buffered reasoning"
+            assert public_partial["_partial_tool_calls"][0]["name"] == "terminal"
     finally:
         with config.STREAMS_LOCK:
             config.STREAMS.pop(stream_id, None)

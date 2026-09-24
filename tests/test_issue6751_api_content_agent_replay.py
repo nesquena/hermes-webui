@@ -371,6 +371,54 @@ def test_issue6751_public_session_projection_strips_context_aliases(monkeypatch)
     assert safe["runtime_journal_snapshot"]["messages"] == [{"role": "assistant"}]
 
 
+def test_journal_recovery_metadata_is_private_at_public_and_import_boundaries(monkeypatch):
+    import api.config as config
+    from api.helpers import public_session_projection, strip_public_internal_fields
+
+    monkeypatch.setattr(config, "load_settings", lambda: {"api_redact_enabled": False})
+    internal_fields = (
+        "_recovered_event_id",
+        "_pending_journal_recovery",
+        "_journal_retry_stream_id",
+        "_journal_retry_attempts",
+        "_journal_retry_first_seen_ts",
+    )
+    user_text = f"Keep this literal: {internal_fields[0]}"
+    opaque_arguments = json.dumps(
+        {field: field for field in internal_fields}, separators=(",", ":")
+    )
+    opaque_tool_args = {field: field for field in internal_fields}
+    source = {
+        "messages": [
+            {"role": "user", "content": user_text},
+            {
+                "role": "assistant",
+                "content": "",
+                **dict.fromkeys(internal_fields, "internal"),
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "echo",
+                            "arguments": opaque_arguments,
+                        }
+                    }
+                ],
+            },
+        ],
+        "tool_calls": [{"name": "echo", "args": opaque_tool_args}],
+    }
+
+    public = public_session_projection(source)
+    imported = strip_public_internal_fields(source)
+
+    for scrubbed in (public, imported):
+        user, assistant = scrubbed["messages"]
+        assert user["content"] == user_text
+        assert all(field not in assistant for field in internal_fields)
+        assert assistant["tool_calls"][0]["function"]["arguments"] == opaque_arguments
+        assert scrubbed["tool_calls"][0]["args"] == opaque_tool_args
+
+
 def test_issue6751_public_projection_preserves_non_message_alias_keys(monkeypatch):
     import api.config as config
     from api.helpers import public_session_projection
