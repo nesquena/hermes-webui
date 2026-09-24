@@ -220,3 +220,137 @@ class TestReaddLiftsSuppression:
         # Pool entry materialized right now with the env source.
         sources = _pool_sources(store.get("credential_pool", {}).get("anthropic"))
         assert "env:ANTHROPIC_API_KEY" in sources
+
+    def test_named_profile_delete_readd_anthropic_resolves_key_and_preserves_root_auth(
+        self, monkeypatch, tmp_path
+    ):
+        """Regate finding 1: named-profile delete then re-add of an Anthropic key
+        must resolve the named-profile key without borrowing root profile keys or
+        mutating the root auth.json."""
+        pytest.importorskip("hermes_cli.auth")
+        pytest.importorskip("agent.credential_pool")
+        pytest.importorskip("hermes_cli.runtime_provider")
+
+        from hermes_cli import auth as h_auth
+        from hermes_cli import runtime_provider
+        from api.providers import remove_provider_key, set_provider_key
+
+        root_dir = tmp_path / "root_hermes"
+        named_dir = tmp_path / "named_profile"
+        root_dir.mkdir(parents=True, exist_ok=True)
+        named_dir.mkdir(parents=True, exist_ok=True)
+
+        # Root auth has default Anthropic key
+        root_auth = root_dir / "auth.json"
+        root_auth.write_text(
+            json.dumps({
+                "credential_pool": {
+                    "anthropic": [
+                        {
+                            "id": "env:ANTHROPIC_API_KEY",
+                            "source": "env:ANTHROPIC_API_KEY",
+                            "auth_type": "api_key",
+                            "runtime_api_key": "sk-ant-ROOT-GLOBAL-KEY",
+                        }
+                    ]
+                }
+            }),
+            encoding="utf-8",
+        )
+        root_bytes_before = root_auth.read_bytes()
+
+        # Named profile initial setup
+        profile_auth = named_dir / "auth.json"
+        profile_auth.write_text(
+            json.dumps({
+                "credential_pool": {
+                    "anthropic": [
+                        {
+                            "id": "env:ANTHROPIC_API_KEY",
+                            "source": "env:ANTHROPIC_API_KEY",
+                            "auth_type": "api_key",
+                            "runtime_api_key": "sk-ant-NAMED-OLD-KEY",
+                        }
+                    ]
+                }
+            }),
+            encoding="utf-8",
+        )
+        (named_dir / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-NAMED-OLD-KEY\n", encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(named_dir))
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: named_dir)
+        monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "named_client")
+        monkeypatch.setattr(h_auth, "_global_auth_file_path", lambda: root_auth)
+
+        # 1. Delete Anthropic key in named profile
+        del_res = remove_provider_key("anthropic")
+        assert del_res["ok"] is True
+        p_store_after_del = json.loads(profile_auth.read_text(encoding="utf-8"))
+        assert "anthropic" not in p_store_after_del.get("credential_pool", {}) or not p_store_after_del["credential_pool"]["anthropic"]
+
+        # 2. Re-add Anthropic key in named profile
+        new_named_key = "sk-ant-NAMED-NEW-KEY-999999"
+        add_res = set_provider_key("anthropic", new_named_key)
+        assert add_res["ok"] is True
+
+        # Root auth.json must be byte-unchanged
+        assert root_auth.read_bytes() == root_bytes_before, "Root auth.json must be byte-unchanged"
+
+        # Runtime provider must resolve the newly saved named-profile key
+        resolved = runtime_provider.resolve_runtime_provider(requested="anthropic")
+        assert resolved.get("api_key") == new_named_key
+
+    def test_readd_google_restores_gemini_pool_and_clears_suppression(
+        self, monkeypatch, tmp_path
+    ):
+        """Regate finding 2: deleting and re-adding GOOGLE_API_KEY must restore
+        Gemini's pool row and leave no suppression marker."""
+        pytest.importorskip("hermes_cli.auth")
+        pytest.importorskip("agent.credential_pool")
+        _pin_home(monkeypatch, tmp_path)
+
+        from api.providers import remove_provider_key, set_provider_key
+
+        auth_path = _write_auth_store(
+            tmp_path,
+            {
+                "credential_pool": {
+                    "google": [
+                        {
+                            "id": "env:GOOGLE_API_KEY",
+                            "source": "env:GOOGLE_API_KEY",
+                            "auth_type": "api_key",
+                            "runtime_api_key": "AIzaSy-OLD-GOOGLE-111",
+                        }
+                    ],
+                    "gemini": [
+                        {
+                            "id": "env:GOOGLE_API_KEY",
+                            "source": "env:GOOGLE_API_KEY",
+                            "auth_type": "api_key",
+                            "runtime_api_key": "AIzaSy-OLD-GEMINI-111",
+                        }
+                    ],
+                }
+            },
+        )
+        (tmp_path / ".env").write_text("GOOGLE_API_KEY=AIzaSy-OLD-GOOGLE-111\n", encoding="utf-8")
+
+        # 1. Delete Google provider
+        del_res = remove_provider_key("google")
+        assert del_res["ok"] is True
+
+        # 2. Re-add Google provider with new key
+        new_google_key = "AIzaSy-NEW-GOOGLE-222"
+        add_res = set_provider_key("google", new_google_key)
+        assert add_res["ok"] is True
+
+        store = _read_auth_store(tmp_path)
+        gemini_suppressed = store.get("suppressed_sources", {}).get("gemini", [])
+        assert "env:GOOGLE_API_KEY" not in gemini_suppressed
+
+        gemini_pool = store.get("credential_pool", {}).get("gemini", [])
+        assert len(gemini_pool) > 0
+        sources = _pool_sources(gemini_pool)
+        assert "env:GOOGLE_API_KEY" in sources

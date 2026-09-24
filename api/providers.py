@@ -2960,7 +2960,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     # immediate load_pool() — mirroring `hermes auth add` (upstream #96058).
     # Best-effort: the .env write above has already succeeded.
     if api_key:
-        _lift_suppressed_pool_source(provider_id, env_var)
+        _lift_suppressed_pool_source(provider_id, env_var, api_key=api_key)
 
     return {
         "ok": True,
@@ -3042,7 +3042,9 @@ def _purge_env_seeded_credential_pool(provider_id: str) -> None:
         )
 
 
-def _lift_suppressed_pool_source(provider_id: str, env_var: str) -> None:
+def _lift_suppressed_pool_source(
+    provider_id: str, env_var: str, api_key: str | None = None
+) -> None:
     """Lift a prior ``env:<VAR>`` suppression and materialize the pool entry.
 
     Symmetric side of ``_purge_env_seeded_credential_pool`` (#7412): a key
@@ -3053,9 +3055,23 @@ def _lift_suppressed_pool_source(provider_id: str, env_var: str) -> None:
     the .env write above has already succeeded.
     """
     matching_providers = {provider_id}
+    # Build provider set from Agent's own env-var registry (meaning every provider
+    # whose registered key vars include env_var), falling back to WebUI's 1:1 map.
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        for pid, pcfg in PROVIDER_REGISTRY.items():
+            key_vars = getattr(pcfg, "api_key_env_vars", ()) or ()
+            if env_var in key_vars:
+                matching_providers.add(pid)
+    except Exception:
+        pass
+
     for pid, ev in _PROVIDER_ENV_VAR.items():
         if ev == env_var:
             matching_providers.add(pid)
+    if env_var in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        matching_providers.update({"google", "gemini"})
 
     try:
         from hermes_cli.auth import unsuppress_credential_source
@@ -3076,6 +3092,52 @@ def _lift_suppressed_pool_source(provider_id: str, env_var: str) -> None:
             provider_id,
             exc_info=True,
         )
+
+    # For named profiles, explicitly persist ONLY this profile's new env:<VAR>
+    # row before calling load_pool(), and never copy rows borrowed from root (#7418).
+    try:
+        from hermes_cli.auth import (
+            write_credential_pool,
+            _global_auth_file_path,
+            _same_path,
+        )
+
+        is_named_profile = False
+        try:
+            from api.profiles import get_active_profile_name
+
+            is_named_profile = get_active_profile_name() not in ("", "default", None)
+        except Exception:
+            pass
+
+        if not is_named_profile:
+            try:
+                local_auth = _get_hermes_home() / "auth.json"
+                global_auth = _global_auth_file_path()
+                is_named_profile = not _same_path(local_auth, global_auth)
+            except Exception:
+                pass
+
+        if is_named_profile:
+            token = api_key or _thread_local_env_value(env_var)
+            for pid in matching_providers:
+                entry = {
+                    "id": f"env:{env_var}",
+                    "source": f"env:{env_var}",
+                    "auth_type": "api_key",
+                    "label": env_var,
+                }
+                if token:
+                    entry["runtime_api_key"] = token
+                    entry["access_token"] = token
+                write_credential_pool(pid, [entry])
+    except Exception:
+        logger.debug(
+            "Failed to pre-seed named profile credential pool for provider %s",
+            provider_id,
+            exc_info=True,
+        )
+
     try:
         from agent.credential_pool import load_pool
 
