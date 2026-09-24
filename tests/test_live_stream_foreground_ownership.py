@@ -252,3 +252,89 @@ def test_late_reconnect_registration_after_switch_keeps_only_foreground_stream(b
         assert result["inflightAReattach"] is True, result
     finally:
         page.close()
+
+
+def test_late_registration_during_load_window_uses_navigation_target(browser, base_url):
+    """A late registration can land while loadSession(B) is still awaiting metadata.
+
+    loadSession() names its destination in ``_loadingSessionId`` and closes other
+    streams synchronously, but only replaces ``S.session`` after its fetch. A
+    registration that lands in that window must arbitrate against the navigation
+    target, not the stale ``S.session`` row, or it keeps the session the user left
+    open with handlers bound to the foreground pane.
+    """
+    page = browser.new_page(
+        viewport={"width": 1024, "height": 720},
+        bypass_csp=True,
+    )
+    try:
+        page.goto(base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true && "
+            "typeof attachLiveStream === 'function'",
+            timeout=15_000,
+        )
+        result = page.evaluate(
+            """
+            async () => {
+              class FakeEventSource {
+                static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+                static instances = [];
+                constructor(url) {
+                  this.url = String(url);
+                  this.readyState = FakeEventSource.OPEN;
+                  FakeEventSource.instances.push(this);
+                }
+                addEventListener() {}
+                close() { this.readyState = FakeEventSource.CLOSED; }
+              }
+              window.EventSource = FakeEventSource;
+              for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              let releaseProbe;
+              const probe = new Promise(resolve => { releaseProbe = resolve; });
+              const originalApi = window.api;
+              window.api = async (path, opts) => {
+                if (String(path).includes('/api/chat/stream/status')) {
+                  await probe;
+                  return {active:true};
+                }
+                return originalApi(path, opts);
+              };
+              try {
+                S.session = {session_id:'session-a', pending_started_at:1};
+                S.messages = [];
+                S.activeStreamId = 'stream-a';
+                attachLiveStream('session-a', 'stream-a', [], {reconnecting:true});
+                await Promise.resolve();
+                // loadSession('session-b') before its metadata lands.
+                _loadingSessionId = 'session-b';
+                closeOtherLiveStreams('session-b');
+                releaseProbe();
+                await new Promise(resolve => setTimeout(resolve, 0));
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const sourceA = FakeEventSource.instances.find(s => s.url.includes('stream-a'));
+                // B's idle metadata lands; nothing else would close A.
+                S.session = {session_id:'session-b'};
+                S.activeStreamId = null;
+                _loadingSessionId = null;
+                await new Promise(resolve => setTimeout(resolve, 0));
+                return {
+                  sourceAOpened:!!sourceA,
+                  sourceAOpen:!!sourceA && sourceA.readyState === FakeEventSource.OPEN,
+                  liveKeys:Object.keys(LIVE_STREAMS).sort(),
+                  inflightAReattach:INFLIGHT['session-a']?.reattach === true,
+                };
+              } finally {
+                window.api = originalApi;
+                _loadingSessionId = null;
+                for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              }
+            }
+            """
+        )
+        assert result["sourceAOpened"] is True, result
+        assert result["sourceAOpen"] is False, result
+        assert result["liveKeys"] == [], result
+        assert result["inflightAReattach"] is True, result
+    finally:
+        page.close()
