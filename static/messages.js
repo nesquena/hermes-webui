@@ -7462,10 +7462,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ownsAttach: _ownsAttach,
     finishAttach:_finishAttach,
     statusDecision:(status)=>{
-      if(status&&status.active){
-        setComposerStatus('Reconnected',1000);
-        return {shouldConnect:true,replayOnly:false};
-      }
+      if(status&&status.active) return {shouldConnect:true,replayOnly:false};
       if(status&&status.replay_available) return {shouldConnect:true,replayOnly:true};
       _clearOwnerInflightState();
       _clearApprovalForOwner();
