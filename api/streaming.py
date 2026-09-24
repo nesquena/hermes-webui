@@ -9310,6 +9310,8 @@ def _build_run_conversation_kwargs(
     task_id,
     persist_user_message,
     persist_user_timestamp,
+    persist_user_display_kind=None,
+    persist_user_display_metadata=None,
 ):
     """Build one rolling-compatible Agent invocation contract without mutation.
 
@@ -9336,7 +9338,35 @@ def _build_run_conversation_kwargs(
         "conversation_history_revision",
         conversation_history_revision,
     )
+    if persist_user_display_kind:
+        _add_supported_run_conversation_kwarg(
+            callable_obj,
+            kwargs,
+            "persist_user_display_kind",
+            persist_user_display_kind,
+        )
+        _add_supported_run_conversation_kwarg(
+            callable_obj,
+            kwargs,
+            "persist_user_display_metadata",
+            persist_user_display_metadata,
+        )
     return kwargs
+
+
+def _trusted_turn_display_persistence(source, delivery_id):
+    """Return durable projection metadata for a server-owned wakeup turn.
+
+    ``source`` comes from the route that admitted the turn, not from prompt
+    content. Browser chat starts always use ``webui``; the background-process
+    drain is the only producer of ``process_wakeup``. The accepted stream id is
+    therefore a unique delivery identity without parsing user-controlled text.
+    """
+    trusted_source = str(source or "").strip()
+    trusted_delivery_id = str(delivery_id or "").strip()
+    if trusted_source != "process_wakeup" or not trusted_delivery_id:
+        return None, None
+    return "process_wakeup", {"delivery_id": trusted_delivery_id}
 
 
 def _attempt_credential_self_heal(
@@ -11930,6 +11960,13 @@ def _run_agent_streaming(
                 _register_pending_user_timestamp_identity(
                     agent.run_conversation, s, _persist_user_timestamp
                 )
+            (
+                _persist_user_display_kind,
+                _persist_user_display_metadata,
+            ) = _trusted_turn_display_persistence(
+                _turn_pending_source,
+                stream_id,
+            )
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
                 user_message=user_message,
@@ -11946,6 +11983,8 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=_persist_user_timestamp,
+                persist_user_display_kind=_persist_user_display_kind,
+                persist_user_display_metadata=_persist_user_display_metadata,
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -12541,6 +12580,8 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=_heal_persist_user_timestamp,
+                                    persist_user_display_kind=_persist_user_display_kind,
+                                    persist_user_display_metadata=_persist_user_display_metadata,
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -13908,6 +13949,8 @@ def _run_agent_streaming(
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=_heal_persist_user_timestamp,
+                            persist_user_display_kind=_persist_user_display_kind,
+                            persist_user_display_metadata=_persist_user_display_metadata,
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config

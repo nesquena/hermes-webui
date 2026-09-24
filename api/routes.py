@@ -9926,10 +9926,50 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
     try:
         return all(
             _session_message_visible_key(messages[idx]) == _session_message_visible_key(prefix_msg)
+            and _trusted_wakeup_delivery_id(messages[idx]) == _trusted_wakeup_delivery_id(prefix_msg)
             for idx, prefix_msg in enumerate(prefix)
         )
     except Exception:
         return False
+
+
+def _display_merge_identity_key(msg):
+    """Keep distinct durable wake deliveries out of content-key shortcuts."""
+    delivery = _trusted_wakeup_delivery_id(msg)
+    if delivery:
+        return ("process_wakeup", delivery)
+    if isinstance(msg, dict) and (
+        msg.get("display_kind") == "process_wakeup"
+        or (isinstance(msg.get("display_metadata"), dict)
+            and msg["display_metadata"].get("delivery_id"))
+    ):
+        # An incomplete or conflicting claim is not a mirror of a trusted row.
+        return ("untrusted_wakeup_provenance", id(msg))
+    return ("ordinary", _session_message_merge_key(msg))
+
+
+def _display_merge_sorted_rows(*collections, merge_metadata=False):
+    """Preserve the historical chronological union without text-only wake dedup."""
+    merged = []
+    seen = {}
+    rows = sorted(
+        (msg for collection in collections for msg in collection),
+        key=lambda msg: (
+            float(msg.get("timestamp") or 0),
+            str(msg.get("role") or ""),
+            str(msg.get("content") or ""),
+        ),
+    )
+    for msg in rows:
+        key = _display_merge_identity_key(msg)
+        existing = seen.get(key)
+        if existing is not None:
+            if merge_metadata:
+                _merge_session_display_metadata(existing, msg)
+            continue
+        seen[key] = msg
+        merged.append(msg)
+    return _normalize_wakeup_rows_for_display(merged)
 
 
 # perf: memoized lineage-stitch results for GET /api/session. Keyed by session
@@ -10098,21 +10138,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                     truncation_boundary=getattr(session, "truncation_boundary", None),
                 )
-            merged_messages = []
-            seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+            return _display_merge_sorted_rows(cli_messages, sidecar_messages)
+        return _normalize_wakeup_rows_for_display(
+            sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+        )
+    return _normalize_wakeup_rows_for_display(sidecar_messages)
 
 
 
@@ -10162,22 +10192,7 @@ def _merged_webui_lineage_messages_for_display(
         return primary_messages
     if _messages_start_with_visible_prefix(primary_messages, parent_messages):
         return primary_messages
-    merged_messages = []
-    seen_message_keys = set()
-    seen_messages_by_key = {}
-    for msg in sorted(list(parent_messages) + list(primary_messages), key=lambda m: (
-        float(m.get("timestamp") or 0),
-        str(m.get("role") or ""),
-        str(m.get("content") or ""),
-    )):
-        key = _session_message_merge_key(msg)
-        if key in seen_message_keys:
-            _merge_session_display_metadata(seen_messages_by_key.get(key), msg)
-            continue
-        seen_message_keys.add(key)
-        seen_messages_by_key[key] = msg
-        merged_messages.append(msg)
-    return merged_messages
+    return _display_merge_sorted_rows(parent_messages, primary_messages, merge_metadata=True)
 
 
 def _message_summary(messages) -> dict:
@@ -10657,6 +10672,8 @@ from api.models import (
     _active_stream_ids,
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
+    _trusted_wakeup_delivery_id,
+    _normalize_wakeup_rows_for_display,
     _session_message_merge_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
