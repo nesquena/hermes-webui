@@ -169,15 +169,24 @@ def test_pre_code_depth_tracking_is_separate_in_parser_source():
         "parser must use re.match (anchored) against the current line "
         "to detect the HTML block entry, not an unanchored search"
     )
-    # Close tokens are detected via re.findall on the line while the
-    # block is open.
-    assert '</pre>' in src and 're.findall' in src, (
-        "parser must scan the line for </pre> close tokens via "
-        "re.findall while the block is open"
+    # 9/24 finding 5: the tags on an open-block line must be processed
+    # in token order — ``</pre><code>`` after ``</pre>`` must open a
+    # ``<code>`` — so the implementation must walk the matches of a
+    # tag regex rather than count ``</pre>`` and ``</code>`` separately
+    # (counting all closes before any open clears the block too early).
+    assert "_HTML_TAG_RE.finditer" in src, (
+        "parser must walk the line's open/close tags in token order via "
+        "a single tag regex's finditer (round 9/24 adjacent-tag finding)"
     )
-    assert '</code>' in src, (
-        "parser must scan the line for </code> close tokens via "
-        "re.findall while the block is open"
+    assert re.search(r"_is_close\s*=\s*_tag\.group\(0\)\.startswith", src), (
+        "each walked token must be classified open/close in order"
+    )
+    # A close token must always apply.
+    assert "</" in src and re.search(r"max\(0,\s*_pre_depth - 1\)", src), (
+        "parser must apply a </pre> close token to the <pre> depth"
+    )
+    assert re.search(r"max\(0,\s*_code_depth - 1\)", src), (
+        "parser must apply a </code> close token to the <code> depth"
     )
 
 

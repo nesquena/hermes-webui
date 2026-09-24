@@ -23,15 +23,22 @@ treated as a response boundary when ALL of the following are true:
    string inside script output or a quoted snippet must not be
    interpreted as a section boundary.
 3. The line is OUTSIDE an HTML-style ``<pre>`` / ``<code>`` block.
-4. The line is within the first ``MAX_PROBE_LINES`` lines of the
-   file (front-matter + system context). Real artifacts carry several
-   hundred context lines before the reply, so the cap is generous;
-   it exists only to stop an unbounded scan of pathological input.
+   Successive open/close tokens on one line are processed in token
+   order, so adjacent tags (``<pre>one</pre><code>``) keep the depth
+   accounting honest.
+
+4. The whole already-read artifact is scanned. The artifact is fully
+   in memory by the time the parser runs, so there is no reason to
+   stop at an arbitrary line count: real runs have carried the reply
+   past line 2,000, and the legacy preview (which scanned everything)
+   showed it. The guards that actually keep the boundary fail-closed
+   are the fence / ``<pre>`` tracking and the exact heading match, not
+   a probe range.
 
 The fail-closed guarantee that a quoted ``## Response`` inside an
 agent transcript is *not* taken as the boundary comes from the fence
-and ``<pre>`` tracking plus the exact heading match, not from the
-probe cap.
+and ``<pre>`` tracking plus the exact heading match, not from any
+line-range limit.
 
 If no boundary is found, ``has_response_boundary`` is False and
 ``response`` is the empty string. The caller is expected to render the
@@ -44,15 +51,6 @@ import re
 from dataclasses import dataclass
 
 
-# Cap how far into the file we look for a response boundary. Real cron
-# artifacts routinely carry several hundred lines of front-matter,
-# system context, skill dumps and tool output before the agent replies
-# — the motivating #7303 artifact has ~320 context lines. The probe
-# range must therefore cover them; the guards that actually keep the
-# boundary fail-closed are the fence / <pre> tracking and the exact
-# heading match below.
-_MAX_PROBE_LINES = 2000
-
 # A boundary is a markdown ATX heading of the right level with the
 # canonical title. We match both ``## Response`` and ``# Response`` to
 # tolerate minor inconsistency between agent runs.
@@ -63,6 +61,24 @@ _RESPONSE_HEADING_RE = re.compile(r"^#{1,2}\s+Response\s*$")
 # character AND opening delimiter length so a ```` ```` ``` ```` ```` line
 # cannot close a four-backtick block early (skill dumps nest fences).
 _FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+
+# One HTML block-level tag token. Used to walk the tags on a line in
+# order so adjacent tags (``<pre>one</pre><code>``) are processed in
+# token order rather than by counting every close tag first.
+_HTML_TAG_RE = re.compile(r"</?(pre|code)\b", re.IGNORECASE)
+
+# Text that may precede an *open* tag and still make it a real tag:
+# indentation only, or the tail of another tag (so ``</pre><code>``
+# counts as a real open for the ``<code>``). Anything else in front of
+# the tag (letters, punctuation) means the line merely mentions it.
+_HTML_LEADING_RE = re.compile(r"^(?:\s*|.*>\s*)$")
+
+
+def _is_anchored_html_tag(prefix: str) -> bool:
+    """True when *prefix* (the text before an open tag) lets that tag
+    count as a real open: indentation, or the end of another tag.
+    """
+    return bool(_HTML_LEADING_RE.match(prefix))
 
 
 @dataclass
@@ -132,9 +148,17 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     fence_char: str | None = None
     fence_len = 0
 
+    # #7303 re-gate 9/24 (finding 4): the whole already-read artifact is
+    # scanned. A run whose reply landed past line 2,000 (a long tool dump
+    # before the reply) lost its boundary under the previous cap, so the
+    # collapsed preview regressed from the reply to the first 600
+    # characters of front-matter. ``lines`` is already fully materialised
+    # in memory at this point, so the scan costs no extra I/O and stays
+    # bounded by the artifact itself; the guards that keep the boundary
+    # fail-closed are the fence / <pre> tracking and the exact heading
+    # match below, not a line-range limit.
+
     for i, line in enumerate(lines):
-        if i >= _MAX_PROBE_LINES:
-            break
         # Track fenced code blocks. Toggle on opening AND closing fences
         # of the same character so ``` doesn't re-open. The closing
         # fence must be at least as long as the opening one, otherwise
@@ -174,13 +198,18 @@ def parse_cron_output(text: str) -> CronOutputProjection:
         #    with ``<pre`` or ``<code`` opens the HTML block, and that
         #    specific opening token is counted as the open. This is
         #    the only place open tokens are recognised.
-        # 2. **Inside** — while ``in_html_pre`` is True, ``</pre>`` and
-        #    ``</code>`` tokens update the depth (close). Any further
-        #    ``<pre`` / ``<code`` tokens in the same line are treated
-        #    as plain text, not as a new open — this prevents skill
-        #    output that *quotes* HTML from accidentally re-opening the
-        #    block. Once both depths hit zero, the block closes.
+        # 2. **Inside** — while the HTML block is open, the tags on the
+        #    line are walked **in token order**. A close token always
+        #    applies; an open token only counts when it is anchored —
+        #    it starts the line or directly follows another tag — so
+        #    prose that merely mentions ``<pre>`` cannot re-open the
+        #    block, while a genuinely adjacent tag (``</pre><code>``)
+        #    still does. Once both depths hit zero, the block closes.
         _opening_match = re.match(r"^\s*<(pre|code)\b", line, re.IGNORECASE)
+        # Where the ordered token walk starts on this line. On the entry
+        # line it begins *after* the token that already opened the block,
+        # so that token is not counted twice.
+        _tag_scan_start = 0
         if _opening_match and not in_html_pre:
             # Open the HTML block on this single starting token.
             in_html_pre = True
@@ -190,11 +219,27 @@ def parse_cron_output(text: str) -> CronOutputProjection:
             else:
                 _pre_depth = 0
                 _code_depth = 1
+            _tag_scan_start = _opening_match.end()
         if in_html_pre:
-            _closes_pre = len(re.findall(r"</pre>", line, re.IGNORECASE))
-            _closes_code = len(re.findall(r"</code>", line, re.IGNORECASE))
-            _pre_depth = max(0, _pre_depth - _closes_pre)
-            _code_depth = max(0, _code_depth - _closes_code)
+            # Walk the tokens left-to-right so a close that precedes an
+            # open on the same line cannot be pre-counted against it.
+            for _tag in _HTML_TAG_RE.finditer(line):
+                if _tag.start() < _tag_scan_start:
+                    continue  # the entry token is already counted
+                _name = _tag.group(1).lower()
+                _is_close = _tag.group(0).startswith("</")
+                if not _is_close and not _is_anchored_html_tag(line[: _tag.start()]):
+                    continue  # a prose mention, not a real open
+                if _name == "pre":
+                    if _is_close:
+                        _pre_depth = max(0, _pre_depth - 1)
+                    else:
+                        _pre_depth += 1
+                else:
+                    if _is_close:
+                        _code_depth = max(0, _code_depth - 1)
+                    else:
+                        _code_depth += 1
             in_html_pre = _pre_depth > 0 or _code_depth > 0
             if in_fence or in_html_pre:
                 continue
@@ -237,4 +282,8 @@ def response_snippet(text: str, limit: int = 600) -> str:
         # Front-matter may appear, but the snippet is still bounded by
         # *limit* so the previews are consistent.
         body = projection.context or text
-    return body[:limit] or "(empty)"
+    # Trim before slicing: leading whitespace must not consume the
+    # character budget. A run that starts with indented front-matter
+    # (600+ leading spaces) otherwise previews as a blank string and
+    # the row looks like it has no output at all.
+    return (body.strip()[:limit]) or "(empty)"

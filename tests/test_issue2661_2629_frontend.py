@@ -27,7 +27,16 @@ def test_cron_expanded_run_renders_full_content_inline():
     # #7303: response-first runs take the projection branch instead of
     # the raw-content branch above.
     assert "const parsed = data.parsed || null;" in PANELS_JS
-    assert "const showResponseFirst = !!(parsed && parsed.has_response_boundary);" in PANELS_JS
+    # 9/24 review finding 3: response-first must additionally be gated
+    # on the job being an agent run (a script job's stdout can contain
+    # ``## Response`` without being a reply) and on the response body
+    # being non-empty (an empty reply renders a blank primary block).
+    assert "const isScriptJob = _isCronScriptJob(_currentCronDetail);" in PANELS_JS
+    assert "const hasResponseText = !!(parsed && typeof parsed.response === 'string' && parsed.response.trim());" in PANELS_JS
+    assert (
+        "const showResponseFirst = !isScriptJob && !!(parsed && parsed.has_response_boundary) && hasResponseText;"
+        in PANELS_JS
+    )
     assert "output = expanded ? parsed.response : (data.snippet || parsed.response || '');" in PANELS_JS
     # "View full output" affordance (legacy path only).
     assert "if (!showResponseFirst && !expanded && data.content && data.snippet && data.content.length > data.snippet.length)" in PANELS_JS
