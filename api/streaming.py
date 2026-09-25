@@ -9235,6 +9235,7 @@ def _append_result_partial_on_error(
             and row.get('role') == 'assistant'
             and row.get('content')
             and not row.get('_error')
+            and not is_lcm_context_recovery_marker(row)
             and (
                 not row.get('_active_turn_token')
                 or row.get('_active_turn_token') == current_token

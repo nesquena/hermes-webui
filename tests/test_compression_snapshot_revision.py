@@ -598,6 +598,25 @@ def test_append_only_partial_rejects_foreign_token_assistant_after_current_user(
     assert session.messages == baseline + [current_user]
 
 
+def test_append_only_partial_does_not_select_assistant_lcm_marker():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    marker = {
+        "role": "assistant",
+        "content": "[Recent Summary (d0, node 418)] old context",
+    }
+    session = Session(session_id="append-only-assistant-lcm", messages=[], context_messages=[])
+    result = {"partial": True, "messages": baseline + [marker]}
+
+    assert streaming.is_lcm_context_recovery_marker(marker)
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
 def test_append_only_partial_does_not_skip_foreign_same_text_user_turn():
     identity = {"token": "t1"}
     baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
