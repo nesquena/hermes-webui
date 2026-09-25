@@ -4531,6 +4531,35 @@ const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
+
+// ── Per-profile color palette (#7711) ────────────────────────────────────
+// Deterministic color assignment: hash profile name → palette index.
+// Palette chosen for visibility on both light and dark backgrounds (WCAG-AA
+// compliant against --bg and --surface).
+const _PROFILE_COLORS = [
+  '#6366f1', // indigo
+  '#f59e0b', // amber
+  '#10b981', // emerald
+  '#ef4444', // red
+  '#8b5cf6', // violet
+  '#06b6d4', // cyan
+  '#ec4899', // pink
+  '#14b8a6', // teal
+  '#f97316', // orange
+  '#3b82f6', // blue
+];
+const _profileColorCache = new Map();
+function _profileColor(name) {
+  if (!name) return null;
+  if (_profileColorCache.has(name)) return _profileColorCache.get(name);
+  let h = 0;
+  for (let i = 0; i < name.length; i++) {
+    h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+  }
+  const color = _PROFILE_COLORS[Math.abs(h) % _PROFILE_COLORS.length];
+  _profileColorCache.set(name, color);
+  return color;
+}
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested
 let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
@@ -7561,8 +7590,18 @@ function _sessionTitleForForkParent(parentSid){
 function _sessionFullTitleTooltip(rawTitle, cleanTitle, session){
   const fallback=String(cleanTitle||'Untitled').trim()||'Untitled';
   const full=String(rawTitle||fallback).trim()||fallback;
-  const title=full.startsWith('[SYSTEM:') ? fallback : full;
-  if(typeof t==='function'&&_isReadOnlySession(session)) return t('session_readonly_title_hint', title);
+  let title=full.startsWith('[SYSTEM:') ? fallback : full;
+  if(typeof t==='function'&&_isReadOnlySession(session)) title=t('session_readonly_title_hint', title);
+  // #7711: append profile name when cross-profile list is active and the session
+  // belongs to a different profile. This surfaces ownership in the tooltip even
+  // in compact density where the metadata line is hidden.
+  if(_showAllProfiles && session && typeof session.profile==='string' && session.profile.trim()){
+    const activeProfileName=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string')?S.activeProfile.trim():'default';
+    const sessionProfileName=session.profile.trim();
+    if(sessionProfileName && sessionProfileName!==activeProfileName){
+      title=title + ' [' + sessionProfileName + ']';
+    }
+  }
   return title;
 }
 
@@ -8817,6 +8856,21 @@ function renderSessionListFromCache(){
       const parentLabel=_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id);
       branchInd.title=_sessionForkTooltip(parentLabel);
       titleRow.appendChild(branchInd);
+    }
+    // Per-profile colored dot (#7711): shown when cross-profile list is active
+    // and the session belongs to a different profile than the active one. Gives
+    // an immediate visual cue without requiring the user to read the metadata.
+    if(_showAllProfiles && s.profile){
+      const sessionProfileName=(typeof s.profile==='string')?s.profile.trim():'';
+      const activeProfileName=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string')?S.activeProfile.trim():'default';
+      if(sessionProfileName && sessionProfileName!==activeProfileName){
+        const profileDot=document.createElement('span');
+        profileDot.className='session-profile-dot';
+        const dotColor=_profileColor(sessionProfileName);
+        if(dotColor) profileDot.style.background=dotColor;
+        profileDot.title=sessionProfileName;
+        titleRow.appendChild(profileDot);
+      }
     }
     const title=document.createElement('span');
     title.className='session-title';

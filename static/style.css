@@ -5804,6 +5804,10 @@ main.main > #mainPlugin{display:none;}
 /* Lives as a flex sibling in .session-title-row (between title and time);
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
+/* Per-profile colored dot (#7711): placed in .session-title-row alongside
+   indicators. Same shape as project dot but slightly larger to visually
+   distinguish profile ownership from project membership. */
+.session-profile-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block;background:var(--muted);}
 
 /* ── Saved prompts popup ── */
 .saved-prompts-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:280px;max-width:380px;max-height:320px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:200;flex-direction:column;gap:2px;padding:6px;}
