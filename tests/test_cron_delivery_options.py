@@ -65,3 +65,43 @@ def test_delivery_options_local_label():
     local_entry = next(p for p in result["platforms"] if p["value"] == "local")
     # Label should contain "Local" or be an i18n key — just verify it's non-empty
     assert local_entry["label"], "Local platform label is empty"
+
+
+def test_delivery_options_survives_the_authority_module_move():
+    """The platform list must not silently empty when the Agent relocates it.
+
+    ``_KNOWN_DELIVERY_PLATFORMS`` used to live in ``cron.scheduler`` and now
+    lives in ``cron.scheduler_delivery``. The endpoint previously imported the
+    old path inside a bare ``except`` and fell back to an EMPTY frozenset, so
+    the move silently degraded the cron delivery picker to local/origin only —
+    every messaging platform (telegram, discord, slack, feishu, ...) vanished
+    from the UI with no error anywhere. Pin the resolution order so a future
+    relocation fails loudly instead of silently dropping platforms.
+
+    Registered in ``_AGENT_DEPENDENT_TESTS`` (tests/conftest.py) alongside the
+    other delivery-options tests: CI runs agent-free, so there is no ``cron``
+    package and no authority to resolve there.
+    """
+    import importlib
+
+    resolved = frozenset()
+    for module_name in ("cron.scheduler_delivery", "cron.scheduler"):
+        try:
+            mod = importlib.import_module(module_name)
+        except Exception:
+            continue
+        known = getattr(mod, "_KNOWN_DELIVERY_PLATFORMS", None)
+        if known:
+            resolved = frozenset(known)
+            break
+
+    assert resolved, (
+        "_KNOWN_DELIVERY_PLATFORMS resolved empty from every known module path "
+        "— the cron delivery picker would silently show only local/origin"
+    )
+    # The endpoint's own output must agree with the resolved authority.
+    result, status = get("/api/crons/delivery-options")
+    assert status == 200
+    values = {p["value"] for p in result["platforms"]}
+    missing = resolved - values
+    assert not missing, f"platforms resolved but absent from the endpoint: {sorted(missing)}"

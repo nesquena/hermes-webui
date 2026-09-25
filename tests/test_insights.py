@@ -173,6 +173,14 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert ".insights-model-team" not in STYLE_CSS
 
 
+def test_insights_period_select_uses_shared_chevron_styles():
+    assert 'id="insightsPeriod" class="insights-period-select"' in INDEX_HTML
+    assert 'id="insightsPeriod" onchange="loadInsights()" style=' not in INDEX_HTML
+    assert ".insights-period-select" in STYLE_CSS
+    assert "width:auto" in STYLE_CSS.split(".insights-period-select", 1)[1].split("}", 1)[0]
+    assert "padding:6px 28px 6px 10px" in STYLE_CSS
+
+
 def _make_daily_rows(n):
     rows = []
     for i in range(n):

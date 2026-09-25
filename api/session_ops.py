@@ -608,6 +608,8 @@ def _stamp_intentional_shrink_generation(session, old_message_count: int, new_me
     if new_message_count >= old_message_count:
         return False
     session.intentional_shrink_generation = uuid.uuid4().hex
+    session.transcript_generation = max(0, int(getattr(session, 'transcript_generation', 0) or 0)) + 1
+    session.transcript_generation_baseline = max(0, int(new_message_count))
     return True
 
 

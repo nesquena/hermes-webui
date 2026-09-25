@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,11 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 NODE = shutil.which("node")
+
+# Sibling harness scaffolding lives beside this file and is not on sys.path by
+# default; import it the same way the other node-harness tests do.
+sys.path.insert(0, str(ROOT / "tests"))
+import _unread_store_helpers as unread_store_helpers  # noqa: E402
 
 
 def _extract_function(source: str, name: str) -> str:
@@ -152,6 +158,8 @@ def test_profile_switch_clears_persisted_old_profile_cron_markers_only():
     save_unread = _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread")
     clear_helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
@@ -173,6 +181,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -371,6 +381,8 @@ def test_legacy_untagged_cron_marker_cleared_via_sidebar_metadata():
     """Re-gate #5975: untagged markers resolve from sidebar session source/profile."""
     helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
@@ -393,6 +405,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -434,6 +448,8 @@ def test_root_alias_keeps_current_profile_cron_marker():
     """Re-gate #5975: default/renamed-root must not erase current-root cron dots."""
     helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
@@ -456,6 +472,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -495,6 +513,8 @@ def test_switch_to_literal_default_clears_other_profile_cron_markers():
     """
     helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
@@ -521,6 +541,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -575,6 +597,8 @@ def test_switch_to_literal_default_without_roster_fails_closed_on_unknown_names(
     gets exact-name semantics (cleared), and literal-'default' markers stay."""
     helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
             _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
             _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
@@ -598,6 +622,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -636,6 +662,8 @@ def test_stale_pre_switch_session_list_does_not_recreate_cron_markers():
     mark_poll = _extract_function(sessions_js, "_markPollingCompletionUnreadTransitions")
     helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(sessions_js, "_isCronSessionForUnread"),
             _extract_function(sessions_js, "_sourceKeyForSession"),
             _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
@@ -657,6 +685,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};
@@ -765,6 +795,8 @@ def test_fresh_session_list_still_marks_when_unread_gen_matches():
     mark_poll = _extract_function(sessions_js, "_markPollingCompletionUnreadTransitions")
     helpers = "\n".join(
         [
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
             _extract_function(sessions_js, "_isCronSessionForUnread"),
             _extract_function(sessions_js, "_sourceKeyForSession"),
             _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
@@ -783,6 +815,8 @@ global.localStorage={{
   getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
   setItem:(key,value)=>{{ store[key]=String(value); }},
   removeItem:(key)=>{{ delete store[key]; }},
+  key:(i)=>Object.keys(store)[i]??null,
+  get length(){{ return Object.keys(store).length; }},
 }};
 let _sessionCompletionUnread=null;
 let _sessionViewedCounts={{}};

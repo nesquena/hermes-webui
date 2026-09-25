@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -10,6 +11,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+# Sibling harness scaffolding lives beside this file and is not on sys.path by
+# default; import it the same way the other node-harness tests do.
+sys.path.insert(0, str(ROOT / "tests"))
+import _unread_store_helpers as unread_store_helpers  # noqa: E402
 
 
 def _function_body(src: str, name: str) -> str:
@@ -91,6 +97,8 @@ def _run_done_compaction_harness(
             _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread"),
             _extract_function(SESSIONS_JS, "_hasUnreadForSession"),
             _extract_function(SESSIONS_JS, "_markSessionCompletedInList"),
+            # Merge/tombstone helpers the unread persistence paths call.
+            unread_store_helpers.BLOCK,
         ]
     )
     has_pre_list_sync = _has_pre_list_view_sync()
@@ -153,7 +161,7 @@ def _run_done_compaction_harness(
         _markSessionCompletedInList(completedSession, activeSid);
         const cacheRow=_allSessions.find(s=>s&&s.session_id===completedSid);
         const unreadAfterCacheUpdate=_hasUnreadForSession(cacheRow);
-        const viewedCountAfterCacheUpdate=_getSessionViewedCounts()[completedSid] ?? null;
+        const viewedCountAfterCacheUpdate=_sessionViewedCountValue(_getSessionViewedCounts()[completedSid]);
         if ({str(is_session_viewed).lower()}) {{
           _markSessionViewed(completedSid, completedMessageCount);
         }}
@@ -164,7 +172,7 @@ def _run_done_compaction_harness(
           unreadAfterActiveBranchSync:_hasUnreadForSession(cacheRow),
           hasCompletionUnread:_hasSessionCompletionUnread(completedSid),
           completionUnreadMessageCount:_getSessionCompletionUnread()[completedSid]?.message_count ?? null,
-          viewedCount:_getSessionViewedCounts()[completedSid] ?? null,
+          viewedCount:_sessionViewedCountValue(_getSessionViewedCounts()[completedSid]),
           cacheRow,
         }}));
         """

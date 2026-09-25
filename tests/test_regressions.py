@@ -642,8 +642,8 @@ def test_chat_start_persists_pending_turn_metadata_for_reload_recovery(cleanup_t
 def test_session_detail_uses_runtime_streaming_state(cleanup_test_sessions):
     """GET /api/session must agree with /api/sessions on live stream ownership."""
     routes_src = (REPO_ROOT / "api/routes.py").read_text()
-    session_route = routes_src.split('if parsed.path == "/api/session":', 1)[1].split(
-        'if parsed.path == "/api/session/lineage/report":', 1
+    session_route = routes_src.split('def _handle_session_get(', 1)[1].split(
+        'def handle_get(', 1
     )[0]
     assert "active_stream_ids = _active_stream_ids()" in session_route
     assert "s.compact(" in session_route
@@ -793,7 +793,8 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     fn_start = ui_src.find("function renderMessages")
     assert fn_start >= 0, "renderMessages() not found in ui.js"
-    fn_body = ui_src[fn_start:fn_start + 1400]
+    # Window sized to reach the render-window reset; renderMessages() preamble grows (#6717).
+    fn_body = ui_src[fn_start:fn_start + 2400]
 
     compact = re.sub(r"\s+", "", fn_body)
     assert (
