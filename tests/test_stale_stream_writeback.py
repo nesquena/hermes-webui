@@ -70,7 +70,7 @@ def test_cancel_stream_does_not_append_marker_after_stream_ownership_rotated():
     mock_agent.interrupt = Mock()
     config.AGENT_INSTANCES[old_stream] = mock_agent
 
-    assert streaming.cancel_stream(old_stream) is True
+    assert streaming.cancel_stream(old_stream)["cancelled"] is True
 
     assert s.active_stream_id == "newer-stream"
     assert s.pending_user_message == "newer prompt"

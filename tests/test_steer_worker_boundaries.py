@@ -195,7 +195,7 @@ def test_stop_during_agent_creation_prevents_provider_run(worker_scene, monkeypa
             assert reached.wait(5), "worker never reached agent creation"
             event = config.CANCEL_FLAGS["run"]
             if cancellation == "stop":
-                assert streaming.cancel_stream("run") is True
+                assert streaming.cancel_stream("run") == {"cancelled": True, "persistence_failed": False, "stream_id": "run"}
                 assert event.is_set()
                 assert "run" not in config.CANCEL_FLAGS
                 assert "run" not in config.STREAMS
