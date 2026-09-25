@@ -250,7 +250,12 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 
 
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
-    script = "import yaml\nfrom run_agent import AIAgent\n"
+    # Import run_agent (hermes_bootstrap) first: on a managed interpreter mismatch it
+    # re-execs into an isolated (`-I`) interpreter with a bare sys.path, then repopulates
+    # third-party deps via activate_dependencies() as a side effect of that import. An
+    # `import yaml` before this line fails in that bare interpreter even when the final,
+    # fully-activated environment has PyYAML (e.g. as another dependency's transitive dep).
+    script = "from run_agent import AIAgent\nimport yaml\n"
     env = os.environ.copy()
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
