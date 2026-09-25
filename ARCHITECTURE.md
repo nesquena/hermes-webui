@@ -278,6 +278,26 @@ visibility stage decides whether recovered background rows are shown. In
 are merged; cross-profile scoping, visibility, deduplication, and final route
 limits remain downstream responsibilities.
 
+#### Compression lineage and session-list invalidation
+
+`api.agent_sessions._is_continuation_session()` is the shared classifier for
+sidebar projection, lineage metadata/reporting, and `state.db` transcript
+stitching. It uses the direct parent link, no conflicting non-empty source,
+`compression` or `cli_close` parent end reason, and the existing two-second
+`started_at` overlap allowance. A `source="tool"` child is always a separate
+conversation, even when its parent is also a tool session or has no source.
+A direct `_branched_from`, `_delegate_from`, or `_reset_from` marker in the
+child's `model_config` also makes a boundary; inherited ancestor markers do
+not. Malformed or unverifiable marker evidence fails closed as a boundary.
+The overlap allowance is the existing master policy, not a new window set by
+this change.
+
+The gateway watcher's cheap database fingerprint includes `model_config`, so
+a marker-only update causes a fresh projection. Its published-payload hash
+covers every emitted session field, not just ID, activity time and message
+count; a changed projected title or lineage field can therefore emit
+`sessions_changed` even without message-row churn.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
@@ -474,6 +494,52 @@ split moves another name, route it through `agent_attr` and add pre-split and
 pointer-removed cases to `tests/test_agent_compat.py`. The resolver is
 compatibility-only: delete it, and import directly from the new homes, once the WebUI
 stops supporting Agents that predate the split.
+
+### 4.10 MCP Runtime Profile Boundary
+
+Hermes Agent owns the in-process MCP ledger. It keys a connection by
+`(profile_home_key, name)` and registers its tools in that profile's registry overlay
+only when the calling task serves a *routed* profile: the context-local Hermes-home
+override differs from the process home. Otherwise the connection uses the bare server
+name and the global registry slot, which belong to the process profile.
+
+- `api.profiles._set_hermes_home()` is the single writer of the process-profile home:
+  startup (`init_profile_state()`) and `switch_profile(process_wide=True)` both go
+  through it, so `get_process_profile_home()` and the Agent pin
+  (`hermes_constants.pin_process_hermes_home()`, when the Agent provides it) are updated
+  in the same step as `HERMES_HOME`. Streaming turns still mirror their profile into
+  `os.environ['HERMES_HOME']` for legacy readers; without the pin, that mirror makes a
+  turn's own profile look like the process profile, so same-named servers of different
+  profiles share one bare-name connection.
+- `/api/mcp/servers`, `/api/mcp/tools`, `/api/notes/sources` and `/reload-mcp` run
+  their Agent calls inside `api.mcp_runtime.mcp_runtime_scope()`, which binds the
+  request profile's home and secret scope (root profile included) without touching
+  `os.environ`. Status, tool count and inventory are read from one scope; the inventory
+  lists only tools in that profile's own registry slot for servers it configures.
+- A connection *serves* a profile when that profile owns it (`_server_scope_keys`, else
+  the scope in the key) or adopted it (`_server_tool_scopes`, an identical shared
+  connection). `api.mcp_runtime.ledger_key_serves_view()` is the one predicate for
+  status, inventory and the reload summary. The Agent's launch-profile view (scope
+  `None`) is process-wide, so `filter_runtime_status_to_view()` downgrades
+  `get_mcp_status()` rows of servers the root profile does not serve to `configured`
+  rather than showing a routed profile's connection, tool count or connect error.
+- The scope is trusted only when the Agent's routing decision matches the profile WebUI
+  resolved. When it cannot be confirmed (for example a same-profile turn's mirror on an
+  Agent without the pin), status and inventory withhold runtime data
+  (`runtime_scope: "unavailable"`, shown as a notice in the MCP panel) and
+  `/reload-mcp` refuses instead of resetting another owner's connection.
+- `/reload-mcp` calls `shutdown_mcp_servers(scope=..., names=...)` with the profile's
+  own scope and the names of its live connections; `scope=None` without `names` is the
+  process-wide wildcard and is used only with Agents that predate profile-scoped MCP
+  (`runtime_scope: "legacy_process"`). A scoped shutdown only clears connect backoff for
+  the live keys it tears down, so WebUI also drops the profile's own cooldown/error
+  entries (`clear_profile_connect_cooldowns()`) before rediscovery: a server that failed
+  to spawn is retried by the reload, as the wildcard did, without touching another
+  owner's backoff.
+
+Status and inventory stay passive: they never start or probe an MCP server. Ledger key
+helpers resolve to Hermes Agent's `tools.mcp_tool_scope` when present so the key shape
+has one owner; the local fallbacks only cover Agents that predate that module.
 
 ---
 
@@ -1420,7 +1486,11 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/chat/stream           ?stream_id=X -> SSE stream. Long-lived. Emits token/tool/
                                approval/done/error events.
     /api/chat/stream/status    ?stream_id=X -> {"active": true/false, "stream_id": X}
-    /api/approval/pending      ?session_id=X -> {"pending": entry_or_null}
+    /api/approval/pending      ?session_id=X -> {"pending": entry_or_null}. The approval/clarify
+                               fallback pollers stop on a 409 session_profile_mismatch.
+    /api/git-info              ?session_id=X -> {"git": status_or_null}. State.db-only sessions
+                               (CLI, subagents) use their stored workspace if it resolves via
+                               resolve_trusted_workspace; missing/untrusted -> {"git": null}.
     /api/approval/inject_test  ?session_id=X&pattern_key=K&command=C -> test-only endpoint.
                                Injects a pending approval entry into the server process.
     /api/file/raw              ?session_id=X&path=P -> raw file bytes with correct MIME type.

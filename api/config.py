@@ -576,6 +576,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     # Remember the old mtime so we can tell whether config actually changed
     # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
     _old_cfg_mtime = _cfg_mtime
+    _old_cfg_path = _cfg_path
     _cfg_path = config_path
     _cfg_mtime = 0.0
     try:
@@ -632,10 +633,11 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
     # Only delete the disk cache when config has actually changed -- not on
-    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
-    # profile switch) -- preserving the disk cache so the next restart
+    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start) and not
+    # on a path change (per-client profile switch leaves the old profile's
+    # mtime) -- preserving the disk cache so the next restart
     # still hits the fast path without a cold run.
-    if _old_cfg_mtime != 0.0:
+    if _old_cfg_mtime != 0.0 and _old_cfg_path == config_path:
         _delete_models_cache_on_disk()
 
 
@@ -7606,7 +7608,7 @@ _MODELS_CACHE_SCHEMA_VERSION = 3
 _models_cache_path = STATE_DIR / "models_cache.json"
 
 
-def _get_models_cache_path() -> Path:
+def _get_models_cache_path(profile: str | None = None) -> Path:
     """Return the /api/models disk-cache path for the *active* profile (#3957).
 
     WebUI profile switching is per-client/cookie scoped (issue #798), but the
@@ -7630,12 +7632,13 @@ def _get_models_cache_path() -> Path:
     The named-profile path is derived from ``_models_cache_path`` (the
     module-level default), not from ``STATE_DIR`` directly, so the path stays
     correct if the default is repointed (e.g. tests monkeypatch
-    ``_models_cache_path`` to an isolated tmp file).
+    ``_models_cache_path`` to an isolated tmp file). Pass *profile* to get
+    another profile's path (profile delete/create).
     """
     try:
         from api.profiles import get_active_profile_name, _is_root_profile
 
-        name = (get_active_profile_name() or "").strip()
+        name = (profile or get_active_profile_name() or "").strip()
         if not name or _is_root_profile(name):
             return _models_cache_path
         # Defensive filename sanitization: the cookie-derived profile name is
@@ -7922,6 +7925,96 @@ def _auth_store_semantic_fingerprint(path: Path) -> dict:
     return fp
 
 
+def _active_profile_home() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        return _gah()
+    except ImportError:
+        return _DEFAULT_HERMES_HOME
+
+
+def _models_cache_env_fingerprint(path: Path) -> list:
+    """``[key, HMAC(value)]`` per non-empty ``.env`` entry, parsed like provider detection.
+
+    Values are keyed-hashed with the WebUI signing key so the cache file never holds a secret.
+    """
+    import hmac
+    from api.auth import _signing_key
+    from api.providers import _load_env_file
+
+    key = _signing_key()
+    return [
+        [k, hmac.new(key, v.encode("utf-8"), hashlib.sha256).hexdigest()]
+        for k, v in sorted(_load_env_file(Path(path).expanduser()).items())
+        if v
+    ]
+
+
+def _declares_model_provider_kind(plugin_dir: Path) -> bool:
+    # Same parse as the agent's providers._declares_model_provider_kind: PyYAML, then a line scan.
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        if not manifest.is_file():
+            continue
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        try:
+            import yaml as _yaml
+
+            data = _yaml.safe_load(text)
+            if isinstance(data, dict):
+                return str(data.get("kind", "")).strip() == "model-provider"
+        except Exception:
+            pass
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            if key.strip() == "kind":
+                return value.strip().strip("\"'") == "model-provider"
+        return False
+    return False
+
+
+def _models_cache_plugin_fingerprint(home: Path) -> list:
+    """``[dir, file stamps]`` per model-provider plugin, discovered like providers._scan_home_layer."""
+    found = []
+    plugins_root = Path(home).expanduser() / "plugins"
+    for base, flat in ((plugins_root / "model-providers", False), (plugins_root, True)):
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith(("_", ".")):
+                continue
+            if flat and (child.name == "model-providers" or not _declares_model_provider_kind(child)):
+                continue
+            found.append([str(child.relative_to(plugins_root)), _plugin_tree_stamps(child)])
+    return found
+
+
+def _plugin_tree_stamps(plugin_dir: Path) -> list:
+    # The loader execs __init__.py, which may import siblings or read data files; skip bytecode.
+    stamps = []
+    for root, dirs, files in os.walk(plugin_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
+        for name in sorted(files):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            stamps.append([os.path.relpath(path, plugin_dir), st.st_mtime_ns, st.st_size])
+    return stamps
+
+
 def _models_cache_source_fingerprint() -> dict:
     """Return the current config/auth/catalog fingerprint for /api/models cache.
 
@@ -7933,9 +8026,12 @@ def _models_cache_source_fingerprint() -> dict:
     mtime/size fingerprint because it is only rewritten on deliberate user
     edits (which can change anything) and does not churn on a timer.
     """
+    home = _active_profile_home()
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
+        "env": _models_cache_env_fingerprint(home / ".env"),
+        "plugins": _models_cache_plugin_fingerprint(home),
         "catalog": _models_cache_catalog_fingerprint(),
     }
 
@@ -8192,21 +8288,30 @@ def resolve_model_alias_runtime(
     resolved = dict(configured)
     base_url_explicit = bool(configured.get("base_url"))
     credential_explicit = bool(configured.get("api_key") or configured.get("key_env"))
+    # Hermes resolves a URL-bearing alias's credential for the alias HOST
+    # (requested="custom", which is host-gated), never for its provider label.
+    # That lookup provider is credential authority only; the alias's logical
+    # provider stays its routing/wire identity.
+    credential_lookup_provider = (
+        "custom" if base_url_explicit else str(configured.get("provider") or "custom").strip()
+    )
     try:
         from hermes_cli.model_switch import _load_direct_aliases, direct_alias_runtime_request
 
         direct = _load_direct_aliases().get(name)
         if direct is not None:
             requested_provider, api_key = direct_alias_runtime_request(direct)
+            credential_lookup_provider = str(requested_provider or credential_lookup_provider).strip()
             resolved = {
                 "model": str(direct.model or "").strip(),
-                "provider": str(requested_provider or direct.provider or "custom").strip(),
+                "provider": str(direct.provider or requested_provider or "custom").strip(),
                 "base_url": str(direct.base_url or configured.get("base_url") or "").strip(),
                 "api_key": str(api_key or configured.get("api_key") or "").strip(),
                 "key_env": "" if api_key else str(configured.get("key_env") or "").strip(),
             }
     except Exception:
         pass
+    resolved["credential_lookup_provider"] = credential_lookup_provider
 
     resolved["alias"] = name
     # Keep server-only provenance for composing aliases with named custom
@@ -8273,6 +8378,39 @@ def raise_for_unresolved_model_alias_route(route_provider: object) -> None:
     )
 
 
+def _same_endpoint_origin(url_a: object, url_b: object) -> bool:
+    """True only for an identical (scheme, host, port) origin; unknown is False."""
+    from urllib.parse import urlsplit
+
+    def _origin(url: object):
+        try:
+            parts = urlsplit(str(url or "").strip())
+            scheme = (parts.scheme or "").lower()
+            host = (parts.hostname or "").lower()
+            port = parts.port or {"https": 443, "http": 80}.get(scheme)
+        except ValueError:
+            return None
+        return (scheme, host, port) if scheme and host else None
+
+    origin_a = _origin(url_a)
+    return origin_a is not None and origin_a == _origin(url_b)
+
+
+def _model_alias_endpoint_api_mode(provider: str, base_url: str | None, model: object) -> str | None:
+    """Wire protocol for a URL-bearing alias, via Hermes' own detection.
+
+    Mirrors Hermes Agent, which clears the mode for a direct-alias endpoint and
+    re-detects it from the alias's logical provider plus its host. ``None``
+    (agent-side detection) when the installed Hermes cannot answer.
+    """
+    try:
+        from hermes_cli.providers import determine_api_mode
+
+        return determine_api_mode(provider, base_url or "", model=str(model or "")) or None
+    except Exception:
+        return None
+
+
 def merge_model_alias_runtime_bundle(
     alias_route: dict,
     runtime_provider: dict | None = None,
@@ -8281,12 +8419,18 @@ def merge_model_alias_runtime_bundle(
 ) -> dict:
     """Compose one alias route with provider runtime state without mixing authorities.
 
-    An alias-declared ``base_url`` owns the whole endpoint boundary. Its declared
-    credential is the only credential that may accompany it; an alias with no
-    credential declaration is deliberately keyless. When the alias names only a
-    provider, normal provider resolution remains authoritative. A credential-only
-    alias may override that provider's credential, but not its endpoint or wire
-    protocol, and it clears the provider credential pool it displaced.
+    An alias-declared ``base_url`` owns the endpoint boundary, matching Hermes
+    Agent's direct-alias contract (``_apply_direct_alias_endpoint``): the alias's
+    declared credential wins; otherwise the only credential that may accompany
+    it is one the caller resolved host-gated against the alias URL itself (see
+    ``direct_alias_runtime_request``), and only when that runtime reports the
+    alias's own origin. An unrelated provider credential never crosses to it.
+    The alias's logical provider remains its identity and selects the wire
+    protocol together with the alias host; the host-gated ``custom`` lookup is
+    credential authority only. When the alias names only a provider, normal
+    provider resolution remains authoritative. A credential-only alias may
+    override that provider's credential, but not its endpoint or wire protocol,
+    and it clears the provider credential pool it displaced.
     """
     route = alias_route if isinstance(alias_route, dict) else {}
     runtime = runtime_provider if isinstance(runtime_provider, dict) else {}
@@ -8296,11 +8440,30 @@ def merge_model_alias_runtime_bundle(
     alias_api_key = route.get("api_key") or None
 
     if explicit_base_url:
+        alias_base_url = route.get("base_url") or None
+        logical_provider = str(route.get("provider") or "").strip()
+        # WebUI canonicalizes named custom providers to "custom" everywhere.
+        bundle_provider = (
+            "custom"
+            if not logical_provider or logical_provider.lower().startswith("custom")
+            else logical_provider
+        )
+        if explicit_credential:
+            api_key = alias_api_key
+        else:
+            runtime_key = str(runtime.get("api_key") or "").strip()
+            if runtime_key == "no-key-required" or not _same_endpoint_origin(
+                runtime.get("base_url"), alias_base_url
+            ):
+                runtime_key = ""
+            api_key = runtime_key or KEYLESS_CUSTOM_API_KEY
         bundle = {
-            "provider": "custom",
-            "base_url": route.get("base_url") or None,
-            "api_key": alias_api_key if explicit_credential else KEYLESS_CUSTOM_API_KEY,
-            "api_mode": None,
+            "provider": bundle_provider,
+            "base_url": alias_base_url,
+            "api_key": api_key,
+            "api_mode": _model_alias_endpoint_api_mode(
+                logical_provider or bundle_provider, alias_base_url, route.get("model")
+            ),
             "acp_command": None,
             "acp_args": None,
             "credential_pool": None,
@@ -8361,10 +8524,10 @@ def _load_stale_models_cache_from_disk() -> dict | None:
     The main cache loader enforces metadata stamps for a full cold-path cache hit.
     This helper intentionally does not apply that stricter policy, so we can still
     recover a useful fallback payload when the strict loader rejected cache because
-    metadata or fingerprint fields are stale. It DOES still enforce the schema
-    version: a cross-schema cache can have an incompatible groups/badge shape, so
-    serving it to the picker could surface a broken catalog — schema mismatch is a
-    hard reject even on the fallback path.
+    the WebUI version stamp is stale. It DOES still enforce the schema version (a
+    cross-schema cache can have an incompatible groups/badge shape) and the source
+    fingerprint: a snapshot built from other config/auth/.env/plugin sources is a
+    wrong catalog, not merely an old one, so it is never served.
     """
     try:
         import json as _j
@@ -8377,6 +8540,8 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
+            return None
+        if cache.get("_source_fingerprint") != _models_cache_source_fingerprint():
             return None
         aliases = cache.get("aliases")
         if not isinstance(aliases, dict):
@@ -8468,7 +8633,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     return None
 
 
-def invalidate_models_cache():
+def invalidate_models_cache(*, delete_disk: bool = True):
     """Force the TTL cache for get_available_models() to be cleared.
 
     Call this after modifying config.cfg in-memory (e.g. in tests) so
@@ -8481,6 +8646,8 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    ``delete_disk=False`` keeps the fingerprint-guarded disk snapshot (profile switch).
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
@@ -8499,7 +8666,8 @@ def invalidate_models_cache():
         _CREDENTIAL_POOL_CACHE.clear()
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
-    _delete_models_cache_on_disk()
+    if delete_disk:
+        _delete_models_cache_on_disk()
     try:
         from api.plugin_providers import invalidate_plugin_model_provider_cache
 

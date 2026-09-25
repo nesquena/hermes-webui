@@ -79,7 +79,11 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
     _is_empty_partial_activity_message,
+    _message_exact_timestamp_details,
+    _message_private_identity_compatible,
+    _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -829,6 +833,97 @@ def _resolve_model_alias_connection_bundle(
             runtime_provider,
             connection_resolver=resolve_custom_provider_connection,
         )
+
+
+def _resolve_model_alias_endpoint_runtime(alias_route: dict, *, target_model=None) -> dict:
+    """Host-gated credential resolution for a URL-bearing alias with no declared key.
+
+    Delegates to Hermes Agent's own direct-alias policy
+    (``hermes_cli.model_switch._apply_direct_alias_endpoint``) so the local worker
+    reads the same configured alias exactly as the Gateway and runner do: the
+    lookup uses ``direct_alias_runtime_request`` (``requested="custom"``, which is
+    host-gated) against the alias URL, so an authoritative host such as
+    openrouter.ai or ollama.com resolves its own key and an unrelated host
+    resolves none. Only the credential is taken from Hermes; provider identity and
+    wire protocol are composed by :func:`merge_model_alias_runtime_bundle`.
+
+    Returns ``{}`` (keyless) for an alias without an endpoint, with a declared
+    credential, or when the installed Hermes cannot answer: failing closed never
+    sends a credential anywhere.
+    """
+    route = alias_route if isinstance(alias_route, dict) else {}
+    base_url = str(route.get("base_url") or "").strip()
+    if not route.get("base_url_explicit") or route.get("credential_explicit") or not base_url:
+        return {}
+    try:
+        from types import SimpleNamespace
+
+        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+        from hermes_cli.model_switch import DirectAlias, _apply_direct_alias_endpoint
+
+        # No declared credential: the alias carries none, so Hermes takes its
+        # fresh host-gated resolution branch (there is no prior session key).
+        alias = DirectAlias(
+            model=str(route.get("model") or ""),
+            provider=str(route.get("provider") or "custom"),
+            base_url=base_url,
+        )
+        state = SimpleNamespace(
+            base_url="",
+            api_key="",
+            api_mode="",
+            target_provider=str(route.get("provider") or "custom"),
+            new_model=str(target_model or route.get("model") or ""),
+            validation_headers={},
+            suppress_ollama_headers=False,
+        )
+        resolve_runtime_provider_with_anthropic_env_lock(_apply_direct_alias_endpoint, state, alias)
+    except Exception as exc:
+        logger.warning("[webui] model alias host-gated credential resolution failed: %s", exc)
+        return {}
+    api_key = str(state.api_key or "").strip()
+    return {
+        "base_url": str(state.base_url or "").strip() or base_url,
+        "api_key": "" if api_key == "no-key-required" else api_key,
+    }
+
+
+def _attempt_model_alias_credential_self_heal(
+    provider_context, expected_model, session_id, _agent_lock_ref, *, target_model=None,
+):
+    """Credential self-heal (#1401) for an alias route: re-read the alias itself.
+
+    An alias-owned credential (``api_key``/``key_env``, or the host-gated key of
+    a URL-bearing alias) lives in the alias's authoritative source, not only in
+    auth.json, so retrying with the originally resolved route would resend the
+    same stale key. Re-resolve the alias from the active profile config/env,
+    then its runtime, and return ``(fresh_route, runtime)`` or ``None``.
+    """
+    try:
+        fresh_route = resolve_model_alias_runtime(provider_context, expected_model=expected_model)
+    except Exception as exc:
+        logger.warning("[webui] self-heal: model alias re-resolution failed: %s", exc)
+        return None
+    if fresh_route is None:
+        return None
+    if not fresh_route.get("base_url_explicit"):
+        runtime = _attempt_credential_self_heal(
+            fresh_route.get("provider") or "", session_id, _agent_lock_ref,
+            target_model=target_model,
+        )
+        return None if runtime is None else (fresh_route, runtime)
+    try:
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+
+        with SESSION_AGENT_CACHE_LOCK:
+            evicted = SESSION_AGENT_CACHE.pop(session_id, None)
+        if evicted is not None:
+            _close_cached_agent_entry_at_session_boundary(session_id, evicted)
+    except Exception:
+        logger.debug("[webui] self-heal: alias agent-cache eviction failed", exc_info=True)
+    return fresh_route, _resolve_model_alias_endpoint_runtime(
+        fresh_route, target_model=target_model,
+    )
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
@@ -2129,6 +2224,58 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
     return messages, True
 
 
+def _active_turn_user_text_matches(message, expected_text):
+    """Validate the Agent's declared user row against the submitted prompt."""
+    if not isinstance(message, dict) or message.get('role') != 'user' or not isinstance(expected_text, str):
+        return False
+    content = message.get('content')
+    if isinstance(content, list):
+        leading_text = []
+        for part in content:
+            if not isinstance(part, dict):
+                return False
+            part_type = str(part.get('type') or '').lower()
+            if part_type in {'image', 'image_url', 'input_image'}:
+                break
+            if part_type not in {'', 'text', 'input_text', 'output_text'}:
+                return False
+            text = part.get('text', part.get('input_text', part.get('output_text', '')))
+            if not isinstance(text, str):
+                return False
+            leading_text.append(text)
+        if not content:
+            return False
+        actual_text = '\n'.join(leading_text)
+    elif isinstance(content, str):
+        actual_text = content
+    else:
+        return False
+    if (
+        isinstance(content, str)
+        and " ".join(actual_text.split()) == " ".join(expected_text.split())
+    ):
+        return True
+    return _submitted_user_text_matches(actual_text, expected_text)
+
+
+def _submitted_user_text_matches(actual_text, expected_text):
+    """Match exact prompt text with at most its generated workspace prefix."""
+    if actual_text == expected_text:
+        return True
+    if not isinstance(actual_text, str) or not isinstance(expected_text, str):
+        return False
+    if not actual_text.endswith(expected_text):
+        return False
+    prefix = actual_text[:-len(expected_text)] if expected_text else actual_text
+    return bool(
+        prefix
+        and (
+            _WORKSPACE_PREFIX_RE.fullmatch(prefix)
+            or _LEGACY_WORKSPACE_PREFIX_RE.fullmatch(prefix)
+        )
+    )
+
+
 def _owner_projection_current_turn_row(messages, identity):
     messages = list(messages or [])
     if not isinstance(identity, dict):
@@ -2165,16 +2312,19 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
                 return idx
     if not _active_turn_boundary_is_valid(identity):
         return None
-    expected_text = identity.get('text') if identity.get('text') is not None else msg_text
     idx = identity['current_turn_user_idx']
     if idx < 0 or idx >= len(result_messages):
         return None
     message = result_messages[idx]
+    expected_text = identity.get('text') if identity.get('text') is not None else msg_text
+    if _active_turn_user_text_matches(message, expected_text):
+        return idx
+    trusted_agent_input = identity.get('trusted_agent_input_text')
     if (
-        isinstance(message, dict)
-        and message.get('role') == 'user'
-        and _normalize_user_text(_message_text(message.get('content')))
-        == _normalize_user_text(expected_text)
+        identity.get('text') == msg_text
+        and isinstance(trusted_agent_input, str)
+        and trusted_agent_input != expected_text
+        and _active_turn_user_text_matches(message, trusted_agent_input)
     ):
         return idx
     return None
@@ -2263,17 +2413,19 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
     )
     if _checkpoint_idx is not None:
         existing_checkpoint = result_messages[_checkpoint_idx]
-        if isinstance(identity.get('checkpoint'), dict):
-            retained_checkpoint = _materialize_active_turn_user(identity, msg_text, source)
-            if (
-                retained_checkpoint.get('id') is None
-                and isinstance(existing_checkpoint, dict)
-                and existing_checkpoint.get('id') is not None
-            ):
-                retained_checkpoint['id'] = existing_checkpoint['id']
-            result_messages[_checkpoint_idx] = retained_checkpoint
-        else:
-            _mark_active_turn_checkpoint(existing_checkpoint, identity)
+        _mark_active_turn_checkpoint(existing_checkpoint, identity)
+        checkpoint = identity.get('checkpoint')
+        if isinstance(checkpoint, dict):
+            for key in ('id', 'timestamp'):
+                if existing_checkpoint.get(key) is None and checkpoint.get(key) is not None:
+                    existing_checkpoint[key] = copy.deepcopy(checkpoint[key])
+            if checkpoint.get('attachments'):
+                existing_checkpoint['attachments'] = copy.deepcopy(checkpoint['attachments'])
+            stamp_message_source(
+                existing_checkpoint,
+                identity.get('source') or source or 'webui',
+                active_turn_token=identity.get('token'),
+            )
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
@@ -2463,6 +2615,45 @@ def _settle_result_messages(
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
     )
+    trusted_agent_input = (
+        active_turn_identity.get('trusted_agent_input_text')
+        if isinstance(active_turn_identity, dict)
+        else None
+    )
+    if (
+        isinstance(trusted_agent_input, str)
+        and active_turn_identity.get('text') == msg_text
+        and active_turn_identity.get('token')
+    ):
+        current_display_rows = [
+            message for message in session.messages
+            if _active_turn_token_matches(message, active_turn_identity)
+        ]
+        current_context_rows = [
+            message for message in session.context_messages
+            if _active_turn_token_matches(message, active_turn_identity)
+        ]
+        if (
+            len(current_display_rows) == 1
+            and current_display_rows[0].get('content') == msg_text
+            and len(current_context_rows) == 1
+        ):
+            context_user = current_context_rows[0]
+            context_content = context_user.get('content')
+            if (
+                isinstance(context_content, list)
+                and any(
+                    isinstance(part, dict)
+                    and str(part.get('type') or '').lower()
+                    in {'image', 'image_url', 'input_image'}
+                    for part in context_content
+                )
+                and _active_turn_user_text_matches(
+                    context_user,
+                    trusted_agent_input,
+                )
+            ):
+                context_user[_WEBUI_TRUSTED_AGENT_INPUT_FIELD] = trusted_agent_input
     # The merge carries earlier display rows across turns verbatim, so a row
     # settled before this guard existed would keep its raw wrapper forever.
     # Scrub the persisted display copy too — after the merge, so identity
@@ -2493,6 +2684,61 @@ def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_
         if role == 'user':
             return False
     return False
+
+
+def _trusted_native_image_context_display_mirror_tokens(previous_display, previous_context):
+    """Find unique token-paired rich image rows already represented in display."""
+    display_by_token = {}
+    context_by_token = {}
+    for messages, rows_by_token in (
+        (previous_display, display_by_token),
+        (previous_context, context_by_token),
+    ):
+        for message in messages or []:
+            if not isinstance(message, dict) or message.get('role') != 'user':
+                continue
+            token = message.get('_active_turn_token')
+            if not isinstance(token, str) or not token:
+                continue
+            rows_by_token.setdefault(token, []).append(message)
+
+    mirrored_tokens = set()
+    for token, context_rows in context_by_token.items():
+        display_rows = display_by_token.get(token, [])
+        if len(context_rows) != 1 or len(display_rows) != 1:
+            continue
+        context, display = context_rows[0], display_rows[0]
+        content = context.get('content')
+        if (
+            not isinstance(content, list)
+            or not any(
+                isinstance(part, dict)
+                and str(part.get('type') or '').lower() in {'image', 'image_url', 'input_image'}
+                for part in content
+            )
+            or not isinstance(
+                context.get(_WEBUI_TRUSTED_AGENT_INPUT_FIELD),
+                str,
+            )
+            or not _active_turn_user_text_matches(
+                context,
+                context.get(_WEBUI_TRUSTED_AGENT_INPUT_FIELD),
+            )
+            or not _message_private_identity_compatible(display, context)
+        ):
+            continue
+        display_ts, display_ts_valid = _message_exact_timestamp_details(display)
+        context_ts, context_ts_valid = _message_exact_timestamp_details(context)
+        if (
+            not display_ts_valid
+            or not context_ts_valid
+            or display_ts is None
+            or context_ts is None
+            or display_ts != context_ts
+        ):
+            continue
+        mirrored_tokens.add(token)
+    return mirrored_tokens
 
 
 def _agent_result_tool_limit_reached(result) -> bool:
@@ -7554,6 +7800,46 @@ def _merge_display_messages_after_agent_result(
     result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
+    active_turn_row_index = _find_active_turn_checkpoint_index(
+        result_messages, previous_context, _active_turn_identity, msg_text,
+    )
+    active_turn_row = (
+        result_messages[active_turn_row_index]
+        if active_turn_row_index is not None
+        else None
+    )
+    active_turn_display_text = None
+    active_content = active_turn_row.get('content') if isinstance(active_turn_row, dict) else None
+    if (
+        isinstance(active_turn_row, dict)
+        and active_turn_row.get('role') == 'user'
+        and isinstance(active_content, list)
+        and any(
+            isinstance(part, dict)
+            and isinstance(part.get('type'), str)
+            and part.get('type') in {'image', 'image_url', 'input_image'}
+            for part in active_content
+        )
+    ):
+        active_turn_display_text = (
+            _active_turn_identity.get('text')
+            if _active_turn_identity.get('text') is not None
+            else msg_text
+        )
+        if not isinstance(active_turn_display_text, str):
+            active_turn_display_text = None
+        else:
+            for display_message in previous_display:
+                if _active_turn_token_matches(display_message, _active_turn_identity):
+                    display_message['content'] = active_turn_display_text
+                    display_message.pop('api_content', None)
+                    for key in ('id', 'timestamp', '_row_id'):
+                        if display_message.get(key) is None and active_turn_row.get(key) is not None:
+                            display_message[key] = copy.deepcopy(active_turn_row[key])
+                    if not display_message.get('attachments') and active_turn_row.get('attachments'):
+                        display_message['attachments'] = copy.deepcopy(
+                            active_turn_row['attachments']
+                        )
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
@@ -7568,16 +7854,34 @@ def _merge_display_messages_after_agent_result(
     # at/after a cursor. Any context messages between the cursor and that
     # match are context-only gaps that get spliced in before the display msg.
     if previous_display and previous_context:
+        _displayed_native_image_context_tokens = (
+            _trusted_native_image_context_display_mirror_tokens(
+                previous_display,
+                previous_context,
+            )
+        )
         _display_id_set = {_message_identity(m) for m in previous_display}
         _context_id_set = {
             _message_identity(m)
             for m in previous_context
+            if not (
+                isinstance(m, dict)
+                and m.get('_active_turn_token') in _displayed_native_image_context_tokens
+            )
             if not _is_context_compression_marker(m)
             and not _is_compressed_context_tool_result_summary_message(m)
         }
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
-            context_keys = [_message_identity(m) for m in previous_context]
+            context_keys = [
+                None
+                if (
+                    isinstance(m, dict)
+                    and m.get('_active_turn_token') in _displayed_native_image_context_tokens
+                )
+                else _message_identity(m)
+                for m in previous_context
+            ]
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
             _display_keys = [_message_identity(m) for m in previous_display]
@@ -7777,10 +8081,55 @@ def _merge_display_messages_after_agent_result(
             or _is_compressed_context_tool_result_summary_message(msg)
         ):
             continue
+        is_active_image_row = (
+            active_turn_display_text is not None
+            and isinstance(msg, dict)
+            and msg.get('role') == 'user'
+            and (
+                msg is active_turn_row
+                or _active_turn_token_matches(msg, _active_turn_identity)
+            )
+        )
+        if is_active_image_row:
+            display_row = _materialize_active_turn_user(
+                _active_turn_identity,
+                active_turn_display_text,
+                source,
+            )
+            display_row['content'] = active_turn_display_text
+            display_row.pop('api_content', None)
+            for key in ('id', 'timestamp', '_row_id'):
+                if display_row.get(key) is None and msg.get(key) is not None:
+                    display_row[key] = copy.deepcopy(msg[key])
+            if not display_row.get('attachments') and msg.get('attachments'):
+                display_row['attachments'] = copy.deepcopy(msg['attachments'])
+            _mark_active_turn_checkpoint(display_row, _active_turn_identity)
+            existing_idx = next(
+                (
+                    idx for idx, existing in enumerate(merged)
+                    if _active_turn_token_matches(existing, _active_turn_identity)
+                ),
+                None,
+            )
+            if existing_idx is not None:
+                existing = merged[existing_idx]
+                existing['content'] = active_turn_display_text
+                existing.pop('api_content', None)
+                for key in ('id', 'timestamp', '_row_id'):
+                    if existing.get(key) is None and msg.get(key) is not None:
+                        existing[key] = copy.deepcopy(msg[key])
+                if not existing.get('attachments') and msg.get('attachments'):
+                    existing['attachments'] = copy.deepcopy(msg['attachments'])
+                if not existing.get('attachments') and display_row.get('attachments'):
+                    existing['attachments'] = copy.deepcopy(display_row['attachments'])
+                _mark_active_turn_checkpoint(existing, _active_turn_identity)
+                continue
+            msg = display_row
         key = _message_identity(msg)
         is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
         if (
-            ((key is not None and key == current_user_key) or is_current_user_turn)
+            not is_active_image_row
+            and ((key is not None and key == current_user_key) or is_current_user_turn)
             and merged
             and (
                 _message_identity(merged[-1]) == current_user_key
@@ -7820,12 +8169,14 @@ def _merge_display_messages_after_agent_result(
             continue
         display_msg = msg
         if (
-            ((key is not None and key == current_user_key) or is_current_user_turn)
+            ((key is not None and key == current_user_key) or is_current_user_turn or is_active_image_row)
             and isinstance(msg, dict)
             and msg.get('role') == 'user'
         ):
             display_msg = copy.deepcopy(msg)
-            display_msg['content'] = msg_text
+            display_msg['content'] = (
+                active_turn_display_text if is_active_image_row else msg_text
+            )
             stamp_message_source(display_msg, source)
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
@@ -9031,6 +9382,39 @@ def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
     return False
 
 
+def _register_pending_user_timestamp_identity(
+    callable_obj, session, persist_user_timestamp,
+):
+    """Persist the pending-turn proof while the caller owns the session lock."""
+    if session is None:
+        return
+    try:
+        timestamp_parameter = inspect.signature(callable_obj).parameters.get(
+            "persist_user_timestamp"
+        )
+    except (TypeError, ValueError):
+        timestamp_parameter = None
+    has_timestamp_contract = (
+        timestamp_parameter is not None
+        and timestamp_parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+    )
+    identity = (
+        _validated_webui_pending_user_timestamp_identity(
+            session,
+            (getattr(session, "active_stream_id", None), persist_user_timestamp),
+        )
+        if has_timestamp_contract
+        else None
+    )
+    previous = getattr(session, "_webui_pending_user_timestamp_identity", None)
+    session._webui_pending_user_timestamp_identity = identity
+    session_id = getattr(session, "session_id", None)
+    save = getattr(session, "save", None)
+    if callable(save) and session_id and previous != identity:
+        # Persist before run_conversation can write this turn to state.db.
+        save(touch_updated_at=False, skip_index=True)
+
+
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
@@ -9042,7 +9426,7 @@ def _build_run_conversation_kwargs(
     persist_user_message,
     persist_user_timestamp,
 ):
-    """Build one rolling-compatible Agent invocation contract.
+    """Build one rolling-compatible Agent invocation contract without mutation.
 
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
@@ -10295,14 +10679,11 @@ def _run_agent_streaming(
         # loaded the default profile's `mcp_servers`, even when the session
         # was stamped with a non-default profile.  See issue #1968.
         #
-        # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global registry
-        # keyed by server name.  This means once profile A registers a server
-        # named e.g. `postgres`, profile B's discovery sees it as already
-        # connected and skips it — even if B's config points at a different
-        # binary.  Fully fixing multi-profile concurrent use requires keying
-        # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
-        # lives outside this WebUI repo.  This change fixes the headline bug
-        # for users who run a single non-default profile per WebUI process.
+        # NOTE: hermes-agent keys MCP connections by `(profile_home, name)` only
+        # for a routed profile (override != process home).  The HERMES_HOME
+        # mirror above would make this turn's own profile look like the process
+        # profile, falling back to bare, cross-profile names, unless the agent
+        # honours the pin from `api.profiles._pin_process_profile_home()`.
         try:
             from api.agent_compat import agent_attr
             discover_mcp_tools = agent_attr("tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery")
@@ -10401,6 +10782,8 @@ def _run_agent_streaming(
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
+            # Bound before resolution so both self-heal paths can test it.
+            _alias_route = None
             # Per-message reasoning: dict maps assistant-message index → accumulated text
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
@@ -11019,13 +11402,18 @@ def _run_agent_streaming(
                 # Default to an empty runtime dict so the constructor-routing
                 # bundle below stays buildable when resolution raises.
                 _rt = {}
-                # An alias-declared endpoint is already a complete routing
-                # authority. Do not ask the active/provider resolver for a key
-                # that could then be sent to that unrelated endpoint.
+                # An alias-declared endpoint owns its credential boundary. Never
+                # ask the active/provider resolver for its label's key (that key
+                # could then reach an unrelated endpoint); resolve host-gated
+                # against the alias URL exactly as Hermes Agent does instead.
                 _alias_has_endpoint = bool(
                     _alias_route is not None and _alias_route.get("base_url_explicit")
                 )
-                if not _alias_has_endpoint:
+                if _alias_has_endpoint:
+                    _rt = _resolve_model_alias_endpoint_runtime(
+                        _alias_route, target_model=resolved_model,
+                    )
+                else:
                     try:
                         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -11688,6 +12076,11 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
+            with _agent_lock:
+                _persist_user_timestamp = getattr(s, 'pending_started_at', None)
+                _register_pending_user_timestamp_identity(
+                    agent.run_conversation, s, _persist_user_timestamp
+                )
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
                 user_message=user_message,
@@ -11703,7 +12096,7 @@ def _run_agent_streaming(
                 conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
-                persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                persist_user_timestamp=_persist_user_timestamp,
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -11745,6 +12138,11 @@ def _run_agent_streaming(
                     profile=(getattr(s, "profile", None) or Path(_profile_home)),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            # This exact WebUI-composed input is identity evidence for the
+            # Agent-indexed current row. Keep identity['text'] as the clean
+            # submitted prompt for display. Assignment follows notification
+            # rejection/rebuild so rejected text cannot claim a returned row.
+            _active_turn_identity['trusted_agent_input_text'] = _agent_msg_text
             _result_partial_pre_call_context = list(_previous_context_messages)
             if not _agent_can_invoke(agent):
                 with _agent_lock:
@@ -12176,10 +12574,21 @@ def _run_agent_streaming(
                         with _profiles_api.profile_scope_for_detached_worker(
                             _resolved_profile_name, "credential self-heal", logger_override=logger
                         ):
-                            _heal_rt = _attempt_credential_self_heal(
-                                resolved_provider or '', session_id, _agent_lock,
-                                target_model=resolved_model,
-                            )
+                            if _alias_route is not None:
+                                # Re-read the alias's own credential source: the
+                                # original route would resend the stale key.
+                                _alias_heal = _attempt_model_alias_credential_self_heal(
+                                    provider_context, model, session_id, _agent_lock,
+                                    target_model=resolved_model,
+                                )
+                                _heal_rt = None
+                                if _alias_heal is not None:
+                                    _alias_route, _heal_rt = _alias_heal
+                            else:
+                                _heal_rt = _attempt_credential_self_heal(
+                                    resolved_provider or '', session_id, _agent_lock,
+                                    target_model=resolved_model,
+                                )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
                             # Rebuild runtime variables from the refreshed resolve
@@ -12274,6 +12683,15 @@ def _run_agent_streaming(
                                     _heal_context_messages,
                                     _heal_conversation_history_revision,
                                 ) = _refresh_context_and_revision_from_state_db()
+                                _heal_persist_user_timestamp = getattr(
+                                    s, 'pending_started_at', None
+                                )
+                                # The returned-error path already owns _agent_lock.
+                                _register_pending_user_timestamp_identity(
+                                    agent.run_conversation,
+                                    s,
+                                    _heal_persist_user_timestamp,
+                                )
                                 _heal_kwargs = _build_run_conversation_kwargs(
                                     agent.run_conversation,
                                     user_message=user_message,
@@ -12291,7 +12709,7 @@ def _run_agent_streaming(
                                     ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
-                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                                    persist_user_timestamp=_heal_persist_user_timestamp,
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -12653,13 +13071,9 @@ def _run_agent_streaming(
                 if attachments:
                     display_attachments = [_attachment_name(a) for a in attachments if _attachment_name(a)]
                     for m in reversed(s.messages):
-                        if m.get('role') == 'user':
-                            content = str(m.get('content', ''))
-                            # Match if content is part of the sent message or vice-versa
-                            base_text = msg_text.split('\n\n[Attached files:')[0].strip() if '\n\n[Attached files:' in msg_text else msg_text
-                            if base_text[:60] in content or content[:60] in msg_text:
-                                m['attachments'] = display_attachments
-                                break
+                        if _active_turn_token_matches(m, _active_turn_identity):
+                            m['attachments'] = display_attachments
+                            break
                 # Persist reasoning trace in the session so it survives reload.
                 # Must run BEFORE s.save() — otherwise the mutation lives only in
                 # memory until the next turn's save, and the last-turn thinking card
@@ -13532,10 +13946,21 @@ def _run_agent_streaming(
                 with _profiles_api.profile_scope_for_detached_worker(
                     _resolved_profile_name, "credential self-heal", logger_override=logger
                 ):
-                    _heal_rt = _attempt_credential_self_heal(
-                        resolved_provider or '', session_id, _agent_lock,
-                        target_model=resolved_model,
-                    )
+                    if _alias_route is not None:
+                        # Re-read the alias's own credential source: the
+                        # original route would resend the stale key.
+                        _alias_heal = _attempt_model_alias_credential_self_heal(
+                            provider_context, model, session_id, _agent_lock,
+                            target_model=resolved_model,
+                        )
+                        _heal_rt = None
+                        if _alias_heal is not None:
+                            _alias_route, _heal_rt = _alias_heal
+                    else:
+                        _heal_rt = _attempt_credential_self_heal(
+                            resolved_provider or '', session_id, _agent_lock,
+                            target_model=resolved_model,
+                        )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
                     _self_healed = True
@@ -13643,6 +14068,15 @@ def _run_agent_streaming(
                             _heal_context_messages,
                             _heal_conversation_history_revision,
                         ) = _refresh_context_and_revision_from_state_db()
+                        with _agent_lock:
+                            _heal_persist_user_timestamp = getattr(
+                                s, 'pending_started_at', None
+                            )
+                            _register_pending_user_timestamp_identity(
+                                _heal_agent.run_conversation,
+                                s,
+                                _heal_persist_user_timestamp,
+                            )
                         _heal_kwargs2 = _build_run_conversation_kwargs(
                             _heal_agent.run_conversation,
                             user_message=user_message,
@@ -13660,7 +14094,7 @@ def _run_agent_streaming(
                             ),
                             task_id=session_id,
                             persist_user_message=msg_text,
-                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
+                            persist_user_timestamp=_heal_persist_user_timestamp,
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config

@@ -202,6 +202,7 @@ def test_custom_alias_route_resolves_exact_endpoint_and_credential(monkeypatch):
         "alias": "east",
         "base_url_explicit": True,
         "credential_explicit": True,
+        "credential_lookup_provider": "custom",
     }
     assert west["base_url"] == "https://west.example.test/v1"
     assert west["api_key"] == "west-secret"
@@ -234,6 +235,7 @@ def test_alias_runtime_fallback_supports_older_agent_loader(monkeypatch):
         "alias": "local",
         "base_url_explicit": True,
         "credential_explicit": True,
+        "credential_lookup_provider": "custom",
     }
     assert config.resolve_model_alias_runtime(route, "different-model") is None
 
@@ -277,7 +279,7 @@ def test_alias_endpoint_and_credential_override_named_custom_provider(monkeypatc
     assert bundle["base_url"] == "https://alias-west.example.test/v1"
     assert bundle["api_key"] == "alias-west-secret"
     assert bundle["credential_pool"] is None
-    assert bundle["api_mode"] is None
+    assert bundle["api_mode"] != "responses"
     assert "provider-west-secret" not in str(bundle)
     assert "unrelated-secret" not in str(bundle)
 
@@ -364,6 +366,91 @@ def test_credential_only_alias_overrides_named_custom_provider_key(monkeypatch):
     assert bundle["api_key"] == "alias-account-secret"
     assert bundle["credential_pool"] is None
     assert "provider-west-secret" not in str(bundle)
+
+
+def test_url_alias_keeps_logical_provider_when_credential_lookup_uses_custom(monkeypatch):
+    """requested='custom' is host-safe lookup, not the alias's provider identity."""
+    from api import config
+
+    monkeypatch.setattr(config, "cfg", {
+        "model_aliases": {
+            "claude": {
+                "model": "claude-opus",
+                "provider": "anthropic",
+                "base_url": "https://api.anthropic.com/v1",
+            },
+        },
+    })
+    alias = types.SimpleNamespace(
+        model="claude-opus",
+        provider="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        api_key="",
+        key_env="",
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.model_switch", types.SimpleNamespace(
+        _load_direct_aliases=lambda: {"claude": alias},
+        direct_alias_runtime_request=lambda _alias: ("custom", None),
+    ))
+    route = config._public_model_alias_routes()["claude"]["route_provider"]
+    resolved = config.resolve_model_alias_runtime(route, "claude-opus")
+    assert resolved["provider"] == "anthropic"
+    assert resolved["base_url"] == "https://api.anthropic.com/v1"
+    assert resolved["base_url_explicit"] is True
+    assert resolved["credential_explicit"] is False
+
+
+def test_url_alias_without_declared_credential_uses_host_gated_runtime_key():
+    from api import config
+
+    bundle = config.merge_model_alias_runtime_bundle(
+        {
+            "alias": "or-cloud",
+            "model": "openrouter/auto",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "",
+            "base_url_explicit": True,
+            "credential_explicit": False,
+        },
+        {
+            "provider": "custom",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "or-host-secret",
+            "api_mode": "chat_completions",
+        },
+    )
+    assert bundle["base_url"] == "https://openrouter.ai/api/v1"
+    assert bundle["api_key"] == "or-host-secret"
+    assert bundle["provider"] == "openrouter"
+    assert bundle["api_mode"] != "custom"
+    assert bundle["api_key"] != config.KEYLESS_CUSTOM_API_KEY
+
+
+def test_url_alias_foreign_host_never_receives_ambient_runtime_key():
+    from api import config
+
+    bundle = config.merge_model_alias_runtime_bundle(
+        {
+            "alias": "theta",
+            "model": "theta-1",
+            "provider": "anthropic",
+            "base_url": "https://theta.example.test/v1",
+            "api_key": "",
+            "base_url_explicit": True,
+            "credential_explicit": False,
+        },
+        {
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-anthropic-SECRET",
+            "api_mode": "anthropic_messages",
+        },
+    )
+    assert bundle["base_url"] == "https://theta.example.test/v1"
+    assert bundle["api_key"] != "sk-anthropic-SECRET"
+    assert "sk-anthropic-SECRET" not in str(bundle)
+    assert bundle["provider"] == "anthropic"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -727,8 +814,14 @@ _ALIAS_WORKER_RUNTIME = {
 }
 
 
-def _setup_alias_worker(monkeypatch, cfg_dict, session_id="session-alias-1"):
-    """Compose the production streaming send path around a capturing agent."""
+def _setup_alias_worker(
+    monkeypatch, cfg_dict, session_id="session-alias-1", *, resolve_runtime=None, run_conversation=None,
+):
+    """Compose the production streaming send path around a capturing agent.
+
+    ``resolve_runtime`` replaces the provider resolver's fixed ambient answer;
+    ``run_conversation(call_number)`` scripts the agent's turns.
+    """
     import queue
     from unittest import mock
 
@@ -788,6 +881,7 @@ def _setup_alias_worker(monkeypatch, cfg_dict, session_id="session-alias-1"):
                 "provider": provider,
                 "base_url": base_url,
                 "api_key": api_key,
+                "api_mode": api_mode,
             }
             captured.setdefault("init_kwargs_history", []).append(dict(captured["init_kwargs"]))
             self.session_id = kwargs.get("session_id")
@@ -801,6 +895,8 @@ def _setup_alias_worker(monkeypatch, cfg_dict, session_id="session-alias-1"):
 
         def run_conversation(self, **kwargs):
             captured["run_calls"] = captured.get("run_calls", 0) + 1
+            if run_conversation is not None:
+                return run_conversation(captured["run_calls"])
             return {"messages": [{"role": "assistant", "content": "ok"}]}
 
         def interrupt(self, _message):
@@ -812,21 +908,24 @@ def _setup_alias_worker(monkeypatch, cfg_dict, session_id="session-alias-1"):
     fake_queue = queue.Queue()
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
-    fake_runtime_module.resolve_runtime_provider = mock.Mock(
-        return_value=dict(_ALIAS_WORKER_RUNTIME)
-    )
-    fake_hermes_cli = types.ModuleType("hermes_cli")
-    fake_hermes_cli.runtime_provider = fake_runtime_module
+    if resolve_runtime is not None:
+        fake_runtime_module.resolve_runtime_provider = mock.Mock(side_effect=resolve_runtime)
+    else:
+        fake_runtime_module.resolve_runtime_provider = mock.Mock(
+            return_value=dict(_ALIAS_WORKER_RUNTIME)
+        )
+    captured["resolver"] = fake_runtime_module.resolve_runtime_provider
     fake_hermes_state = types.ModuleType("hermes_state")
     fake_hermes_state.SessionDB = mock.Mock(return_value=object())
 
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    # Keep the parent package importable: the worker lazily imports api.goals,
+    # which must not cache Goals-unavailable state from a fake hermes_cli.
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
     monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
     monkeypatch.setattr(
         api.oauth,
         "resolve_runtime_provider_with_anthropic_env_lock",
-        lambda resolver, **kwargs: resolver(**kwargs),
+        lambda resolver, *args, **kwargs: resolver(*args, **kwargs),
     )
     monkeypatch.setattr(streaming, "get_session", lambda _session_id: fake_session)
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: CapturingAgent)
@@ -843,11 +942,11 @@ def _setup_alias_worker(monkeypatch, cfg_dict, session_id="session-alias-1"):
     return streaming, fake_stream_id, fake_queue, captured, restore
 
 
-def _drive_alias_worker_send(monkeypatch, cfg_dict, *, model, lane, session_id):
+def _drive_alias_worker_send(monkeypatch, cfg_dict, *, model, lane, session_id, **hooks):
     import queue as _queue
 
     streaming, stream_id, q, captured, restore = _setup_alias_worker(
-        monkeypatch, cfg_dict, session_id=session_id
+        monkeypatch, cfg_dict, session_id=session_id, **hooks
     )
     try:
         streaming.STREAMS[stream_id] = q
@@ -978,6 +1077,165 @@ def test_resolved_alias_lane_still_reaches_its_own_endpoint(monkeypatch):
     assert init_kwargs["api_key"] == "east-secret"
     assert init_kwargs["provider"] == "custom"
     assert captured.get("run_calls") == 1
+
+
+@pytest.fixture
+def real_hermes_alias_policy(monkeypatch):
+    """Import the installed Hermes direct-alias policy for worker tests.
+
+    WebUI's test venv carries only WebUI's dependencies, and Hermes'
+    ``model_switch`` imports ``requests`` at module load (the deployed WebUI runs
+    in the agent's environment). Stub ``requests`` only when it is absent, and
+    drop every module this import adds so no other test sees stub-backed state.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("requests") is None:
+        monkeypatch.setitem(sys.modules, "requests", types.ModuleType("requests"))
+    before = set(sys.modules)
+    from hermes_cli import model_switch
+
+    assert callable(getattr(model_switch, "_apply_direct_alias_endpoint", None))
+    yield model_switch
+    for name in set(sys.modules) - before:
+        sys.modules.pop(name, None)
+
+
+def _host_gated_runtime_resolver(host_secrets, *, label_secret):
+    """Model Hermes' resolver: an explicit alias URL resolves only that host's key.
+
+    ``requested="custom"`` with ``explicit_base_url`` is host-gated (a key only for
+    a host that owns one); any other request answers with the provider label's
+    own secret on the provider's endpoint — the key that must never cross to an
+    unrelated alias host.
+    """
+    from urllib.parse import urlsplit
+
+    def resolve(requested=None, explicit_api_key=None, explicit_base_url=None, target_model=None, **_kwargs):
+        if explicit_base_url:
+            return {
+                "provider": "custom",
+                "base_url": explicit_base_url,
+                "api_key": host_secrets.get(urlsplit(explicit_base_url).hostname, "no-key-required"),
+                "api_mode": "chat_completions",
+            }
+        return {"provider": requested, "base_url": "https://api.anthropic.com", "api_key": label_secret}
+
+    return resolve
+
+
+def _resolver_requests(captured):
+    return [call.kwargs for call in captured["resolver"].call_args_list]
+
+
+def test_worker_url_alias_without_credential_uses_host_gated_key(monkeypatch, real_hermes_alias_policy):
+    """No declared key: Hermes' host-gated lookup supplies the authoritative host's key."""
+    from api import config
+
+    alias_url = "https://openrouter.ai/api/v1"
+    cfg = {
+        "model": {"default": "active/model", "provider": "openrouter"},
+        "model_aliases": {
+            "orc": {"model": "openrouter/auto", "provider": "openrouter", "base_url": alias_url},
+        },
+    }
+    captured, apperrors, _cache_empty = _drive_alias_worker_send(
+        monkeypatch, cfg,
+        model="openrouter/auto",
+        lane=config._model_alias_route_provider("orc"),
+        session_id="session-alias-host-gated",
+        resolve_runtime=_host_gated_runtime_resolver(
+            {"openrouter.ai": "or-host-secret"}, label_secret="label-secret",
+        ),
+    )
+
+    assert not apperrors
+    init_kwargs = captured["init_kwargs"]
+    assert init_kwargs["base_url"] == alias_url
+    assert init_kwargs["api_key"] == "or-host-secret"
+    # Credential lookup went through the host-gated custom route; identity did not.
+    assert init_kwargs["provider"] == "openrouter"
+    requests = _resolver_requests(captured)
+    assert requests and all(r.get("requested") == "custom" for r in requests)
+    assert all(r.get("explicit_base_url") == alias_url for r in requests)
+    assert captured.get("run_calls") == 1
+
+
+def test_worker_url_alias_foreign_host_never_receives_provider_credential(
+    monkeypatch, real_hermes_alias_policy,
+):
+    """A provider label on an unrelated host must not ship that provider's secret."""
+    from api import config
+    from hermes_cli.providers import determine_api_mode
+
+    alias_url = "https://theta.example.test/v1"
+    cfg = {
+        "model": {"default": "active/model", "provider": "anthropic"},
+        "model_aliases": {
+            "theta": {"model": "theta-1", "provider": "anthropic", "base_url": alias_url},
+        },
+    }
+    captured, apperrors, _cache_empty = _drive_alias_worker_send(
+        monkeypatch, cfg,
+        model="theta-1",
+        lane=config._model_alias_route_provider("theta"),
+        session_id="session-alias-foreign-host",
+        resolve_runtime=_host_gated_runtime_resolver({}, label_secret="sk-anthropic-SECRET"),
+    )
+
+    assert not apperrors
+    assert "sk-anthropic-SECRET" not in json.dumps(captured["init_kwargs_history"])
+    init_kwargs = captured["init_kwargs"]
+    assert init_kwargs["base_url"] == alias_url
+    assert init_kwargs["api_key"] == config.KEYLESS_CUSTOM_API_KEY
+    # Logical identity and wire protocol follow the alias, as in Hermes.
+    assert init_kwargs["provider"] == "anthropic"
+    assert init_kwargs["api_mode"] == determine_api_mode("anthropic", alias_url, model="theta-1")
+    # Hermes' own host-gated lookup ran (not a silent keyless fallback).
+    requests = _resolver_requests(captured)
+    assert requests and all(r.get("requested") == "custom" for r in requests)
+    assert all(r.get("explicit_base_url") == alias_url for r in requests)
+
+
+def test_worker_alias_self_heal_rereads_rotated_alias_credential(monkeypatch):
+    """A 401 re-reads the alias's own key source instead of resending the stale key."""
+    from api import config
+
+    monkeypatch.setenv("ROT_ALIAS_KEY", "stale-key")
+    cfg = {
+        "model": {"default": "active/model", "provider": "openrouter"},
+        "model_aliases": {
+            "rot": {
+                "model": "rot-1",
+                "provider": "custom",
+                "base_url": "https://rot.example.test/v1",
+                "key_env": "ROT_ALIAS_KEY",
+            },
+        },
+    }
+
+    def run(call_number):
+        if call_number == 1:
+            monkeypatch.setenv("ROT_ALIAS_KEY", "fresh-key")
+            raise RuntimeError("Error code: 401 - Unauthorized: invalid api key")
+        return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+    captured, _apperrors, _cache_empty = _drive_alias_worker_send(
+        monkeypatch, cfg,
+        model="rot-1",
+        lane=config._model_alias_route_provider("rot"),
+        session_id="session-alias-self-heal",
+        run_conversation=run,
+    )
+
+    keys = [kwargs["api_key"] for kwargs in captured.get("init_kwargs_history", [])]
+    assert keys == ["stale-key", "fresh-key"]
+    assert all(
+        kwargs["base_url"] == "https://rot.example.test/v1"
+        for kwargs in captured["init_kwargs_history"]
+    )
+    assert captured.get("run_calls") == 2
+    assert "ambient-secret" not in json.dumps(captured["init_kwargs_history"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1268,8 +1526,8 @@ def test_wakeup_alias_routing_follows_the_session_profile_config(monkeypatch, tm
     assert "east-secret" not in json.dumps(captured)
 
 
-def test_named_gateway_wakeup_skips_default_profile_runtime_barrier(monkeypatch, tmp_path):
-    """A gateway-owned named profile is not rejected by the local Agent barrier."""
+def test_named_gateway_wakeup_obeys_pre_session_runtime_barrier(monkeypatch, tmp_path):
+    """The pre-session barrier can refuse before named-profile routing is known."""
     from api.profiles import profile_scope_for_detached_worker
 
     _install_profile_home(monkeypatch, tmp_path, "work", _ALIAS_PROFILE_CONFIG)
@@ -1280,20 +1538,19 @@ def test_named_gateway_wakeup_skips_default_profile_runtime_barrier(monkeypatch,
             monkeypatch, profile="work", provider=lane, real_config=True
         )
         captured = _capture_legacy_dispatch(monkeypatch, routes_mod)
-        barrier_calls = []
-
-        def stale_default_profile_barrier(**kwargs):
-            barrier_calls.append(kwargs)
-            return {"type": "agent_runtime_stale", "error": "stale default runtime"}
-
         monkeypatch.setattr(
-            routes_mod, "_agent_runtime_barrier_response", stale_default_profile_barrier
+            routes_mod, "_agent_runtime_barrier_response",
+            lambda **kwargs: {"type": "agent_runtime_stale", "error": "restart required"},
+        )
+        monkeypatch.setattr(
+            routes_mod, "get_session",
+            lambda *_a, **_k: pytest.fail("session loaded before stale-runtime refusal"),
         )
         resp = routes_mod.start_session_turn("sess-alias-wake", "wakeup")
 
-    assert resp["_status"] == 200
-    assert captured["external_runtime_owned"] is True
-    assert barrier_calls == []
+    assert resp == {"_status": 409, "type": "agent_runtime_stale", "error": "restart required"}
+    assert captured == {}
+
 
 
 def test_alias_lane_is_bound_to_the_owning_profile(monkeypatch, tmp_path):
@@ -1349,8 +1606,9 @@ def test_wakeup_alias_lane_dead_in_the_session_profile_is_refused(monkeypatch, t
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# The /goal kickoff is the one turn start that reaches the backends directly
-# instead of through `_start_run`, so it makes the same two alias decisions.
+# The /goal kickoff routes through _start_run like any other turn start, so it
+# makes the same two alias decisions. Runner-owned sessions refuse goal set
+# outright until the runner exposes an atomic set-goal-and-kickoff control.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1470,85 +1728,99 @@ def test_goal_kickoff_legacy_keeps_opaque_alias_lane(monkeypatch):
     assert started[0]["external_runtime_owned"] is False
 
 
-def test_goal_kickoff_uses_runner_dispatch_for_alias(monkeypatch):
-    """A runner-owned goal kickoff follows the same alias contract as chat."""
-    _install_alias_cfg(monkeypatch)
-    lane = _live_lane()
-    routes, restored = _stub_goal_kickoff(
-        monkeypatch, provider=lane, gateway_owned=False
-    )
-    captured = []
-
-    class RunnerClient:
-        def update_goal(self, session_id, action, text):
-            assert session_id == "sid-goal-alias"
-            assert action == "set"
-            assert text == "ship it"
-            return {"ok": True, "action": "set", "kickoff_prompt": "ship it"}
-
-        def start_run(self, request):
-            captured.append(request)
-            return {
-                "run_id": "run-goal",
-                "stream_id": "stream-goal",
-                "session_id": request.session_id,
-            }
-
-    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
-    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
-    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: RunnerClient())
-    monkeypatch.setattr(
-        routes,
-        "_start_chat_stream_for_session",
-        lambda *_args, **_kwargs: pytest.fail("runner-owned goal used the local worker"),
-    )
-
-    result = routes._handle_goal_command(
-        object(), {"session_id": "sid-goal-alias", "args": "ship it"}
-    )
-
-    assert result["status"] == 200
-    assert len(captured) == 1
-    assert captured[0].model == "east"
-    assert captured[0].provider is None
-    assert captured[0].source == "webui"
-    assert captured[0].metadata["route"] == "/api/goal"
-    assert captured[0].metadata["goal_related"] is True
-    assert restored == []
-
-
-def test_goal_kickoff_runner_exception_restores_goal_state(monkeypatch):
-    """A transport failure cannot leave a goal set without a kickoff run."""
-    from api.runner_client import RunnerClientError
+@pytest.mark.parametrize("goal", [None, {
+    "goal": "existing goal", "status": "paused", "turns_used": 7,
+    "max_turns": 20, "last_verdict": "continue", "last_reason": "unfinished",
+    "paused_reason": "user-paused",
+}])
+@pytest.mark.parametrize("args", ["ship it", "set ship it"])
+def test_goal_kickoff_runner_set_preserves_goal_without_dispatch(monkeypatch, goal, args):
+    """Refusing replacement cannot mutate either owner's goal or launch a turn."""
+    import copy
+    from api import goals
 
     _install_alias_cfg(monkeypatch)
     routes, restored = _stub_goal_kickoff(
         monkeypatch, provider=_live_lane(), gateway_owned=False
     )
+    original = copy.deepcopy(goal)
+    calls = []
 
-    runner_goal_calls = []
+    class RunnerClient:
+        def __init__(self):
+            self.goal = copy.deepcopy(goal)
 
-    class FailingRunnerClient:
         def update_goal(self, session_id, action, text):
-            runner_goal_calls.append((session_id, action, text))
+            calls.append(("goal", action))
+            self.goal = {"goal": text, "status": "active", "turns_used": 0}
             return {"ok": True, "action": action, "kickoff_prompt": text}
 
-        def start_run(self, _request):
-            raise RunnerClientError("runner unavailable")
+        def start_run(self, request):
+            calls.append(("start", request))
+            return {"run_id": "run-goal", "stream_id": "stream-goal"}
+
+    client = RunnerClient()
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: client)
+    for name in ("goal_command_payload", "goal_state_snapshot", "restore_goal_state"):
+        monkeypatch.setattr(goals, name, lambda *_a, **_k: pytest.fail("local goal manager used"))
+    monkeypatch.setattr(
+        routes, "_start_chat_stream_for_session",
+        lambda *_a, **_k: pytest.fail("local worker launched"),
+    )
+    result = routes._handle_goal_command(
+        object(), {"session_id": "sid-goal-alias", "args": args}
+    )
+    assert result["status"] == 501
+    assert result["payload"]["ok"] is False
+    assert result["payload"]["status"] == "unsupported"
+    assert "atomic" in result["payload"]["error"]
+    assert calls == []
+    assert client.goal == original
+    assert restored == []
+
+
+@pytest.mark.parametrize("args,action", [
+    ("", "status"), ("status", "status"), ("pause", "pause"),
+    ("resume", "resume"), ("clear", "clear"), ("stop", "clear"), ("done", "clear"),
+])
+def test_runner_goal_controls_delegate_without_local_execution(monkeypatch, args, action):
+    from api import goals
+
+    routes, _ = _stub_goal_kickoff(monkeypatch, provider=None, gateway_owned=False)
+    calls = []
+
+    class RunnerClient:
+        def update_goal(self, session_id, requested_action, text):
+            calls.append((session_id, requested_action, text))
+            return {"ok": True, "action": requested_action, "message": "runner control accepted"}
 
     monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
-    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
-    monkeypatch.setattr(
-        routes, "_runtime_runner_client_factory", lambda: FailingRunnerClient()
-    )
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", RunnerClient)
+    monkeypatch.setattr(goals, "goal_command_payload", lambda *_a, **_k: pytest.fail("local goal manager used"))
+    monkeypatch.setattr(routes, "_start_run", lambda *_a, **_k: pytest.fail("control launched a run"))
+    result = routes._handle_goal_command(object(), {"session_id": "sid-goal-alias", "args": args})
+    assert result == {"status": 200, "payload": {"ok": True, "action": action, "message": "runner control accepted"}}
+    assert calls == [("sid-goal-alias", action, args)]
 
-    with pytest.raises(RunnerClientError, match="runner unavailable"):
-        routes._handle_goal_command(
-            object(), {"session_id": "sid-goal-alias", "args": "ship it"}
-        )
 
+@pytest.mark.parametrize("mode", ["legacy-direct", "legacy-journal"])
+def test_legacy_goal_set_keeps_local_goal_and_kickoff(monkeypatch, mode):
+    from api import goals
+
+    _install_alias_cfg(monkeypatch)
+    routes, restored = _stub_goal_kickoff(monkeypatch, provider=_live_lane(), gateway_owned=False)
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", mode)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: mode == "legacy-journal")
+    calls = []
+    monkeypatch.setattr(goals, "goal_command_payload", lambda sid, text, **kw:
+        calls.append((sid, text)) or {"ok": True, "action": "set", "kickoff_prompt": text})
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: pytest.fail("legacy goal used runner"))
+    started = []
+    result = _run_goal_kickoff(monkeypatch, routes, started)
+    assert result["status"] == 200
+    assert calls == [("sid-goal-alias", "ship it")]
+    assert len(started) == 1
+    assert started[0]["goal_related"] is True
+    assert started[0]["model_provider"] == _live_lane()
     assert restored == []
-    assert runner_goal_calls == [
-        ("sid-goal-alias", "set", "ship it"),
-        ("sid-goal-alias", "clear", ""),
-    ]

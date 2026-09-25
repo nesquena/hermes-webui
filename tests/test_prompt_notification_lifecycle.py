@@ -24,6 +24,7 @@ const S = {busy:true,session:{session_id:'s'}};
 const _approvalPromptBelongsToActiveSession=()=>false;
 let _approvalSessionId = 's', _approvalCurrentId = 'id';
 let _approvalFallbackPollInFlight=false, _approvalPollTimer;
+let _promptPollerFocusEpoch=0;
 let _clarifyPollingSessionId, _clarifyPollTimer, _clarifyFallbackPollInFlight=false;
 const _promptActiveSessionId=()=> 's';
 const _approvalPollingSessionMissingOrMismatched=()=>false;

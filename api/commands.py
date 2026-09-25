@@ -257,11 +257,28 @@ def _run_codex_runtime_command(arg_string: str) -> str:
 
 
 def _run_reload_mcp_command() -> str:
-    """Execute the MCP reconnect path and return a short user-facing summary."""
+    """Execute the MCP reconnect path and return a short user-facing summary.
+
+    Scoped to the request profile: only that profile's connections are shut
+    down and rediscovered from that profile's config, so other profiles'
+    same-named servers keep running (agents with profile-scoped MCP; older
+    agents keep their process-wide reload).
+    """
     with _RELOAD_MCP_LOCK:
         try:
+            import importlib
             from tools.mcp_tool import _servers, _lock
+            # Resolved by full name (like the ``from`` import above) so a stubbed
+            # ``tools.mcp_tool`` without a ``tools`` package still works.
+            _core = importlib.import_module("tools.mcp_tool")
             from api.agent_compat import agent_attr
+            from api.mcp_runtime import (
+                accepts_keywords,
+                clear_profile_connect_cooldowns,
+                ledger_key_serves_view,
+                mcp_key_name,
+                mcp_runtime_scope,
+            )
 
             shutdown_mcp_servers = agent_attr(
                 "tools.mcp_tool", "shutdown_mcp_servers", "tools.mcp_tool_lifecycle"
@@ -269,22 +286,74 @@ def _run_reload_mcp_command() -> str:
             discover_mcp_tools = agent_attr(
                 "tools.mcp_tool", "discover_mcp_tools", "tools.mcp_tool_discovery"
             )
+            try:
+                register_mcp_servers = agent_attr(
+                    "tools.mcp_tool", "register_mcp_servers", "tools.mcp_tool_discovery"
+                )
+            except Exception:
+                register_mcp_servers = None  # older agent: no overlay reconciliation
         except Exception as exc:
             logger.warning("Failed to import MCP runtime for /reload-mcp", exc_info=True)
             raise RuntimeError("MCP runtime unavailable") from exc
 
-        try:
-            with _lock:
-                old_servers = set(_servers.keys())
+        with mcp_runtime_scope("/reload-mcp") as view:
+            if not view.trusted:
+                # Resetting under an unconfirmed scope could stop another profile's
+                # connection or rebuild this one under the wrong owner.
+                raise RuntimeError(
+                    "MCP reload unavailable: this profile's MCP runtime scope could not be "
+                    "confirmed (a chat turn on this profile may be running); retry when it finishes"
+                )
+            try:
+                # Profile-scoped teardown needs both the scoped ledger and a
+                # shutdown that takes scope/names; otherwise keep the legacy reload.
+                legacy = view.legacy or not accepts_keywords(shutdown_mcp_servers, "scope", "names")
 
-            shutdown_mcp_servers()
-            new_tools = discover_mcp_tools()
+                def live_names() -> set:
+                    # Same criteria as the status page: the connection serves this
+                    # profile (owned or adopted) and is live. A parked task (failed
+                    # spawn retained for retry) has no session and is not "connected".
+                    return {
+                        mcp_key_name(key) for key, server in _servers.items()
+                        if (legacy or ledger_key_serves_view(_core, key, view))
+                        and getattr(server, "session", True) is not None
+                    }
 
-            with _lock:
-                connected_servers = set(_servers.keys())
-        except Exception as exc:
-            logger.warning("Failed to reload MCP servers", exc_info=True)
-            raise RuntimeError("Failed to reload MCP servers") from exc
+                with _lock:
+                    old_servers = live_names()
+                    # Every ledger entry serving this profile, parked ones included:
+                    # a parked task left in place would make discovery skip the server.
+                    owned_names = {
+                        mcp_key_name(key) for key in _servers
+                        if ledger_key_serves_view(_core, key, view)
+                    }
+
+                if legacy:
+                    shutdown_mcp_servers()
+                else:
+                    # ``names`` is required: ``scope=None`` alone is the process-wide
+                    # wildcard. Only names with a ledger key are passed; shutdown
+                    # ignores anything else, and a key of another owner is never selected.
+                    shutdown_mcp_servers(scope=view.registry_scope, names=owned_names)
+                    # The wildcard also dropped connect backoff; keep that for this
+                    # profile's own failed servers so the reload retries them now.
+                    clear_profile_connect_cooldowns(_core, view)
+                    # A connection this profile ADOPTED (another profile's identical
+                    # route) is not torn down above, and ``discover_mcp_tools()``
+                    # returns before its reconcile step when the profile's config
+                    # has no server left, so the adopted tools would stay callable.
+                    # ``register_mcp_servers({})`` judges every server serving this
+                    # scope against the profile's config on disk and detaches only
+                    # this profile's overlay; the owner's connection keeps running.
+                    if register_mcp_servers is not None and view.registry_scope is not None:
+                        register_mcp_servers({})
+                new_tools = discover_mcp_tools()
+
+                with _lock:
+                    connected_servers = live_names()
+            except Exception as exc:
+                logger.warning("Failed to reload MCP servers", exc_info=True)
+                raise RuntimeError("Failed to reload MCP servers") from exc
 
     added = connected_servers - old_servers
     removed = old_servers - connected_servers

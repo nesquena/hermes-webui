@@ -309,6 +309,27 @@ Interpret the two together:
 
 ---
 
+## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
+
+**Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.
+
+**Why.** Hermes Agent keeps one in-process MCP ledger per WebUI process and keys a connection by profile only when it can tell the request serves a profile other than the process's own. The WebUI binds every MCP status read and `/reload-mcp` to the request profile (`ARCHITECTURE.md` §4.10). While a chat turn is streaming, the WebUI mirrors that turn's profile into `HERMES_HOME`; Agents that predate `hermes_constants.pin_process_hermes_home` cannot distinguish that mirror from the process profile, so the WebUI withholds runtime data and refuses the reload instead of showing or resetting another profile's connection.
+
+**Diagnostic commands.**
+
+```bash
+# runtime_scope: "profile" (bound), "legacy_process" (Agent without profile-scoped MCP),
+# "unavailable" (scope could not be confirmed right now)
+curl -s -b "hermes_profile=<profile>" http://127.0.0.1:8787/api/mcp/servers | python3 -m json.tool | grep -E '"(name|status|tool_count|runtime_scope)"'
+python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_process_hermes_home'))"
+```
+
+**Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, the Agent predates the process-home pin; upgrade Hermes Agent. `legacy_process` means the Agent has no profile-scoped MCP ledger at all; its `/reload-mcp` stays process-wide by design. After changing a profile's `mcp_servers`, run `/reload-mcp` **from that profile**: it only resets that profile's own connections and retries its failed servers.
+
+**When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and a server is still reported *Active* with tools you cannot see in the inventory, or if `/reload-mcp` from one profile changes another profile's `tool_count`.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

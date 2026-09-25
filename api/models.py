@@ -16,7 +16,7 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, overload
+from typing import Literal, cast, overload
 
 try:  # pragma: no cover - platform-specific imports.
     import fcntl as _fcntl
@@ -42,6 +42,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
+    read_assigned_project_row_counts,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -53,6 +54,63 @@ logger = logging.getLogger(__name__)
 # nests when it wins a slot in this window. Resolved in api.config before
 # profile init; override with HERMES_WEBUI_VISIBLE_SESSION_LIMIT (clamped 1–200).
 CLI_VISIBLE_SESSION_LIMIT = _cfg.CLI_VISIBLE_SESSION_LIMIT
+# Project chips must remain able to reveal older assigned CLI/TUI sessions even
+# after newer unassigned rows fill the normal sidebar window (#6659).
+#
+# The bound is PER PROJECT and counts LOGICAL conversations (after lineage and
+# sidecar dedup), not raw state.db rows. Per project, because a single global
+# budget re-creates the bug this fixes — one busy project would evict another
+# project's whole history. Logical conversations, because compression segments
+# are not separately addressable and must not spend a project's budget.
+PROJECT_ASSIGNED_CLI_LIMIT = 200
+# Hard ceiling on the assigned-recovery QUERY so the per-project budget cannot
+# multiply into an unbounded scan on a profile with dozens of projects. Past
+# this, every project's share of the recovery pass shrinks to
+# PROJECT_ASSIGNED_CLI_SCAN_CEILING // len(projects) instead of any one project
+# eating the whole window; project-filtered server pagination is still the real
+# fix for profiles that large.
+PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
+# The project-scoped follow-up below is deliberately NOT capped by project
+# count: any fixed cap would recreate the starvation it repairs — every starved
+# project past the cap stays unreachable on every rebuild (greptile P1 on
+# #6659). Its work is bounded by construction instead: it fires only when the
+# global assigned query is logically saturated OR its final raw candidate window
+# was exhausted while projection stayed short; each scoped query is limited to
+# one project's remaining budget; and the sum of those budgets across every
+# starved project is at most effective_limit * len(projects), which the scan
+# ceiling above already caps. Worst case per build: 1 global query + 1 GROUP BY
+# probe + one small project-scoped query per starved project, plus the pass's
+# single widening budget (query_limit, see `widening_budget`) shared by the
+# compression-heavy retries — a retry is NOT granted the global allowance per
+# project, which would make a build scale with the number of starved projects
+# (greptile P1 on #6659).
+#
+# --- Bounds for the UNASSIGNED refill pass (see _load_cli_sessions_uncached).
+# The SQL 'unassigned' filter reads state.db.project_id, but a WebUI-side move
+# records the assignment on the session's sidecar ONLY, so that filter hands back
+# conversations this projection classifies as ASSIGNED. How many is not knowable
+# before the query runs, so the refill re-classifies its own result and widens
+# again while the window is still short. These two constants are what keep that
+# loop finite. Both bound ONE profile context: get_cli_sessions(
+# all_profiles=1) runs the whole loader once per context, so an N-profile sidebar
+# pays N times the numbers below.
+#
+# At most this many unassigned queries per profile context (the first included).
+# The widening below is geometric and proportional, not one row at a time, so 4
+# covers both moves spread through the history and moves clustered just under the
+# window edge; the last of the four abandons estimating and reads the ceiling in
+# one go, which is the widest read the loop is ever allowed to pay. It is also
+# what paces the geometric growth: each widening adds at least width // queries
+# still left, so the steps get bolder as the forced ceiling read gets closer.
+UNASSIGNED_CLI_REFILL_MAX_QUERIES = 4
+# ...and no single refill query reads deeper than this many logical
+# conversations. It bounds both the I/O and the payload: a build cannot be made
+# to scan the whole of a large state.db by moving conversations into projects.
+# The unassigned window is filled whenever at least CLI_VISIBLE_SESSION_LIMIT of
+# the newest UNASSIGNED_CLI_REFILL_SCAN_CEILING state.db-unassigned conversations
+# are still unassigned once sidecars are read; past that (>180 of the newest 200
+# moved from the WebUI) the sidebar is honestly short rather than unbounded.
+UNASSIGNED_CLI_REFILL_SCAN_CEILING = 200
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -63,6 +121,11 @@ WEBHOOK_PROJECT_CHIP_LIMIT = 200
 # higher project-chip cap so project-assigned kanban rows stay addressable when
 # the toggle is on, without letting them dominate the default sidebar window.
 KANBAN_PROJECT_CHIP_LIMIT = 200
+# Sources with their own bounded project-chip pass. They are kept out of the
+# interactive CLI window and out of its recovery passes, and they keep the
+# system-chip answer wherever they are projected, so the same background row can
+# never report two different project chips.
+BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -1276,6 +1339,36 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     return row
 
 
+def _validated_webui_pending_user_timestamp_identity(session, value):
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    stream_id = getattr(session, 'active_stream_id', None)
+    source = str(getattr(session, 'pending_user_source', '') or '').strip().lower()
+    if (
+        not isinstance(stream_id, str)
+        or not stream_id
+        or value[0] != stream_id
+        or not isinstance(getattr(session, 'pending_user_message', None), str)
+        or not getattr(session, 'pending_user_message', None)
+        or source not in {'webui', 'fork'}
+    ):
+        return None
+    pending_timestamp, pending_valid = _message_exact_timestamp_details(
+        {'timestamp': getattr(session, 'pending_started_at', None)}
+    )
+    identity_timestamp, identity_valid = _message_exact_timestamp_details(
+        {'timestamp': value[1]}
+    )
+    if (
+        not pending_valid
+        or not identity_valid
+        or pending_timestamp is None
+        or pending_timestamp != identity_timestamp
+    ):
+        return None
+    return (stream_id, pending_timestamp)
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1313,6 +1406,8 @@ class Session:
                  truncation_boundary=None,
                  clear_generation=None,
                  intentional_shrink_generation=None,
+                 transcript_generation: int=0,
+                 transcript_generation_baseline: int=0,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1327,6 +1422,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 gateway_run=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1378,6 +1474,11 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self._webui_pending_user_timestamp_identity = (
+            _validated_webui_pending_user_timestamp_identity(
+                self, kwargs.get('_webui_pending_user_timestamp_identity')
+            )
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1411,6 +1512,10 @@ class Session:
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
         self.intentional_shrink_generation = intentional_shrink_generation
+        self.transcript_generation = max(0, _parse_nonnegative_int(transcript_generation) or 0)
+        self.transcript_generation_baseline = max(
+            0, _parse_nonnegative_int(transcript_generation_baseline) or 0
+        )
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1432,6 +1537,7 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        self.gateway_run = gateway_run if isinstance(gateway_run, dict) else None
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1475,6 +1581,11 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        self._webui_pending_user_timestamp_identity = (
+            _validated_webui_pending_user_timestamp_identity(
+                self, getattr(self, '_webui_pending_user_timestamp_identity', None)
+            )
+        )
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1485,6 +1596,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            '_webui_pending_user_timestamp_identity',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -1497,6 +1609,8 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'intentional_shrink_generation',
+            'transcript_generation',
+            'transcript_generation_baseline',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1504,6 +1618,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
+            'gateway_run',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1895,6 +2010,8 @@ class Session:
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
+            'transcript_generation': self.transcript_generation,
+            'transcript_generation_baseline': self.transcript_generation_baseline,
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -4304,21 +4421,83 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         )
         if not state_messages:
             return False
+
+        # The Agent row is intentionally hidden from display while the saved
+        # handoff proof is active. Materialize the exact WebUI-owned prompt
+        # before reconciling that row away, so clearing pending state cannot
+        # erase the only durable copy of the submitted text/attachments.
+        pending_identity = _validated_webui_pending_user_timestamp_identity(
+            locked,
+            getattr(locked, '_webui_pending_user_timestamp_identity', None),
+        )
+        # When a legacy sidecar has no explicit context_messages, the shared
+        # context reconciler falls back to messages. Capture that model-facing
+        # merge before adding the display-only WebUI owner row below.
+        merged_context = (
+            reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
+            if pending_identity is not None
+            else None
+        )
+        if pending_identity is not None:
+            pending_timestamp = pending_identity[1]
+            pending_text = locked.pending_user_message
+            pending_source = getattr(locked, 'pending_user_source', None) or 'webui'
+            pending_attachments = list(getattr(locked, 'pending_attachments', None) or [])
+            pending_row = {
+                'role': 'user',
+                'content': pending_text,
+                'timestamp': pending_timestamp,
+            }
+            stamp_message_source(pending_row, pending_source)
+            if str(pending_source or '').strip().lower() == 'fork':
+                pending_row['_fork_child_turn'] = locked.session_id
+            if pending_attachments:
+                pending_row['attachments'] = pending_attachments
+
+            existing_pending = next((
+                message for message in locked_messages
+                if isinstance(message, dict)
+                and (
+                    _message_exact_timestamp_details(message)
+                    == (pending_timestamp, True)
+                    and (message.get('_source') or 'webui') == pending_source
+                    and _message_matches_pending_text(message, pending_text)
+                )
+            ), None)
+            if existing_pending is not None:
+                # A prior eager checkpoint already owns this exact proved turn;
+                # refresh it from the still-authoritative pending fields.
+                existing_pending.update(pending_row)
+                if pending_attachments:
+                    existing_pending['attachments'] = pending_attachments
+                else:
+                    existing_pending.pop('attachments', None)
+            else:
+                # The proof makes this submitted row authoritative even if a
+                # clock adjustment places it before the surviving sidecar tail.
+                if not _insert_state_message_chronologically(locked_messages, pending_row):
+                    locked_messages.insert(0, pending_row)
+            locked.messages = locked_messages
+
+        display_baseline_count = len(locked_messages)
         merged_messages = reconciled_state_db_messages_for_session(
             locked,
             state_messages=state_messages,
         )
-        # The reconciler is append-only: a genuine state.db advance (output the
-        # lost stream never wrote back) shows up as MORE rows than the sidecar.
-        # A merged length not greater than the sidecar means nothing new to
-        # recover — leave the sidecar untouched rather than rewriting in place.
-        if len(merged_messages) <= locked_count:
+        # The baseline includes any proven WebUI-owned pending display row. Only
+        # a later state.db row is an advance worth committing and clearing pending.
+        if len(merged_messages) <= display_baseline_count:
             return False
-        merged_context = reconciled_state_db_messages_for_session(
-            locked,
-            prefer_context=True,
-            state_messages=state_messages,
-        )
+        if merged_context is None:
+            merged_context = reconciled_state_db_messages_for_session(
+                locked,
+                prefer_context=True,
+                state_messages=state_messages,
+            )
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent
@@ -7237,6 +7416,48 @@ def _profile_has_user_projects(profile: str | None = None) -> bool:
     return False
 
 
+# Sentinel for profile_scoped_project_ids(): "no profile given, use the active
+# one". A bare None cannot mean that, because None is a legitimate profile value
+# (_profiles_match reads it as the root profile).
+_ACTIVE_PROFILE = object()
+
+
+def profile_scoped_project_ids(profile=_ACTIVE_PROFILE) -> frozenset[str]:
+    """Project IDs that currently exist for ``profile`` (default: the active one).
+
+    A state.db ``project_id`` is an opaque string the agent wrote; the project
+    it names can since have been deleted, or can belong to a different profile.
+    Callers resolve against this set and treat a miss as "unassigned" so a stale
+    assignment can never HIDE a session: an unresolved id would otherwise drop
+    the row out of "Unassigned" and turn it into a ``default_hidden`` row with no
+    project chip left to reveal it (#6659 review finding 3).
+
+    ``profile`` must be the SESSION's profile, not the process-wide active one,
+    wherever the two can differ. The all-profiles sidebar view scans one state.db
+    per profile in a single request, so resolving every context against the active
+    profile made another profile's LIVE assignment look unresolvable and dropped
+    the row from the payload entirely — while its chip stayed selectable in that
+    same view (#6659 review finding 3).
+
+    Profile/alias matching is delegated to ``api.profiles._profiles_match``,
+    the canonical helper every other profile-scoped read already uses, so this
+    set cannot disagree with the rest of the app about which profile owns a
+    project (renamed root, legacy ``'default'`` tag, and a missing ``profile``
+    key are all its business, not ours). Read-only.
+    """
+    from api.profiles import get_active_profile_name, _profiles_match
+
+    active = get_active_profile_name() if profile is _ACTIVE_PROFILE else profile
+    resolved: set[str] = set()
+    for p in load_projects():
+        project_id = str(p.get('project_id') or '').strip()
+        if not project_id:
+            continue
+        if _profiles_match(p.get('profile'), active):
+            resolved.add(project_id)
+    return frozenset(resolved)
+
+
 def is_cron_session(session_id: str, source_tag: str | None = None) -> bool:
     """Return True if a session originates from a cron job."""
     if source_tag == 'cron':
@@ -8058,7 +8279,14 @@ def clear_sidecar_metadata_cache() -> None:
 
 
 def _state_projection_sidecar_metadata(sid: str) -> dict:
-    """Return UI-owned metadata (title + archived) for a state.db-projected row.
+    """Return UI-owned metadata (title + archived + project_id) for a state row.
+
+    ``project_id`` is UI-owned in exactly the same way as the other two:
+    ``/api/session/move`` writes it onto the sidecar and NOTHING writes
+    ``state.db.sessions.project_id``. Reading it here is what lets the sidebar
+    projection agree with the assignment ``all_sessions()`` re-surfaces, instead
+    of counting a moved conversation against the unassigned window (#6659 review
+    finding 2).
 
     Memoized by the sidecar file's (path, mtime_ns, size, ctime_ns) stat
     signature so the sidebar projection — which calls this once per row in both
@@ -8069,11 +8297,11 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     Returns a COPY so callers can't mutate the cached dict.
 
     NOTE: this stat-gates on ``SESSION_DIR / f'{sid}.json'`` because that file is
-    ``Session.load_metadata_only``'s sole source for title+archived. If that ever
-    stops being true (metadata moves to another store), this gate would short-
-    circuit before the real source — update both together.
+    ``Session.load_metadata_only``'s sole source for title+archived+project_id. If
+    that ever stops being true (metadata moves to another store), this gate would
+    short-circuit before the real source — update both together.
     """
-    default = {"title": None, "archived": False}
+    default = {"title": None, "archived": None, "project_id": None}
     if not is_safe_session_id(sid):
         return dict(default)
     p = SESSION_DIR / f'{sid}.json'
@@ -8101,6 +8329,8 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
         if title:
             metadata["title"] = title
         metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        project_id = str(getattr(webui_meta, 'project_id', None) or '').strip()
+        metadata["project_id"] = project_id or None
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
@@ -8113,6 +8343,16 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     return dict(metadata)
 
 
+def _state_db_supports_project_ids(db_path: Path) -> bool:
+    """Return whether the agent session schema can persist project assignments."""
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
+    except Exception:
+        return False
+    return any(str(row[1]) == "project_id" for row in rows)
+
+
 @profile_home_resolve_cache_scope()
 def _load_cli_sessions_uncached(
     hermes_home: Path,
@@ -8121,6 +8361,7 @@ def _load_cli_sessions_uncached(
     source_filter=None,
     *,
     visible_session_limit: int | None = None,
+    project_assigned_limit: int | None | bool = PROJECT_ASSIGNED_CLI_LIMIT,
     cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
@@ -8208,12 +8449,97 @@ def _load_cli_sessions_uncached(
             _webhook_pid_cache[0] = ensure_webhook_project(profile=_cli_profile)
         return _webhook_pid_cache[0]
 
+    # The live project catalog for THIS SCAN'S profile, read lazily and at most
+    # once per scan (same [resolved, value] cell pattern as _cron_pid above, for
+    # the same #4842 reason: a per-row load_projects() is a cold-sidebar I/O
+    # blowup).
+    #
+    # Scoped to ``_cli_profile`` — the profile whose state.db this scan is
+    # reading — not to the process-wide active profile. The all-profiles view
+    # calls this loader once per profile context in a single request, so the
+    # active-profile catalog would misread another profile's LIVE assignment as
+    # unresolvable and drop the row from the payload (#6659 review finding 3).
+    _known_project_ids_cache: list = [False, frozenset()]
+    def _known_project_ids() -> frozenset[str]:
+        if not _known_project_ids_cache[0]:
+            _known_project_ids_cache[0] = True
+            try:
+                _known_project_ids_cache[1] = profile_scoped_project_ids(_cli_profile)
+            except Exception:
+                logger.debug("Project catalog read failed for CLI projection", exc_info=True)
+        return _known_project_ids_cache[1]
+
+    def _resolved_project_id(raw) -> str | None:
+        """A state.db assignment, or None when its project no longer resolves.
+
+        Coercing an unresolved (deleted or cross-profile) id to None BEFORE
+        either cap runs is what keeps the row in the default "Unassigned" window
+        instead of exiling it to a ``default_hidden`` row whose project chip does
+        not exist any more — the mirror of the bug this PR fixes (#6659).
+        """
+        project_id = str(raw or '').strip()
+        if not project_id:
+            return None
+        return project_id if project_id in _known_project_ids() else None
+
     def _state_row_project_id(sid: str, source: str | None) -> str | None:
+        """Dedicated system-source chip for a background row, else None.
+
+        cron and webhook own an auto-provisioned project; kanban deliberately
+        does not, so it falls through to None (upstream behaviour) and is
+        reachable through the normal sidebar list instead of a chip.
+        """
         if is_cron_session(sid, source):
             return _cron_pid()
         if is_webhook_session(sid, source):
             return _webhook_pid()
         return None
+
+    # Sidecar-carried assignments, memoized per sid for this scan.
+    # _state_projection_sidecar_metadata is already stat-cached, but
+    # _interactive_row_project_id is called several times per row (budget
+    # seeding, the unassigned count, the projection), and one os.stat per call
+    # per row is the kind of cold-sidebar I/O #4842 removed.
+    _sidecar_pid_cache: dict[str, str | None] = {}
+    def _sidecar_row_project_id(sid: str) -> str | None:
+        if sid not in _sidecar_pid_cache:
+            _sidecar_pid_cache[sid] = _state_projection_sidecar_metadata(sid).get('project_id')
+        return _sidecar_pid_cache[sid]
+
+    def _interactive_row_project_id(row: dict) -> str | None:
+        """Project chip for an interactive (CLI/TUI/ACP) state.db row.
+
+        Single resolved value for both the cap decisions below and the projected
+        payload, so the code that budgets a row and the code that renders it can
+        never disagree about which project it belongs to.
+
+        The WebUI sidecar is consulted when state.db carries no assignment,
+        because ``/api/session/move`` writes ``project_id`` onto the sidecar ONLY
+        — nothing writes ``state.db.sessions.project_id``. Without this the
+        "``CLI_VISIBLE_SESSION_LIMIT`` unassigned conversations" guarantee counted
+        a WebUI-side assignment as unassigned while the route (which sees the
+        sidecar's value through ``all_sessions()``) classified the same
+        conversation as ASSIGNED, so three moved sessions silently shortened
+        everyone's sidebar to 17 rows (#6659 review finding 2). state.db wins when
+        it has an assignment of its own: it is the agent's own record.
+
+        Background sources keep the system-chip answer even when a
+        ``source_filter`` routes them through this loop, so one kanban row cannot
+        report a resolved ``project_id`` here and ``None`` from its own bounded
+        second pass further down.
+        """
+        sid = row['id']
+        source = row.get('source')
+        if (
+            str(source or '').strip().lower() in BACKGROUND_CLI_SOURCES
+            or is_cron_session(sid, source)
+            or is_webhook_session(sid, source)
+        ):
+            return _state_row_project_id(sid, source)
+        resolved = _resolved_project_id(row.get('project_id'))
+        if resolved is None:
+            resolved = _resolved_project_id(_sidecar_row_project_id(sid))
+        return resolved
 
     profile_value = _cli_profile or 'default'
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
@@ -8226,7 +8552,7 @@ def _load_cli_sessions_uncached(
         _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
     except Exception:
         _deleted_webui_tombstone = frozenset()
-    for row in read_importable_agent_session_rows(
+    state_rows = read_importable_agent_session_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
@@ -8238,9 +8564,536 @@ def _load_cli_sessions_uncached(
         # Background sources have independent bounded passes below. Keeping them
         # out of this 20-row interactive window prevents a busy worker source
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
+        # Spelled as a literal on purpose: tests/test_issue2841_show_cron_sessions_toggle.py
+        # reads this line as source text. Must stay equal to BACKGROUND_CLI_SOURCES
+        # (pinned by test_background_source_exclusion_literal_matches_the_constant).
         exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
-    ):
+    )
+    if source_filter is None:
+        # The interactive window above is a MIXED budget of assigned and
+        # unassigned conversations, and it truncates by recency. Two bounded
+        # recovery passes repair the two ways that loses a conversation:
+        #   1. an assigned conversation older than the window is unreachable even
+        #      though its project chip still claims it;
+        #   2. every assigned row inside the window spends a slot the sidebar
+        #      owes to an unassigned conversation (#6659 review findings 1-2).
+        # Both passes are keyed on the LOGICAL conversation (lineage), never the
+        # raw row, so compression segments cannot consume either budget.
+        interactive_excluded = BACKGROUND_CLI_SOURCES
+        first_pass_count = len(state_rows)
+        represented_rows: dict[str, dict] = {}
+
+        def _lineage_ids(row: dict) -> list[str]:
+            return [
+                str(value)
+                for key in ("id", "_lineage_root_id", "_lineage_tip_id")
+                if (value := row.get(key))
+            ]
+
+        def _merge_state_row(row: dict) -> bool:
+            """Add ``row`` unless its lineage is already represented.
+
+            Returns True only when a NEW logical conversation was added, which is
+            what lets recovery pass 1 spend its per-project budget on
+            conversations rather than rows. An already represented lineage is
+            upgraded in place: the recovery pass sees the same conversation
+            carrying its resolved project assignment, and the projection loop
+            must read that richer row. Pass 2 needs no budget of its own (its
+            query limit is the bound) and ignores the result.
+
+            "Upgrade" is one-way. Overwriting a row that already carries a
+            RESOLVED project_id with a projection that has none would delete the
+            chip this whole function exists to restore — and swap the row's
+            identity from the lineage tip back to its root. Pass 2 projects the
+            same conversations as pass 1 without the assignment context, so it
+            must never be able to win that race.
+            """
+            lineage_ids = _lineage_ids(row)
+            existing = next(
+                (represented_rows[value] for value in lineage_ids if value in represented_rows),
+                None,
+            )
+            if existing is not None:
+                if (
+                    _resolved_project_id(row.get('project_id')) is not None
+                    or _resolved_project_id(existing.get('project_id')) is None
+                ):
+                    # Either the incoming row adds an assignment, or the row on
+                    # file has none to lose: overwriting cannot drop a chip.
+                    existing.clear()
+                    existing.update(row)
+                for value in lineage_ids:
+                    represented_rows[value] = existing
+                return False
+            state_rows.append(row)
+            for value in lineage_ids:
+                represented_rows[value] = row
+            return True
+
+        for row in state_rows:
+            for value in _lineage_ids(row):
+                represented_rows.setdefault(value, row)
+
+        # --- Recovery pass 1: project-assigned conversations the recent window
+        # truncated. Bounded PER PROJECT (see PROJECT_ASSIGNED_CLI_LIMIT) so a
+        # chip can reveal its project's history without any one project growing
+        # the payload without limit. Skipped entirely when the profile has no
+        # projects at all — nothing could resolve, so the query would be waste.
+        #
+        # Two tiers, because a per-project BUDGET on top of one global recency
+        # window is not a per-project bound: a project that owns the whole window
+        # leaves every other project unrepresented. So the global query runs
+        # first (the only cost most profiles pay), and only if it came back
+        # saturated does a project-scoped follow-up top up the projects it
+        # starved. Worst case per build: 1 global query + 1 GROUP BY probe +
+        # one project-scoped query per starved project, each bounded to that
+        # project's remaining budget (whose sum the scan ceiling bounds).
+        known_project_ids = _known_project_ids() if project_assigned_limit is not False else frozenset()
+        if (
+            project_assigned_limit is not False
+            and known_project_ids
+            and _state_db_supports_project_ids(db_path)
+        ):
+            project_count = max(len(known_project_ids), 1)
+            per_project_limit = (
+                None if project_assigned_limit is None
+                else max(0, int(project_assigned_limit))
+            )
+            # Every project gets an EQUAL share of the global scan ceiling. The
+            # share only bites past PROJECT_ASSIGNED_CLI_SCAN_CEILING /
+            # PROJECT_ASSIGNED_CLI_LIMIT projects, and it is what keeps the
+            # recovered payload bounded (<= the ceiling) while making a project's
+            # allowance independent of how loud its neighbours are.
+            effective_limit = (
+                None if per_project_limit is None
+                else min(
+                    per_project_limit,
+                    max(1, PROJECT_ASSIGNED_CLI_SCAN_CEILING // project_count),
+                )
+            )
+            query_limit = (
+                None if effective_limit is None
+                else min(
+                    effective_limit * project_count,
+                    PROJECT_ASSIGNED_CLI_SCAN_CEILING,
+                )
+            )
+            try:
+                # An assigned conversation ALREADY inside the recent window
+                # occupies one of its project's slots, so this pass tops each
+                # project UP TO the bound instead of stacking a second bound on
+                # top of the window.
+                kept_per_project: dict[str, int] = {}
+                for row in state_rows:
+                    seeded_project_id = _interactive_row_project_id(row)
+                    if seeded_project_id is not None:
+                        kept_per_project[seeded_project_id] = (
+                            kept_per_project.get(seeded_project_id, 0) + 1
+                        )
+
+                def _spend_assigned_rows(rows: list[dict]) -> None:
+                    """Merge ``rows`` into the window under the per-project budget."""
+                    for row in rows:
+                        project_id = _resolved_project_id(row.get('project_id'))
+                        if project_id is None:
+                            # A deleted/cross-profile id is not an assignment.
+                            # Leave the row to the normal window so it stays
+                            # reachable under "Unassigned" (#6659 finding 3).
+                            continue
+                        if (
+                            effective_limit is not None
+                            and kept_per_project.get(project_id, 0) >= effective_limit
+                        ):
+                            continue
+                        if _merge_state_row(row):
+                            # Spend the budget on LOGICAL conversations only: a
+                            # row that merely upgrades an already-represented
+                            # lineage (a compression segment, or a window row
+                            # learning its assignment) costs its project nothing.
+                            kept_per_project[project_id] = (
+                                kept_per_project.get(project_id, 0) + 1
+                            )
+
+                # One global newest-first query covers every profile whose whole
+                # assigned history fits in the window — the overwhelmingly common
+                # case, and the only query most builds pay.
+                global_rows, global_window_exhausted = cast(
+                    tuple[list[dict], bool],
+                    read_importable_agent_session_rows(
+                        db_path,
+                        limit=query_limit,
+                        log=logger,
+                        exclude_sources=interactive_excluded,
+                        project_assignment='assigned',
+                        return_window_exhaustion=True,
+                    ),
+                )
+                _spend_assigned_rows(global_rows)
+
+                # A full logical result truncates by recency, as does a result
+                # that stays short only because the final raw candidate window
+                # was consumed by compression/visibility projection.  In either
+                # case older rows can still exist, so only then pay the GROUP BY
+                # probe that identifies projects needing a scoped top-up. A short
+                # result from an unfilled raw window has seen every candidate and
+                # keeps the one-global-query fast path.
+                if (
+                    effective_limit
+                    and query_limit
+                    and (
+                        len(global_rows) >= query_limit
+                        or global_window_exhausted
+                    )
+                ):
+                    # One GROUP BY over sessions.project_id (no join, no lineage
+                    # recursion) says which projects still own rows this pass has
+                    # not delivered, so the follow-up queries below are paid only
+                    # for projects that can actually be starved — not one per
+                    # registered project.
+                    owed_rows = read_assigned_project_row_counts(
+                        db_path,
+                        log=logger,
+                        exclude_sources=interactive_excluded,
+                    )
+                    starved = sorted(
+                        (kept_per_project.get(project_id, 0), project_id)
+                        for project_id, row_count in owed_rows.items()
+                        if project_id in known_project_ids
+                        and kept_per_project.get(project_id, 0) < effective_limit
+                        and row_count > kept_per_project.get(project_id, 0)
+                    )
+                    # Neediest first (fewest conversations delivered, then id for
+                    # a deterministic order). EVERY starved project is served: a
+                    # fixed per-build project cap would leave every project past
+                    # it unreachable on each rebuild — the very starvation this
+                    # pass exists to repair (greptile P1 on #6659). The per-build
+                    # cost stays bounded because each query is limited to one
+                    # project's remaining budget (sum <= the scan ceiling) and
+                    # only fires when the global window was saturated.
+                    #
+                    # The WIDENING below is rationed per PASS instead (greptile
+                    # P1 on #6659): `remaining` bounds each project's FIRST
+                    # query, but a retry that jumps to `query_limit` is not
+                    # bounded by the project's own share at all, so granting it
+                    # to every starved project made a build scan
+                    # len(starved) * query_limit — an order of magnitude past
+                    # the ceiling on a profile with ten compression-heavy
+                    # projects. One aggregate pool caps the scoped reading of
+                    # a pass at a constant multiple of `query_limit` however
+                    # many projects are starved.
+                    # Only the widening is rationed; the first query of every
+                    # starved project is never skipped, which is what keeps the
+                    # completeness guarantee above intact.
+                    #
+                    # (greptile P1, 2026-09-22 re-review) The pool is debited
+                    # only for what a retry reads BEYOND the project's own
+                    # first-query width — `widened - scoped_limit`, not the
+                    # whole `widened` grant. Debiting the whole grant spent the
+                    # entire pool on the first starved project whose window
+                    # merely touched its own 8x oversample: it read
+                    # `grant - share` extra rows but was billed the full grant,
+                    # so every later starved project lost its retry and its
+                    # older conversations stayed absent from its sidebar on
+                    # every rebuild. With incremental debits a later project
+                    # retries whenever real reads have left it pool; if an
+                    # earlier project genuinely read the pool down to zero,
+                    # that was real scan work — the aggregate bound, not a
+                    # reservation, is what caps the pass. The bound is
+                    # `3 * query_limit`: every starved project's first query
+                    # sums to at most `query_limit`, a retrying project re-reads
+                    # at most its own first width again, and the funded
+                    # increments sum to at most the pool — still constant in
+                    # the number of starved projects, which is what retires the
+                    # original `len(starved) * query_limit` blow-up.
+                    widening_budget = query_limit
+                    for starved_index, (_kept, project_id) in enumerate(starved):
+                        remaining = effective_limit - kept_per_project.get(project_id, 0)
+                        if remaining <= 0:
+                            continue
+                        # A scoped query carries a raw candidate window of its
+                        # own, and compression segments plus the post-projection
+                        # visibility filters are spent from that window BEFORE
+                        # the logical slice. A lineage-heavy project can
+                        # therefore come back short with its window fully
+                        # consumed and older assigned conversations of its own
+                        # still waiting behind it. Without the exhaustion signal
+                        # the loop would advance to the next project and leave
+                        # this one under-delivered on every rebuild — the same
+                        # failure the global query already guards against
+                        # (greptile P1 on #6659). Re-query once, widened to the
+                        # project's own width plus whatever the pass's widening
+                        # pool still has, which is what bounds the retry at the
+                        # PASS level instead of per project (greptile P1 on
+                        # #6659).
+                        scoped_limit = remaining
+                        while True:
+                            scoped_rows, scoped_window_exhausted = cast(
+                                tuple[list[dict], bool],
+                                read_importable_agent_session_rows(
+                                    db_path,
+                                    limit=scoped_limit,
+                                    log=logger,
+                                    exclude_sources=interactive_excluded,
+                                    project_assignment='assigned',
+                                    project_ids=(project_id,),
+                                    return_window_exhaustion=True,
+                                ),
+                            )
+                            _spend_assigned_rows(scoped_rows)
+                            if (
+                                not scoped_window_exhausted
+                                # A binding window on a project that is now
+                                # full needs no second query, and neither does
+                                # one that cannot be widened any further.
+                                or kept_per_project.get(project_id, 0)
+                                >= effective_limit
+                                or scoped_limit >= query_limit
+                            ):
+                                break
+                            # (greptile P1, 2026-09-22 re-review) Each
+                            # retry is funded by a FAIR SHARE of what the
+                            # pool still holds — one slice per starved
+                            # project not yet tried, so later projects
+                            # always keep pool for their own first retry.
+                            # The retry goes to `scoped_limit + share`:
+                            # debiting the whole grant spent the entire
+                            # pool on the first starved project whose
+                            # window merely touched its own 8x oversample
+                            # and left every later one unfunded, but
+                            # granting `min(query_limit, pool)` whole also
+                            # let the first project READ the pool down to
+                            # zero — every project whose raw window is
+                            # consumed re-reads its own width once before
+                            # delivering, so an honest retry must buy
+                            # roughly one more width. The share converges
+                            # there in a few bounded steps; anything still
+                            # short after the pool is spent stays for the
+                            # next build — the alternative is the
+                            # per-project grant that made the pass scan
+                            # `len(starved) * query_limit` (the original
+                            # greptile P1 on #6659).
+                            pool_share = (
+                                widening_budget
+                                // max(len(starved) - starved_index, 1)
+                            )
+                            if pool_share <= 0:
+                                # The pool is spent: no further starved
+                                # project's retry can be funded. Whatever a
+                                # project could not reach this pass stays
+                                # for the next build — the alternative is
+                                # buying reads nobody budgeted for.
+                                break
+                            widened = min(
+                                query_limit, scoped_limit + pool_share
+                            )
+                            widening_budget -= widened - scoped_limit
+                            scoped_limit = widened
+            except Exception:
+                logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)
+
+        # --- Recovery pass 2: top the interactive window back up to
+        # CLI_VISIBLE_SESSION_LIMIT *unassigned* conversations. Only runs when
+        # the window came up short AND something other than an empty database
+        # can explain it: either it was saturated, or assigned conversations
+        # inside it displaced unassigned candidates. A profile with no
+        # assignments and a small state.db still pays nothing.
+        unassigned_target = (
+            visible_session_limit if visible_session_limit is not None
+            else CLI_VISIBLE_SESSION_LIMIT
+        )
+
+        def _count_unassigned() -> int:
+            """Conversations in the window this projection calls unassigned.
+
+            Recomputed after every refill query instead of trusted from before
+            it: the classification depends on the sidecar, so only the rows in
+            hand can answer it. Cheap to repeat — both inputs
+            (``_sidecar_row_project_id``, ``_known_project_ids``) are memoized
+            for the scan, so no pass re-reads a file (#4842).
+            """
+            return sum(
+                1 for row in state_rows if _interactive_row_project_id(row) is None
+            )
+
+        unassigned_seen = _count_unassigned()
+        # A sidecar-carried assignment is invisible to the SQL 'unassigned'
+        # filter (state.db still says NULL), so the refill query would spend
+        # that many of its own slots re-fetching conversations this pass already
+        # classified as assigned and already represents. Widen the FIRST query by
+        # that count so it can actually reach the older unassigned conversations
+        # the moved rows displaced (#6659 review finding 2). It is only the first
+        # estimate — the moved conversations this window cannot see yet are what
+        # the re-examination loop below is for.
+        sidecar_only_assigned = sum(
+            1 for row in state_rows
+            if _interactive_row_project_id(row) is not None
+            and _resolved_project_id(row.get('project_id')) is None
+        )
+        if (
+            unassigned_target
+            and unassigned_seen < unassigned_target
+            and (
+                first_pass_count >= unassigned_target
+                # A short MIXED first pass can still be under-delivering: the
+                # narrower unassigned-only query reaches conversations the mixed
+                # candidate window spent on assigned rows and segments.
+                or unassigned_seen < first_pass_count
+            )
+        ):
+            try:
+                # ONE pre-computed allowance is the wrong shape. It is derived
+                # from the rows fetched BEFORE the refill, but the refill reaches
+                # OLDER conversations, and those can carry sidecar-only
+                # assignments of their own — each of which spends an unassigned
+                # slot again, the exact failure the widening exists to remove.
+                # (Three moves at the bottom edge of a 30-conversation database
+                # delivered 19 rows and never fetched the 20th conversation;
+                # eleven straddling the boundary delivered 15.)
+                #
+                # So the refill re-classifies ITS OWN result and widens again
+                # while the window is short. Bounds, per PROFILE CONTEXT (not per
+                # sidebar build: all_profiles=1 runs this loader once per context,
+                # so an N-profile view pays N times everything below):
+                #   * at most UNASSIGNED_CLI_REFILL_MAX_QUERIES queries;
+                #   * none of them reading deeper than the scan ceiling;
+                #   * and it stops early the moment the window is full or the
+                #     filter has demonstrably nothing deeper to give.
+                # Guarantee: the window is filled whenever at least
+                # ``unassigned_target`` of the newest ceiling
+                # state.db-unassigned conversations are still unassigned once
+                # their sidecars are read — the last query reads exactly that
+                # band. Past that the sidebar is honestly short (a shortfall the
+                # database itself imposes) instead of unbounded work.
+                #
+                # What that costs, stated at its WORST rather than its best. The
+                # window this loop must deliver is 20 rows; the best case is a
+                # single query carrying 24 of them, and quoting that as the
+                # trade-off understates it by an order of magnitude:
+                #   * PAYLOAD. Every refill row is merged into the projection and
+                #     travels on, so the surplus is trimmed by the sidebar cap
+                #     only AFTER it has been read, sidecar-stat()ed and (on
+                #     /api/sessions/gateway/stream, which snapshots the uncapped
+                #     list) serialised. A shape that keeps the window short
+                #     through all three estimates reaches the forced ceiling
+                #     query, and the model then carries the whole band — up to
+                #     scan_ceiling (200) conversations, nearly all of them
+                #     unassigned, to hand the sidebar 20. The widening below is
+                #     what keeps ordinary shapes off that path; it does not, and
+                #     cannot, remove it, because the ceiling read is exactly what
+                #     the guarantee above is made of.
+                #   * I/O. "No query deeper than 200 conversations" is a LOGICAL
+                #     depth. read_importable_agent_session_rows oversamples raw
+                #     rows by CANDIDATE_WINDOW_MULTIPLIERS = (8, 32) to survive
+                #     compression segments, so a ceiling-width query touches
+                #     200 * 8 = 1600 raw rows, and 200 * 32 = 6400 when the first
+                #     window is consumed and re-widened. Per profile context.
+                # Cheaper than any of it: project-filtered server pagination, or
+                # recording WebUI-side moves in state.db so the SQL filter stops
+                # lying to this pass.
+                query_limit = unassigned_target + sidecar_only_assigned
+                # A caller-supplied window wider than the ceiling still gets its
+                # first query at full width — the ceiling bounds the WIDENING,
+                # it does not shrink the requested window.
+                scan_ceiling = max(UNASSIGNED_CLI_REFILL_SCAN_CEILING, query_limit)
+                queries_left = UNASSIGNED_CLI_REFILL_MAX_QUERIES
+                while queries_left > 0:
+                    queries_left -= 1
+                    if queries_left == 0:
+                        # Out of estimates: pay one query at the ceiling rather
+                        # than hand back a short window after guessing three
+                        # times. This is the only query allowed to over-read, and
+                        # the ceiling is what bounds it.
+                        query_limit = scan_ceiling
+                    refill_rows, refill_window_exhausted = cast(
+                        tuple[list[dict], bool],
+                        read_importable_agent_session_rows(
+                            db_path,
+                            limit=query_limit,
+                            log=logger,
+                            exclude_sources=interactive_excluded,
+                            project_assignment='unassigned',
+                            return_window_exhaustion=True,
+                        ),
+                    )
+                    for row in refill_rows:
+                        _merge_state_row(row)
+                    unassigned_seen = _count_unassigned()
+                    shortfall = unassigned_target - unassigned_seen
+                    if (
+                        shortfall <= 0
+                        or query_limit >= scan_ceiling
+                        # A short result from an UNFILLED raw candidate window has
+                        # already seen every conversation this filter can reach,
+                        # so a wider query would re-read the same rows for
+                        # nothing. A short result whose raw window WAS consumed
+                        # (by compression segments) is the opposite: widening the
+                        # limit re-widens that window, so it is worth another go.
+                        or (
+                            len(refill_rows) < query_limit
+                            and not refill_window_exhausted
+                        )
+                    ):
+                        break
+                    # Widen GEOMETRICALLY, not by one row at a time. Up to three
+                    # candidate widths; the widest of the ones that apply wins:
+                    #   * query_limit + shortfall — the exact width needed if
+                    #     every conversation deeper than the current one is
+                    #     unassigned. It is the FLOOR: always strictly wider, so
+                    #     the loop cannot stall, and it is exact (no over-read)
+                    #     when the moved conversations are clustered.
+                    #   * query_limit + query_limit // queries_left — GEOMETRIC
+                    #     growth, paced by the budget that is left. The floor alone
+                    #     advances by only the shortfall, so a handful of moves
+                    #     clustered just below the window edge crawls (21, 23, 25)
+                    #     until every estimate is spent and the forced ceiling read
+                    #     does the job anyway: 200 rows fetched to deliver 20. The
+                    #     step grows as the budget shrinks (width/3, then width/2)
+                    #     because a too-narrow LAST estimate costs the whole ceiling
+                    #     read, while a too-wide one costs only its own surplus.
+                    #     Those eight clustered moves now finish at (21, 28).
+                    #   * ceil(target * query_limit / unassigned_seen) — the width
+                    #     implied by the moved SHARE observed so far, for moves
+                    #     spread through the history. Without it, a database where
+                    #     every other conversation was moved would close the gap
+                    #     by halves and need ~log2(target) queries.
+                    # That last term applies ONLY when this window found at least
+                    # one still-unassigned conversation. With zero, the share is
+                    # undefined, and guarding the divisor with max(seen, 1)
+                    # evaluated it as target * query_limit (20 * 40 = 800, clamped
+                    # to the ceiling): every profile that had moved >= 21 of its
+                    # newest conversations jumped straight to a full 200-row read
+                    # where the 60-row floor would have filled the window. Zero
+                    # unassigned rows is not evidence about density, so the
+                    # geometric step — not a degenerate ratio — is what carries it.
+                    # The price of escalating smoothly is that a profile whose
+                    # newest ceiling band is ENTIRELY moved now spends its whole
+                    # budget (40, 60, 90, 200) climbing to the ceiling it was
+                    # always going to need, instead of two queries. That is the
+                    # deliberate side of the trade: an extra narrow query costs SQL
+                    # only, while an early-and-wrong wide query costs payload — and
+                    # payload is read, sidecar-stat()ed and serialised. And a
+                    # cluster deeper than the last estimate can reach — measured at
+                    # 23+ moves sitting just under the window edge, where the three
+                    # estimates are 21, 28, 42 — still ends on the ceiling read, as
+                    # it did before: that is the guarantee doing its job, not the
+                    # estimate failing.
+                    next_query_limit = max(
+                        query_limit + shortfall,
+                        query_limit + query_limit // max(queries_left, 1),
+                    )
+                    if unassigned_seen > 0:
+                        next_query_limit = max(
+                            next_query_limit,
+                            -(  # ceil(target * width / unassigned)
+                                -unassigned_target * query_limit // unassigned_seen
+                            ),
+                        )
+                    query_limit = min(scan_ceiling, next_query_limit)
+            except Exception:
+                logger.debug("Unassigned CLI refill pass failed", exc_info=True)
+
+    for row in state_rows:
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
         # Prefer the CLI session's own profile from the DB; fall back to
@@ -8270,7 +9123,10 @@ def _load_cli_sessions_uncached(
         _sidecar_meta = _state_projection_sidecar_metadata(sid)
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
-        _archived = bool(_sidecar_meta.get('archived'))
+        if _sidecar_meta.get('archived') is not None:
+            _archived = bool(_sidecar_meta['archived'])
+        else:
+            _archived = bool(row.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
@@ -8282,7 +9138,7 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _state_row_project_id(sid, _source),
+            'project_id': _interactive_row_project_id(row),
             'profile': profile,
             'source_tag': _source,
             'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
@@ -8342,7 +9198,10 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                if _sidecar_meta.get('archived') is not None:
+                    _archived = bool(_sidecar_meta['archived'])
+                else:
+                    _archived = bool(row.get('archived'))
                 _display_title = _title or 'Cron Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -8408,7 +9267,10 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                if _sidecar_meta.get('archived') is not None:
+                    _archived = bool(_sidecar_meta['archived'])
+                else:
+                    _archived = bool(row.get('archived'))
                 _display_title = _title or 'Webhook Session'
                 cli_sessions.append({
                     'session_id': sid,
@@ -8473,7 +9335,10 @@ def _load_cli_sessions_uncached(
                 _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
-                _archived = bool(_sidecar_meta.get('archived'))
+                if _sidecar_meta.get('archived') is not None:
+                    _archived = bool(_sidecar_meta['archived'])
+                else:
+                    _archived = bool(row.get('archived'))
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _title or 'Kanban Session',
@@ -8571,8 +9436,17 @@ def get_cli_sessions(
             merged: list[dict] = []
             for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
                 load_kwargs = {
+                    # NOTE: visible_session_limit=None is NOT "unbounded" for the
+                    # interactive pass — it resolves to CLI_VISIBLE_SESSION_LIMIT
+                    # above, so this view truncates assigned conversations by
+                    # recency exactly like the single-profile one and needs the
+                    # same recovery passes. project_assigned_limit therefore keeps
+                    # its default per-project bound here. Only the three limits
+                    # below are handed straight to the reader as ``limit=``, where
+                    # None really does mean unbounded.
                     'source_filter': source_filter,
                     'visible_session_limit': None,
+                    'project_assigned_limit': PROJECT_ASSIGNED_CLI_LIMIT,
                     'cron_project_limit': None,
                     'webhook_project_limit': None,
                     'kanban_project_limit': None,
@@ -8588,7 +9462,7 @@ def get_cli_sessions(
                     )
                 )
             return merged
-        load_kwargs = {'source_filter': source_filter}
+        load_kwargs: dict = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
         return _load_cli_sessions_uncached(
@@ -8827,8 +9701,8 @@ def _project_state_db_message(row, available, id_col, optional):
     Shared by ``get_state_db_session_messages`` and the regeneration
     single-snapshot helper so the bounded tail can never drift from the
     canonical reader: JSON-decode content/tool_calls/reasoning payloads, omit
-    empty fields, keep durable row id private (``_state_db_row_id`` only for
-    real Agent api_content replays), and apply ``tool_name → name``.
+    empty fields, keep durable row id private for provider replays and native
+    image projections, and apply ``tool_name → name``.
     """
     msg = {
         'role': row['role'],
@@ -8844,11 +9718,21 @@ def _project_state_db_message(row, available, id_col, optional):
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
         msg[col] = value
+    native_image_projection = (
+        msg.get('role') == 'user'
+        and isinstance(msg.get('content'), str)
+        and '[screenshot]' in msg['content']
+    )
     if (
         id_col
         and row['id'] is not None
-        and isinstance(msg.get('api_content'), str)
-        and msg['api_content']
+        and (
+            native_image_projection
+            or (
+                isinstance(msg.get('api_content'), str)
+                and msg['api_content']
+            )
+        )
     ):
         msg['_state_db_row_id'] = row['id']
     if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
@@ -9517,6 +10401,8 @@ def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
 
 
 _SESSION_MESSAGE_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+_WEBUI_TRUSTED_AGENT_INPUT_FIELD = "_webui_trusted_agent_input_text"
+_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD = "_webui_unmatched_native_image_mirror"
 
 
 def _agent_durable_multimodal_content(msg: dict) -> str | None:
@@ -9595,6 +10481,202 @@ def _session_message_multimodal_mirror_key(
         str(msg.get("tool_name") or msg.get("name") or ""),
         tool_calls_key,
     )
+
+
+def _native_image_leading_text(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            return None
+        part_type = str(part.get("type") or "").lower()
+        if part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+            return "\n".join(parts)
+        if part_type not in {"", "text", "input_text", "output_text"}:
+            return None
+        text = part.get("text", part.get("input_text", part.get("output_text", "")))
+        if not isinstance(text, str):
+            return None
+        parts.append(text)
+    return None
+
+
+def _suppress_native_image_display_mirrors(
+    session,
+    state_messages,
+    *,
+    suppress_api_content=True,
+    suppress_pending_turn=True,
+):
+    """Drop proven pending Agent rows and native-image mirrors from display."""
+    if not state_messages:
+        return state_messages
+
+    if suppress_pending_turn:
+        identity = _validated_webui_pending_user_timestamp_identity(
+            session,
+            getattr(session, "_webui_pending_user_timestamp_identity", None),
+        )
+        if identity is not None:
+            # A matching timestamp is an Agent handoff identity only because
+            # the live worker recorded that this exact value was passed via
+            # persist_user_timestamp. If rows collide on it, hide the whole
+            # ambiguous bucket from display; model context retains every row.
+            pending_timestamp = identity[1]
+            state_messages = [
+                message for message in state_messages
+                if not (
+                    isinstance(message, dict)
+                    and str(message.get("role") or "").lower() == "user"
+                    and _message_exact_timestamp(message) == pending_timestamp
+                )
+            ]
+
+    display_messages = getattr(session, "messages", None) or []
+    context_messages = getattr(session, "context_messages", None) or []
+    if not display_messages or not context_messages or not state_messages:
+        return state_messages
+
+    display_by_token = collections.defaultdict(list)
+    context_by_token = collections.defaultdict(list)
+    for message in display_messages:
+        if isinstance(message, dict) and message.get("_active_turn_token"):
+            display_by_token[message["_active_turn_token"]].append(message)
+    for message in context_messages:
+        if isinstance(message, dict) and message.get("_active_turn_token"):
+            context_by_token[message["_active_turn_token"]].append(message)
+
+    display_row_id_counts = collections.Counter()
+    context_row_id_counts = collections.Counter()
+    for messages, counts in (
+        (display_messages, display_row_id_counts),
+        (context_messages, context_row_id_counts),
+    ):
+        for message in messages:
+            row_id, valid = _state_db_row_identity_details(message)
+            if valid and row_id is not None:
+                counts[row_id] += 1
+
+    from api.streaming import _submitted_user_text_matches
+
+    mirrors = collections.defaultdict(list)
+    for token, contexts in context_by_token.items():
+        displays = display_by_token.get(token, [])
+        for context in contexts:
+            trusted_input = context.get(_WEBUI_TRUSTED_AGENT_INPUT_FIELD)
+            leading_text = _native_image_leading_text(context)
+            if (
+                not isinstance(trusted_input, str)
+                or leading_text is None
+                or not _submitted_user_text_matches(leading_text, trusted_input)
+            ):
+                continue
+            key = _session_message_multimodal_mirror_key(
+                context,
+                require_image_parts=True,
+            )
+            if key is None:
+                continue
+            display = displays[0] if len(contexts) == len(displays) == 1 else None
+            display_link_valid = False
+            if display is not None and display.get("role") == "user":
+                context_ts, context_ts_valid = _message_exact_timestamp_details(context)
+                display_ts, display_ts_valid = _message_exact_timestamp_details(display)
+                display_link_valid = (
+                    context_ts_valid
+                    and display_ts_valid
+                    and context_ts is not None
+                    and display_ts == context_ts
+                    and _message_private_identity_compatible(display, context)
+                )
+            # Keep trusted rich candidates even when display linkage is
+            # ambiguous, so a matching scalar row is preserved unless its
+            # durable row id proves it is the exact Agent projection.
+            mirrors[key].append((context, display, display_link_valid))
+    if not mirrors:
+        return state_messages
+
+    row_id_counts = collections.Counter()
+    stable_id_counts = collections.Counter()
+    state_mirror_keys = []
+    for message in state_messages:
+        if not isinstance(message, dict):
+            state_mirror_keys.append(None)
+            continue
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        stable_id, stable_id_valid = _stable_message_identity_details(message)
+        if row_id_valid and row_id is not None:
+            row_id_counts[row_id] += 1
+        if stable_id_valid and stable_id is not None:
+            stable_id_counts[stable_id] += 1
+        state_mirror_keys.append(
+            _session_message_multimodal_mirror_key(
+                message,
+                require_scalar_mirror=True,
+            )
+        )
+
+    suppress = set()
+    marked = {}
+    for index, key in enumerate(state_mirror_keys):
+        if key is None or key not in mirrors:
+            continue
+        message = state_messages[index]
+        row_id, row_id_valid = _state_db_row_identity_details(message)
+        stable_id, stable_id_valid = _stable_message_identity_details(message)
+        contexts = mirrors[key]
+        matched = None
+        preserve_distinct_row = False
+        if len(contexts) == 1:
+            context, display, display_link_valid = contexts[0]
+            context_row_id, context_row_id_valid = _state_db_row_identity_details(context)
+            display_row_id, display_row_id_valid = _state_db_row_identity_details(display)
+            linked_context_row = (
+                display is not None
+                and display_link_valid
+                and context_row_id_valid
+                and display_row_id_valid
+                and context_row_id is not None
+                and context_row_id == display_row_id
+                and context_row_id_counts[context_row_id] == 1
+                and display_row_id_counts[display_row_id] == 1
+            )
+            if (
+                linked_context_row
+                and (not row_id_valid or row_id is None or row_id != context_row_id)
+                and (row_id is None or row_id_counts[row_id] == 1)
+                and stable_id_valid
+                and (stable_id is None or stable_id_counts[stable_id] == 1)
+            ):
+                preserve_distinct_row = True
+            if (
+                linked_context_row
+                and row_id_valid
+                and row_id is not None
+                and context_row_id == row_id
+                and row_id_counts[row_id] == 1
+                and stable_id_valid
+                and (stable_id is None or stable_id_counts[stable_id] == 1)
+                and _message_private_identity_compatible(context, message)
+            ):
+                matched = context
+        if (
+            matched is not None
+            and (suppress_api_content or not _session_message_api_content_key(message))
+        ):
+            suppress.add(index)
+        elif preserve_distinct_row:
+            marked[index] = {
+                **message,
+                _WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD: True,
+            }
+    return [
+        marked.get(index, message)
+        for index, message in enumerate(state_messages)
+        if index not in suppress
+    ]
 
 
 # Per-call memo of structured-content identities. Reconciliation derives merge,
@@ -9900,7 +10982,7 @@ def _visible_content_compatible(target: dict | None, source: dict | None) -> boo
 
 
 def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
-    """Copy a non-empty internal sidecar without replacing an existing one."""
+    """Copy a valid sidecar unless the target already has a valid one."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return False
     target_role = _message_sidecar_role(target)
@@ -9919,7 +11001,8 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
             )
         ):
             return False
-    if target.get("api_content") not in (None, ""):
+    target_api_content = target.get("api_content")
+    if isinstance(target_api_content, str) and target_api_content:
         return True
     api_content = source.get("api_content")
     if isinstance(api_content, str) and api_content:
@@ -10864,6 +11947,89 @@ def merge_session_messages_append_only(
         _STRUCTURED_IDENTITY_MEMO.reset(token)
 
 
+def _project_native_image_payload_conflicts_for_display(
+    sidecar_messages,
+    state_messages,
+    merged_messages,
+):
+    """Project a proven same-row native-image conflict onto its sidecar bubble."""
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not sidecar_messages or not state_messages:
+        return merged_messages
+
+    sidecar_row_id_counts = collections.Counter(
+        row_id
+        for message in sidecar_messages
+        if (row_id := _state_db_row_identity(message)) is not None
+    )
+    state_row_id_counts = collections.Counter(
+        row_id
+        for message in state_messages
+        if (row_id := _state_db_row_identity(message)) is not None
+    )
+    display_conflicts = {}
+    for incoming in state_messages:
+        if (
+            not isinstance(incoming, dict)
+            or incoming.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is not True
+        ):
+            continue
+        row_id, row_id_valid = _state_db_row_identity_details(incoming)
+        timestamp, timestamp_valid = _message_exact_timestamp_details(incoming)
+        content = incoming.get("content")
+        if (
+            not row_id_valid
+            or row_id is None
+            or sidecar_row_id_counts[row_id] != 1
+            or state_row_id_counts[row_id] != 1
+            or not timestamp_valid
+            or timestamp is None
+            or str(incoming.get("role") or "").lower() != "user"
+            or not isinstance(content, str)
+        ):
+            continue
+        incoming_api_content = _session_message_api_content_key(incoming)
+        if incoming_api_content is None:
+            continue
+        sidecar_owner = next((
+            message for message in sidecar_messages
+            if isinstance(message, dict)
+            and _state_db_row_identity_details(message) == (row_id, True)
+            and _message_identity_compatible(message, incoming)
+            and message.get("content") == content
+            and _message_exact_timestamp_details(message) == (timestamp, True)
+            and _session_message_api_content_key(message)
+            not in (None, incoming_api_content)
+        ), None)
+        if sidecar_owner is not None:
+            display_conflicts[(row_id, timestamp, content)] = (incoming, sidecar_owner)
+
+    if not display_conflicts:
+        return merged_messages
+    visible_messages = []
+    for message in merged_messages:
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            row_id, row_id_valid = _state_db_row_identity_details(message)
+            timestamp, timestamp_valid = _message_exact_timestamp_details(message)
+            conflict = (
+                display_conflicts.get((row_id, timestamp, message["content"]))
+                if row_id_valid and row_id is not None and timestamp_valid
+                else None
+            )
+            if conflict is not None and _message_identity_compatible(message, conflict[0]):
+                incoming, sidecar_owner = conflict
+                is_sidecar_owner = (
+                    _message_identity_compatible(message, sidecar_owner)
+                    and _session_message_api_content_key(message)
+                    == _session_message_api_content_key(sidecar_owner)
+                )
+                if not is_sidecar_owner:
+                    continue
+        visible_messages.append(message)
+    return visible_messages
+
+
 def _merge_session_messages_append_only_impl(
     sidecar_messages: list,
     state_messages: list,
@@ -11186,14 +12352,217 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts < watermark_timestamp
     )
-    for msg in state_messages:
+
+    def _state_row_is_truncated(
+        msg, key, content_key, timestamp, checkpoint_consumed,
+        *, retained_native_image_row: bool | None = None,
+    ):
+        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
+        # past the watermark. Because Session.save() no longer auto-clears the
+        # watermark, an unconditional `timestamp > watermark` skip would become
+        # permanent and silently drop legitimate future state.db-only recovery
+        # rows once the session moves forward past the edit boundary. Once the
+        # sidecar's own max timestamp is beyond the watermark, allow state rows
+        # newer than the sidecar tail to merge.
+        #
+        # The sidecar's max timestamp can also EQUAL the watermark when the new
+        # post-edit USER turn has been checkpointed into the sidecar (its
+        # timestamp == the advanced watermark) but its ASSISTANT reply exists
+        # only in state.db (recovery before the sidecar tail advances). In that
+        # state truncation_boundary < watermark proves the session is genuinely
+        # advanced, so the post-watermark state-only reply is legitimate
+        # post-edit content and must merge through (not be dropped as a replaced
+        # tail). The conservative skip still applies for boundary is None and
+        # boundary == watermark (not-advanced / legacy).
+        #
+        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
+        # state replay has consumed the sidecar's visible checkpoint
+        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
+        # row with ts > watermark that appears in state.db BEFORE the edited
+        # checkpoint must still be skipped — otherwise the advanced signal would
+        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
+        # sidecar tail beyond the watermark is itself proof the checkpoint has
+        # advanced).
+        sidecar_advanced_past_watermark = (
+            watermark_timestamp is not None
+            and (
+                (max_sidecar_timestamp is not None
+                 and max_sidecar_timestamp > watermark_timestamp)
+                or (watermark_advanced_by_boundary and checkpoint_consumed)
+            )
+        )
+        message_key_seen = key in seen_message_keys
+        content_key_seen = content_key in seen_content_keys
+        if retained_native_image_row is not None:
+            # A marked image mirror needs durable row proof; an equal scalar
+            # projection from another row cannot exempt it from the watermark.
+            message_key_seen = content_key_seen = retained_native_image_row
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp > watermark_timestamp
+            and not message_key_seen
+            and (
+                not sidecar_advanced_past_watermark
+                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
+            )
+        ):
+            return True
+        # When a truncation watermark is active, state.db may contain original
+        # messages that were replaced by Edit (old content with old timestamp).
+        # The timestamp-based filter above catches messages AFTER the watermark,
+        # but messages BEFORE it (like the original pre-edit content) slip through.
+        # If a state.db message's content is not present in the sidecar and its
+        # timestamp is before the watermark, it's a replaced/stale row — skip it.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp < watermark_timestamp
+            and not message_key_seen
+            and not content_key_seen
+        ):
+            return True
+        # Same-second edit: if timestamp equals the watermark and the message
+        # content is not in the sidecar, it's a replaced message edited at the
+        # same second — skip it. The edited version (same timestamp, different
+        # content) is in the sidecar and survives this check.
+        #
+        # Only apply the same-second guard to user messages. An assistant reply
+        # (or tool message) at the same second as the watermark is a legitimate
+        # post-edit recovery row — the sidecar holds only the edited user
+        # checkpoint, so the assistant reply's content won't be in it and would
+        # be silently dropped without this role guard.
+        return (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp == watermark_timestamp
+            and not message_key_seen
+            and not content_key_seen
+            and str(msg.get("role", "")).lower() == "user"
+        )
+
+    for source_message in state_messages:
+        preserve_native_image_row = (
+            isinstance(source_message, dict)
+            and source_message.get(_WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD) is True
+        )
+        msg = (
+            {
+                key: value
+                for key, value in source_message.items()
+                if key != _WEBUI_UNMATCHED_NATIVE_IMAGE_MIRROR_FIELD
+            }
+            if preserve_native_image_row
+            else source_message
+        )
         timestamp = _message_timestamp_as_float(msg)
         key = _cached_message_key(msg, "merge")
         dedup_key = _cached_message_key(msg, "dedup")
         visible_key = _cached_message_key(msg, "visible_state")
         content_key = _cached_message_key(msg, "content_state")
+        if preserve_native_image_row:
+            row_id, row_id_valid = _state_db_row_identity_details(msg)
+            existing = (
+                merged_by_row_id.get(row_id)
+                if row_id_valid and row_id is not None
+                else None
+            )
+            row_id_fast_path_allowed = (
+                existing is not None
+                and row_id not in ambiguous_row_ids
+                and _row_id_fast_path_allowed(existing, msg)
+            )
+            existing_timestamp, existing_timestamp_valid = (
+                _message_exact_timestamp_details(existing)
+            )
+            incoming_timestamp, incoming_timestamp_valid = (
+                _message_exact_timestamp_details(msg)
+            )
+            retained_native_image_row = (
+                row_id_fast_path_allowed
+                and sidecar_row_id_counts.get(row_id, 0) == 1
+                and state_row_id_counts.get(row_id, 0) == 1
+                and existing_timestamp_valid
+                and incoming_timestamp_valid
+                and existing_timestamp is not None
+                and existing_timestamp == incoming_timestamp
+                and str(msg.get("role") or "").lower() == "user"
+            )
+            if _state_row_is_truncated(
+                msg,
+                key,
+                content_key,
+                timestamp,
+                state_replay_idx >= len(sidecar_visible_sequence),
+                retained_native_image_row=retained_native_image_row,
+            ):
+                continue
+            if row_id_fast_path_allowed:
+                # This state row replays the sidecar row it resolved to, so it
+                # consumes that position in the replay sequence exactly like the
+                # ordinary and multimodal-mirror paths do. Without this the
+                # checkpoint never reads as consumed and a later state-only
+                # reply after an edited checkpoint is truncated.
+                if (
+                    state_replay_idx < len(sidecar_visible_messages)
+                    and sidecar_visible_messages[state_replay_idx] is existing
+                ):
+                    state_replay_idx += 1
+                existing_api_content = _session_message_api_content_key(existing)
+                incoming_api_content = _session_message_api_content_key(msg)
+                if (
+                    existing_api_content is not None
+                    and incoming_api_content is not None
+                    and existing_api_content != incoming_api_content
+                ):
+                    # Row identity does not establish which provider payload is
+                    # newer. A unique exact row match proves this row survived
+                    # truncation, so preserve both versions for model context.
+                    pass
+                else:
+                    if existing_api_content is None and incoming_api_content is not None:
+                        _copy_api_content_sidecar(existing, msg)
+                    _merge_session_display_metadata(existing, msg)
+                    continue
+            if dedup_key in seen_dedup_keys:
+                duplicate = merged_by_dedup_key.get(dedup_key)
+                duplicate_row_id, duplicate_row_id_valid = (
+                    _state_db_row_identity_details(duplicate)
+                )
+                two_distinct_durable_rows = (
+                    row_id_valid
+                    and row_id is not None
+                    and duplicate_row_id_valid
+                    and duplicate_row_id is not None
+                    and duplicate_row_id != row_id
+                )
+                if not two_distinct_durable_rows:
+                    _merge_session_display_metadata(duplicate, msg)
+                    continue
+                duplicate = merged_by_row_id.get(row_id)
+                duplicate_row_id, duplicate_row_id_valid = (
+                    _state_db_row_identity_details(duplicate)
+                )
+                same_durable_row = (
+                    row_id not in ambiguous_row_ids
+                    and duplicate_row_id_valid
+                    and duplicate_row_id == row_id
+                    and _cached_message_key(duplicate, "dedup") == dedup_key
+                    and _row_id_fast_path_allowed(duplicate, msg)
+                )
+                if same_durable_row:
+                    _merge_session_display_metadata(duplicate, msg)
+                    continue
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+            seen_message_keys.add(key)
+            seen_dedup_keys.add(dedup_key)
+            seen_content_keys.add(content_key)
+            seen_visible_keys.add(visible_key)
+            _remember_merged_message(msg, source="state")
+            continue
         multimodal_mirror_key = (
-            state_multimodal_mirror_keys.get(id(msg))
+            state_multimodal_mirror_keys.get(id(source_message))
             if sidecar_multimodal_mirrors
             else None
         )
@@ -11271,83 +12640,9 @@ def _merge_session_messages_append_only_impl(
                     _copy_api_content_sidecar(existing, msg)
                 _merge_session_display_metadata(existing, msg)
                 continue
-        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
-        # past the watermark. Because Session.save() no longer auto-clears the
-        # watermark, an unconditional `timestamp > watermark` skip would become
-        # permanent and silently drop legitimate future state.db-only recovery
-        # rows once the session moves forward past the edit boundary. Once the
-        # sidecar's own max timestamp is beyond the watermark (the session has
-        # advanced), allow state rows newer than the sidecar tail to merge.
-        #
-        # The sidecar's max timestamp can also EQUAL the watermark when the new
-        # post-edit USER turn has been checkpointed into the sidecar (its
-        # timestamp == the advanced watermark) but its ASSISTANT reply exists
-        # only in state.db (recovery before the sidecar tail advances). In that
-        # state truncation_boundary < watermark proves the session is genuinely
-        # advanced, so the post-watermark state-only reply is legitimate
-        # post-edit content and must merge through (not be dropped as a replaced
-        # tail). The conservative skip still applies for boundary is None and
-        # boundary == watermark (not-advanced / legacy).
-        #
-        # CRITICAL: the boundary-advanced signal may only bypass the skip AFTER
-        # state replay has consumed the sidecar's visible checkpoint
-        # (state_replay_idx >= len(sidecar_visible_sequence)). A deleted suffix
-        # row with ts > watermark that appears in state.db BEFORE the edited
-        # checkpoint must still be skipped — otherwise the advanced signal would
-        # resurrect it. The sidecar-max-timestamp signal needs no such gate (a
-        # sidecar tail beyond the watermark is itself proof the checkpoint has
-        # advanced).
         checkpoint_consumed = state_replay_idx >= len(sidecar_visible_sequence)
-        sidecar_advanced_past_watermark = (
-            watermark_timestamp is not None
-            and (
-                (max_sidecar_timestamp is not None
-                 and max_sidecar_timestamp > watermark_timestamp)
-                or (watermark_advanced_by_boundary and checkpoint_consumed)
-            )
-        )
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp > watermark_timestamp
-            and key not in seen_message_keys
-            and (
-                not sidecar_advanced_past_watermark
-                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
-            )
-        ):
-            continue
-        # When a truncation watermark is active, state.db may contain original
-        # messages that were replaced by Edit (old content with old timestamp).
-        # The timestamp-based filter above catches messages AFTER the watermark,
-        # but messages BEFORE it (like the original pre-edit content) slip through.
-        # If a state.db message's content is not present in the sidecar and its
-        # timestamp is before the watermark, it's a replaced/stale row — skip it.
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp < watermark_timestamp
-            and key not in seen_message_keys
-            and content_key not in seen_content_keys
-        ):
-            continue
-        # Same-second edit: if timestamp equals the watermark and the message
-        # content is not in the sidecar, it's a replaced message edited at the
-        # same second — skip it.  The edited version (same timestamp, different
-        # content) is in the sidecar and survives this check.
-        #
-        # Only apply the same-second guard to user messages.  An assistant reply
-        # (or tool message) at the same second as the watermark is a legitimate
-        # post-edit recovery row — the sidecar holds only the edited user
-        # checkpoint, so the assistant reply's content won't be in it and would
-        # be silently dropped without this role guard.
-        if (
-            watermark_timestamp is not None
-            and timestamp is not None
-            and timestamp == watermark_timestamp
-            and key not in seen_message_keys
-            and content_key not in seen_content_keys
-            and str(msg.get("role", "")).lower() == "user"
+        if _state_row_is_truncated(
+            msg, key, content_key, timestamp, checkpoint_consumed,
         ):
             continue
         # Check for true duplicates using full-precision timestamp (#3346).
@@ -11550,6 +12845,12 @@ def reconciled_state_db_messages_for_session(
             state_messages = state_result.messages
         else:
             state_messages = state_result
+    state_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_messages,
+        suppress_api_content=not using_context_messages,
+        suppress_pending_turn=not prefer_context,
+    )
     if prefer_context and local_messages:
         if using_context_messages:
             sidecar_messages = getattr(session, 'messages', None) or []
@@ -11601,6 +12902,12 @@ def reconciled_state_db_messages_for_session(
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
     )
+    if not prefer_context:
+        reconciled_messages = _project_native_image_payload_conflicts_for_display(
+            local_messages,
+            state_messages,
+            reconciled_messages,
+        )
     return _state_db_session_messages_result(
         reconciled_messages,
         state_revision,

@@ -285,6 +285,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Settings and configuration
 - **Hermes Control Center** (sidebar launcher button) -- Conversation tab (export/import/clear), Preferences tab (model, send key, theme, language, all toggles), System tab (version, password)
 - Send key: Enter (default) or Ctrl/Cmd+Enter
+- Send-key on touch devices: plain Enter inserts a newline on phones (iPhone/iPod, Android phones) and on tablets / iPadOS / touch-capable Macs that only expose a coarse pointer (no attached hardware keyboard), matching the software keyboard's return key. Devices that report a fine pointer (for example, a tablet with a hardware keyboard) keep the configured physical-keyboard send-key behavior. The configured shortcut and the Send button remain available for sending.
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
 - Control Center always opens on the Conversation tab; resets on close
@@ -329,11 +330,27 @@ Alias resolution follows the format of the alias:
 
 Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
 receives the model, the provider id, and an opaque route id, never a base URL or key.
+An alias with its own `base_url` follows Hermes's direct-alias credential rules on every backend:
+its declared `api_key`/`key_env` wins; otherwise only a credential resolved for that endpoint's
+own host is sent (for example an OpenRouter key to `openrouter.ai`), never the provider label's
+key to an unrelated host. The alias's provider still selects its wire protocol.
 
 A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
 leaves the session pointing at a route nothing owns. That send fails closed — on every backend, the
 in-process worker, the gateway and the runner alike — with a controlled "model alias unavailable"
 error instead of quietly falling back to another provider; pick the model again to store a live route.
+
+With `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`, `/goal <text>` returns HTTP 501
+(`status: unsupported`) without changing an existing goal or starting a run. The
+runner contract does not yet provide atomic goal replacement and kickoff; WebUI
+never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
+`clear` delegate to the runner when supported. Legacy-direct and legacy-journal
+goal kickoff behavior is unchanged. Normal runner chat still supports model aliases.
+
+Server-initiated turns retain the pre-session stale-Agent-runtime barrier. It
+runs before loading the session; named-profile alias and Gateway routing happen
+only after admission. A stale default local runtime can therefore reject a wakeup
+before the session's named-profile Gateway ownership is known.
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation

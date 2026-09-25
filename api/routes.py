@@ -9349,6 +9349,13 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         return sidecar_messages
+    state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    if not state_db_messages:
+        return sidecar_messages
+
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -9408,6 +9415,11 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+    )
+    merged = _project_native_image_payload_conflicts_for_display(
+        sidecar_messages,
+        state_db_messages,
+        merged,
     )
     if cache_key is not None:
         _state_key = cache_key[4]
@@ -10104,7 +10116,35 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
 
 
 
-def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
+_LINEAGE_PARENT_SESSION_UNSET = object()
+
+
+def _webui_lineage_parent_session_for_display(session):
+    """Load the immediate parent only for display-eligible continuations."""
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return None
+    if (
+        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
+        and str(getattr(session, "compression_recovery_action", "") or "").strip()
+    ):
+        return None
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
+    if source == "fork" or relationship == "child_session":
+        return None
+    try:
+        return get_session(parent_id, metadata_only=False)
+    except Exception:
+        return None
+
+
+def _merged_webui_lineage_messages_for_display(
+    session,
+    messages=None,
+    *,
+    parent_session=_LINEAGE_PARENT_SESSION_UNSET,
+) -> list:
     """Include immediate parent-only rows when a WebUI continuation sidecar is partial.
 
     Compression/continuation sessions should render as one conversation. Most
@@ -10115,23 +10155,9 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
     subset of their parent.
     """
     primary_messages = list(messages if messages is not None else (getattr(session, "messages", []) or []))
-    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
-    if not parent_id:
-        return primary_messages
-    if (
-        str(getattr(session, "compression_recovery_source_session_id", "") or "").strip()
-        and str(getattr(session, "compression_recovery_action", "") or "").strip()
-    ):
-        return primary_messages
-    source = str(getattr(session, "session_source", "") or "").strip().lower()
-    relationship = str(getattr(session, "relationship_type", "") or "").strip().lower()
-    if source == "fork" or relationship == "child_session":
-        return primary_messages
-    try:
-        parent = get_session(parent_id, metadata_only=False)
-    except Exception:
-        return primary_messages
-    parent_messages = list(getattr(parent, "messages", []) or [])
+    if parent_session is _LINEAGE_PARENT_SESSION_UNSET:
+        parent_session = _webui_lineage_parent_session_for_display(session)
+    parent_messages = list(getattr(parent_session, "messages", []) or [])
     if not parent_messages:
         return primary_messages
     if _messages_start_with_visible_prefix(primary_messages, parent_messages):
@@ -10462,19 +10488,164 @@ def _cli_visible_session_cap() -> int:
     return CLI_VISIBLE_SESSION_LIMIT
 
 
-def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int | None = None) -> list[dict]:
-    """Keep only the most recent CLI-visible sessions after filtering."""
+# Bound on project-assigned CLI rows in the FINAL MERGED payload, across EVERY
+# project. This is the only place that sees every source of assigned rows at
+# once — state.db's own bounded passes plus imported WebUI sidecars from
+# all_sessions(), which no model-side cap applies to — so it is the only place
+# that can actually bound the assigned set (#6659 review finding 1).
+#
+# It has to bound the MERGED set, not one project: 200 rows x N projects grows
+# with the project count, and 1,000 assigned conversations spread over 5 projects
+# still returned all 1,000 — the exact reproduction from that finding. Pinned
+# equal to models.PROJECT_ASSIGNED_CLI_LIMIT (an independent literal on the
+# model side; the test is what keeps the two in lockstep) by
+# test_route_merged_assigned_cap_is_the_existing_model_row_cap.
+CLI_PROJECT_ASSIGNED_CAP = 200
+
+
+def _draw_assigned_cli_rows_fairly(
+    rows_by_project: dict[str, list[int]], budget: int
+) -> set[int]:
+    """Pick ``budget`` assigned row indices, spread fairly across the projects.
+
+    ``rows_by_project`` maps project id -> that project's row indices, newest
+    first, keyed in order of each project's most recent assigned conversation
+    (``sessions`` is newest-first, so insertion order already is that order).
+
+    Each round hands one slot to every project that still has history left, so:
+
+    * the drawn set never exceeds ``budget`` — that is the whole point, a
+      per-project bound does not bound the payload (#6659 review finding 1);
+    * no single busy project can eat every slot, which a flat ``sessions[:200]``
+      truncation would do to whichever project sorts first — the starvation
+      greptile rejected as P1 on #6659;
+    * every project keeps at least one row whenever
+      ``budget >= len(rows_by_project)``. Past that the bound wins: with more
+      assigned projects than slots, the ``budget`` most recently active projects
+      get one row each, because the review's number is the hard constraint.
+
+    Within a project the draw is newest-first, so what a chip loses is always the
+    oldest end of its own history.
+    """
+    drawn: set[int] = set()
+    if budget <= 0 or not rows_by_project:
+        return drawn
+    queues = list(rows_by_project.values())
+    offsets = [0] * len(queues)
+    remaining = budget
+    while remaining > 0:
+        progressed = False
+        for position, project_rows in enumerate(queues):
+            offset = offsets[position]
+            if offset >= len(project_rows):
+                continue
+            drawn.add(project_rows[offset])
+            offsets[position] = offset + 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            # Every project is exhausted — the whole assigned set fits.
+            break
+    return drawn
+
+
+def _cap_recent_cli_sessions(
+    sessions: list[dict],
+    cli_cap: int | None = None,
+    project_cap: int = CLI_PROJECT_ASSIGNED_CAP,
+) -> list[dict]:
+    """Cap the default CLI list while retaining project-addressable rows.
+
+    ``sessions`` is newest-first and already deduplicated (WebUI sidecars merged,
+    lineages collapsed, messaging sources folded), so every row counted here is
+    one logical conversation.
+
+    Two independent budgets, because they answer to different users (#6659):
+
+    * ``cli_cap`` unassigned conversations own the default sidebar window. An
+      assigned row must not spend one of those slots, or assigning three sessions
+      to a project silently shortens everyone's sidebar to 17 rows. Resolved
+      lazily from the shared configurable window (HERMES_WEBUI_VISIBLE_SESSION_LIMIT),
+      never a second hard-coded 20.
+    * ``project_cap`` assigned conversations IN TOTAL, across every project, stay
+      in the payload so the project chips can reveal them, marked
+      ``default_hidden`` once the recent window is full. Past that bound they are
+      dropped: keeping assigned rows past the *recent* cap is the fix, keeping
+      them past *all* bounds just trades a vanishing session for a stalled
+      sidebar.
+
+    That assigned budget is spent by a fair round-robin draw across the projects
+    (see ``_draw_assigned_cli_rows_fairly``) instead of by truncating the merged
+    list, so bounding the payload cannot starve a quiet project (greptile P1 on
+    #6659). ``project_cap <= 0`` disables the assigned bound entirely.
+    """
     if cli_cap is None:
         cli_cap = _cli_visible_session_cap()
     if cli_cap <= 0:
         return sessions
-    kept = []
-    cli_seen = 0
-    for session in sessions:
-        if _is_cli_session_for_settings(session):
-            cli_seen += 1
-            if cli_seen > cli_cap:
+    # Group the assigned rows per project first: the draw has to weigh the
+    # projects against each other, which a single forward pass cannot do.
+    rows_by_project: dict[str, list[int]] = {}
+    for index, session in enumerate(sessions):
+        if not _is_cli_session_for_settings(session):
+            continue
+        project_id = str(session.get("project_id") or "").strip()
+        if project_id:
+            rows_by_project.setdefault(project_id, []).append(index)
+    if project_cap > 0 and rows_by_project:
+        # Reserve the CLI rows the recent window already shows — the first
+        # ``cli_cap`` CLI rows in sort order, assigned or not — before the fair
+        # draw spreads the REST of the assigned budget across projects. Without
+        # this, a project holding all the newest sessions can lose its newest
+        # rows in the draw and the payload drops sessions the base displays
+        # (2026-09-24 re-gate reproduction: 11 projects x 20 sessions, all 20
+        # newest in one project, ``p0-19`` vanished from the payload).
+        reserved: set[int] = set()
+        seen_cli = 0
+        for index, session in enumerate(sessions):
+            if not _is_cli_session_for_settings(session):
                 continue
+            if seen_cli >= cli_cap:
+                break
+            seen_cli += 1
+            reserved.add(index)
+        # The reserved rows have already been paid for by the recent window;
+        # draw the remaining budget over the queues MINUS those rows, so the
+        # reservation cannot double-spend slots the draw would have granted.
+        remaining_rows_by_project: dict[str, list[int]] = {
+            project: [index for index in indices if index not in reserved]
+            for project, indices in rows_by_project.items()
+        }
+        assigned_reserved = sum(
+            1 for index in reserved
+            if str(sessions[index].get("project_id") or "").strip()
+        )
+        drawn = reserved | _draw_assigned_cli_rows_fairly(
+            remaining_rows_by_project, max(project_cap - assigned_reserved, 0)
+        )
+    else:
+        drawn = None if project_cap <= 0 else set()
+    kept = []
+    recent_seen = 0
+    unassigned_seen = 0
+    for index, session in enumerate(sessions):
+        if _is_cli_session_for_settings(session):
+            project_id = str(session.get("project_id") or "").strip()
+            if not project_id:
+                unassigned_seen += 1
+                if unassigned_seen > cli_cap:
+                    continue
+                recent_seen += 1
+            else:
+                if drawn is not None and index not in drawn:
+                    continue
+                if recent_seen >= cli_cap:
+                    session = dict(session)
+                    session["default_hidden"] = True
+                else:
+                    recent_seen += 1
         kept.append(session)
     return kept
 
@@ -10611,7 +10782,6 @@ from api.models import (
     new_session,
     all_sessions,
     title_from,
-    _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -10625,6 +10795,8 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _project_native_image_payload_conflicts_for_display,
+    _suppress_native_image_display_mirrors,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
@@ -13371,13 +13543,33 @@ def _handle_session_get(handler, parsed) -> bool:
                         msg_before=msg_before,
                     )
             else:
+                state_db_messages = _suppress_native_image_display_mirrors(
+                    s,
+                    state_db_messages,
+                )
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
+                lineage_parent = _webui_lineage_parent_session_for_display(s)
+                projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+                    s,
+                    sidecar_messages,
+                    parent_session=lineage_parent,
+                )
                 _all_msgs = merge_session_messages_append_only(
-                    _webui_sidecar_lineage_messages_for_display(s),
+                    sidecar_messages,
                     state_db_messages,
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
                 )
-                _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
+                _all_msgs = _merged_webui_lineage_messages_for_display(
+                    s,
+                    _all_msgs,
+                    parent_session=lineage_parent,
+                )
+                _all_msgs = _project_native_image_payload_conflicts_for_display(
+                    projection_sidecar_messages,
+                    state_db_messages,
+                    _all_msgs,
+                )
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -13529,7 +13721,7 @@ def _handle_session_get(handler, parsed) -> bool:
             "tool_calls": _session_tool_calls,
             "active_stream_id": getattr(s, "active_stream_id", None),
             "pending_user_message": getattr(s, "pending_user_message", None),
-            "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
+            "pending_attachments": getattr(s, "pending_attachments", []) if (load_messages or getattr(s, "pending_user_message", None)) else [],
             "pending_started_at": getattr(s, "pending_started_at", None),
             "pending_user_source": getattr(s, "pending_user_source", None),
             "context_length": _persisted_cl,
@@ -14603,13 +14795,22 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required")
         try:
-            s = get_session(sid)
+            workspace = get_session(sid).workspace
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
+            cli_meta = _lookup_cli_session_metadata(sid)
+            if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            if not cli_meta.get("workspace"):
+                return j(handler, {"git": None})
+            try:
+                workspace = resolve_trusted_workspace(cli_meta["workspace"])
+            except (FileNotFoundError, ValueError):
+                return j(handler, {"git": None})
         from api.workspace_git import GitWorkspaceError, git_status
 
         try:
-            status = git_status(Path(s.workspace))
+            status = git_status(Path(workspace))
         except GitWorkspaceError as e:
             return _git_bad(handler, e)
         totals = status.get("totals") or {}
@@ -17108,8 +17309,9 @@ def handle_post(handler, parsed) -> bool:
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
+            # The per-profile disk snapshot is fingerprint-guarded, so keep it.
             from api.config import invalidate_models_cache
-            invalidate_models_cache()
+            invalidate_models_cache(delete_disk=False)
             try:
                 from api.gateway_watcher import restart_watcher_for_profile
                 restart_watcher_for_profile(name)
@@ -23167,6 +23369,7 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = effective_source
+    s._webui_pending_user_timestamp_identity = None
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 
@@ -24252,6 +24455,10 @@ def start_session_turn(
         }
     if not msg:
         return {"error": "message is required", "_status": 400}
+    stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
+    if stale_response is not None:
+        stale_response["_status"] = 409
+        return stale_response
     turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
     try:
         s = get_session(session_id)
@@ -24659,6 +24866,26 @@ def _handle_goal_command(handler, body):
     from api.goals import goal_command_payload, goal_state_snapshot, restore_goal_state
 
     goal_args = str(body.get("args", "") or body.get("text", "") or "")
+    from api.runtime_adapter import (
+        LegacyJournalRuntimeAdapter,
+        build_runtime_adapter,
+        runtime_adapter_enabled,
+        runtime_adapter_runner_enabled,
+    )
+
+    goal_adapter_action = _runtime_adapter_goal_action(goal_args)
+    runner_goal_owned = runtime_adapter_runner_enabled()
+    if runner_goal_owned and goal_adapter_action == "set":
+        # Separate set and kickoff calls cannot restore the runner's prior goal
+        # on failure. Refuse until the runner supports an atomic operation.
+        return j(handler, {
+            "ok": False,
+            "status": "unsupported",
+            "error": (
+                "Goal set requires an atomic set-goal-and-kickoff control, which "
+                "the runner backend does not support. Existing goal state is unchanged."
+            ),
+        }, status=501)
     goal_action = goal_args.strip().lower()
     will_kickoff = bool(
         goal_args.strip()
@@ -24707,13 +24934,6 @@ def _handle_goal_command(handler, body):
             pass
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
-    from api.runtime_adapter import (
-        LegacyJournalRuntimeAdapter,
-        build_runtime_adapter,
-        runtime_adapter_enabled,
-        runtime_adapter_runner_enabled,
-    )
-
     def _legacy_goal_update(session_id: str, _action: str, text: str) -> dict:
         return goal_command_payload(
             session_id,
@@ -24722,8 +24942,6 @@ def _handle_goal_command(handler, body):
             profile_home=profile_home,
         )
 
-    goal_adapter_action = _runtime_adapter_goal_action(goal_args)
-    runner_goal_owned = runtime_adapter_runner_enabled()
     goal_adapter = None
     if runner_goal_owned:
         goal_adapter = build_runtime_adapter(
@@ -24771,17 +24989,10 @@ def _handle_goal_command(handler, body):
         return j(handler, payload, status=status)
 
     def _rollback_goal_after_failed_kickoff() -> None:
-        if runner_goal_owned and goal_adapter is not None:
-            try:
-                goal_adapter.update_goal(s.session_id, "clear", "")
-            except Exception:
-                logger.warning(
-                    "Failed to clear runner-owned goal after kickoff failure for %s",
-                    s.session_id,
-                    exc_info=True,
-                )
-            return
         restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+
+    if runner_goal_owned:
+        return j(handler, payload)
 
     kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
     if kickoff_prompt:
@@ -25397,10 +25608,12 @@ def _handle_chat_sync(handler, body):
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
+                _settle_current_turn_boundary,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
@@ -25465,6 +25678,33 @@ def _handle_chat_sync(handler, body):
             result=result,
             agent=agent,
         )
+        if (
+            isinstance(_active_turn_identity, dict)
+            and _active_turn_identity.get("agent_turn_boundary_resolved") is True
+            and not _active_turn_identity.get("token")
+        ):
+            _active_image_index = _find_active_turn_checkpoint_index(
+                _result_messages,
+                _previous_context_messages,
+                _active_turn_identity,
+                msg,
+            )
+            _active_image_content = (
+                _result_messages[_active_image_index].get("content")
+                if _active_image_index is not None
+                else None
+            )
+            if isinstance(_active_image_content, list) and any(
+                isinstance(part, dict)
+                and part.get("type") in {"image", "image_url", "input_image"}
+                for part in _active_image_content
+            ):
+                from api.process_event_utils import build_active_turn_token
+
+                _active_turn_identity["token"] = build_active_turn_token(
+                    f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
+                    time.time(),
+                )
         _turn_boundary = _active_turn_boundary(
             _result_messages, _previous_context_messages, _active_turn_identity, msg,
         )
@@ -25483,6 +25723,14 @@ def _handle_chat_sync(handler, body):
             _next_context_messages,
             msg,
         )
+        if _active_turn_identity.get("token"):
+            _next_context_messages = _settle_current_turn_boundary(
+                _previous_context_messages,
+                _next_context_messages,
+                _active_turn_identity,
+                msg,
+                getattr(s, "pending_user_source", None) or "webui",
+            )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
@@ -25492,6 +25740,9 @@ def _handle_chat_sync(handler, body):
             ),
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
+            verification_nudge_provenance={
+                "active_turn_identity": _active_turn_identity,
+            },
         )
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
@@ -27034,8 +27285,8 @@ def _relay_gateway_run_approval(
     Both the approval-card endpoint and the ordinary session-YOLO endpoint use
     this chokepoint so one tab cannot retire another tab's parked remote run.
     """
-    from api.config import gateway_supports_approval_identity_v1, get_config as _get_config
-    from api.gateway_chat import _gateway_api_key, _gateway_base_url
+    from api.config import gateway_supports_approval_identity_v1
+    from api.gateway_chat import gateway_run_endpoint
     from api.runner_client import HttpRunnerClient, RunnerClientError
 
     run_id = str(mirror.get("run_id") or "").strip()
@@ -27077,8 +27328,7 @@ def _relay_gateway_run_approval(
                 enable_yolo=enable_yolo,
             )
 
-        base_url = _gateway_base_url(_get_config())
-        api_key = _gateway_api_key()
+        base_url, api_key = gateway_run_endpoint(run_id)
         identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and (
             gateway_supports_approval_identity_v1(base_url, api_key)
         )
@@ -29525,17 +29775,34 @@ def _parse_mcp_enabled(value) -> bool:
     return True
 
 
-def _mcp_runtime_status_by_name() -> dict[str, dict]:
+def _mcp_runtime_status_by_name(servers=None, view=None) -> dict[str, dict]:
     """Return already-known MCP runtime status without starting servers.
 
     ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
     configuration; it does not probe or spawn MCP subprocesses. If Hermes Agent
     is unavailable, fall back to an empty map so the API remains safe.
+
+    Call it inside ``mcp_runtime_scope()`` and pass its ``view``: the agent
+    filters a routed profile's connections itself, but its launch-profile view
+    is process-wide, so rows are narrowed to the connections serving ``view``
+    (``api.mcp_runtime.filter_runtime_status_to_view``). ``servers`` (the
+    profile's ``mcp_servers`` WebUI displays) is passed as ``configured`` when
+    supported so both read the same config.
     """
     try:
         from api.agent_compat import agent_attr
+        from api.mcp_runtime import accepts_keywords, filter_runtime_status_to_view
         get_mcp_status = agent_attr("tools.mcp_tool", "get_mcp_status", "tools.mcp_tool_discovery")
-        statuses = get_mcp_status()
+        if isinstance(servers, dict) and accepts_keywords(get_mcp_status, "configured"):
+            # Invalid entries are summarized as invalid_config by WebUI; keep them
+            # out of the agent call so one bad entry cannot blank every status.
+            statuses = get_mcp_status(configured={
+                str(name): scfg for name, scfg in servers.items() if isinstance(scfg, dict)
+            })
+        else:
+            statuses = get_mcp_status()
+        if view is not None and isinstance(statuses, list):
+            statuses = filter_runtime_status_to_view(statuses, view)
     except Exception:
         return {}
     if not isinstance(statuses, list):
@@ -29718,10 +29985,18 @@ def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
     return tools
 
 
-def _mcp_tools_from_registry(server_summaries):
-    """Read already-registered MCP tool schemas without probing MCP servers."""
+def _mcp_tools_from_registry(server_summaries, view=None):
+    """Read already-registered MCP tool schemas without probing MCP servers.
+
+    With a profile ``view`` (see ``api.mcp_runtime``), only tools registered in
+    that profile's own registry slot are listed. The slot is the isolation check;
+    the raw ``mcp_servers`` config is not an allowlist: the agent merges portable
+    plugin servers into the running config at runtime, and their tools are
+    registered in the same slot without a ``config.yaml`` entry.
+    """
     try:
         from tools.registry import registry
+        from api.mcp_runtime import registry_tool_owned_by_view
     except Exception:
         return []
     tools = []
@@ -29737,6 +30012,10 @@ def _mcp_tools_from_registry(server_summaries):
         if not isinstance(toolset, str) or not toolset.startswith("mcp-"):
             continue
         server_name = toolset[len("mcp-"):]
+        if view is not None and not view.legacy and not registry_tool_owned_by_view(
+            registry, tool_name, view
+        ):
+            continue
         schema = registry.get_schema(tool_name) or {}
         server_summary = server_summaries.get(server_name, {
             "name": server_name,
@@ -29748,22 +30027,45 @@ def _mcp_tools_from_registry(server_summaries):
     return tools
 
 
+def _mcp_profile_runtime_inventory(servers, purpose, *, include_tools=True):
+    """Build server summaries and tools from ONE runtime view of the request profile.
+
+    Status, tool count and inventory are all read inside the same
+    ``mcp_runtime_scope()`` so they describe the same profile's connections.
+    When that profile scope cannot be confirmed, runtime data is withheld rather
+    than showing another profile's connection. Passive: never starts or probes
+    MCP servers.
+    """
+    from api.mcp_runtime import mcp_runtime_scope
+
+    runtime = {}
+    tools = []
+    source = "none"
+    with mcp_runtime_scope(purpose) as view:
+        if view.trusted:
+            runtime = _mcp_runtime_status_by_name(servers, view)
+        server_summaries = {
+            str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+            for name, scfg in servers.items()
+        }
+        if include_tools and view.trusted:
+            tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+            source = "mcp_runtime_status"
+            if not tools:
+                tools = _mcp_tools_from_registry(server_summaries, view)
+                source = "tool_registry" if tools else "none"
+    return server_summaries, tools, source, view.scope_label
+
+
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
     cfg = get_config_for_profile_home(get_active_hermes_home())
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
-    server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
-        for name, scfg in servers.items()
-    }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
-    source = "mcp_runtime_status"
-    if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
-        source = "tool_registry" if tools else "none"
+    server_summaries, tools, source, runtime_scope = _mcp_profile_runtime_inventory(
+        servers, "/api/mcp/tools"
+    )
     tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
     unavailable_servers = [
         summary["name"] for summary in server_summaries.values()
@@ -29774,6 +30076,7 @@ def _handle_mcp_tools_list(handler):
         "total": len(tools),
         "source": source,
         "inventory_scope": "already_known_runtime_only",
+        "runtime_scope": runtime_scope,
         "unavailable_servers": unavailable_servers,
     })
 
@@ -29963,21 +30266,15 @@ def _handle_notes_sources_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
-    server_summaries = {
-        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
-        for name, scfg in servers.items()
-    }
-    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
-    source = "mcp_runtime_status"
-    if not tools:
-        tools = _mcp_tools_from_registry(server_summaries)
-        source = "tool_registry" if tools else "none"
+    server_summaries, tools, source, runtime_scope = _mcp_profile_runtime_inventory(
+        servers, "/api/notes/sources"
+    )
     return j(handler, {
         "enabled": True,
         "sources": _notes_sources_from_mcp_inventory(server_summaries, tools),
         "source": source,
         "inventory_scope": "already_known_runtime_only",
+        "runtime_scope": runtime_scope,
         "attach_supported": False,
         "automatic_recall_unchanged": True,
         "recent_ai_notes": _joplin_recent_ai_notes(limit=6),
@@ -30268,15 +30565,14 @@ def _handle_mcp_servers_list(handler):
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    runtime = _mcp_runtime_status_by_name()
-    result = [
-        _server_summary(name, scfg, runtime.get(str(name)))
-        for name, scfg in servers.items()
-    ]
+    server_summaries, _tools, _source, runtime_scope = _mcp_profile_runtime_inventory(
+        servers, "/api/mcp/servers", include_tools=False
+    )
     return j(handler, {
-        "servers": result,
+        "servers": list(server_summaries.values()),
         "toggle_supported": True,
         "reload_required": True,
+        "runtime_scope": runtime_scope,
     })
 
 

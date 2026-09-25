@@ -8137,8 +8137,14 @@ function startApprovalPolling(sid) {
 let _approvalEventSource = null;
 let _approvalSSEHealthTimer = null;
 let _approvalPollingSessionId = null;
+// Session whose poller stopped on a profile-mismatch 409; re-armed on focus/visibility.
+let _approvalProfilePausedSessionId = null;
+// Bumped on every focus/visibility return. A mismatch 409 for a request that began before
+// the latest return may predate a cookie switch-back, so it earns one retry before pausing.
+let _promptPollerFocusEpoch = 0;
 
 function _startApprovalFallbackPoll(sid) {
+  _approvalProfilePausedSessionId = null;
   // Run one tick immediately so a session already blocked on a pending approval
   // shows its card instantly (the removed SSE 'initial' event used to do this);
   // then poll on the 1500ms cadence. (#3913 SHOULD-FIX)
@@ -8148,6 +8154,7 @@ function _startApprovalFallbackPoll(sid) {
     }
     if (_approvalFallbackPollInFlight) return;
     _approvalFallbackPollInFlight = true;
+    const focusEpoch = _promptPollerFocusEpoch;
     try {
       const generation = _approvalPromptGeneration(sid);
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
@@ -8163,10 +8170,20 @@ function _startApprovalFallbackPoll(sid) {
           stopApprovalPollingForSession(sid);
         }
       }
-    } catch(e) { /* ignore poll errors */ }
-    finally { _approvalFallbackPollInFlight = false; }
+    } catch(e) {
+      // Another profile owns this session now (e.g. a different tab switched the shared
+      // profile cookie): every further poll would 409, so stop and leave the card as-is.
+      // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
+      if (typeof _sessionProfileMismatchFromError === 'function' && _sessionProfileMismatchFromError(e)
+          && _approvalPollTimer === pollTimer) {
+        // Focus returned mid-request: the cookie may be back, so retry once (after finally).
+        if (focusEpoch !== _promptPollerFocusEpoch) queueMicrotask(_tick);
+        else { stopApprovalPolling(); _approvalProfilePausedSessionId = sid; }
+      }
+    }
+    finally { if (_approvalPollTimer === pollTimer) _approvalFallbackPollInFlight = false; }
   };
-  _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
+  const pollTimer = _approvalPollTimer = setInterval(_tick, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
   _tick();
 }
 
@@ -8315,32 +8332,37 @@ function _startHiddenActiveStreamPoll(sid) {
   if (!sid) return;
   _stopHiddenActiveStreamPoll();
   _sessionStreamHiddenPollSid = sid;
+  let notFoundCount = 0;
+  let pollTimer = null;
+  const ownsPoll = () => _sessionStreamHiddenPollSid === sid &&
+    _sessionStreamHiddenPollTimer === pollTimer;
   const tick = () => {
+    // A queued tick/response must not mutate a replacement, even for the same sid.
+    if (!ownsPoll()) return;
     // Stop conditions: tab became visible (real SSE takes over), session
     // switched, or we're already rendering a stream.
     if (typeof document !== 'undefined' && !document.hidden) { _stopHiddenActiveStreamPoll(); return; }
-    if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
         .then(r => {
-          // #7299: 404 Not Found / 410 Gone are TERMINAL for this
-          // session-owned poll. The session has been deleted or no
-          // longer exists in the active state directory, so further
-          // polls are guaranteed to fail. Stop the poll immediately
-          // to avoid the infinite 404 loop on stale background tabs
-          // (one tab could fire ~10 such requests per minute; multiple
-          // tabs multiply the noise). Transient failures (5xx, rate
-          // limit, network error) keep polling — only the missing
-          // session itself is terminal.
-          if ((r.status === 404 || r.status === 410) && _sessionStreamHiddenPollSid === sid) {
+          if (!ownsPoll()) return null;
+          if (r && r.status === 404) {
+            // Profile visibility also returns 404. Bound repeated misses, but
+            // retain the resume owner so a profile flip back can self-heal.
+            if (++notFoundCount >= 3) _stopHiddenActiveStreamPoll();
+            return null;
+          }
+          notFoundCount = 0;
+          if (r && r.status === 410) {
+            if (_sessionStreamHiddenSid === sid) _sessionStreamHiddenSid = null;
             _stopHiddenActiveStreamPoll();
             return null;
           }
-          return r.ok ? r.json() : null;
+          return r && r.ok ? r.json() : null;
         })
         .then(d => {
-          if (!d || _sessionStreamHiddenPollSid !== sid) return;
+          if (!d || !ownsPoll()) return;
           const streamId = d.active_stream_id;
           if (streamId && S.activeStreamId !== String(streamId)) {
             // Server-initiated turn in flight while hidden → attach as replay.
@@ -8373,10 +8395,11 @@ function _startHiddenActiveStreamPoll(sid) {
             }
           }
         })
-        .catch(() => {});
-    } catch (_) {}
+        .catch(() => { notFoundCount = 0; });
+    } catch (_) { notFoundCount = 0; }
   };
-  _sessionStreamHiddenPollTimer = setInterval(tick, 6000);
+  pollTimer = setInterval(tick, 6000);
+  _sessionStreamHiddenPollTimer = pollTimer;
   // Fire one immediately so a turn already running when we go hidden is caught
   // without waiting a full interval.
   tick();
@@ -9286,6 +9309,7 @@ var _clarifyFallbackTimer = null;
 var _clarifyHealthTimer = null;
 let _clarifyFallbackPollInFlight = false;
 let _clarifyPollingSessionId = null;
+let _clarifyProfilePausedSessionId = null;
 
 function startClarifyPolling(sid) {
   stopClarifyPolling();
@@ -9308,6 +9332,7 @@ function startClarifyPolling(sid) {
 
 function _startClarifyFallbackPoll(sid) {
   _clarifyPollingSessionId = sid || null;
+  _clarifyProfilePausedSessionId = null;
   // Run one tick immediately so a session already blocked on a pending clarify
   // shows its card instantly (the removed SSE 'initial' event used to do this);
   // then poll on the 3000ms cadence. (#3913 SHOULD-FIX)
@@ -9317,6 +9342,7 @@ function _startClarifyFallbackPoll(sid) {
     }
     if (_clarifyFallbackPollInFlight) return;
     _clarifyFallbackPollInFlight = true;
+    const focusEpoch = _promptPollerFocusEpoch;
     try {
       const generation = _clarifyPromptGeneration(sid);
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
@@ -9338,6 +9364,16 @@ function _startClarifyFallbackPoll(sid) {
         currentSessionId: currentSid,
         message: msg,
       };
+      // Profile-mismatch 409: the session is owned by another profile under the current
+      // cookie, so polling can never succeed. Stop quietly; the live card stays standing.
+      // Only this poller may stop itself: a late 409 from a replaced poller must not kill its successor.
+      if (typeof _sessionProfileMismatchFromError === "function" && _sessionProfileMismatchFromError(e)) {
+        if (_clarifyFallbackTimer === pollTimer) {
+          if (focusEpoch !== _promptPollerFocusEpoch) queueMicrotask(_tick);
+          else { stopClarifyPolling(); _clarifyProfilePausedSessionId = sid; }
+        }
+        return;
+      }
       // A 404 from the active session domain is a STALE-SESSION signal — e.g.
       // the old profile's session still polling briefly after a profile switch,
       // or a session deleted server-side — NOT a missing clarify endpoint. Stop
@@ -9386,10 +9422,10 @@ function _startClarifyFallbackPoll(sid) {
         console.warn("[clarify] pending poll failed", logDetails);
       }
     } finally {
-      _clarifyFallbackPollInFlight = false;
+      if (_clarifyFallbackTimer === pollTimer) _clarifyFallbackPollInFlight = false;
     }
   };
-  _clarifyFallbackTimer = setInterval(_tick, 3000);
+  const pollTimer = _clarifyFallbackTimer = setInterval(_tick, 3000);
   _tick();
 }
 
@@ -9405,6 +9441,21 @@ function stopClarifyPolling() {
   _clarifyFallbackPollInFlight = false;
   _clarifyPollingSessionId = null;
 }
+
+// Another tab may have switched the shared profile cookie back: re-arm pollers that a
+// profile-mismatch 409 paused while their session is still open. A still-mismatched
+// profile just 409s once and pauses them again.
+function _resumeProfilePausedPromptPollers() {
+  if (typeof document !== 'undefined' && document.hidden) return;
+  _promptPollerFocusEpoch++;
+  const current = (S.session && S.session.session_id) || null;
+  const approvalSid = _approvalProfilePausedSessionId;
+  const clarifySid = _clarifyProfilePausedSessionId;
+  if (approvalSid && approvalSid === current && !_approvalPollTimer) startApprovalPolling(approvalSid);
+  if (clarifySid && clarifySid === current && !_clarifyFallbackTimer) startClarifyPolling(clarifySid);
+}
+document.addEventListener('visibilitychange', _resumeProfilePausedPromptPollers);
+window.addEventListener('focus', _resumeProfilePausedPromptPollers);
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
 

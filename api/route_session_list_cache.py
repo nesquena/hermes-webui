@@ -53,6 +53,8 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "model",
     "model_provider",
     "message_count",
+    "transcript_generation",
+    "transcript_generation_baseline",
     "user_message_count",
     "created_at",
     "updated_at",
@@ -606,6 +608,22 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         session_index_path = _session_list_cache_session_dir() / "_index.json"
     except Exception:
         session_index_path = None
+    all_profiles_state_stamp = None
+    if _cache_all_profiles:
+        try:
+            from api.models import _all_profiles_cli_contexts
+            contexts, _ = _all_profiles_cli_contexts()
+            all_profiles_state_stamp = tuple(
+                (
+                    _session_list_cache_path_stamp(ctx_db),
+                    _session_list_cache_path_stamp(ctx_db.with_name(f"{ctx_db.name}-wal") if ctx_db else None),
+                    _session_list_cache_state_db_fingerprint(ctx_db),
+                )
+                for _home, ctx_db, _prof in contexts
+            )
+        except Exception:
+            all_profiles_state_stamp = None
+
     return (
         _session_list_cache_path_stamp(state_db_path),
         _session_list_cache_path_stamp(state_db_wal_path),
@@ -617,6 +635,7 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         # frame size), so without this a freshly-committed CLI/gateway session
         # could be served stale for the cache TTL. Mirrors the models-layer fix.
         _session_list_cache_state_db_fingerprint(state_db_path),
+        all_profiles_state_stamp,
         swv,
     )
 
