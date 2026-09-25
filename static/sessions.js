@@ -1970,6 +1970,16 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  const _expectedLoadProfile = Object.prototype.hasOwnProperty.call(opts,'ownerProfile')
+    ? String(opts.ownerProfile||'default')
+    : null;
+  const _loadProfileIsCurrent = () => !_expectedLoadProfile
+    || (typeof _profileMatchesActiveProfile==='function'
+      && _profileMatchesActiveProfile(_expectedLoadProfile,S.activeProfile||'default'));
+  // An owner-scoped reconciliation must fail closed before any stream teardown,
+  // draft save, transcript clear, or loading placeholder can affect another
+  // profile's visible conversation.
+  if(!_loadProfileIsCurrent())return;
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
@@ -2021,7 +2031,9 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentLoad = () => _loadingSessionId === sid
+    && _loadSessionGeneration === _loadGeneration
+    && _loadProfileIsCurrent();
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
