@@ -3219,6 +3219,26 @@ async function _ensureMessagesLoaded(sid, opts) {
         `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
         {timeoutMs:120000}
       );
+    if (!_ownsLoad()) return;
+    // The fresh-navigation tail starts in parallel with metadata, so its server
+    // read can predate metadata even when its promise is awaited second. The
+    // accepted metadata count is also the SSE subscription floor; applying an
+    // older tail would both lower that count and omit rows the stream will not
+    // replay. Refresh once, after metadata, while retaining the same bounded
+    // tail request and load owner.
+    const acceptedMessageCount = Number(S.session&&S.session.session_id===sid&&S.session.message_count);
+    const prefetchedMessageCount = Number(data&&data.session&&data.session.message_count);
+    if(
+      opts.messageRequest&&
+      Number.isFinite(acceptedMessageCount)&&
+      Number.isFinite(prefetchedMessageCount)&&
+      prefetchedMessageCount<acceptedMessageCount
+    ){
+      data=await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+        {timeoutMs:120000}
+      );
+    }
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }

@@ -182,6 +182,7 @@ function makeHarness() {
 function snapshotState() {
   return {
     sid: S.session && S.session.session_id,
+    messageCount: S.session && S.session.message_count,
     messages: Array.isArray(S.messages) ? S.messages.map((m) => (m && m.role ? String(m.content || '') : null)).filter(Boolean) : [],
     toolCalls: Array.isArray(S.toolCalls) ? S.toolCalls.slice() : [],
     truncated: _messagesTruncated,
@@ -440,6 +441,40 @@ const API_ATLAS_RELOAD_MSGS = {
   },
 };
 
+const API_FRESHNESS_META = {
+  session: {
+    session_id: 'sid-freshness',
+    message_count: 2,
+    active_stream_id: null,
+    resolve_model: 'qwen/qwq-32b-instruct',
+  },
+};
+
+const API_FRESHNESS_STALE_MSGS = {
+  session: {
+    session_id: 'sid-freshness',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [{ role: 'user', content: 'older-message' }],
+    message_count: 1,
+    tool_calls: [],
+  },
+};
+
+const API_FRESHNESS_CURRENT_MSGS = {
+  session: {
+    session_id: 'sid-freshness',
+    _messages_truncated: false,
+    _messages_offset: 0,
+    messages: [
+      { role: 'user', content: 'older-message' },
+      { role: 'assistant', content: 'just-completed-message' },
+    ],
+    message_count: 2,
+    tool_calls: [],
+  },
+};
+
 function buildMessageUrl(sid, mode, suffix='', limit=_INITIAL_TAIL_MSG_LIMIT) {
   const base = `/api/session?session_id=${encodeURIComponent(sid)}&messages=${mode}&resolve_model=0`;
   if (mode === 0) return base;
@@ -573,11 +608,41 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runPrefetchedTailOlderThanMetadata() {
+  createEnvironment();
+  globalThis._messageReloadLimitForSession = () => _INITIAL_TAIL_MSG_LIMIT;
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const calls = {
+    metadata: apiHost.enqueue(buildMessageUrl('sid-freshness', 0)),
+    staleTail: apiHost.enqueue(buildMessageUrl('sid-freshness', 1)),
+    currentTail: apiHost.enqueue(buildMessageUrl('sid-freshness', 1)),
+  };
+
+  const load = loadSession('sid-freshness', { force: true });
+  await waitForQueued(apiHost, calls.staleTail.url);
+  // The parallel tail reads the transcript before the metadata request observes
+  // the just-completed assistant row. Resolve it first to pin that schedule.
+  calls.staleTail._resolve(API_FRESHNESS_STALE_MSGS);
+  await Promise.resolve();
+  calls.currentTail._resolve(API_FRESHNESS_CURRENT_MSGS);
+  calls.metadata._resolve(API_FRESHNESS_META);
+  await load;
+
+  return {
+    scenario: 'prefetched-tail-older-than-metadata',
+    ...snapshotState(),
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    prefetchedTailOlderThanMetadata: await runPrefetchedTailOlderThanMetadata(),
   };
 }
 
@@ -632,6 +697,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    freshness = body["prefetchedTailOlderThanMetadata"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -698,6 +764,21 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
     ) == 2, "both old and active loads should have attempted message fetch"
+
+    # 4) A parallel tail can complete before newer metadata. The accepted
+    # metadata count is the freshness floor: refetch one bounded tail before
+    # replacing the transcript or lowering its message_count.
+    freshness_tail_url = (
+        "/api/session?session_id=sid-freshness&messages=1&resolve_model=0"
+        "&msg_limit=30&expand_renderable=1"
+    )
+    assert freshness["apiCalls"].count(freshness_tail_url) == 2, (
+        "an older prefetched tail must trigger exactly one bounded refresh"
+    )
+    assert freshness["messages"] == ["older-message", "just-completed-message"]
+    assert freshness["messageCount"] == 2, (
+        "an older tail must not lower the accepted metadata/SSE cursor count"
+    )
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
