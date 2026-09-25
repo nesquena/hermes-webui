@@ -1,4 +1,8 @@
+import os
 import pathlib
+import subprocess
+import sys
+import textwrap
 from unittest.mock import patch
 
 import bootstrap
@@ -9,6 +13,115 @@ def _repo_venv_python(repo_root: pathlib.Path) -> pathlib.Path:
         "Scripts/python.exe" if bootstrap.platform.system() == "Windows" else "bin/python"
     )
     return repo_root / ".venv" / rel
+
+
+def test_agent_probe_activates_hermes_before_importing_webui_dependencies(monkeypatch):
+    """A source-installed Hermes may re-exec the probe while importing run_agent.
+
+    The re-executed ``-c`` body does not have PM-managed site-packages until
+    ``run_agent`` imports hermes_bootstrap, so ``yaml`` must be imported after it.
+    """
+    captured: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        captured.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+
+    assert bootstrap._python_can_run_webui_and_agent("/fake/python") is True
+    script = captured[0][2]
+    assert script.index("from run_agent import AIAgent") < script.index("import yaml")
+
+
+def test_agent_probe_survives_pm_style_reexec_before_webui_dependency_import(tmp_path, monkeypatch):
+    """Exercise the source-install relaunch that exposed the original failure."""
+    agent_dir = tmp_path / "agent"
+    legacy_deps = tmp_path / "legacy-deps"
+    managed_deps = tmp_path / "managed-deps"
+    for path in (agent_dir, legacy_deps, managed_deps):
+        path.mkdir()
+    (legacy_deps / "yaml.py").write_text("SOURCE = 'legacy'\n", encoding="utf-8")
+    (managed_deps / "yaml.py").write_text("SOURCE = 'managed'\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!" + sys.executable + "\n"
+        + textwrap.dedent(
+            f"""
+            import os
+            import sys
+
+            agent_dir = {str(agent_dir)!r}
+            if os.environ.get("FAKE_PM_REEXEC") == "1":
+                sys.path.insert(0, agent_dir)
+                class _BlockYamlUntilBootstrap:
+                    def find_spec(self, fullname, path=None, target=None):
+                        if fullname == "yaml":
+                            raise ModuleNotFoundError("No module named 'yaml'")
+                        return None
+                sys.meta_path.insert(0, _BlockYamlUntilBootstrap())
+            else:
+                sys.path[:0] = [agent_dir, {str(legacy_deps)!r}]
+            if sys.argv[1] != "-c":
+                raise SystemExit("expected -c")
+            exec(sys.argv[2])
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    (agent_dir / "run_agent.py").write_text(
+        textwrap.dedent(
+            f"""
+            import os
+            import sys
+
+            if os.environ.get("FAKE_PM_REEXEC") != "1":
+                os.environ["FAKE_PM_REEXEC"] = "1"
+                os.execv({str(fake_python)!r}, [{str(fake_python)!r}, "-c", os.environ["FAKE_PROBE_BODY"]])
+            sys.meta_path[:] = [
+                finder for finder in sys.meta_path
+                if type(finder).__name__ != "_BlockYamlUntilBootstrap"
+            ]
+            sys.path.insert(0, {str(managed_deps)!r})
+
+            class AIAgent:
+                pass
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    new_script = "from run_agent import AIAgent\nimport yaml\nassert yaml.SOURCE == 'managed'\n"
+    old_script = "import yaml\nfrom run_agent import AIAgent\n"
+    monkeypatch.setenv("FAKE_PROBE_BODY", new_script)
+
+    assert bootstrap._python_can_run_webui_and_agent(str(fake_python), agent_dir) is True
+
+    old_env = os.environ.copy()
+    old_env["FAKE_PM_REEXEC"] = "1"
+    old_env["FAKE_PROBE_BODY"] = old_script
+    old = subprocess.run(
+        [str(fake_python), "-c", old_script],
+        capture_output=True,
+        env=old_env,
+        text=True,
+    )
+    assert old.returncode != 0
+    assert "No module named 'yaml'" in old.stderr
+
+
+def test_server_adds_its_repository_to_sys_path_before_api_imports():
+    """PM relaunches external scripts through runpy.run_path() in isolated mode."""
+    source = (pathlib.Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
+
+    assert source.index("sys.path.insert(0, REPO_ROOT)") < source.index(
+        "from api.request_logging import emit_request_log"
+    )
+    assert source.index("import hermes_bootstrap") < source.index(
+        "from api.request_logging import emit_request_log"
+    )
 
 
 def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(monkeypatch, tmp_path):

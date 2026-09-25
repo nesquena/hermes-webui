@@ -10,6 +10,27 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Hermes PM can re-exec this external script via runpy.run_path() in isolated
+# mode.  Unlike normal script execution, that path does not put this repository
+# on sys.path, so sibling ``api`` imports below would otherwise fail.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+# A source-installed Hermes can relaunch this external entry point through
+# runpy.run_path() before its PM-managed dependencies are activated.  Activate
+# them before importing WebUI modules, while still allowing agent-free
+# onboarding to report the normal unavailable-agent state. Test servers keep
+# their network-isolation contract: bootstrap may synchronise dependencies.
+if not os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
+    try:
+        import hermes_bootstrap  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "hermes_bootstrap":
+            raise
+
+
 def _ignore_sigpipe() -> None:
     """Keep broken client writes from terminating the server process."""
     if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
