@@ -146,6 +146,7 @@ globalThis._activeProject = args.activeProject;
 globalThis._allProjects = args.allProjects || [];
 globalThis._sessionSourceFilter = 'webui';
 globalThis._newSessionInFlight = null;
+globalThis._sessionNavigationGeneration = 0; globalThis._sessionNavigationRollbackAnchor = null;
 globalThis._messagesTruncated = false;
 globalThis._oldestIdx = 0;
 globalThis.INFLIGHT = {};
