@@ -20,6 +20,7 @@ the named-profile isolation invariant) and misparsed the supported
 import base64
 import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -343,6 +344,7 @@ def test_parser_grammar_matches_launcher_expectations():
     assert "UID" not in parsed
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 def test_parser_matches_ctl_sh_env_loader(tmp_path):
     """[cross-loader parity] Run the real ctl.sh loader over the same .env and
     require the same present/absent set and the same byte-exact values."""
