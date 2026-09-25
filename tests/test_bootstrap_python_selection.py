@@ -134,8 +134,11 @@ def test_server_pm_runpath_relaunch_activates_deps_before_api_imports(tmp_path):
         encoding="utf-8",
     )
 
+    shutil.copyfile(
+        pathlib.Path(__file__).parent.parent / "api" / "runtime_bootstrap.py",
+        api_root / "runtime_bootstrap.py",
+    )
     modules = {
-        "runtime_bootstrap.py": "def activate_hermes_runtime():\n    import hermes_bootstrap\n\ndef ignore_sigpipe():\n    pass\n",
         "request_logging.py": "import yaml\nassert yaml.MANAGED\nemit_request_log = lambda *args, **kwargs: None\n",
         "auth.py": "check_auth_or_close = reset_trusted_auth_request_state = lambda *args, **kwargs: None\n",
         "config.py": "from pathlib import Path\nHOST = '127.0.0.1'\nPORT = 0\nSTATE_DIR = SESSION_DIR = DEFAULT_WORKSPACE = Path('.')\n",
