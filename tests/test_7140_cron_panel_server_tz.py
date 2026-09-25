@@ -312,5 +312,68 @@ def test_server_tz_info_does_not_use_cached_hermes_time():
     )
 
 
+def test_end_to_end_no_key_fixed_offset_preserves_minutes():
+    """Review #7155: fixed-offset server zones with no IANA key at +0530, +0545,
+    and -0330 must leave server_tz_name empty so the frontend reaches the
+    numeric-offset fallback and preserves the exact minute component.
+    """
+    import sys
+    import time as _time
+    import datetime as _dt
+    import api.routes as routes
+
+    cases = [
+        (_dt.timezone(_dt.timedelta(hours=5, minutes=30)), "+0530", "18:30"),
+        (_dt.timezone(_dt.timedelta(hours=5, minutes=45)), "+0545", "18:45"),
+        (_dt.timezone(_dt.timedelta(hours=-3, minutes=-30)), "-0330", "09:30"),
+    ]
+
+    for tz_obj, expected_offset, expected_time in cases:
+        class FakeDT:
+            timezone = _dt.timezone
+            timedelta = _dt.timedelta
+            class datetime:
+                @classmethod
+                def now(cls):
+                    mock_local = mock.MagicMock()
+                    mock_local.tzinfo = tz_obj
+                    mock_inst = mock.MagicMock()
+                    mock_inst.astimezone.return_value = mock_local
+                    return mock_inst
+
+        with mock.patch.dict(os.environ, {"HERMES_TIMEZONE": ""}, clear=False):
+            with mock.patch.object(routes, "_load_yaml_config_file", return_value={}):
+                with mock.patch.object(_time, "strftime", return_value=expected_offset):
+                    with mock.patch.dict(sys.modules, {"datetime": FakeDT}):
+                        info = routes._server_tz_info()
+
+        assert info["server_tz_name"] == "", (
+            f"Expected empty IANA name for fractional {expected_offset}, got {info['server_tz_name']}"
+        )
+        assert info["server_tz"] == expected_offset
+
+        # Feed backend result into the real frontend formatter
+        script = _GRAB_FORMATTER + r"""
+let _serverTzName = process.env.SERVER_TZ_NAME;
+let _serverTz = process.env.SERVER_TZ;
+const out = _formatInServerTz(new Date('2026-03-10T13:00:00Z'), {hour:'2-digit',minute:'2-digit',hour12:false});
+const expected = process.env.EXPECTED;
+if (out !== expected) {
+  console.error('E2E FORMATTER MISMATCH for ' + _serverTz + ': got ' + out + ', expected ' + expected);
+  process.exit(1);
+}
+console.log('E2E OK: ' + out);
+"""
+        env = dict(
+            os.environ,
+            SERVER_TZ_NAME=info["server_tz_name"],
+            SERVER_TZ=info["server_tz"],
+            EXPECTED=expected_time,
+        )
+        proc = _node(script, env=env)
+        _assert_node_ok(proc, f"e2e fractional offset {expected_offset}")
+        assert "E2E OK" in proc.stdout
+
+
 if __name__ == "__main__":
     unittest.main()
