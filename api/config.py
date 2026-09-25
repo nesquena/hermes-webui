@@ -4051,6 +4051,8 @@ def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
@@ -4061,7 +4063,9 @@ def resolve_model_reasoning_efforts(
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    raw = _resolve_model_reasoning_efforts_impl(
+        model_id, provider_id, base_url, config_data=config_data
+    )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -4113,8 +4117,11 @@ def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
+    target_cfg = config_data if isinstance(config_data, dict) else cfg
     model = str(model_id or "").strip()
     if not model:
         return []
@@ -4125,7 +4132,7 @@ def _resolve_model_reasoning_efforts_impl(
         try:
             _, provider, resolved_base_url = resolve_model_provider(model)
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            provider = str((target_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -4149,14 +4156,14 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(target_cfg):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (target_cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -4228,6 +4235,8 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> str:
     """Return the closest supported effort for the target model/provider."""
     raw = str(effort or "").strip().lower()
@@ -4248,6 +4257,7 @@ def coerce_reasoning_effort_for_model(
         model_id,
         provider_id=provider_id,
         base_url=base_url,
+        config_data=config_data,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -4369,6 +4379,7 @@ def reasoning_status_for_config(
         resolve_model,
         provider_id=resolve_provider,
         base_url=resolve_base_url,
+        config_data=config_data,
     )
     # supports_thinking_toggle: can the user turn thinking on/off at all? An
     # effort-capable model obviously can. The ZAI gate separately exposes the
@@ -4391,6 +4402,7 @@ def reasoning_status_for_config(
             resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
+            config_data=config_data,
         ),
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),

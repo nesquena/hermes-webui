@@ -885,3 +885,101 @@ def test_switch_profile_returns_coerced_reasoning_contract_for_destination(tmp_p
         profiles._DEFAULT_HERMES_HOME = orig_default
         profiles._active_profile = orig_active
         profiles._tls.profile = None
+
+
+def test_switch_profile_reasoning_uses_destination_provider_capabilities(tmp_path, monkeypatch):
+    """
+    Profile switch must compute destination reasoning status using the
+    destination profile's own configured provider capabilities, never
+    the source profile's global config (#7206 re-gate item 1).
+    """
+    import api.config as config
+    import api.profiles as profiles
+
+    default_home = tmp_path / '.hermes'
+    default_home.mkdir()
+    target_home = default_home / 'profiles' / 'isolated'
+    target_home.mkdir(parents=True)
+
+    # Destination has provider 'mockprov' offering only ['high']
+    (target_home / 'config.yaml').write_text(
+        'model:\n'
+        '  default: custom-reasoning-model\n'
+        '  provider: mockprov\n'
+        'providers:\n'
+        '  mockprov:\n'
+        '    reasoning_efforts: ["high"]\n'
+        'agent:\n'
+        '  reasoning_effort: high\n',
+        encoding='utf-8',
+    )
+
+    orig_default = profiles._DEFAULT_HERMES_HOME
+    profiles._DEFAULT_HERMES_HOME = default_home
+    orig_active = profiles._active_profile
+    profiles._active_profile = 'default'
+    profiles._tls.profile = None
+
+    # Global config simulates source profile having 'mockprov' with only ['low']
+    orig_cfg = config.cfg
+    config.cfg = {
+        'model': {'default': 'custom-reasoning-model', 'provider': 'mockprov'},
+        'providers': {'mockprov': {'reasoning_efforts': ['low']}},
+        'agent': {'reasoning_effort': 'low'},
+    }
+
+    try:
+        result = profiles.switch_profile('isolated', process_wide=False)
+        reasoning = result.get('reasoning')
+        assert reasoning is not None
+        # Destination capability must win: 'high' is supported in destination profile
+        assert reasoning['reasoning_effort'] == 'high'
+        assert reasoning['supported_efforts'] == ['high']
+        assert reasoning['supports_reasoning_effort'] is True
+        assert reasoning['supports_thinking_toggle'] is True
+    finally:
+        config.cfg = orig_cfg
+        profiles._DEFAULT_HERMES_HOME = orig_default
+        profiles._active_profile = orig_active
+        profiles._tls.profile = None
+
+
+def test_switch_profile_reasoning_fallback_when_unresolvable(tmp_path, monkeypatch):
+    """
+    When destination reasoning status cannot be computed (e.g. malformed or
+    unresolvable model data), switch_profile must not crash, and returns
+    reasoning: None so frontend safely falls back (#7206 re-gate item 3).
+    """
+    import api.profiles as profiles
+
+    default_home = tmp_path / '.hermes'
+    default_home.mkdir()
+    target_home = default_home / 'profiles' / 'badcfg'
+    target_home.mkdir(parents=True)
+
+    # Broken config where model is not a valid structure
+    (target_home / 'config.yaml').write_text(
+        'model: "not-a-dict"\n',
+        encoding='utf-8',
+    )
+
+    orig_default = profiles._DEFAULT_HERMES_HOME
+    profiles._DEFAULT_HERMES_HOME = default_home
+    orig_active = profiles._active_profile
+    profiles._active_profile = 'default'
+    profiles._tls.profile = None
+
+    try:
+        monkeypatch.setattr(
+            profiles,
+            '_destination_reasoning_status',
+            lambda *args, **kwargs: None,
+        )
+        result = profiles.switch_profile('badcfg', process_wide=False)
+        assert 'reasoning' in result
+        assert result['reasoning'] is None
+    finally:
+        profiles._DEFAULT_HERMES_HOME = orig_default
+        profiles._active_profile = orig_active
+        profiles._tls.profile = None
+
