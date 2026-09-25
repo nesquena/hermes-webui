@@ -6499,9 +6499,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           const _collapsedInPlace=typeof _collapseJustSettledWorklogInPlace==='function'
             && _collapseJustSettledWorklogInPlace(_settledStreamId);
-          if(!_collapsedInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
+          // #7676: Transparent Stream has no disclosure group for the compact
+          // pass above, so every turn end fell through to a second FULL render
+          // (`innerHTML=''` rebuild of the whole transcript) just to reach the
+          // final settled state — the widest possible blank window. Finalize the
+          // settled transparent scene IN PLACE instead (the keep-open token is
+          // already disarmed, so the row cap is applied there), and keep the full
+          // rebuild as the fallback whenever that in-place finalize reports it
+          // did nothing or left the turn blank.
+          const _settledInPlace=!!_collapsedInPlace
+            || (typeof _finalizeJustSettledTransparentScene==='function'
+              && _finalizeJustSettledTransparentScene(_settledStreamId));
+          if(!_settledInPlace&&typeof _renderMessagesWithScrollSnapshot==='function'){
             _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
-          }else if(!_collapsedInPlace){
+          }else if(!_settledInPlace){
             renderMessages({preserveScroll:true});
           }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);

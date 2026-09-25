@@ -10202,6 +10202,56 @@ function _liveTurnCarriesUnsettledContent(turn){
   ).length) return true;
   return turn.querySelectorAll('[data-live-assistant="1"]').length>1;
 }
+function _normalizeTransferredLiveProse(turn){
+  // #7676 (Transparent Stream): a transferred live turn can carry the final
+  // answer in a segment that is deliberately hidden while its scene rows render
+  // the activity — `assistant-segment-worklog-source` + aria-hidden + hidden.
+  // If that node lands as the pane's ONLY copy of the reply (scene rows already
+  // removed by the settle render), the settled reply renders blank. After the
+  // node is attached, un-hide the retained final prose as the fallback — unless
+  // another visible scene row actually owns the prose.
+  //
+  // Visibility here is STRUCTURAL (hidden/aria-hidden/display), not geometric:
+  // this runs before the node is attached, where getClientRects() is empty for
+  // everything.
+  if(!turn||!turn.querySelectorAll) return turn;
+  const _segs=turn.querySelectorAll('.assistant-segment.assistant-segment-worklog-source[data-live-assistant="1"]');
+  if(!_segs||!_segs.length) return turn;
+  const _structVisible=(el)=>!!(el
+    && !el.hidden
+    && el.getAttribute('aria-hidden')!=='true'
+    && !(el.style&&el.style.display==='none'));
+  const _rows=Array.prototype.slice.call(turn.querySelectorAll(
+    '[data-anchor-scene-row="1"],.transparent-event-row,.tool-worklog-group,.tool-card-row'
+  ));
+  // While a stream is still attached, the transparent live scene keeps the
+  // streaming prose hidden ON PURPOSE (the rows are the progress surface) — a
+  // mid-stream render must not start showing it early. A reconnecting pane has
+  // no attached stream (S.activeStreamId null) and may reveal.
+  const _streaming=(typeof S!=='undefined'&&S&&!!S.activeStreamId);
+  const _otherVisibleContent=(()=>{
+    for(const other of turn.querySelectorAll('.assistant-segment')){
+      if(Array.prototype.indexOf.call(_segs,other)!==-1) continue;
+      if(other.classList.contains('assistant-segment-worklog-source')) continue;
+      if(_structVisible(other)&&(other.textContent||'').trim()) return true;
+    }
+    return _rows.some(row=>_structVisible(row)&&(row.textContent||'').trim());
+  })();
+  Array.prototype.slice.call(_segs).forEach(seg=>{
+    const text=(seg.textContent||'').trim();
+    if(!text) return;
+    const tail=text.slice(-Math.min(40,text.length));
+    const _owned=_rows.some(row=>_structVisible(row)&&(row.textContent||'').indexOf(tail)!==-1);
+    if(_owned) return;             // another visible scene row already shows this prose
+    if(_streaming&&_otherVisibleContent) return;  // live scene still owns the frame
+    seg.classList.remove('assistant-segment-worklog-source');
+    seg.removeAttribute('aria-hidden');
+    seg.removeAttribute('hidden');
+    seg.hidden=false;
+    if(seg.style) seg.style.display='';
+  });
+  return turn;
+}
 function _settledTranscriptOwnsLiveTurn(sid, turn){
   if(!turn) return false;
   const msgs=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:null;
@@ -14942,6 +14992,53 @@ function _collapseJustSettledWorklogInPlace(streamId){
   }
   return true;
 }
+function _finalizeJustSettledTransparentScene(streamId){
+  // #7676 (Transparent Stream): the settled transparent scene is written by the
+  // FIRST settle render while the keep-open token is still armed, so it renders
+  // uncapped — and the compact path above cannot act on it (transparent activity
+  // rows are flat; there is no disclosure group to collapse). STREAM_DONE
+  // therefore used to fall through to a SECOND full render (`innerHTML=''`
+  // rebuild of the entire transcript) purely to reach the final state — the
+  // widest possible blank window, once per turn end.
+  //
+  // Finalize in place instead: re-render ONLY this turn's settled scene now that
+  // the token is disarmed (so the row cap and the retained-final-prose state are
+  // applied), never touching the rest of the transcript. Returns true only when
+  // that in-place finalize actually happened AND the turn is visibly non-blank;
+  // otherwise the caller must keep the full rebuild as the fallback.
+  if(!streamId) return false;
+  if(typeof isTransparentStream!=='function'||!isTransparentStream()) return false;
+  const inner=$('msgInner');
+  if(!inner||!Array.isArray(S.messages)) return false;
+  const msgs=S.messages;
+  let ownerIdx=-1;
+  for(let i=msgs.length-1;i>=0;i--){
+    const msg=msgs[i];
+    if(msg&&msg.role==='assistant'&&msg._anchor_activity_scene
+       &&typeof _settledAssistantStreamId==='function'
+       &&_settledAssistantStreamId(msg)===String(streamId)){
+      ownerIdx=i;break;
+    }
+  }
+  if(ownerIdx<0) return false;
+  const segment=inner.querySelector('.assistant-segment[data-msg-idx="'+ownerIdx+'"]');
+  if(!segment) return false;
+  const turn=typeof segment.closest==='function'?segment.closest('.assistant-turn'):null;
+  if(!turn) return false;
+  if(!_renderSettledAnchorSceneTransparentForMessage(msgs[ownerIdx],segment,ownerIdx)) return false;
+  const _visibleRows=turn.querySelectorAll('.transparent-event-row:not([hidden]):not([aria-hidden="true"])');
+  if(_assistantTurnHasVisibleRenderedSegment(turn)!==true&&!_visibleRows.length) return false;
+  // The skipped full render was also the one that (re)wrote _sessionHtmlCache:
+  // the first settle render is excluded while the keep-open token is armed, so
+  // drop any older entry for this session — a later switch must rebuild from
+  // S.messages instead of restoring pre-settle HTML.
+  if(typeof _sessionHtmlCache!=='undefined'&&_sessionHtmlCache
+     &&typeof _sessionHtmlCache.delete==='function'){
+    _sessionHtmlCache.delete(S.session&&S.session.session_id);
+    if(typeof _sessionHtmlCacheSid!=='undefined') _sessionHtmlCacheSid=null;
+  }
+  return true;
+}
 // True while a just-settled worklog is being force-rendered open (between
 // _armKeepSettledWorklogOpen and _disarmKeepSettledWorklogOpen). renderMessages()
 // consults this so it does NOT write the forced-open DOM into _sessionHtmlCache:
@@ -17421,7 +17518,18 @@ function renderMessages(options){
       const _hasLiveAssistantProjection=Array.isArray(S.messages)&&S.messages.some(m=>
         m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined)
       );
-      if(S.activeStreamId || _hasLiveAssistantProjection){
+      // #7676: TERMINAL SETTLEMENT OWNS THE TURN. The live-projection branch
+      // above exists for the reconnect case — the pane is still working
+      // (S.busy) when the SSE transport drops and the journal snapshot carries
+      // live markers. It must NOT apply once the pane has settled: after
+      // `done`/`cancel` the projection is the authority, and re-attaching the
+      // parser-owned node over it can re-pin the pre-settle live DOM — which
+      // in Transparent Stream carries the final prose hidden
+      // (`assistant-segment-worklog-source` + aria-hidden + hidden) with its
+      // scene rows already removed, i.e. the reported blank (#7676). A settled
+      // pane (idle, no live stream ownership) therefore never preserves.
+      const _paneSettled=S.busy===false && !S.activeStreamId;
+      if(S.activeStreamId || (_hasLiveAssistantProjection && !_paneSettled)){
         _preservedLiveTurn=_lt;
       }
     }
@@ -18846,83 +18954,6 @@ function renderMessages(options){
       }
     }
   }
-  // Fail-safe invariant (#3875): a settled assistant turn must never render with
-  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
-  // assistant segments into a collapsed Worklog card and hides the source segment
-  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
-  // turn also has a visible final answer. But when a turn's ONLY content is folded
-  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
-  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
-  // worklog card built with no expandable tool steps), every segment is hidden and
-  // the turn paints as nothing — leaving the transcript a bare stack of date
-  // separators (#3875 brick). Reveal such turns so their content is never silently
-  // swallowed: expand the turn's Worklog group(s) when the turn has no other
-  // visible content. This NEVER touches a turn that has any visible segment, so the
-  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
-  // The live turn is excluded by its `liveAssistantTurn` id (it drives its own
-  // state during a stream), so this sweep is safe to run even while busy — a
-  // historical blank turn must not re-paint blank during a follow-up stream
-  // (Opus advisor, stage-342).
-  {
-    const _turnHasVisibleContent=(turn)=>{
-      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
-        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
-      }
-      // Keep the extracted renderMessages test harness self-contained.
-      if(!turn||typeof turn.querySelectorAll!=='function') return false;
-      for(const seg of turn.querySelectorAll('.assistant-segment')){
-        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
-        if(seg.classList.contains('assistant-segment-anchor')) continue;
-        if((seg.textContent||'').trim()) return true;
-      }
-      return false;
-    };
-    for(const turn of inner.querySelectorAll('.assistant-turn')){
-      if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
-      if(_turnHasVisibleContent(turn)) continue;
-      // No visible content — surface the folded Worklog so the turn isn't blank.
-      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
-      let revealed=false;
-      for(const group of groups){
-        // A settled Worklog whose rows are still deferred (#5839) has an empty
-        // textContent but is not empty in substance. Judging it empty here drops
-        // through to the last-resort un-hide below, and the deferred rows then
-        // materialize the same prose beside the segments it just un-hid.
-        // Materialize first, then judge.
-        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
-           &&typeof _materializeDeferredWorklogRows==='function'){
-          _materializeDeferredWorklogRows(group);
-        }
-        if(!(group.textContent||'').trim()) continue; // empty group can't help
-        if(group.classList.contains('tool-call-group-collapsed')){
-          group.classList.remove('tool-call-group-collapsed');
-          group.classList.add('open');
-          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
-          if(summary) summary.setAttribute('aria-expanded','true');
-          // #5839: this turn is otherwise blank, so materialize any deferred
-          // settled rows now that we're force-expanding the worklog to fill it.
-          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
-        }
-        // `revealed` means "this turn has a non-empty Worklog group that the user
-        // can see" — NOT "we just expanded something". An already-open non-empty
-        // group is itself visible (it slips past _turnHasVisibleContent only
-        // because that check inspects .assistant-segment nodes, not group bodies),
-        // so the turn isn't truly blank and the last-resort un-hide below is
-        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
-        revealed=true;
-      }
-      // Last resort: no usable worklog group either, but hidden worklog-source
-      // segments carry the real text — un-hide them so nothing is lost.
-      if(!revealed){
-        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
-          if(!(seg.textContent||'').trim()) continue;
-          seg.classList.remove('assistant-segment-worklog-source');
-          seg.removeAttribute('aria-hidden');
-          seg.hidden=false;
-        }
-      }
-    }
-  }
   // Re-attach the preserved live turn (#3877). The rebuild above recreated a
   // live turn from S.messages, but the live assistant message's content lags the
   // stream (it is only persisted to S.messages on a throttled write-back) — so the
@@ -18951,6 +18982,14 @@ function renderMessages(options){
   // no live segment to swap into. No-op for a settled turn or when nothing was
   // streaming.
   if(_preservedLiveTurn){
+    // #7676: the transferred node may hold the final answer in a segment that
+    // the transparent live scene hides (`assistant-segment-worklog-source` +
+    // aria-hidden + hidden) while its scene rows rendered the activity. If this
+    // node is about to become the pane's only copy of the reply (rows already
+    // removed by the settle render), the reply would go blank — so normalize the
+    // retained prose FIRST (it un-hides only when no visible scene row owns it),
+    // before any branch re-attaches the node.
+    _normalizeTransferredLiveProse(_preservedLiveTurn);
     const _rebuilt=document.getElementById('liveAssistantTurn');
     // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
     // post-tool activity boundaries a live turn can carry MULTIPLE
@@ -19024,6 +19063,90 @@ function renderMessages(options){
           // live projection), so #3877 preservation is untouched.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           inner.appendChild(_preservedLiveTurn);
+        }
+      }
+    }
+  }
+  // Fail-safe invariant (#3875): a settled assistant turn must never render with
+  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
+  // assistant segments into a collapsed Worklog card and hides the source segment
+  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
+  // turn also has a visible final answer. But when a turn's ONLY content is folded
+  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
+  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
+  // worklog card built with no expandable tool steps), every segment is hidden and
+  // the turn paints as nothing — leaving the transcript a bare stack of date
+  // separators (#3875 brick). Reveal such turns so their content is never silently
+  // swallowed: expand the turn's Worklog group(s) when the turn has no other
+  // visible content. This NEVER touches a turn that has any visible segment, so the
+  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
+  // The live turn is excluded by its `liveAssistantTurn` id while a stream
+  // still owns it (it drives its own state during a stream), so this sweep is
+  // safe to run even while busy — a historical blank turn must not re-paint
+  // blank during a follow-up stream (Opus advisor, stage-342). A SETTLED live
+  // turn is covered (#7676): the invariant runs after every preservation and
+  // swap decision above, so a transferred blank live node is revealed rather
+  // than pinned as the pane's zero-visible-content reply.
+  {
+    const _turnHasVisibleContent=(turn)=>{
+      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
+        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
+      }
+      // Keep the extracted renderMessages test harness self-contained.
+      if(!turn||typeof turn.querySelectorAll!=='function') return false;
+      for(const seg of turn.querySelectorAll('.assistant-segment')){
+        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+        if(seg.classList.contains('assistant-segment-anchor')) continue;
+        if((seg.textContent||'').trim()) return true;
+      }
+      return false;
+    };
+    const _liveTurnSettled=(S.busy===false && !S.activeStreamId); // #7676
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      // #7676: the invariant must hold for a SETTLED live turn too — the
+      // transparent settle can transfer a node whose only copy of the reply is
+      // hidden. An ACTIVE stream still owns its node and drives its own state.
+      if(turn.id==='liveAssistantTurn'&&!_liveTurnSettled) continue;
+      if(_turnHasVisibleContent(turn)) continue;
+      // No visible content — surface the folded Worklog so the turn isn't blank.
+      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
+      let revealed=false;
+      for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
+        if(!(group.textContent||'').trim()) continue; // empty group can't help
+        if(group.classList.contains('tool-call-group-collapsed')){
+          group.classList.remove('tool-call-group-collapsed');
+          group.classList.add('open');
+          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
+          if(summary) summary.setAttribute('aria-expanded','true');
+          // #5839: this turn is otherwise blank, so materialize any deferred
+          // settled rows now that we're force-expanding the worklog to fill it.
+          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
+        }
+        // `revealed` means "this turn has a non-empty Worklog group that the user
+        // can see" — NOT "we just expanded something". An already-open non-empty
+        // group is itself visible (it slips past _turnHasVisibleContent only
+        // because that check inspects .assistant-segment nodes, not group bodies),
+        // so the turn isn't truly blank and the last-resort un-hide below is
+        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
+        revealed=true;
+      }
+      // Last resort: no usable worklog group either, but hidden worklog-source
+      // segments carry the real text — un-hide them so nothing is lost.
+      if(!revealed){
+        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
+          if(!(seg.textContent||'').trim()) continue;
+          seg.classList.remove('assistant-segment-worklog-source');
+          seg.removeAttribute('aria-hidden');
+          seg.hidden=false;
         }
       }
     }
