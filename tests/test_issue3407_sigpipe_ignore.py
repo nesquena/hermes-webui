@@ -28,10 +28,10 @@ def test_sigpipe_set_to_ignore_by_startup_helper():
         # Windows / no-SIGPIPE platform: nothing to assert, importing server
         # must simply not raise (covered by test_import_does_not_raise below).
         return
-    import server
+    from api.runtime_bootstrap import ignore_sigpipe
     previous = signal.getsignal(signal.SIGPIPE)
     try:
-        server._ignore_sigpipe()
+        ignore_sigpipe()
         current = signal.getsignal(signal.SIGPIPE)
         assert current == signal.SIG_IGN, (
             "server.py must set SIGPIPE to SIG_IGN so a dropped client mid-response "
@@ -96,10 +96,11 @@ def test_sigpipe_handler_is_getattr_guarded_in_source():
     """The handler must be guarded with getattr(signal, 'SIGPIPE', None) so the
     POSIX-only signal can't AttributeError on Windows (native-Windows support,
     #1952)."""
-    src = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
+    src = (REPO_ROOT / "api" / "runtime_bootstrap.py").read_text(encoding="utf-8")
     assert 'getattr(signal, "SIGPIPE"' in src or "getattr(signal, 'SIGPIPE'" in src, (
-        "server.py must resolve SIGPIPE via getattr so it is Windows-safe; a "
+        "runtime_bootstrap.py must resolve SIGPIPE via getattr so it is Windows-safe; a "
         "bare signal.SIGPIPE reference would AttributeError on native Windows."
     )
-    assert "SIG_IGN" in src, "server.py must set the SIGPIPE handler to SIG_IGN"
-    assert "def main() -> None:" in src and "_ignore_sigpipe()" in src
+    assert "SIG_IGN" in src, "runtime_bootstrap.py must set the SIGPIPE handler to SIG_IGN"
+    server_src = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
+    assert "def main() -> None:" in server_src and "ignore_sigpipe()" in server_src

@@ -10,10 +10,10 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-def _ignore_sigpipe() -> None:
-    """Keep broken client writes from terminating the server process."""
-    if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
-        signal.signal(sigpipe, signal.SIG_IGN)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from api.runtime_bootstrap import activate_hermes_runtime, ignore_sigpipe
+activate_hermes_runtime()
 
 # Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
@@ -546,7 +546,7 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
-    _ignore_sigpipe()
+    ignore_sigpipe()
 
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /

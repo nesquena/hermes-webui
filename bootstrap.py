@@ -250,7 +250,11 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 
 
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
-    script = "import yaml\nfrom run_agent import AIAgent\n"
+    # Import the agent first: source-installed Hermes may re-exec this probe into
+    # its PM-managed runtime during ``run_agent`` import.  Importing WebUI-only
+    # dependencies before that activation makes the re-executed ``-c`` body run
+    # without the managed site-packages on its first pass.
+    script = "from run_agent import AIAgent\nimport yaml\n"
     env = os.environ.copy()
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
