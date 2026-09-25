@@ -234,6 +234,87 @@ def test_none_profile_session_keeps_bare_404(
     assert status == 404, f"None-profile row must stay 404, got {status}: {payload}"
 
 
+def test_none_profile_messaging_row_404s_without_materializing(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826: a profile=None metadata row must be rejected BEFORE any
+    materialization path — even when the row looks like a messaging session.
+    The old guard only 409'd for truthy profiles, so a None row fell through
+    and could construct/save a writable Session into whichever profile
+    happened to be active. Assert the rejection happens up front: no
+    Session ctor, no save, no publish, and no import_cli_session."""
+    legacy_meta = dict(CLI_META_OTHER, profile=None)
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+    # Make the row look like a messaging-session record — the rejection must
+    # happen before this check is even consulted.
+    monkeypatch.setattr(routes_module, "_is_messaging_session_record",
+                        lambda _m: True)
+    side_effects = []
+
+    class _SpySession:
+        def __init__(self, *a, **k):
+            side_effects.append("Session-ctor")
+
+        def save(self, *a, **k):
+            side_effects.append("save")
+
+        def compact(self):
+            return {"session_id": "legacy-sid-no-profile", "archived": False}
+
+    monkeypatch.setattr(routes_module, "Session", _SpySession)
+    monkeypatch.setattr(routes_module, "import_cli_session",
+                        lambda *a, **k: side_effects.append("import"))
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: side_effects.append("publish"))
+
+    status, _ = _post_archive(routes_module, {
+        "session_id": "legacy-sid-no-profile", "archived": True})
+
+    assert status == 404, "profile=None messaging row must be rejected with 404"
+    assert side_effects == [], (
+        f"None-profile rejection must not construct/save/import/publish: "
+        f"{side_effects}")
+
+
+def test_none_profile_non_messaging_nonempty_transcript_404s_without_import(
+    routes_module, archive_env, monkeypatch
+):
+    """#7826: the non-messaging branch with a NONEMPTY CLI transcript must
+    also hit the bare 404. The pre-fix test proved only that an empty
+    session 404s; a profile-less row with real messages would have been
+    imported into the active profile. Rejection must happen before
+    get_cli_session_messages/import_cli_session are reached."""
+    legacy_meta = dict(CLI_META_OTHER, profile=None)
+    monkeypatch.setattr(
+        routes_module, "_lookup_cli_session_metadata",
+        lambda _sid, *, all_profiles=False: legacy_meta if all_profiles else {})
+    # Non-messaging row (fixture default) but with a rich transcript — the
+    # old bare-404 test's empty-messages 404 must not be what saves us.
+    monkeypatch.setattr(routes_module, "_is_messaging_session_record",
+                        lambda _m: False)
+    calls = []
+    monkeypatch.setattr(routes_module, "get_cli_session_messages",
+                        lambda _sid: calls.append("get") or [{"role": "user",
+                                                              "content": "x"}])
+    side_effects = []
+    monkeypatch.setattr(routes_module, "import_cli_session",
+                        lambda *a, **k: side_effects.append("import"))
+    monkeypatch.setattr(routes_module, "publish_session_list_changed",
+                        lambda *a, **k: side_effects.append("publish"))
+
+    status, _ = _post_archive(routes_module, {
+        "session_id": "legacy-sid-no-profile", "archived": True})
+
+    assert status == 404, ("None-profile non-messaging row with a nonempty "
+                           "transcript must stay 404")
+    assert calls == [], (
+        f"None-profile rejection must precede get_cli_session_messages: {calls}")
+    assert side_effects == [], (
+        f"None-profile rejection must not import/publish: {side_effects}")
+
+
 def test_archive_handler_passes_all_profiles_on_retry():
     """Static pin: the handler's fallback retry uses all_profiles=True."""
     src = ROUTES_PY.read_text(encoding="utf-8")
