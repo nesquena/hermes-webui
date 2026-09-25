@@ -10,6 +10,16 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Hermes Agent's managed-interpreter relaunch (hermes_bootstrap -> venv_sync.prepare_launch)
+# re-execs into an isolated (-I) interpreter and re-runs this file via runpy.run_path with a
+# bare sys.path containing only the Agent's own root. That drops this directory, so the
+# `api.*` imports below fail with "No module named 'api'" on the second (relaunched) run.
+# Restoring our own directory before those imports makes both the original and relaunched
+# runs resolve `api` the same way.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
 def _ignore_sigpipe() -> None:
     """Keep broken client writes from terminating the server process."""
     if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
