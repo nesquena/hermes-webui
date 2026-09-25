@@ -588,6 +588,18 @@ function _agentCommandResultId(result){
 async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){
   const commandId=_agentCommandResultId(result);
   if(!ownerSid||!commandId||typeof loadSession!=='function')return false;
+  const activeProfile=(S&&S.activeProfile)||'default';
+  const profileMatches=typeof _profileMatchesActiveProfile!=='function'
+    ||_profileMatchesActiveProfile(ownerProfile,activeProfile);
+  const sessionMatches=!(S&&S.session&&S.session.session_id)
+    ||S.session.session_id===ownerSid;
+  if(!profileMatches||!sessionMatches){
+    if(typeof showToast==='function')showToast(
+      'Command output was saved in the original conversation. Switch back to see it.',
+      4000,'warning'
+    );
+    return false;
+  }
   // The endpoint is explicitly telling us that the returned output is not a
   // durable terminal transcript row. Keep the returned warning visible rather
   // than hiding it behind an otherwise successful reload.
