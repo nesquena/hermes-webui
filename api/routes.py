@@ -16495,7 +16495,6 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
-            _invalidate_webui_command_runs(sid)
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
@@ -16602,7 +16601,6 @@ def handle_post(handler, parsed) -> bool:
         if keep < 0:
             return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
-            _invalidate_webui_command_runs(body["session_id"])
             from api.session_ops import truncate_session_at_keep
 
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)

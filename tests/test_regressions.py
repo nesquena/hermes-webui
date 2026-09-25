@@ -2216,6 +2216,47 @@ def test_webui_command_reconcile_requires_durable_terminal_row_and_surfaces_warn
     assert out["loads"] == 3
 
 
+def test_reconcile_agent_command_transcript_refuses_profile_or_session_mismatch():
+    """Reconciliation must not let an old owner reload over the active UI."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    result_id = _js_block(source, "function _agentCommandResultId(result){", "\nasync function _reconcileAgentCommandTranscript")
+    reconcile = _js_block(source, "async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){", "\nasync function resolveBundleCommand")
+    script = textwrap.dedent(
+        """
+        const S={session:{session_id:'sid-B'},activeProfile:'other-profile',activeProfileIsDefault:false,messages:[]};
+        let loads=0;
+        const toasts=[];
+        const showToast=(...args)=>toasts.push(args);
+        const loadSession=async()=>{ loads++; };
+        const _profileMatchesActiveProfile=(owner,active)=>owner===active;
+        %(result_id)s
+        %(reconcile)s
+        (async()=>{
+          const profileMismatch=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          S.activeProfile='default';
+          const sessionMismatch=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          console.log(JSON.stringify({profileMismatch,sessionMismatch,loads,toasts}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"result_id": result_id, "reconcile": reconcile}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["profileMismatch"] is False
+    assert out["sessionMismatch"] is False
+    assert out["loads"] == 0
+    assert len(out["toasts"]) == 2
+
+
 def _run_webui_plugin_command_scenario(*, reject=False):
     """Run the real awaited plugin-command branch while ownership changes."""
     import json

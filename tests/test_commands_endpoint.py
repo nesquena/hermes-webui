@@ -758,6 +758,115 @@ def test_commands_exec_stale_finalizer_cannot_overwrite_replacement_marker(monke
     )
 
 
+@pytest.mark.parametrize("mutation", ["clear", "truncate"])
+def test_commands_exec_same_id_cannot_rerun_while_session_mutation_is_in_flight(monkeypatch, tmp_path, mutation):
+    """Clearing or truncating must not release a live command's idempotency fence."""
+    from api import commands, config, routes, session_ops
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    lock = threading.RLock()
+    command_id = "webui-command-clear-running"
+    sid = "clear-running-command-session"
+    session_path = tmp_path / "session.json"
+
+    class Session:
+        session_id = sid
+        profile = "default"
+        read_only = False
+        is_read_only = False
+        parent_session_id = None
+        path = session_path
+
+        def __init__(self):
+            self.messages = []
+            self.context_messages = []
+            self.tool_calls = []
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+            self.path.write_text(json.dumps({
+                "messages": self.messages,
+                "context_messages": self.context_messages,
+                "truncation_watermark": 0.0,
+                "truncation_boundary": 0.0,
+                "active_stream_id": getattr(self, "active_stream_id", None),
+                "pending_user_message": getattr(self, "pending_user_message", None),
+                "pending_attachments": getattr(self, "pending_attachments", []),
+                "pending_started_at": getattr(self, "pending_started_at", None),
+                "pending_user_source": getattr(self, "pending_user_source", None),
+                "clear_generation": getattr(self, "clear_generation", None),
+            }))
+
+        def compact(self):
+            return {"session_id": self.session_id, "messages": self.messages}
+
+    session = Session()
+
+    def execute(_command):
+        calls.append(_command)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+            return "first result"
+        return "duplicate result"
+
+    def clear_messages(target, _keep):
+        target.messages = []
+        target.context_messages = []
+        target.truncation_watermark = 0.0
+        target.truncation_boundary = 0.0
+        return 0, 0
+
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: lock)
+    monkeypatch.setattr(commands, "execute_agent_command", execute)
+    monkeypatch.setattr(session_ops, "truncate_session_at_keep", clear_messages)
+    monkeypatch.setattr(session_ops, "apply_session_title_rename", lambda *_args: None)
+    monkeypatch.setattr(config, "_evict_session_agent", lambda _sid: None)
+
+    payload = {
+        "command": "/memory pending",
+        "session_id": sid,
+        "command_id": command_id,
+    }
+    first_handler = _RouteHandler(payload)
+    first_thread = threading.Thread(
+        target=routes.handle_post,
+        args=(first_handler, SimpleNamespace(path="/api/commands/exec", query="")),
+        daemon=True,
+    )
+    first_thread.start()
+    assert entered.wait(5)
+
+    mutation_handler = _RouteHandler({
+        "session_id": sid,
+        **({"keep_count": 0} if mutation == "truncate" else {}),
+    })
+    routes.handle_post(
+        mutation_handler,
+        SimpleNamespace(
+            path=f"/api/session/{mutation}",
+            query="",
+        ),
+    )
+    assert mutation_handler.status == 200
+
+    retry_handler = _RouteHandler(payload)
+    routes.handle_post(retry_handler, SimpleNamespace(path="/api/commands/exec", query=""))
+    assert retry_handler.status == 409
+    assert calls == ["/memory pending"]
+
+    release.set()
+    first_thread.join(5)
+    assert not first_thread.is_alive()
+    assert first_handler.status == 200
+
+
 def test_commands_exec_recovers_orphaned_pending_marker_without_reexecution(monkeypatch):
     """A same-id retry after restart settles an orphan marker without repeating its side effect."""
     from api import commands, routes
