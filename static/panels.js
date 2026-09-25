@@ -13071,10 +13071,19 @@ let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
+// Completions whose bounded session lookup failed, remembered on the page so the
+// poll cursor can advance instead of replaying them. Bounded: at most
+// _CRON_PENDING_MAX entries, each retried at most _CRON_PENDING_ATTEMPTS times.
+const _CRON_PENDING_MAX=50;
+const _CRON_PENDING_ATTEMPTS=5;
+const _cronPendingDetails=new Map();  // `${job_id}:${completed_at}` -> {job_id, completed_at, attempts}
 
 function _resetCronUnreadForProfileSwitch(){
   _cronPollGeneration++;
   _cronNewJobIds.clear();
+  // Guarded: the tests that lift this function out of the file declare only the
+  // cron globals they need, so an unguarded read would throw there.
+  if(typeof _cronPendingDetails!=='undefined') _cronPendingDetails.clear();
   _cronPollSince=Date.now()/1000;
   // Clear persisted cron sidebar markers from the profile we left. Non-cron
   // completion unread stays intact (#5960 gate: sticky all-profile leak).
@@ -13091,20 +13100,74 @@ window.addEventListener('hermes:cron_created', () => {
   if ($('cronList')) loadCrons();
 });
 
+function _cronRememberPendingDetails(completions){
+  for(const c of completions||[]){
+    if(!c||c.session_id) continue;
+    const key=`${c.job_id}:${c.completed_at}`;
+    const prev=_cronPendingDetails.get(key);
+    _cronPendingDetails.set(key,{
+      job_id:c.job_id,
+      completed_at:c.completed_at,
+      attempts:prev?prev.attempts:0,
+    });
+  }
+  while(_cronPendingDetails.size>_CRON_PENDING_MAX){
+    _cronPendingDetails.delete(_cronPendingDetails.keys().next().value);
+  }
+}
+
+// Re-fetch the detail for completions whose bounded lookup failed, in a separate
+// narrow request over the window that holds them. The cursor has already moved
+// past them, so this is the only place they are revisited; after
+// _CRON_PENDING_ATTEMPTS the page gives up, so a permanently failing lookup
+// cannot replay a completion (or its badge and toast) forever.
+async function _cronRetryPendingDetails(pollGeneration){
+  if(!_cronPendingDetails.size) return;
+  let since=Infinity;
+  for(const entry of _cronPendingDetails.values()){
+    since=Math.min(since,Number(entry.completed_at)||0);
+  }
+  let data={};
+  try{
+    data=await api(`/api/crons/recent?since=${since-0.001}`,{timeoutToast:false})||{};
+  }catch(e){
+    data={};
+  }
+  if(pollGeneration!==_cronPollGeneration) return;
+  const resolved=new Set();
+  for(const c of (data.completions||[])){
+    const key=`${c.job_id}:${c.completed_at}`;
+    if(!_cronPendingDetails.has(key)||!c.session_id) continue;
+    resolved.add(key);
+    if(typeof _markSessionCompletionUnreadIfBackground==='function'){
+      const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+      _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+        source:'cron',
+        profile:activeProfile,
+      });
+    }
+  }
+  for(const [key,entry] of Array.from(_cronPendingDetails)){
+    if(resolved.has(key)){ _cronPendingDetails.delete(key); continue; }
+    entry.attempts=Number(entry.attempts||0)+1;
+    if(entry.attempts>=_CRON_PENDING_ATTEMPTS) _cronPendingDetails.delete(key);
+  }
+}
+
 function startCronPolling(){
   if(_cronPollTimer) return;
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
       const pollGeneration=_cronPollGeneration;
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      const data=await api(`/api/crons/recent?since=${_cronPollSince}`,{timeoutToast:false});
       if(pollGeneration!==_cronPollGeneration) return;
+      let advanced=_cronPollSince;
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){
             showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           }
-          _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
           if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
             const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
@@ -13113,9 +13176,22 @@ function startCronPolling(){
               profile:activeProfile,
             });
           }
+          advanced=Math.max(advanced,Number(c.completed_at)||0);
+        }
+        // Advance past every completion we were handed, enriched or not. One
+        // whose bounded lookup failed is remembered on the page and re-fetched
+        // separately below; holding the cursor here instead replayed completions
+        // every poll, so an opened job's unread badge came back and old toasts
+        // reappeared once the toast memory evicted them.
+        if(data.session_lookup_failed && typeof _cronRememberPendingDetails==='function'){
+          _cronRememberPendingDetails(data.completions);
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();
+      }
+      _cronPollSince=advanced;
+      if(typeof _cronRetryPendingDetails==='function'){
+        await _cronRetryPendingDetails(pollGeneration);
       }
     }catch(e){}
   },30000);
