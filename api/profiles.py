@@ -44,6 +44,11 @@ _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', ''
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
 _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
+# Snapshot the launcher env before any profile init / dotenv reload can mutate
+# it (#7060 CR). Keys present here are launcher-owned and must not be dropped
+# from os.environ by the profile-scope scrub, even when root .env also defines
+# them — the launcher value always wins (OPENAI_BASE_URL etc.).
+_INITIAL_ENV: frozenset = frozenset(os.environ)
 
 # ── Module state ────────────────────────────────────────────────────────────
 _active_profile = 'default'
@@ -199,6 +204,13 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # profile .env set HERMES_WEBUI_ISOLATED_PROFILE=0 would let a contained user
 # escape isolation (#4589).
 _PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
+# Prefix for HTTP-server WebUI configuration keys (#7060 CR, security). Keys
+# with this prefix are read by check_auth() and other HTTP-server paths on
+# EVERY thread — removing them from os.environ during a named-profile turn
+# would silence OIDC auth for all concurrent HTTP requests. We guard the
+# entire prefix rather than enumerating individual OIDC key names so that
+# future HERMES_WEBUI_* settings are protected by default.
+_HERMES_WEBUI_SERVER_KEY_PREFIX = 'HERMES_WEBUI_'
 
 
 # #7048: explicit, origin-aware allowlist of root/parent .env keys that MAY fall
@@ -1332,8 +1344,12 @@ def _root_only_env_names_for_profile(
             continue  # shared operator settings stay inherited
         if key in _PROTECTED_ENV_KEYS or key in _BLOCKED_RUNTIME_ENV_KEYS:
             continue  # posture/identity keys are handled elsewhere
+        if key.startswith(_HERMES_WEBUI_SERVER_KEY_PREFIX):
+            continue  # HTTP-server config — shared env, never scrub (#7060 CR)
         if key == 'HERMES_HOME':
             continue  # the profile home override has its own machinery
+        if key in _INITIAL_ENV:
+            continue  # launcher-owned: never drop, even if root .env also defines it
         root_only.add(key)
     return root_only
 

@@ -473,3 +473,71 @@ def _layout(tmp_path, monkeypatch):
     for key in _AMBIENT_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     return base, alpha
+
+
+def test_hermes_webui_prefix_keys_never_enter_root_only_scrub_set(tmp_path, monkeypatch):
+    """#7060 CR regression (security): HERMES_WEBUI_* keys are HTTP-server
+    configuration read by check_auth() on EVERY thread.  Including them in the
+    root-only scrub set deletes them from the shared os.environ for the duration
+    of a named-profile worker turn, which silences OIDC auth for all concurrent
+    requests.  They must be excluded unconditionally."""
+    base, alpha = _layout(tmp_path, monkeypatch)
+    _write_env(
+        base / ".env",
+        "HERMES_WEBUI_OIDC_ISSUER=https://auth.example.com\n"
+        "HERMES_WEBUI_OIDC_CLIENT_ID=app-client-id\n"
+        "HERMES_WEBUI_PASSWORD=server-auth-secret\n"
+        "ROOT_SCOPE_KEY=root-value\n",
+    )
+    _write_env(alpha / ".env", "ALPHA_KEY=a\n")
+
+    safe_runtime_env = {"ALPHA_KEY": "a", "HERMES_HOME": str(alpha)}
+    root_only = profiles._root_only_env_names_for_profile(alpha, safe_runtime_env)
+
+    # HERMES_WEBUI_* keys must NEVER be in the scrub set.
+    assert "HERMES_WEBUI_OIDC_ISSUER" not in root_only, (
+        "HERMES_WEBUI_OIDC_ISSUER in root_only scrub set would silence OIDC auth"
+    )
+    assert "HERMES_WEBUI_OIDC_CLIENT_ID" not in root_only
+    assert "HERMES_WEBUI_PASSWORD" not in root_only
+    # Non-HERMES_WEBUI root-only key still works normally.
+    assert "ROOT_SCOPE_KEY" in root_only
+
+
+def test_launcher_owned_env_key_not_scrubbed_when_also_in_root_env(tmp_path, monkeypatch):
+    """#7060 CR regression: a key that the launcher set at startup and that root
+    .env also defines was incorrectly classified as 'root-only' and deleted from
+    os.environ for the duration of a named-profile turn.  The fix uses
+    _INITIAL_ENV (the env snapshot taken at module import time) to detect
+    launcher-owned keys and exclude them from the scrub set regardless of
+    whether root .env repeats them."""
+    base, alpha = _layout(tmp_path, monkeypatch)
+    _write_env(
+        base / ".env",
+        # Root .env defines the same key as the launcher.
+        "OPENAI_BASE_URL=https://api.openai.com/v1\n"
+        "ROOT_ONLY_KEY=root-value\n",
+    )
+    _write_env(alpha / ".env", "ALPHA_KEY=a\n")
+
+    # Simulate a launcher-provided OPENAI_BASE_URL in _INITIAL_ENV.
+    launcher_value = "https://my-gateway.internal/v1"
+    monkeypatch.setitem(os.environ, "OPENAI_BASE_URL", launcher_value)
+    # Patch _INITIAL_ENV so the function sees it as launcher-owned.
+    original_initial_env = profiles._INITIAL_ENV
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_ENV",
+        frozenset(list(original_initial_env) + ["OPENAI_BASE_URL"]),
+    )
+
+    safe_runtime_env = {"ALPHA_KEY": "a", "HERMES_HOME": str(alpha)}
+    root_only = profiles._root_only_env_names_for_profile(alpha, safe_runtime_env)
+
+    # OPENAI_BASE_URL is launcher-owned — must NOT be in the scrub set.
+    assert "OPENAI_BASE_URL" not in root_only, (
+        "launcher-owned OPENAI_BASE_URL should not be in root_only scrub set"
+    )
+    # Keys not in _INITIAL_ENV (pure root-only) still get scrubbed.
+    assert "ROOT_ONLY_KEY" in root_only
+
