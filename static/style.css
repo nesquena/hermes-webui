@@ -3593,6 +3593,19 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   opacity:.7;
   line-height:1;
 }
+.file-icon-download{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:44px;
+  min-height:44px;
+  cursor:pointer;
+  border-radius:4px;
+}
+.file-icon-download:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:-2px;
+}
 
 /* ── Resizable panels ── */
 .resize-handle{

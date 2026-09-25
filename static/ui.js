@@ -21940,6 +21940,31 @@ function _renderTreeItems(container, entries, depth){
       : isDirLike
         ? (isLk ? li('link', 14) : li('folder', 14))
         : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
+    // Only glyphs that actually advertise download get a distinct action.
+    // Other file-type icons still bubble to the row's preview handler.
+    const ext=fileExt(item.name);
+    const hasDownloadGlyph=!isLk && !IMAGE_EXTS.has(ext) && !MD_EXTS.has(ext)
+      && ((typeof DOWNLOAD_EXTS!=='undefined' && DOWNLOAD_EXTS.has(ext)) || ext==='.pdf');
+    if(isFileLike && !isReadOnlyEscape && hasDownloadGlyph){
+      const label=typeof t==='function' ? t('media_download') : 'Download';
+      iconEl.classList.add('file-icon-download');
+      iconEl.title=label;
+      iconEl.setAttribute('role','button');
+      iconEl.setAttribute('tabindex','0');
+      iconEl.setAttribute('aria-label',label+' '+item.name);
+      iconEl.onclick=(e)=>{
+        e.stopPropagation();
+        // The second click of a double-click must not start another download.
+        if(e.detail>1)return;
+        if(typeof downloadFile==='function') downloadFile(item.path);
+      };
+      iconEl.onkeydown=(e)=>{
+        if(e.key==='Enter'||e.key===' '){
+          e.preventDefault();e.stopPropagation();
+          if(typeof downloadFile==='function') downloadFile(item.path);
+        }
+      };
+    }
     el.appendChild(iconEl);
 
     // Name
