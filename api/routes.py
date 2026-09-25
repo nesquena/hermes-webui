@@ -13128,12 +13128,12 @@ def _save_saved_prompts(
     if backup_content:
         backup = _saved_prompts_backup_path(p)
         try:
+            # _atomic_write_text (api.paths) already copies uid/gid and mode
+            # from an existing inode onto the temp descriptor before the
+            # rename. For a brand-new .bak that copy falls back to the
+            # process umask, matching Path.write_text semantics — no extra
+            # seed needed, and no empty inode left behind on write failure.
             _write_text_atomic(backup, backup_content)
-            if source_mode is not None:
-                try:
-                    backup.chmod(source_mode)
-                except OSError:
-                    pass
         except OSError as exc:
             if backup_required:
                 raise
