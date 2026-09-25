@@ -3101,12 +3101,43 @@ def _message_matches_pending_checkpoint(message, pending_text, timestamp, source
         # 500.0 win ownership of a 500.9 current turn after the callers
         # truncated — suppressing the row and clearing pending state.
         return False
-    return (
+    if (
         _normalize_journal_recovery_text(message.get('content'))
-        == _normalize_journal_recovery_text(pending_text)
-        and (message.get('_source') or 'webui') == (source or 'webui')
-        and list(message.get('attachments') or []) == list(attachments or [])
-    )
+        != _normalize_journal_recovery_text(pending_text)
+    ):
+        return False
+    # Optional identity fields: a core-transcript projection carries the
+    # authoritative turn text + timestamp but may omit ``_source`` /
+    # ``attachments`` entirely (the projection does not persist them).
+    # Requiring strict field equality then rejected a row that IS the
+    # pending turn, the caller appended a duplicate user row after the
+    # existing assistant, and turn-scoped replay re-emitted the answer
+    # (2026-09-23 re-gate). So: absent/empty fields on EITHER side are
+    # non-conflicting evidence — accept; only a CONFLICT (both present and
+    # different) is negative evidence.
+    if _source_conflicts(message.get('_source'), source):
+        return False
+    if _attachments_conflict(message.get('attachments'), attachments):
+        return False
+    return True
+
+
+def _source_conflicts(message_source, expected_source) -> bool:
+    """True only when both sources are present AND differ."""
+    msg = str(message_source or '').strip()
+    exp = str(expected_source or '').strip()
+    if not msg or not exp:
+        return False
+    return msg != exp
+
+
+def _attachments_conflict(message_attachments, expected_attachments) -> bool:
+    """True only when both attachment lists are non-empty AND differ."""
+    msg = message_attachments if isinstance(message_attachments, (list, tuple)) else []
+    exp = expected_attachments if isinstance(expected_attachments, (list, tuple)) else []
+    if not msg or not exp:
+        return False
+    return [str(a) for a in msg] != [str(a) for a in exp]
 
 
 def _message_matches_pending_text(message, pending_text):
@@ -5270,20 +5301,26 @@ def _retry_journal_recovery_in_place(
                 owner_index = _cancel_journal_retry_owner_index(session, idx, msg)
                 if owner_index is None:
                     continue
-                recovered_output = _append_journaled_partial_output(
+                recovered_output, terminal_error_recovered, output_accounted_for = (
+                    _recover_journaled_output_and_terminal_error(
                     session,
                     stream_id,
                     dedupe_existing=True,
                     dedupe_min_index=owner_index + 1,
                     dedupe_max_index=idx,
                     append_context=False,
-                    display_only=True,
                 )
-                terminal_error_recovered = False
-            else:
-                if not stream_id:
-                    # No stream id to retry against; demote immediately.
-                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+            )
+            # A dedupe hit (no fresh row appended this pass) still means the
+            # journal's visible output is represented in the transcript, so
+            # the marker is resolved: keeping "reload to retry" visible would
+            # spend a retry budget on every read for output that is already
+            # on screen (2026-09-23 re-gate, api/models.py:3789). Only a
+            # genuine "nothing visible to recover" (all three False) may
+            # leave the marker armed for the next lazy pass.
+            if recovered_output or terminal_error_recovered or output_accounted_for:
+                if not terminal_error_recovered:
+                    msg['content'] = _INTERRUPTED_RECOVERED_WORDING
                     _strip_journal_retry_meta(msg)
                     try:
                         session.save(touch_updated_at=False)
@@ -5444,6 +5481,53 @@ def _retry_journal_recovery_in_place(
             getattr(session, 'session_id', '?'),
         )
         return False
+
+
+def _promote_or_refresh_reused_marker(
+    session,
+    marker_idx: int,
+    *,
+    resolved: bool,
+    terminal_error: bool,
+    stream_id: str | None = None,
+) -> None:
+    """Update a reused same-stream marker in place instead of leaving it stale.
+
+    Two reuse shapes (2026-09-23 re-gate, ``api/models.py``):
+
+    * ``resolved`` — this repair pass proved the marker's journal output is
+      accounted for (freshly appended, or dedupe-reused) or materialized a
+      terminal error. The stale marker must be PROMOTED: retry meta
+      stripped, wording switched to the recovered/terminal form, and any
+      journaled rows recovered after it reordered above it so the user does
+      not see "reload to retry" sitting underneath recovered output.
+    * not resolved — the marker stays armed, but a later pass that found
+      journal output still needs the marker REORDERED above those rows
+      (otherwise the recovered output renders after the "reload to retry"
+      notice), and its retry metadata refreshed so the budget reflects the
+      latest attempt.
+    """
+    if marker_idx < 0 or marker_idx >= len(session.messages or []):
+        return
+    marker = session.messages[marker_idx]
+    if not isinstance(marker, dict):
+        return
+    if resolved:
+        if not terminal_error:
+            marker['content'] = _INTERRUPTED_RECOVERED_WORDING
+        _strip_journal_retry_meta(marker)
+        # Recovered rows may have landed below the marker (appended at the
+        # tail by this pass or an earlier one) — hoist them above it.
+        _reorder_journal_tail_above_marker(session, marker_idx)
+    else:
+        # Refresh the retry budget on the reused marker: the previous
+        # attempt counter would otherwise keep counting from a stale base.
+        marker['_journal_retry_attempts'] = int(
+            marker.get('_journal_retry_attempts') or 0
+        ) + 1
+        if stream_id and not marker.get('_journal_retry_stream_id'):
+            marker['_journal_retry_stream_id'] = str(stream_id)
+        _reorder_journal_tail_above_marker(session, marker_idx)
 
 
 def _marker_reuse_index(session, stream_id: str | None) -> int | None:
@@ -5643,10 +5727,25 @@ def _apply_core_sync_or_error_marker(
             # untouched (a different stream's marker still needs its own).
             _existing_marker_idx = _marker_reuse_index(session, _stream_id)
             if _existing_marker_idx is not None:
-                # Reuse: do not append. The marker (and its retry meta, if
-                # any) is already in place for this stream; budget is
-                # consumed by the existing marker, not by stacking a new one.
-                pass
+                # Reuse: do not append. The marker stays in place (its retry
+                # budget still guards this stream), but it must be UPDATED,
+                # not left stale: when this pass proved the journal output is
+                # accounted for, promote the marker (strip the retry meta and
+                # recovered wording) and hoist any journaled rows recovered
+                # after it; otherwise refresh its retry counter so the next
+                # lazy pass budgets correctly (2026-09-23 re-gate:
+                # "update and reorder the reused marker instead of leaving it").
+                _promote_or_refresh_reused_marker(
+                    session,
+                    _existing_marker_idx,
+                    resolved=bool(
+                        recovered_output
+                        or _output_accounted_for
+                        or terminal_error_recovered
+                    ),
+                    terminal_error=bool(terminal_error_recovered),
+                    stream_id=_stream_id,
+                )
             else:
                 session.messages.append(
                     _build_recovery_marker_with_retry_hook(
@@ -5743,6 +5842,19 @@ def _apply_core_sync_or_error_marker(
                             stream_id=_stream_id,
                             pending_started_at=_pending_started_at,
                         )
+                    )
+                else:
+                    # Reuse instead of stacking — but promote the existing
+                    # marker: this pass recovered fresh output, so a stale
+                    # retry/pending marker underneath it must be resolved
+                    # and the recovered rows reordered above it (2026-09-23
+                    # re-gate, "update and reorder the reused marker").
+                    _promote_or_refresh_reused_marker(
+                        session,
+                        _existing_marker_idx,
+                        resolved=True,
+                        terminal_error=False,
+                        stream_id=_stream_id,
                     )
             # NOTE: when the core transcript was synced in but the run journal
             # is not yet visible, intentionally do NOT append a lazy-retry

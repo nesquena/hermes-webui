@@ -1037,3 +1037,229 @@ def test_two_identical_journal_tool_events_consume_two_cards(hermes_home):
         f"SILENT 3: one existing card absorbed multiple identical journal "
         f"events (cards={recovered!r})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Re-gate round 2 (nesquena-hermes 2026-09-23): three more silent findings.
+# 1) `output_accounted_for` (dedupe hit) must resolve the retry marker.
+# 2) Reusing a same-stream marker must UPDATE/REORDER it, not no-op.
+# 3) Core-sync ownership must not require `_source` / `attachments` fields
+#    the core projection may not carry.
+# ---------------------------------------------------------------------------
+
+
+def test_dedupe_hit_resolves_retry_marker_instead_of_burning_attempts(hermes_home):
+    """Finding 1: a lazy retry that only hits a content/tool dedupe still
+    proves the journal output is on screen — the marker must be promoted to
+    the recovered wording and the reload hint cleared, instead of returning
+    False (which left 'reload to retry' visible and consumed a retry).
+    """
+    from api.models import _retry_journal_recovery_in_place
+
+    sid = "regate_accounted_for"
+    stream_id = "regate-accounted-stream"
+    append_run_event(sid, stream_id, "token", {"text": "partial answer"})
+
+    # Production shape: the journal's output was already materialized by an
+    # earlier pass (the plain assistant row), and the stale pending-retry
+    # marker sits at the tail — the lazy walk finds it before hitting any
+    # normal assistant row. first_seen must be "now", otherwise the retry
+    # budget's give-up clock demotes the marker before the assertion runs.
+    import time as _time
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 900.5},
+            {
+                "role": "assistant",
+                "content": "partial answer",
+                "timestamp": 900.6,
+            },
+            {
+                "role": "assistant",
+                "content": "reload to retry",
+                "type": "interrupted",
+                "_error": True,
+                "timestamp": 900.7,
+                "_pending_journal_recovery": True,
+                "_journal_retry_stream_id": stream_id,
+                "_journal_retry_attempts": 1,
+                "_journal_retry_first_seen_ts": int(_time.time()),
+            },
+        ],
+    )
+    session.pending_user_message = None  # pending already consumed
+    session.active_stream_id = stream_id
+    session.save()
+
+    resolved = _retry_journal_recovery_in_place(session)
+
+    assert resolved is True, (
+        "a dedupe-only pass must count as resolved recovery "
+        "(output_accounted_for) — returning False burns another retry"
+    )
+    marker = session.messages[-1]
+    assert marker.get("_pending_journal_recovery") is None, (
+        "resolved marker must drop the reload-hint flag"
+    )
+    assert marker.get("_journal_retry_attempts") is None, (
+        "resolved marker must drop the retry metadata"
+    )
+    assert "reload to retry" not in str(marker.get("content") or ""), (
+        "resolved marker must switch to the recovered wording"
+    )
+
+
+def test_reused_marker_is_promoted_when_journal_output_resolves_it(hermes_home):
+    """Finding 2: when a later repair finds journal output, the reused
+    same-stream marker must be UPDATED (retry meta stripped, recovered
+    wording) and the recovered rows reordered ABOVE it — not left as a
+    stale 'reload to retry' sitting underneath recovered output.
+    """
+    sid = "regate_marker_promote"
+    stream_id = "regate-promote-stream"
+    append_run_event(sid, stream_id, "token", {"text": "the answer"})
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 700.5},
+            # Stale pending-retry marker from an earlier repair cycle,
+            # followed (below) by the output a later pass recovered.
+            {
+                "role": "assistant",
+                "content": "reload to retry",
+                "type": "interrupted",
+                "_error": True,
+                "timestamp": 700.7,
+                "_pending_journal_recovery": True,
+                "_journal_retry_stream_id": stream_id,
+                "_journal_retry_attempts": 0,
+                "_journal_retry_first_seen_ts": 700,
+            },
+            {
+                "role": "assistant",
+                "content": "the answer",
+                "timestamp": 700.8,
+                "_recovered_from_run_journal": True,
+            },
+        ],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_started_at = 700.5
+    session.pending_attachments = []
+    session.pending_user_source = None
+    session.save()
+
+    result = _apply_core_sync_or_error_marker(
+        session,
+        hermes_home / "sessions" / f"session_{sid}.json",
+        stream_id_for_recheck=stream_id,
+    )
+    assert result is True
+
+    markers = [
+        (i, m)
+        for i, m in enumerate(session.messages)
+        if isinstance(m, dict) and m.get("type") == "interrupted"
+    ]
+    assert len(markers) == 1, (
+        f"reuse must not stack a second marker: {session.messages!r}"
+    )
+    marker_idx, marker = markers[0]
+    assert marker.get("_pending_journal_recovery") is None, (
+        "the reused marker must be promoted once journal output is "
+        f"accounted for: {marker!r}"
+    )
+    assert "reload to retry" not in str(marker.get("content") or ""), (
+        f"promoted marker must not keep the reload wording: {marker!r}"
+    )
+    # The recovered row must sit ABOVE the marker (reordered).
+    assert marker_idx > 0, (
+        f"marker must not be the first message after promotion: "
+        f"{session.messages!r}"
+    )
+    above = session.messages[marker_idx - 1]
+    assert above.get("_recovered_from_run_journal") and \
+        above.get("content") == "the answer", (
+        f"recovered output must be reordered above the promoted marker: "
+        f"{session.messages!r}"
+    )
+
+
+def test_core_sync_accepts_row_without_source_and_attachments(hermes_home):
+    """Finding 3: a core-transcript row that matches the pending turn on
+    text + full-precision timestamp but carries neither ``_source`` nor
+    ``attachments`` (the core projection does not persist them) must still
+    own the turn — requiring those fields appended a duplicate user row
+    after the existing assistant and turn-scoped replay re-emitted it.
+    """
+    from api.models import _pending_user_row_already_materialized
+
+    sid = "regate_core_projection_row"
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {
+                # Exactly the core-projection shape: no _source, no
+                # attachments keys at all.
+                "role": "user",
+                "content": "core-synced prompt",
+                "timestamp": 3100.25,
+            },
+            {"role": "assistant", "content": "the answer", "timestamp": 3100.3},
+        ],
+    )
+    session.pending_user_message = "core-synced prompt"
+    session.active_stream_id = "stream-x"
+    session.pending_started_at = 3100.25
+    session.pending_attachments = ["/tmp/file.png"]  # pending HAS attachments
+    session.pending_user_source = "cli"  # pending HAS a non-webui source
+
+    owned = _pending_user_row_already_materialized(
+        session, session.messages[0], session.pending_started_at
+    )
+
+    assert owned is True, (
+        "core-projection row without _source/attachments must still own "
+        "the pending turn when text and full-precision timestamp match "
+        "and no field conflicts"
+    )
+
+
+def test_core_sync_still_rejects_conflicting_source_or_attachments(hermes_home):
+    """Control for finding 3: a genuine CONFLICT (both sides present and
+    different) must remain negative evidence — the relaxed comparison only
+    forgives ABSENT fields, never contradictions.
+    """
+    from api.models import (
+        _attachments_conflict,
+        _message_matches_pending_checkpoint,
+        _source_conflicts,
+    )
+
+    assert _source_conflicts(None, "cli") is False
+    assert _source_conflicts("cli", None) is False
+    assert _source_conflicts("cli", "cli") is False
+    assert _source_conflicts("cli", "webui") is True
+
+    assert _attachments_conflict(None, ["/a.png"]) is False
+    assert _attachments_conflict([], []) is False
+    assert _attachments_conflict(["/a.png"], ["/b.png"]) is True
+    assert _attachments_conflict(["/a.png"], ["/a.png"]) is False
+
+    matched = _message_matches_pending_checkpoint(
+        {"role": "user", "content": "p", "timestamp": 5.0, "_source": "cli"},
+        "p",
+        5.0,
+        "webui",  # conflicts with the message's cli
+        [],
+    )
+    assert matched is False, (
+        "a real source conflict must still reject the checkpoint match"
+    )
