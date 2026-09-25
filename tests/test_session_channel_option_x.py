@@ -935,11 +935,10 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
-    # added inside loadSession pushed the fetch-error catch's stream restart past
-    # the old 14000-char cutoff.
+    # Isolate the loadSession body. Keep the window above the current body size;
+    # this test checks structure, not a fixed source-length budget.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 16000]
+    body = js[fn_ix:fn_ix + 18000]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -973,7 +972,9 @@ def test_load_session_rearms_stream_on_every_early_return():
     # but guarded against the self-healed-current (404'd) case so it never
     # spins the reconnect loop against a dead session_id.
     catch_ix = body.index("const _selfHealedCurrent")
-    catch_src = body[catch_ix:catch_ix + 2200]
+    # Keep this window generous because explanatory comments in the guarded
+    # failure path may grow without changing the control-flow invariant.
+    catch_src = body[catch_ix:catch_ix + 4000]
     assert "!_selfHealedCurrent" in catch_src and "startSessionStream(currentSid)" in catch_src, (
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"
