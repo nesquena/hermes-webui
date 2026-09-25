@@ -13288,10 +13288,82 @@ def _load_saved_prompts() -> list:
         return []
 
 
-def _save_saved_prompts(prompts: list) -> None:
+# One generation of backup kept next to the store: any destructive write (the
+# DELETE /api/prompts path in particular) leaves the previous contents behind in
+# `saved_prompts.json.bak`, so a mis-click is recoverable from disk. See #7644.
+_SAVED_PROMPTS_BACKUP_SUFFIX = ".bak"
+
+
+def _saved_prompts_backup_path(p: "Path | None" = None) -> "Path":
+    """Path of the one-generation backup of the saved-prompts store (#7644)."""
+    p = p if p is not None else _saved_prompts_path()
+    return p.with_name(p.name + _SAVED_PROMPTS_BACKUP_SUFFIX)
+
+
+from api.paths import _atomic_write_text
+
+
+def _write_text_atomic(path: "Path", text: str) -> None:
+    """Atomic write wrapper delegating to api.paths._atomic_write_text (tempfile + fsync + os.replace)."""
+    _atomic_write_text(path, text)
+
+
+def _save_saved_prompts(
+    prompts: list,
+    *,
+    backup_required: bool = False,
+    backup_content: "str | None" = None,
+) -> None:
+    """Persist the saved-prompt list, atomically and with one backup generation.
+
+    Two durability guarantees, both added for #7644:
+
+    * the write is atomic via _write_text_atomic / api.paths._atomic_write_text,
+      preserving permissions, ownership, symlink targets, and directory constraints;
+    * the previous generation is copied to `saved_prompts.json.bak` *before* the
+      rewrite, preserving the source's mode/ownership, so a DELETE can be undone.
+
+    With ``backup_required=True`` (the DELETE path, #7647) a backup failure is
+    raised instead of logged: the caller must abort the destructive operation
+    and leave the live store untouched. If ``backup_content`` is passed, it is
+    used directly rather than re-reading the store from disk. Non-destructive
+    writers (POST) keep best-effort behaviour: they log and continue.
+    """
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    source_stat = None
+    source_mode = None
+    if p.exists():
+        try:
+            source_stat = p.stat()
+            source_mode = _stat.S_IMODE(source_stat.st_mode)
+        except OSError:
+            pass
+
+    if backup_content is None and p.is_file():
+        try:
+            backup_content = p.read_text(encoding="utf-8")
+        except Exception as exc:
+            if backup_required:
+                raise OSError(f"could not read saved prompts for backup: {exc}") from exc
+            backup_content = None
+
+    if backup_content:
+        backup = _saved_prompts_backup_path(p)
+        try:
+            # _atomic_write_text (api.paths) already copies uid/gid and mode
+            # from an existing inode onto the temp descriptor before the
+            # rename. For a brand-new .bak that copy falls back to the
+            # process umask, matching Path.write_text semantics — no extra
+            # seed needed, and no empty inode left behind on write failure.
+            _write_text_atomic(backup, backup_content)
+        except OSError as exc:
+            if backup_required:
+                raise
+            logger.warning("saved prompts: could not write backup %s: %s", backup, exc)
+
+    _write_text_atomic(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
@@ -18274,8 +18346,48 @@ def handle_delete(handler, parsed) -> bool:
         pid = str(body.get("id") or "").strip()
         if not pid:
             return bad(handler, "id is required")
-        prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
-        _save_saved_prompts(prompts)
+        p = _saved_prompts_path()
+        try:
+            source_raw = p.read_text(encoding="utf-8") if p.exists() else "[]"
+            before = json.loads(source_raw)
+            if not isinstance(before, list):
+                raise ValueError("saved prompts file does not contain a list")
+        except Exception as exc:
+            logger.error("saved prompt delete aborted: cannot read or verify prompts store: %s", exc)
+            return bad(handler, "could not verify saved prompts before deletion", status=500)
+
+        prompts = [item for item in before if item.get("id") != pid]
+        if len(prompts) == len(before):
+            # #7647: repeat DELETE for an id that is already gone. Rewriting
+            # the store here would rotate .bak onto a generation that no
+            # longer contains the deleted prompt, destroying the only
+            # recovery copy (a stale retry or double-submit is enough).
+            # Return without saving: neither store nor backup is touched, so
+            # the first (oldest) backup for this key is preserved.
+            logger.info(
+                "saved prompt delete repeated: id=%s already gone, backup preserved",
+                pid,
+            )
+            return j(handler, {"ok": True})
+        try:
+            # The recovery backup is committed atomically (tmp + fsync +
+            # rename) BEFORE the store is rewritten; if it cannot be written
+            # the delete aborts here with the live store untouched (#7647).
+            _save_saved_prompts(prompts, backup_required=True, backup_content=source_raw)
+        except OSError as exc:
+            logger.error("saved prompt delete aborted: recovery backup failed: %s", exc)
+            return bad(
+                handler,
+                "could not write the recovery backup; nothing was deleted",
+                status=500,
+            )
+        # #7644: deletions used to be total and silent. The store keeps the
+        # previous generation in .bak and the log records what went away.
+        logger.info(
+            "saved prompt deleted: id=%s (previous generation kept at %s)",
+            pid,
+            _saved_prompts_backup_path().name,
+        )
         return j(handler, {"ok": True})
 
     if parsed.path.startswith("/api/kanban/"):
