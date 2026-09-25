@@ -184,6 +184,32 @@ screenshots. This gate tests page reconstruction, journal-cursor resume, and
 subsequent fixture SSE updates. It does not test a real provider/network or PWA
 service-worker cache behavior.
 
+### Touch sidebar prepend anchor
+
+`./scripts/test.sh tests/test_touch_prepend_browser.py -q` exercises two prepends
+across absent date groups with real Chromium layout and the production stylesheet
+at desktop, tablet, and phone widths. It verifies retained row identity, canonical
+SID/group order, and exact measured scroll compensation, including group headers.
+Install Playwright and Chromium as above; otherwise this optional browser slice
+skips. It does not certify physical iPadOS momentum scrolling.
+
+### Touch session-list windowing and loading affordances
+
+On touch-primary devices the session list renders a bounded `[start,end)` window
+and materializes batches on demand. The bounds are preserved across unchanged-scope
+background repaints (timestamp/SSE/refresh); a real scope change (profile, project,
+source filter, archive page, search, collapsed groups, active session, row count or
+identity) resets both bounds to the initial batch. Loading affordances are
+directional: the bottom "Loading more…" indicator appears only when rows remain
+below the window (`end < total`), and a distinct top indicator appears when rows
+remain above it (`start > 0`). Batching direction is derived from live DOM
+boundaries on both edges, independent of the bottom indicator's visibility; a
+viewport stranded entirely above the rendered window (scroll-indicator overshoot)
+does not arm upward prepends. Pointer taps on the list do not enter the momentum
+cooldown — only real scroll events defer background renders. Direct group-collapse
+taps force an immediate render bypassing that deferral. Gate-blocker regressions:
+`./scripts/test.sh tests/test_ipad_gate_blockers.py tests/test_ipad_sidebar_scroll_stuck.py -q`.
+
 ### Streaming reader intent
 
 While a response is still streaming, scroll upward with a trackpad or wheel to
