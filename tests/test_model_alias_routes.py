@@ -1804,6 +1804,43 @@ def test_runner_goal_controls_delegate_without_local_execution(monkeypatch, args
     assert calls == [("sid-goal-alias", action, args)]
 
 
+def test_runner_goal_control_reports_unconfigured_runner(monkeypatch):
+    """Runner goal controls fail bounded when runner-local has no configured endpoint."""
+    from api import goals
+
+    routes, _ = _stub_goal_kickoff(monkeypatch, provider=None, gateway_owned=False)
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(
+        routes,
+        "_runtime_runner_client_factory",
+        lambda: (_ for _ in ()).throw(
+            NotImplementedError("runner-local chat backend is not configured")
+        ),
+    )
+    monkeypatch.setattr(
+        goals,
+        "goal_command_payload",
+        lambda *_a, **_k: pytest.fail("local goal manager used"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda *_a, **_k: pytest.fail("control launched a run"),
+    )
+
+    result = routes._handle_goal_command(
+        object(), {"session_id": "sid-goal-alias", "args": "status"}
+    )
+
+    assert result == {
+        "status": 501,
+        "payload": {
+            "ok": False,
+            "error": "runner-local chat backend is not configured",
+        },
+    }
+
+
 @pytest.mark.parametrize("mode", ["legacy-direct", "legacy-journal"])
 def test_legacy_goal_set_keeps_local_goal_and_kickoff(monkeypatch, mode):
     from api import goals

@@ -24944,12 +24944,19 @@ def _handle_goal_command(handler, body):
 
     goal_adapter = None
     if runner_goal_owned:
-        goal_adapter = build_runtime_adapter(
-            legacy_adapter_factory=lambda: LegacyJournalRuntimeAdapter(
-                goal_delegate=_legacy_goal_update
-            ),
-            runner_client_factory=_runtime_runner_client_factory,
-        )
+        try:
+            goal_adapter = build_runtime_adapter(
+                legacy_adapter_factory=lambda: LegacyJournalRuntimeAdapter(
+                    goal_delegate=_legacy_goal_update
+                ),
+                runner_client_factory=_runtime_runner_client_factory,
+            )
+        except NotImplementedError as exc:
+            return j(
+                handler,
+                {"ok": False, "error": str(exc)},
+                status=501,
+            )
         if goal_adapter is None:
             return j(
                 handler,
