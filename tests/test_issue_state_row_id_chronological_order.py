@@ -141,6 +141,42 @@ def test_state_db_prefix_replay_keeps_anonymous_cross_second_rows():
     ) == [sidecar, replay]
 
 
+def test_state_db_keeps_subsecond_legacy_collision_before_later_sidecar_row():
+    sidecar = [
+        _assistant("same", 100.25),
+        _user("later", 102.0),
+    ]
+    state = [_assistant("same", 100.75)]
+
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, incoming_provenance="state_db",
+    )
+
+    assert [(message["content"], message["timestamp"]) for message in merged] == [
+        ("same", 100.25),
+        ("same", 100.75),
+        ("later", 102.0),
+    ]
+
+
+def test_state_db_keeps_older_legacy_collision_without_reordering_sidecar_rows():
+    sidecar = [
+        _assistant("same", 102.0),
+        _user("later", 103.0),
+    ]
+    state = [_assistant("same", 100.75)]
+
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, incoming_provenance="state_db",
+    )
+
+    assert [(message["content"], message["timestamp"]) for message in merged] == [
+        ("same", 102.0),
+        ("later", 103.0),
+        ("same", 100.75),
+    ]
+
+
 def test_state_db_prefix_replay_uses_full_precision_and_shared_identity():
     cases = [
         (_assistant("same", 100.0), _assistant("same", 100.0)),

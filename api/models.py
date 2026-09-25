@@ -13247,19 +13247,29 @@ def _merge_session_messages_append_only_impl(
             continue
         replays_sidecar_prefix = False
         replay_target = None
+        prefix_candidate_visible = False
+        prefix_candidate_identity_compatible = False
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if (
-                _prefix_replay_identity_compatible(
+            prefix_candidate_visible = (
+                visible_key == expected_visible_key or _has_visible_duplicate(
+                    visible_key, {expected_visible_key}
+                )
+            )
+            if prefix_candidate_visible:
+                prefix_candidate_identity_compatible = _prefix_replay_identity_compatible(
                     sidecar_visible_messages[state_replay_idx], msg
                 )
-                and (visible_key == expected_visible_key or _has_visible_duplicate(
-                    visible_key, {expected_visible_key}
-                ))
-            ):
+            if prefix_candidate_identity_compatible:
                 replays_sidecar_prefix = True
                 replay_target = sidecar_visible_messages[state_replay_idx]
                 state_replay_idx += 1
+        state_db_prefix_identity_conflict = (
+            incoming_provenance == "state_db"
+            and str(msg.get("role") or "").lower() == "assistant"
+            and prefix_candidate_visible
+            and not prefix_candidate_identity_compatible
+        )
         if replays_sidecar_prefix:
             merge_display_metadata(
                 replay_target,
@@ -13341,6 +13351,15 @@ def _merge_session_messages_append_only_impl(
         if dedup_key in seen_dedup_keys and not duplicate_identity_conflict:
             merge_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
             continue
+        legacy_replay_identity_compatible = (
+            incoming_provenance != "state_db"
+            or duplicate is None
+            or _prefix_replay_identity_compatible(duplicate, msg)
+        )
+        legacy_suppression_identity_compatible = (
+            legacy_replay_identity_compatible
+            and not state_db_prefix_identity_conflict
+        )
         if (
             not duplicate_identity_conflict
             and max_sidecar_timestamp is not None
@@ -13360,7 +13379,7 @@ def _merge_session_messages_append_only_impl(
                 # Different tool_calls produce different merge_keys even with
                 # identical content/timestamp, so an unchecked continue here
                 # would drop legitimately distinct turns.  (#3346 / PR #3665)
-                if key in seen_message_keys:
+                if key in seen_message_keys and legacy_suppression_identity_compatible:
                     merge_display_metadata(merged_by_message_key.get(key), msg)
                     continue
         if key in seen_message_keys and key[0] == "message_id" and not duplicate_identity_conflict:
@@ -13397,6 +13416,7 @@ def _merge_session_messages_append_only_impl(
             and timestamp <= max_sidecar_timestamp
             and not row_id_sidecar_conflict
             and not duplicate_identity_conflict
+            and legacy_suppression_identity_compatible
         ):
             # When a truncation watermark is active and the sidecar holds only
             # the edited user checkpoint, state.db may contain an assistant/tool
