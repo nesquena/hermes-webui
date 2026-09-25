@@ -116,6 +116,13 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
         "renderLiveAnchorActivityScene",
         "_freshProgrammaticScrollActive",
         "_recordNonMessageScrollIntent",
+        # The wheel/key/drag input handlers delegate the generation bump to this
+        # capture helper (catch-tail contract); extract the real one so reader
+        # input actually advances _messageScrollInputGeneration in the harness.
+        "_captureMessageScrollInputTail",
+        # The capture is gated on the input actually targeting the transcript
+        # scroll surface (#7494); the handler consults this helper directly.
+        "_isTranscriptScrollTarget",
         "_captureMessageScrollSnapshot",
         "_messageScrollSnapshotInputChanged",
         "_abandonMessageScrollSnapshot",
@@ -139,6 +146,11 @@ let _programmaticScroll=false, _programmaticScrollSetAt=0;
 let recordWrites=true;
 const callbacks=[];
 const performance={{now(){{return 1;}}}};
+// Node has no layout engine: the #7494 targeting gate consults
+// getComputedStyle; the harness target is `el` itself (the transcript
+// scroller), which never hits the nested-surface walk, but provide the
+// global anyway so the helper never throws.
+const getComputedStyle=()=>{{overflowY:'visible';}};
 const el={{
   scrollHeight:90453, clientHeight:427,
   get scrollTop(){{return this._top;}},

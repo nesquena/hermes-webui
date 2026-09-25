@@ -192,6 +192,23 @@ render. Subsequent streamed content must not pull the reader back to the bottom.
 Use the jump-to-latest control to resume following the live tail; after that,
 new streamed content should remain visible at the bottom.
 
+The authoritative behavior contract — including the input-tail re-pinning rules
+(scrolling back down to the tail you were aiming at re-pins immediately, even
+while the stream keeps growing) and the transcript's overscroll suppression —
+lives in
+[`docs/architecture/transcript-auto-follow-scroll.md`](docs/architecture/transcript-auto-follow-scroll.md).
+Verify it per that document's manual checklist across wide desktop, ordinary
+laptop width, and narrow/mobile viewport widths (touch: swipe up releases
+follow, swipe back down to the tail re-pins, and no bottom-edge vibration is
+visible while pinned during streaming), matching the responsive-state
+expectations in [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md).
+
+Automated regression coverage for this section:
+`tests/test_fast_stream_shrink_clamp_unpin.py`,
+`tests/test_issue5637_stale_anchor_guard.py` (the `test_live_render_queue_*`
+ownership tests), `tests/test_2111_ios_pwa_bottom_scroll_stutter.py`, and
+`tests/test_mobile_layout.py` (the `.messages` overscroll suppression).
+
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
 and **skips gracefully** (clear message) when it isn't — so environments without the

@@ -577,6 +577,8 @@ eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
 eval(extractFunc('_cancelBottomSettle'));
 eval(extractFunc('_freshProgrammaticScrollActive'));
+eval(extractFunc('_isTranscriptScrollTarget'));
+eval(extractFunc('_captureMessageScrollInputTail'));
 eval(extractFunc('_recordNonMessageScrollIntent'));
 
 _beginMessageJumpScroll(container);
@@ -706,6 +708,8 @@ function _freshProgrammaticScrollActive(){
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_isTranscriptScrollTarget'));
+eval(extractFunc('_captureMessageScrollInputTail'));
 eval(extractFunc('_recordNonMessageScrollIntent'));
 
 _beginMessageJumpScroll(container);
@@ -773,6 +777,8 @@ function _freshProgrammaticScrollActive(){
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_isTranscriptScrollTarget'));
+eval(extractFunc('_captureMessageScrollInputTail'));
 eval(extractFunc('_recordNonMessageScrollIntent'));
 
 _beginMessageJumpScroll(container);
