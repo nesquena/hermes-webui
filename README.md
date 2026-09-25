@@ -330,6 +330,10 @@ Alias resolution follows the format of the alias:
 
 Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
 receives the model, the provider id, and an opaque route id, never a base URL or key.
+An alias with its own `base_url` follows Hermes's direct-alias credential rules on every backend:
+its declared `api_key`/`key_env` wins; otherwise only a credential resolved for that endpoint's
+own host is sent (for example an OpenRouter key to `openrouter.ai`), never the provider label's
+key to an unrelated host. The alias's provider still selects its wire protocol.
 
 A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
 leaves the session pointing at a route nothing owns. That send fails closed — on every backend, the

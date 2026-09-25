@@ -835,6 +835,97 @@ def _resolve_model_alias_connection_bundle(
         )
 
 
+def _resolve_model_alias_endpoint_runtime(alias_route: dict, *, target_model=None) -> dict:
+    """Host-gated credential resolution for a URL-bearing alias with no declared key.
+
+    Delegates to Hermes Agent's own direct-alias policy
+    (``hermes_cli.model_switch._apply_direct_alias_endpoint``) so the local worker
+    reads the same configured alias exactly as the Gateway and runner do: the
+    lookup uses ``direct_alias_runtime_request`` (``requested="custom"``, which is
+    host-gated) against the alias URL, so an authoritative host such as
+    openrouter.ai or ollama.com resolves its own key and an unrelated host
+    resolves none. Only the credential is taken from Hermes; provider identity and
+    wire protocol are composed by :func:`merge_model_alias_runtime_bundle`.
+
+    Returns ``{}`` (keyless) for an alias without an endpoint, with a declared
+    credential, or when the installed Hermes cannot answer: failing closed never
+    sends a credential anywhere.
+    """
+    route = alias_route if isinstance(alias_route, dict) else {}
+    base_url = str(route.get("base_url") or "").strip()
+    if not route.get("base_url_explicit") or route.get("credential_explicit") or not base_url:
+        return {}
+    try:
+        from types import SimpleNamespace
+
+        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+        from hermes_cli.model_switch import DirectAlias, _apply_direct_alias_endpoint
+
+        # No declared credential: the alias carries none, so Hermes takes its
+        # fresh host-gated resolution branch (there is no prior session key).
+        alias = DirectAlias(
+            model=str(route.get("model") or ""),
+            provider=str(route.get("provider") or "custom"),
+            base_url=base_url,
+        )
+        state = SimpleNamespace(
+            base_url="",
+            api_key="",
+            api_mode="",
+            target_provider=str(route.get("provider") or "custom"),
+            new_model=str(target_model or route.get("model") or ""),
+            validation_headers={},
+            suppress_ollama_headers=False,
+        )
+        resolve_runtime_provider_with_anthropic_env_lock(_apply_direct_alias_endpoint, state, alias)
+    except Exception as exc:
+        logger.warning("[webui] model alias host-gated credential resolution failed: %s", exc)
+        return {}
+    api_key = str(state.api_key or "").strip()
+    return {
+        "base_url": str(state.base_url or "").strip() or base_url,
+        "api_key": "" if api_key == "no-key-required" else api_key,
+    }
+
+
+def _attempt_model_alias_credential_self_heal(
+    provider_context, expected_model, session_id, _agent_lock_ref, *, target_model=None,
+):
+    """Credential self-heal (#1401) for an alias route: re-read the alias itself.
+
+    An alias-owned credential (``api_key``/``key_env``, or the host-gated key of
+    a URL-bearing alias) lives in the alias's authoritative source, not only in
+    auth.json, so retrying with the originally resolved route would resend the
+    same stale key. Re-resolve the alias from the active profile config/env,
+    then its runtime, and return ``(fresh_route, runtime)`` or ``None``.
+    """
+    try:
+        fresh_route = resolve_model_alias_runtime(provider_context, expected_model=expected_model)
+    except Exception as exc:
+        logger.warning("[webui] self-heal: model alias re-resolution failed: %s", exc)
+        return None
+    if fresh_route is None:
+        return None
+    if not fresh_route.get("base_url_explicit"):
+        runtime = _attempt_credential_self_heal(
+            fresh_route.get("provider") or "", session_id, _agent_lock_ref,
+            target_model=target_model,
+        )
+        return None if runtime is None else (fresh_route, runtime)
+    try:
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+
+        with SESSION_AGENT_CACHE_LOCK:
+            evicted = SESSION_AGENT_CACHE.pop(session_id, None)
+        if evicted is not None:
+            _close_cached_agent_entry_at_session_boundary(session_id, evicted)
+    except Exception:
+        logger.debug("[webui] self-heal: alias agent-cache eviction failed", exc_info=True)
+    return fresh_route, _resolve_model_alias_endpoint_runtime(
+        fresh_route, target_model=target_model,
+    )
+
+
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
     """True if two base URLs point at the same scheme+host+port endpoint.
 
@@ -10691,6 +10782,8 @@ def _run_agent_streaming(
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
+            # Bound before resolution so both self-heal paths can test it.
+            _alias_route = None
             # Per-message reasoning: dict maps assistant-message index → accumulated text
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
@@ -11309,13 +11402,18 @@ def _run_agent_streaming(
                 # Default to an empty runtime dict so the constructor-routing
                 # bundle below stays buildable when resolution raises.
                 _rt = {}
-                # An alias-declared endpoint is already a complete routing
-                # authority. Do not ask the active/provider resolver for a key
-                # that could then be sent to that unrelated endpoint.
+                # An alias-declared endpoint owns its credential boundary. Never
+                # ask the active/provider resolver for its label's key (that key
+                # could then reach an unrelated endpoint); resolve host-gated
+                # against the alias URL exactly as Hermes Agent does instead.
                 _alias_has_endpoint = bool(
                     _alias_route is not None and _alias_route.get("base_url_explicit")
                 )
-                if not _alias_has_endpoint:
+                if _alias_has_endpoint:
+                    _rt = _resolve_model_alias_endpoint_runtime(
+                        _alias_route, target_model=resolved_model,
+                    )
+                else:
                     try:
                         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -12476,10 +12574,21 @@ def _run_agent_streaming(
                         with _profiles_api.profile_scope_for_detached_worker(
                             _resolved_profile_name, "credential self-heal", logger_override=logger
                         ):
-                            _heal_rt = _attempt_credential_self_heal(
-                                resolved_provider or '', session_id, _agent_lock,
-                                target_model=resolved_model,
-                            )
+                            if _alias_route is not None:
+                                # Re-read the alias's own credential source: the
+                                # original route would resend the stale key.
+                                _alias_heal = _attempt_model_alias_credential_self_heal(
+                                    provider_context, model, session_id, _agent_lock,
+                                    target_model=resolved_model,
+                                )
+                                _heal_rt = None
+                                if _alias_heal is not None:
+                                    _alias_route, _heal_rt = _alias_heal
+                            else:
+                                _heal_rt = _attempt_credential_self_heal(
+                                    resolved_provider or '', session_id, _agent_lock,
+                                    target_model=resolved_model,
+                                )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
                             # Rebuild runtime variables from the refreshed resolve
@@ -13837,10 +13946,21 @@ def _run_agent_streaming(
                 with _profiles_api.profile_scope_for_detached_worker(
                     _resolved_profile_name, "credential self-heal", logger_override=logger
                 ):
-                    _heal_rt = _attempt_credential_self_heal(
-                        resolved_provider or '', session_id, _agent_lock,
-                        target_model=resolved_model,
-                    )
+                    if _alias_route is not None:
+                        # Re-read the alias's own credential source: the
+                        # original route would resend the stale key.
+                        _alias_heal = _attempt_model_alias_credential_self_heal(
+                            provider_context, model, session_id, _agent_lock,
+                            target_model=resolved_model,
+                        )
+                        _heal_rt = None
+                        if _alias_heal is not None:
+                            _alias_route, _heal_rt = _alias_heal
+                    else:
+                        _heal_rt = _attempt_credential_self_heal(
+                            resolved_provider or '', session_id, _agent_lock,
+                            target_model=resolved_model,
+                        )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
                     _self_healed = True

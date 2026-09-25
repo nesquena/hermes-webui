@@ -8288,21 +8288,30 @@ def resolve_model_alias_runtime(
     resolved = dict(configured)
     base_url_explicit = bool(configured.get("base_url"))
     credential_explicit = bool(configured.get("api_key") or configured.get("key_env"))
+    # Hermes resolves a URL-bearing alias's credential for the alias HOST
+    # (requested="custom", which is host-gated), never for its provider label.
+    # That lookup provider is credential authority only; the alias's logical
+    # provider stays its routing/wire identity.
+    credential_lookup_provider = (
+        "custom" if base_url_explicit else str(configured.get("provider") or "custom").strip()
+    )
     try:
         from hermes_cli.model_switch import _load_direct_aliases, direct_alias_runtime_request
 
         direct = _load_direct_aliases().get(name)
         if direct is not None:
             requested_provider, api_key = direct_alias_runtime_request(direct)
+            credential_lookup_provider = str(requested_provider or credential_lookup_provider).strip()
             resolved = {
                 "model": str(direct.model or "").strip(),
-                "provider": str(requested_provider or direct.provider or "custom").strip(),
+                "provider": str(direct.provider or requested_provider or "custom").strip(),
                 "base_url": str(direct.base_url or configured.get("base_url") or "").strip(),
                 "api_key": str(api_key or configured.get("api_key") or "").strip(),
                 "key_env": "" if api_key else str(configured.get("key_env") or "").strip(),
             }
     except Exception:
         pass
+    resolved["credential_lookup_provider"] = credential_lookup_provider
 
     resolved["alias"] = name
     # Keep server-only provenance for composing aliases with named custom
@@ -8369,6 +8378,39 @@ def raise_for_unresolved_model_alias_route(route_provider: object) -> None:
     )
 
 
+def _same_endpoint_origin(url_a: object, url_b: object) -> bool:
+    """True only for an identical (scheme, host, port) origin; unknown is False."""
+    from urllib.parse import urlsplit
+
+    def _origin(url: object):
+        try:
+            parts = urlsplit(str(url or "").strip())
+            scheme = (parts.scheme or "").lower()
+            host = (parts.hostname or "").lower()
+            port = parts.port or {"https": 443, "http": 80}.get(scheme)
+        except ValueError:
+            return None
+        return (scheme, host, port) if scheme and host else None
+
+    origin_a = _origin(url_a)
+    return origin_a is not None and origin_a == _origin(url_b)
+
+
+def _model_alias_endpoint_api_mode(provider: str, base_url: str | None, model: object) -> str | None:
+    """Wire protocol for a URL-bearing alias, via Hermes' own detection.
+
+    Mirrors Hermes Agent, which clears the mode for a direct-alias endpoint and
+    re-detects it from the alias's logical provider plus its host. ``None``
+    (agent-side detection) when the installed Hermes cannot answer.
+    """
+    try:
+        from hermes_cli.providers import determine_api_mode
+
+        return determine_api_mode(provider, base_url or "", model=str(model or "")) or None
+    except Exception:
+        return None
+
+
 def merge_model_alias_runtime_bundle(
     alias_route: dict,
     runtime_provider: dict | None = None,
@@ -8377,12 +8419,18 @@ def merge_model_alias_runtime_bundle(
 ) -> dict:
     """Compose one alias route with provider runtime state without mixing authorities.
 
-    An alias-declared ``base_url`` owns the whole endpoint boundary. Its declared
-    credential is the only credential that may accompany it; an alias with no
-    credential declaration is deliberately keyless. When the alias names only a
-    provider, normal provider resolution remains authoritative. A credential-only
-    alias may override that provider's credential, but not its endpoint or wire
-    protocol, and it clears the provider credential pool it displaced.
+    An alias-declared ``base_url`` owns the endpoint boundary, matching Hermes
+    Agent's direct-alias contract (``_apply_direct_alias_endpoint``): the alias's
+    declared credential wins; otherwise the only credential that may accompany
+    it is one the caller resolved host-gated against the alias URL itself (see
+    ``direct_alias_runtime_request``), and only when that runtime reports the
+    alias's own origin. An unrelated provider credential never crosses to it.
+    The alias's logical provider remains its identity and selects the wire
+    protocol together with the alias host; the host-gated ``custom`` lookup is
+    credential authority only. When the alias names only a provider, normal
+    provider resolution remains authoritative. A credential-only alias may
+    override that provider's credential, but not its endpoint or wire protocol,
+    and it clears the provider credential pool it displaced.
     """
     route = alias_route if isinstance(alias_route, dict) else {}
     runtime = runtime_provider if isinstance(runtime_provider, dict) else {}
@@ -8392,11 +8440,30 @@ def merge_model_alias_runtime_bundle(
     alias_api_key = route.get("api_key") or None
 
     if explicit_base_url:
+        alias_base_url = route.get("base_url") or None
+        logical_provider = str(route.get("provider") or "").strip()
+        # WebUI canonicalizes named custom providers to "custom" everywhere.
+        bundle_provider = (
+            "custom"
+            if not logical_provider or logical_provider.lower().startswith("custom")
+            else logical_provider
+        )
+        if explicit_credential:
+            api_key = alias_api_key
+        else:
+            runtime_key = str(runtime.get("api_key") or "").strip()
+            if runtime_key == "no-key-required" or not _same_endpoint_origin(
+                runtime.get("base_url"), alias_base_url
+            ):
+                runtime_key = ""
+            api_key = runtime_key or KEYLESS_CUSTOM_API_KEY
         bundle = {
-            "provider": "custom",
-            "base_url": route.get("base_url") or None,
-            "api_key": alias_api_key if explicit_credential else KEYLESS_CUSTOM_API_KEY,
-            "api_mode": None,
+            "provider": bundle_provider,
+            "base_url": alias_base_url,
+            "api_key": api_key,
+            "api_mode": _model_alias_endpoint_api_mode(
+                logical_provider or bundle_provider, alias_base_url, route.get("model")
+            ),
             "acp_command": None,
             "acp_args": None,
             "credential_pool": None,
