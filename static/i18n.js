@@ -13687,6 +13687,7 @@ const LOCALES = {
     session_batch_archive_confirm: '要封存 {0} 個對話嗎？',
     session_batch_delete_worktree_confirm: '要刪除 {0} 個對話嗎？其中 {1} 個 worktree 對話會把 worktree 目錄保留在磁碟上。',
     session_batch_archive_worktree_confirm: '要封存 {0} 個對話嗎？其中 {1} 個 worktree 對話會把 worktree 目錄保留在磁碟上。',
+    session_batch_archive_mixed_profiles: '選取的對話涵蓋多個設定檔，請針對各設定檔分別封存。',
     session_no_selection: '未選取任何對話',
     // settings panel
     settings_heading_title: '控制中心',

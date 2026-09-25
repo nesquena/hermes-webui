@@ -5820,12 +5820,12 @@ function _renderBatchActionBar(){
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
-    // #7826: batch archive must not silently mix profiles — the archive
-    // handler resolves ownership against the active profile, and a mixed
-    // selection would 409 or re-parent sessions into the wrong store.
-    // Reject the batch up front and let the user archive per profile.
-    const profiles=[...new Set([...sessionsById.values()].map(s=>s&&s.profile).filter(Boolean))];
-    if(profiles.length>1){
+    // #7826 round 3: preflight the complete snapshot BEFORE any request.
+    // A missing snapshot, a profile-less row, or mixed owners fails closed
+    // with zero API calls — the archive handler would otherwise resolve
+    // some rows to 409/404 mid-batch and leave a partial archive behind.
+    const preflight=_archiveBatchOwners(ids,sessionsById);
+    if(!preflight.owner){
       showToast(t('session_batch_archive_mixed_profiles'),3500);
       exitSessionSelectMode();
       return;
@@ -5836,17 +5836,12 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
-    try{
-      const results=await Promise.all(ids.map(async sid=>{
-        const _batchPayload={session_id:sid,archived:true};
-        const _snap=sessionsById.get(sid);
-        if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&_snap&&_snap.profile){_batchPayload.all_profiles=true;_batchPayload.profile=_snap.profile;}
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_batchPayload)});
-        return {response,session:_snap||null};
-      }));
-      const retainedCount=_worktreeResponseCount(results);
-      showToast(retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
-    }catch(e){showToast('Archive failed: '+(e.message||e));}
+    const outcome=await _archiveBatchSessions(ids,sessionsById,preflight.owner);
+    if(outcome.error){
+      showToast(t('session_archive_failed')+outcome.error);
+      return;
+    }
+    showToast(outcome.retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
   };bar.appendChild(archiveBtn);
   // Move
   const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
@@ -6618,6 +6613,60 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
   if(!currentSession||!currentAnchor||!currentAnchor.isConnected) return null;
   if(contextPoint) currentAnchor._projectPickerContextPoint=contextPoint;
   return {session:currentSession,anchorEl:currentAnchor};
+}
+// #7826 round 3: preflight the complete batch selection before any
+// archive request. Missing snapshots and profile-less rows fail closed —
+// the server 404s profile-less metadata rows by contract, and a raw
+// Promise.all would let earlier requests mutate the store before the
+// 404 lands, leaving a partial archive behind a generic failure toast.
+// Requires exactly one non-empty owner across the whole selection.
+function _archiveBatchOwners(ids, sessionsById){
+  let owner=null;
+  for(const sid of ids){
+    const snap=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
+    const profile=(snap&&typeof snap.profile==='string'&&snap.profile.trim())?snap.profile.trim():null;
+    if(!profile) return {owner:null, reason:'missing-or-profileless'};
+    if(owner && owner!==profile) return {owner:null, reason:'mixed'};
+    owner=profile;
+  }
+  return owner?{owner}:{owner:null, reason:'empty'};
+}
+
+// #7826 round 3: archive a preflighted, uniform-owner batch. If the sole
+// owner differs from the active profile, switch profile ONCE before any
+// request — never per-row in parallel. Then archive sequentially: a
+// mid-batch failure stops the loop and reports an error, so the batch
+// can never claim success after only a subset was archived. Returns
+// {error} on failure (partial progress possible but never reported as
+// success) or {ok:true, retainedCount} on full success.
+async function _archiveBatchSessions(ids, sessionsById, owner){
+  // fail closed: preflight must have resolved exactly one non-empty owner;
+  // a caller that skips preflight must never fire archive requests.
+  if(!(typeof owner==='string'&&owner.trim())) return {ok:false,error:'missing-owner'};
+  const activeProfile=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ?S.activeProfile.trim()
+    :'default';
+  if(owner&&owner!==activeProfile){
+    try{
+      if(typeof showToast==='function') showToast(`Switching to ${owner} profile to archive these sessions…`,2200);
+      await _switchProfileForSessionLoad(owner);
+    }catch(switchErr){
+      return {ok:false,error:(switchErr&&switchErr.message)||String(switchErr)};
+    }
+  }
+  let retainedCount=0;
+  for(const sid of ids){
+    const session=(sessionsById&&sessionsById.get(sid))||null;
+    let response;
+    try{
+      response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
+    }catch(e){
+      return {ok:false,error:(e&&e.message)||String(e)};
+    }
+    if(session) session.archived=true;
+    if(_sessionResponseRetainsWorktree(response,session)) retainedCount++;
+  }
+  return {ok:true,retainedCount};
 }
 
 function _openSessionActionMenu(session, anchorEl){
