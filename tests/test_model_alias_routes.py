@@ -1090,6 +1090,8 @@ def real_hermes_alias_policy(monkeypatch):
     """
     import importlib.util
 
+    if importlib.util.find_spec("hermes_cli") is None:
+        pytest.skip("hermes-agent not installed")
     if importlib.util.find_spec("requests") is None:
         monkeypatch.setitem(sys.modules, "requests", types.ModuleType("requests"))
     before = set(sys.modules)
