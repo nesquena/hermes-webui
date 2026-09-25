@@ -6218,14 +6218,17 @@ function _normalizeReasoningEffort(eff){
 }
 
 function _formatReasoningEffortLabel(effort){
-  const _t=(typeof t==='function')?t:(k=>({reasoning_effort_none:'None',reasoning_effort_default:'Default',reasoning_effort_minimal:'Minimal',reasoning_effort_low:'Low',reasoning_effort_medium:'Medium',reasoning_effort_high:'High',reasoning_effort_xhigh:'Extra High',reasoning_effort_max:'Max'}[k]||k));
+  const _t=(typeof t==='function')?t:(k=>({reasoning_effort_none:'None',reasoning_effort_default:'Default',reasoning_effort_minimal:'Minimal',reasoning_effort_low:'Low',reasoning_effort_medium:'Medium',reasoning_effort_high:'High',reasoning_effort_xhigh:'Extra High',reasoning_effort_xhigh_short:'XHigh',reasoning_effort_max:'Max'}[k]||k));
   if(effort==='none') return _t('reasoning_effort_none');
   if(!effort) return _t('reasoning_effort_default');
   if(effort==='minimal') return _t('reasoning_effort_minimal');
   if(effort==='low') return _t('reasoning_effort_low');
   if(effort==='medium') return _t('reasoning_effort_medium');
   if(effort==='high') return _t('reasoning_effort_high');
-  if(effort==='xhigh') return _t('reasoning_effort_xhigh');
+  // The composer chip keeps the short `XHigh` wording (display-neutral vs
+  // master); the dropdown's own option text stays `reasoning_effort_xhigh`
+  // ('Extra High') via its data-i18n attribute. (#7697 re-gate)
+  if(effort==='xhigh') return _t('reasoning_effort_xhigh_short');
   if(effort==='max') return _t('reasoning_effort_max');
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
