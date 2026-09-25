@@ -164,6 +164,60 @@ def test_annotate_copies_and_never_mutates(plan_env):
     assert served[1] is other                        # non-user passes through
 
 
+def test_annotated_targets_survive_public_projection(tmp_path, monkeypatch):
+    """Review item #1: an ordinary durable row WITHOUT api_content must get
+    usable restore addressing through the ACTUAL public projection — the
+    annotation keys survive redaction (only api_content/_state_db_row_id/
+    _db_row_id/state_db_row_id are stripped) and are visible to the client."""
+    from api.helpers import public_session_projection
+    from hermes_state import SessionDB
+
+    sid = "restoretest-projection"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    state_db = tmp_path / "state.db"
+
+    db = SessionDB(state_db)
+    try:
+        db.ensure_session(sid, source="webui-test")
+        u1 = db.append_message(sid, "user", "first prompt")
+        db.append_message(sid, "assistant", "answer 1")
+        u2 = db.append_message(sid, "user", "second prompt")
+        db.append_message(sid, "assistant", "answer 2")
+    finally:
+        db.close()
+
+    s = Session(session_id=sid)
+    s.title = "projection"
+    s.messages = [
+        {"role": "user", "content": "first prompt", "id": "u1"},
+        {"role": "assistant", "content": "answer 1", "id": "a1"},
+        {"role": "user", "content": "second prompt", "id": "u2"},
+        {"role": "assistant", "content": "answer 2", "id": "a2"},
+    ]
+    s.context_messages = [dict(m) for m in s.messages]
+
+    monkeypatch.setattr(config, "SESSION_DIR", str(sessions_dir))
+    monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db)
+    monkeypatch.setattr(models, "_agent_state_db_path", lambda **kw: state_db)
+    s.save()
+    monkeypatch.setitem(models.SESSIONS, sid, s)
+
+    served = checkpoint_map.annotate_restore_targets(s, list(s.messages), list(s.messages))
+    assert served[0]["_restore_ready"] is True
+    assert served[0]["_restore_row_id"] == u1
+    assert served[2]["_restore_row_id"] == u2
+    assert served[0] is not s.messages[0]         # copy, transcript untouched
+    assert "_restore_ready" not in s.messages[0]
+
+    projected = public_session_projection(s.compact() | {"messages": served})
+    row = projected["messages"][0]
+    assert row["_restore_ready"] is True
+    assert row["_restore_row_id"] == u1
+    assert "_restore_ready" not in projected["messages"][1]   # non-user row
+
+
 # --------------------------------------------------------------------------
 # session_ops end-to-end on a tmp sidecar store + REAL tmp state.db
 # --------------------------------------------------------------------------

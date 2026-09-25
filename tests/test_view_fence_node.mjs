@@ -89,6 +89,26 @@ test('shipped restore flow consults the fence at every choke point', () => {
   assert.ok(src.includes('_restoreRelease(claim)'), 'claim-owner release in finally');
 });
 
+test('the shipped error path is view-fenced before it writes status', () => {
+  const start = src.indexOf('async function _doRestoreCheckpoint');
+  assert.ok(start !== -1, 'restore function present');
+  const body = src.slice(start, start + 4600);
+  const catchIdx = body.indexOf('} catch(e) {');
+  assert.ok(catchIdx !== -1, 'catch block present');
+  const catchBody = body.slice(catchIdx, catchIdx + 400);
+  assert.ok(catchBody.includes('_viewTokenMatches(token)'),
+    'catch path must validate the view token before setStatus (review item #5)');
+});
+
+test('the restore request is subpath-safe (api helper, not root-absolute fetch)', () => {
+  assert.ok(src.includes("api('/api/session/checkpoint/restore'"),
+    'restore must go through the subpath-safe api() helper');
+  assert.ok(!src.includes("fetch('/api/session/checkpoint/restore'"),
+    'restore must not use a root-absolute fetch');
+  assert.ok(!src.includes('fetch("/api/session/checkpoint/restore"'),
+    'restore must not use a root-absolute fetch (double quotes)');
+});
+
 test('every session settle point bumps the generation', () => {
   const uiBumps = (src.match(/_bumpViewGeneration\(\)/g) || []).length;
   const sessionBumps = (sessionsSrc.match(/_bumpViewGeneration\(\)/g) || []).length;

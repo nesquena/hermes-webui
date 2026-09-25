@@ -19582,7 +19582,11 @@ async function _doRestoreCheckpoint(target, msg, expectedToken) {
     }catch(_){ /* composer prefill is best-effort */ }
     setStatus(t('restore_done') + ' ' + ((msg && (msg.text || _restoreMessageText(msg))) || ''));
   } catch(e) {
-    setStatus(t('restore_failed') + (e && e.message ? e.message : String(e)));
+    // View fence (error path): a stale flow must never write its failure into
+    // a different view's status line (PR #7075 review item #5 residual).
+    if(_viewTokenMatches(token)){
+      setStatus(t('restore_failed') + (e && e.message ? e.message : String(e)));
+    }
   } finally {
     // The claim must clear even if renderMessages()/projection code throws —
     // otherwise every future restore is dead until a page reload. Release is

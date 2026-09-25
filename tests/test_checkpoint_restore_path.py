@@ -317,3 +317,70 @@ def test_legacy_truncate_before_sink_removed(env):
     src = inspect.getsource(routes)
     assert '"/api/session/truncate-before"' not in src
     assert "checkpoint/restore" in src
+
+
+def test_restore_archives_tool_and_state_only_suffix_rows(tmp_path, monkeypatch):
+    """Item #6: the physical suffix can contain rows the display projection
+    never surfaces (tool rows carry no display twin). The rewind must archive
+    the COMPLETE durable suffix — proving the durable path does not
+    reconstruct the cut from display rows."""
+    from hermes_state import SessionDB
+
+    sid = "restoretest-toolstate"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    state_db = tmp_path / "state.db"
+
+    db = SessionDB(state_db)
+    try:
+        db.ensure_session(sid, source="webui-test")
+        u1 = db.append_message(sid, "user", "first prompt")
+        a1 = db.append_message(sid, "assistant", "answer 1")
+        u2 = db.append_message(sid, "user", "second prompt")
+        a2 = db.append_message(sid, "assistant", "answer 2")
+        t1 = db.append_message(sid, "tool", None, tool_name="Bash", tool_call_id="call-1")
+        u3 = db.append_message(sid, "user", "third prompt")
+    finally:
+        db.close()
+
+    s = Session(session_id=sid)
+    s.title = "tool/state suffix"
+    # The display slice only carries visible user/assistant rows — t1 has no
+    # display twin at all, yet it lives in the physical suffix.
+    s.messages = [
+        {"role": "user", "content": "first prompt", "id": "u1", "_row_id": u1},
+        {"role": "assistant", "content": "answer 1", "id": "a1", "_row_id": a1},
+        {"role": "user", "content": "second prompt", "id": "u2", "_row_id": u2},
+        {"role": "assistant", "content": "answer 2", "id": "a2", "_row_id": a2},
+    ]
+    s.context_messages = [dict(m) for m in s.messages]
+
+    monkeypatch.setattr(config, "SESSION_DIR", str(sessions_dir))
+    monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db)
+    monkeypatch.setattr(models, "_agent_state_db_path", lambda **kw: state_db)
+    s.save()
+    monkeypatch.setitem(models.SESSIONS, sid, s)
+
+    res = session_ops.restore_checkpoint_at_row_id(sid, u2)
+    # The display-invisible tool row is part of the archived suffix.
+    assert sorted(res["archived_state_row_ids"]) == sorted([u2, a2, t1, u3])
+    assert _active_ids(state_db, sid) == [u1, a1]
+
+
+def test_restore_refuses_active_compression_lock(env):
+    """Item #6: a live compression lock on the transcript refuses the rewind
+    inside the transaction (SessionCompressionInProgressError ->
+    CheckpointBusyError -> 409), nothing is written."""
+    from hermes_state import SessionDB
+    db = SessionDB(env.state_db)
+    try:
+        assert db.try_acquire_compression_lock(
+            env.sid, "compressor-test", ttl_seconds=120.0) is True
+    finally:
+        db.close()
+    with pytest.raises(session_ops.CheckpointBusyError):
+        session_ops.restore_checkpoint_at_row_id(env.sid, env.ids["u2"])
+    assert len(env.session.messages) == 4
+    assert _active_ids(env.state_db, env.sid) == [
+        env.ids["u1"], env.ids["a1"], env.ids["u2"], env.ids["a2"]]
