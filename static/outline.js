@@ -16,8 +16,16 @@ function _currentSid() {
   return (S && S.session && S.session.session_id) || null;
 }
 
+// Narrow viewports get the SAME outline, rendered as a bottom sheet instead of
+// the desktop floating panel — the 320px-wide side panel has nowhere to sit on
+// a phone, so style.css re-shapes it into a bottom-anchored sheet at the same
+// 900px breakpoint. Two call sites need this answer: the visibility gate and
+// the "collapse the sheet after jumping" behavior, so it lives in a helper.
+function _outlineIsCompact() {
+  return !!(window.matchMedia && window.matchMedia('(max-width:900px)').matches);
+}
+
 function _outlineAllowed() {
-  const compact = window.matchMedia && window.matchMedia('(max-width:900px)').matches;
   // The outline is a chat-view affordance only — never show the toggle or panel
   // while another MAIN panel (settings, tasks, insights, …) is active. _currentPanel
   // is owned by panels.js; treat an undefined/absent value as the chat default.
@@ -26,7 +34,37 @@ function _outlineAllowed() {
   // mutation for the observer, so allowing it keeps the toggle stable).
   const panel = (typeof _currentPanel === 'undefined') ? 'chat' : (_currentPanel || 'chat');
   const onChatView = panel === 'chat' || panel === 'todos';
-  return window._showConversationOutline === true && !compact && onChatView;
+  return window._showConversationOutline === true && onChatView;
+}
+
+// The dimming layer behind the bottom-sheet form. Only exists on narrow
+// viewports (and only while the panel is open); tapping it closes the sheet.
+// Desktop keeps its non-modal floating panel and never gets a backdrop.
+function _syncOutlineBackdrop() {
+  const wanted = _panelOpen && _outlineIsCompact();
+  let backdrop = document.getElementById('outlineBackdrop');
+
+  if (!wanted) {
+    if (backdrop) backdrop.remove();
+    return;
+  }
+  if (backdrop) return;
+
+  backdrop = document.createElement('div');
+  backdrop.id = 'outlineBackdrop';
+  backdrop.className = 'outline-backdrop';
+  backdrop.setAttribute('aria-hidden', 'true');
+  backdrop.addEventListener('click', closeOutlinePanel);
+  document.body.appendChild(backdrop);
+}
+
+// Closes the panel and any compact-only chrome. Shared by the close button,
+// the backdrop tap, panel switches, and post-jump auto-collapse.
+function closeOutlinePanel() {
+  _panelOpen = false;
+  const wrapper = document.getElementById('outlinePanelWrapper');
+  if (wrapper) wrapper.hidden = true;
+  _syncOutlineBackdrop();
 }
 
 function _syncOutlinePosition() {
@@ -39,14 +77,16 @@ function _syncOutlinePosition() {
 
 function applyConversationOutlinePreference() {
   const toggle = document.getElementById('outlineToggleBtn');
-  const wrapper = document.getElementById('outlinePanelWrapper');
   const enabled = _outlineAllowed();
   document.documentElement.dataset.conversationOutline = enabled ? 'enabled' : 'disabled';
   _syncOutlinePosition();
   if (toggle) toggle.hidden = !enabled;
   if (!enabled) {
-    _panelOpen = false;
-    if (wrapper) wrapper.hidden = true;
+    closeOutlinePanel();
+  } else {
+    // Width can change under an open panel (rotation, resize, sidebar toggle),
+    // so re-evaluate the compact-only backdrop on every gate refresh.
+    _syncOutlineBackdrop();
   }
 }
 
@@ -100,6 +140,7 @@ function _jumpToMessage(rawIdx) {
   if (row) {
     row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     _flashRow(row);
+    _collapseAfterJump();
     return;
   }
 
@@ -123,7 +164,11 @@ function _jumpToMessage(rawIdx) {
       window.setTimeout(function() {
         if (!S.session || S.session.session_id !== sid) return;
         const r = document.getElementById('msg-user-' + rawIdx);
-        if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
+        if (r) {
+          r.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          _flashRow(r);
+          _collapseAfterJump();
+        }
       }, 120);
     })
     .catch(function() {});
@@ -136,6 +181,13 @@ function _flashRow(row) {
   void row.offsetWidth;   // reflow to restart animation
   row.classList.add('outline-jump-flash');
   window.setTimeout(function() { row.classList.remove('outline-jump-flash'); }, 1200);
+}
+
+// On narrow viewports the outline is a modal bottom sheet that covers the
+// transcript — so a successful jump must also get out of the way. Desktop's
+// floating panel stays open, matching its non-modal behavior.
+function _collapseAfterJump() {
+  if (_outlineIsCompact()) closeOutlinePanel();
 }
 
 // Builds the list of user messages from S.messages.
@@ -210,30 +262,33 @@ function toggleOutlinePanel() {
     applyConversationOutlinePreference();
     return;
   }
-  _panelOpen = !_panelOpen;
   const wrapper = document.getElementById('outlinePanelWrapper');
   if (!wrapper) return;
 
   if (_panelOpen) {
-    _syncOutlinePosition();
-    wrapper.hidden = false;
-    const sid = _currentSid();
-    const panel = document.getElementById('outlinePanel');
-    if (panel) panel.innerHTML = '<p class="outline-empty">' + t('outline_loading') + '</p>';
-    _ensureOutlineMessagesLoaded(sid).then(function() {
-      if (!_panelOpen || _currentSid() !== sid) return;
-      _renderPanel();
-      // Keep rendered data fresh after every renderMessages() call.
-      _outlineSid = _currentSid();
-    });
-  } else {
-    wrapper.hidden = true;
+    closeOutlinePanel();
+    return;
   }
+
+  _panelOpen = true;
+  _syncOutlinePosition();
+  wrapper.hidden = false;
+  _syncOutlineBackdrop();
+  const sid = _currentSid();
+  const panel = document.getElementById('outlinePanel');
+  if (panel) panel.innerHTML = '<p class="outline-empty">' + t('outline_loading') + '</p>';
+  _ensureOutlineMessagesLoaded(sid).then(function() {
+    if (!_panelOpen || _currentSid() !== sid) return;
+    _renderPanel();
+    // Keep rendered data fresh after every renderMessages() call.
+    _outlineSid = _currentSid();
+  });
 }
 
 // Jump target exposed on window so inline onclick handlers can reach it.
 window._outlineJump = _jumpToMessage;
 window.applyConversationOutlinePreference = applyConversationOutlinePreference;
+window.closeOutlinePanel = closeOutlinePanel;
 
 // Re-render after renderMessages() if the panel is open and the session
 // changed or new messages arrived since the last render.
