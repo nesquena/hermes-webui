@@ -149,12 +149,14 @@ def _make_cached_agent(sid="session-1"):
         "rate_limit",
         "tool_limit_reached",
         "compression_exhausted",
+        "no_response",
+        "error",
     ],
 )
 def test_terminal_eviction_preserves_cached_agent_on_non_poisoning_err_types(monkeypatch, err_type):
-    """#6625 review: user Stop, transient rate/quota, iteration budgets, and
-    compression exhaustion must NOT evict the cached agent — evicting there
-    would force a costly system-prompt rebuild on the next turn."""
+    """#6625 review: user Stop, transient rate/quota, iteration budgets,
+    compression exhaustion, generic error, and no_response must NOT evict the cached agent —
+    evicting there would force a costly system-prompt rebuild on the next turn."""
     import api.streaming as streaming
     from api.streaming import _invalidate_cached_agent_on_terminal_error
 
@@ -162,7 +164,7 @@ def test_terminal_eviction_preserves_cached_agent_on_non_poisoning_err_types(mon
     monkeypatch.setattr(
         streaming,
         "_close_cached_agent_entry_at_session_boundary",
-        lambda session_id, entry: closed_entries.append((session_id, entry)),
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
     )
     agent = _make_cached_agent()
     config.SESSION_AGENT_CACHE.clear()
@@ -172,6 +174,85 @@ def test_terminal_eviction_preserves_cached_agent_on_non_poisoning_err_types(mon
 
     assert "session-1" in config.SESSION_AGENT_CACHE
     assert closed_entries == []
+
+
+def test_terminal_eviction_preserves_cached_agent_on_transient_timeout(monkeypatch):
+    """#6625 review: temporary TimeoutError, connection blip, or socket error must NOT evict."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "error",
+        agent=agent,
+        exc=TimeoutError("Request timed out"),
+    )
+
+    assert "session-1" in config.SESSION_AGENT_CACHE
+    assert closed_entries == []
+
+
+def test_terminal_eviction_evicts_on_affirmative_http_400_payload(monkeypatch):
+    """#6625 review: affirmative HTTP 400 provider error signal evicts and closes."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "error",
+        agent=agent,
+        error_payload={"details": "❌ Non-retryable error (HTTP 400): invalid model"},
+    )
+
+    assert "session-1" not in config.SESSION_AGENT_CACHE
+    assert closed_entries == [("session-1", (agent, "sig"))]
+
+
+def test_terminal_eviction_deferred_teardown_outside_locks(monkeypatch):
+    """#6625 review: close=False pops the entry but defers teardown outside locks."""
+    import api.streaming as streaming
+    from api.streaming import _invalidate_cached_agent_on_terminal_error
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
+    )
+    agent = _make_cached_agent()
+    config.SESSION_AGENT_CACHE.clear()
+    config.SESSION_AGENT_CACHE["session-1"] = (agent, "sig")
+
+    popped = _invalidate_cached_agent_on_terminal_error(
+        "session-1",
+        "model_not_found",
+        agent=agent,
+        close=False,
+    )
+
+    assert "session-1" not in config.SESSION_AGENT_CACHE
+    assert popped == (agent, "sig")
+    assert closed_entries == []  # Not closed yet, teardown deferred!
 
 
 def test_terminal_eviction_evicts_cached_agent_on_non_retryable_400(monkeypatch):
@@ -184,7 +265,7 @@ def test_terminal_eviction_evicts_cached_agent_on_non_retryable_400(monkeypatch)
     monkeypatch.setattr(
         streaming,
         "_close_cached_agent_entry_at_session_boundary",
-        lambda session_id, entry: closed_entries.append((session_id, entry)),
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
     )
     agent = _make_cached_agent()
     config.SESSION_AGENT_CACHE.clear()
@@ -207,7 +288,7 @@ def test_terminal_eviction_skips_replaced_cache_entry(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "_close_cached_agent_entry_at_session_boundary",
-        lambda session_id, entry: closed_entries.append((session_id, entry)),
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
     )
     turn_agent = _make_cached_agent("turn-agent")
     replacement = _make_cached_agent("replacement")
@@ -232,7 +313,7 @@ def test_terminal_eviction_keys_pop_off_payload_session_id(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "_close_cached_agent_entry_at_session_boundary",
-        lambda session_id, entry: closed_entries.append((session_id, entry)),
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
     )
     agent = _make_cached_agent("new_sid")
     config.SESSION_AGENT_CACHE.clear()
@@ -255,7 +336,7 @@ def test_terminal_eviction_noop_when_no_agent_used_this_turn(monkeypatch):
     monkeypatch.setattr(
         streaming,
         "_close_cached_agent_entry_at_session_boundary",
-        lambda session_id, entry: closed_entries.append((session_id, entry)),
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
     )
     config.SESSION_AGENT_CACHE.clear()
     config.SESSION_AGENT_CACHE["session-1"] = (_make_cached_agent(), "sig")

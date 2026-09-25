@@ -405,7 +405,7 @@ def test_captured_terminal_http_400_evicts_cached_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(
         streaming,
         "_close_cached_agent_entry_at_session_boundary",
-        lambda session_id, entry: closed_entries.append((session_id, entry)),
+        lambda session_id, entry, **kwargs: closed_entries.append((session_id, entry)),
     )
 
     class CapturedTerminalHttp400EvictAgent(MockAgent):
