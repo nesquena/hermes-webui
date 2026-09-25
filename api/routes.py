@@ -6771,6 +6771,43 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     return provider or None
 
 
+def _non_authoritative_hint_matches_requested_provider(
+    hinted_provider: str | None,
+    requested_provider: object,
+) -> bool:
+    """True when a persisted ``@provider:`` hint can safely be preserved
+    against the caller's requested provider on the non-authoritative catalog
+    path.
+
+    The no-wait display path returns the persisted pair unchanged so the
+    browser's echo pins the next turn to it — which means a persisted hint
+    that names a DIFFERENT provider than ``requested_provider`` (a legacy
+    cold-wakeup artifact such as ``@copilot:gpt-5.5`` while the session's
+    provider is ``openai-codex``) would silently route every subsequent turn
+    through that other provider: ``model_with_provider_context()`` keeps an
+    existing ``@`` qualifier intact rather than re-qualifying it.
+
+    So preserve only when the hint resolves to the same provider as the
+    request — raw-equal, alias-equal, or normalized-equal (the same three
+    comparisons the authoritative path makes against
+    ``hint_matches_active``). Everything else falls through to the
+    compatibility-repair path, which is what rewrites a stale cross-provider
+    pair to the correct routed default.
+    """
+    hint = str(hinted_provider or "").strip().lower()
+    requested = str(requested_provider or "").strip().lower()
+    if not hint or not requested:
+        return False
+    if hint == requested:
+        return True
+    from api.config import _resolve_provider_alias as _resolve_alias
+
+    if _resolve_alias(hint) == requested:
+        return True
+    normalized = _normalize_provider_id(hint)
+    return bool(normalized) and normalized == requested
+
+
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     """Split an ``@provider:model`` hint into ``(bare_model, provider)``.
 
@@ -7660,6 +7697,8 @@ def _resolve_compatible_session_model_state(
         _bare_model_hint, _hinted_provider = _split_provider_qualified_model(model)
         if _hinted_provider and _provider_is_known_or_configured(
             _hinted_provider
+        ) and _non_authoritative_hint_matches_requested_provider(
+            _hinted_provider, requested_provider
         ):
             return model, requested_provider, False
 

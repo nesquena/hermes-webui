@@ -1734,6 +1734,15 @@ def _provider_is_known_or_configured(
     raw = str(provider_id or "").strip().lower()
     if not raw:
         return False
+    try:
+        if _is_plugin_model_provider(raw):
+            return True
+    except Exception:
+        # Same rationale as the sibling registry check in the picker's
+        # detector: a transient plugin-registry failure must not make a real
+        # plugin-backed provider look unknown (it would be repaired away on
+        # the no-wait path). Surface at warning, fail closed to False.
+        logger.warning("plugin model-provider check failed for %s", raw, exc_info=True)
     # Configured custom provider: a named slug in custom_providers, or any
     # ``custom`` / ``custom:<slug>`` form when custom_providers are defined.
     if _named_custom_provider_slug_for_provider(raw, config_obj):

@@ -563,3 +563,115 @@ def test_regression_fails_without_guard(monkeypatch, no_copilot_in_providers_cfg
         "reverse-verification: without the guard, the display provider "
         "should switch to openai-codex (proves the regression is real)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 1c. Round-8 findings (re-review #7568, nesquena-hermes 2026-09-23):
+#     registered plugin providers must be preserved, and a hint whose
+#     @provider: qualifier DISAGREES with the requested provider must be
+#     repaired, not preserved.
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_preserves_registered_plugin_provider_pair(
+    monkeypatch, no_copilot_in_providers_cfg
+):
+    """A persisted ``@myplugin:model`` pair whose provider is only known via
+    the plugin registry must survive a non-authoritative catalog.
+
+    Round 6/7's ``_provider_is_known_or_configured()`` recognized static and
+    custom providers but never called ``_is_plugin_model_provider()``, so a
+    registered plugin-provider selection was treated as unknown during an
+    in-flight catalog rebuild and repaired away to the active default.
+
+    The stubbing targets the plugin-registry predicate itself (NOT the
+    outer ``_provider_is_known_or_configured``), so the REAL predicate body
+    — including the plugin detection branch — runs. Without the fix the
+    registry branch is absent and this test fails.
+    """
+    monkeypatch.setattr(
+        cfg, "_is_plugin_model_provider", lambda pid: pid == "myplugin"
+    )
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ):
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "@myplugin:gpt-5.5", "myplugin"
+            )
+        )
+
+    assert effective_model == "@myplugin:gpt-5.5", (
+        "non-authoritative catalog repaired away a registered plugin "
+        "provider selection (re-review #7568 round 8)"
+    )
+    assert effective_provider == "myplugin"
+    assert normalized is False
+
+
+def test_resolver_repairs_hint_whose_qualifier_disagrees_with_requested_provider(
+    monkeypatch, no_copilot_in_providers_cfg
+):
+    """A legacy cold-wakeup pair whose ``@provider:`` qualifier names a
+    DIFFERENT provider than ``requested_provider`` (e.g. persisted
+    ``@copilot:gpt-5.5`` while the session's provider is ``openai-codex``)
+    must fall through to the compatibility repair, not be preserved.
+
+    Preservation pins the browser echo, and ``model_with_provider_context()``
+    keeps an existing ``@copilot:`` qualifier intact — so preserving this
+    pair routes every subsequent turn to copilot even though the request
+    asked for openai-codex. Only a hint that resolves to the SAME provider
+    as the request is safe to preserve.
+    """
+    monkeypatch.setattr(routes, "_provider_is_known_or_configured", lambda *a, **k: True)
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ):
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "@copilot:gpt-5.5", "openai-codex"
+            )
+        )
+
+    assert effective_model == "gpt-5.5", (
+        "hint whose @provider: qualifier disagrees with the requested "
+        "provider must be repaired to the active default, not preserved "
+        f"(re-review #7568 round 8): got {effective_model!r}"
+    )
+    assert effective_provider == "openai-codex"
+    assert normalized is True, (
+        "a mismatched-qualifier repair must report model_was_normalized=True "
+        "so callers treat it as a repair"
+    )
+
+
+def test_resolver_still_preserves_hint_that_matches_requested_provider(
+    monkeypatch, no_copilot_in_providers_cfg
+):
+    """Control for the qualifier check: a hint that resolves to the SAME
+    provider as the request (raw / alias / normalized equality) is still
+    preserved. Without this, an over-broad equality check would repair
+    away legitimate persisted pairs and re-open the silent-revert bug.
+    """
+    monkeypatch.setattr(routes, "_provider_is_known_or_configured", lambda *a, **k: True)
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ):
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "@copilot:gpt-5.5", "copilot"
+            )
+        )
+
+    assert (effective_model, effective_provider, normalized) == (
+        "@copilot:gpt-5.5",
+        "copilot",
+        False,
+    ), (
+        "a hint that matches the requested provider is a legitimate "
+        "persisted selection and must stay preserved on the "
+        "non-authoritative path"
+    )
