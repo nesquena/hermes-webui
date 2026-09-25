@@ -34,14 +34,17 @@ def test_model_picker_renders_selected_badge_without_replacing_configured_badge(
 
 
 def test_selected_badge_is_keyed_to_current_model_value():
-    assert "String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" in UI_JS
+    assert "const _isSelectedModelRow=(m)=>" in UI_JS
+    assert "const selModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');" in UI_JS
+    assert "rowValue===selModel" in UI_JS
 
 
 def test_selected_badge_is_keyed_to_current_model_provider():
     assert "const _selectedModelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(sel,sel.value)" in UI_JS
     assert "const _modelProviderForSelectedBadge=(m)=>" in UI_JS
     assert "return (_provider&&_provider!=='default')?_provider:null;" in UI_JS
-    assert "String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'')" in UI_JS
+    assert "const selProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');" in UI_JS
+    assert "rowProvider.toLowerCase()===selProvider.toLowerCase()" in UI_JS
     assert "const _isSelectedModelRow=(m)=>" in UI_JS
     assert "row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');" in UI_JS
 

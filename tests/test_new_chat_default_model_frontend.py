@@ -178,13 +178,13 @@ def test_save_settings_syncs_default_model_provider_with_saved_model():
     assert "_captureModelDropdownSelection($('settingsModel'))" in save_block
     assert "JSON.stringify({model,provider:modelState.model_provider||null})" in save_block
     assert "body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;" in save_block
-    assert "const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));" in save_block
+    assert "const modelChanged=(model!==(_settingsHermesDefaultModelOnOpen||'')||(provider!==(_settingsHermesDefaultModelProviderOnOpen||null)));" in save_block
     assert "if(Object.prototype.hasOwnProperty.call(body,'default_model_provider')) window._activeProvider=body.default_model_provider||null;" in apply_saved_block
     assert "_settingsHermesDefaultModelProviderOnOpen=(models&&models.active_provider)||null;" in panels_js
     assert "if(Object.prototype.hasOwnProperty.call(body,'default_model_provider')) _settingsHermesDefaultModelProviderOnOpen=body.default_model_provider||null;" in apply_saved_block
     assert "(modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null)" in autosave_block
     assert "_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null}" in panels_js
-    assert "_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null}" in save_block
+    assert "_captureModelDropdownSelection($('settingsModel'))||{model:String(rawModel||''),model_provider:null}" in save_block
 
 
 def test_changelog_mentions_new_chat_default_model_provider_sync():

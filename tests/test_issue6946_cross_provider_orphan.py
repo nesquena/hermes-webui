@@ -21,6 +21,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
+PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -148,3 +149,356 @@ def test_cross_provider_orphan_collapses_onto_real_twin(tmp_path):
         "reverse lookup of @provider-b:shared-model must resolve to the "
         "provider-B real row (provider equality): " + str(out)
     )
+
+
+def test_apply_model_to_dropdown_selects_provider_b_option_object(tmp_path):
+    """#6946 re-gate item 5: when duplicate scalar model values exist across providers,
+    _applyModelToDropdown() with preferredProviderId must set selected=true on the
+    specific provider-B option object, not merely set the scalar value."""
+    src = UI_JS_PATH.read_text(encoding="utf-8")
+    parts = [
+        _function(src, "_getOptionProviderId"),
+        _function(src, "_providerFromModelValue"),
+        _function(src, "_modelPickerOptionIdentity"),
+        _function(src, "_modelPickerCanonicalIdentity"),
+        _function(src, "_providerQualifiedPresetRest"),
+        _function(src, "_findModelInDropdown"),
+        _function(src, "_modelStateForSelect"),
+        _function(src, "_applyModelToDropdown"),
+    ]
+    driver = tmp_path / "driver_select_obj.js"
+    driver.write_text(
+        "\n".join(parts)
+        + r"""
+globalThis.window = {_activeProvider: null};
+globalThis.syncModelChip = () => {};
+globalThis.syncSettingsModelChip = () => {};
+globalThis._refreshOpenModelDropdown = () => {};
+
+const optA = {
+  tagName: 'OPTION',
+  value: 'shared-model',
+  textContent: 'shared-model',
+  dataset: {},
+  selected: false,
+  parentElement: {tagName: 'OPTGROUP', dataset: {provider: 'provider-a'}},
+};
+const optB = {
+  tagName: 'OPTION',
+  value: 'shared-model',
+  textContent: 'shared-model',
+  dataset: {},
+  selected: false,
+  parentElement: {tagName: 'OPTGROUP', dataset: {provider: 'provider-b'}},
+};
+const select = {
+  id: 'modelSelect',
+  options: [optA, optB],
+  _val: '',
+  get value() { return this._val; },
+  set value(v) {
+    this._val = v;
+    const firstMatch = this.options.find(o => o.value === v);
+    this.options.forEach(o => o.selected = (o === firstMatch));
+  },
+  get selectedOptions() {
+    return this.options.filter(o => o.selected);
+  }
+};
+
+const applied = _applyModelToDropdown('shared-model', select, 'provider-b');
+process.stdout.write(JSON.stringify({
+  applied,
+  optA_selected: optA.selected,
+  optB_selected: optB.selected,
+  selectedOptionIsB: select.options.find(o => o.selected && o.parentElement.dataset.provider === 'provider-b') === optB,
+}));
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run([NODE, str(driver)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["applied"] == "shared-model"
+    assert out["optB_selected"] is True, "Option B must have selected=true"
+    assert out["selectedOptionIsB"] is True, "Provider-B option object must be selected"
+
+
+def test_production_function_advanced_save_main_and_auxiliary(tmp_path):
+    """#6946 re-gate item 3: test production _openAuxAdvancedOptions() for both main
+    OpenRouter openrouter/@preset/blue and auxiliary mode. Assert no ReferenceError
+    and the exact /api/model/set payload."""
+    ui_src = UI_JS_PATH.read_text(encoding="utf-8")
+    panels_src = PANELS_JS_PATH.read_text(encoding="utf-8")
+
+    ui_parts = [
+        _function(ui_src, "_getOptionProviderId"),
+        _function(ui_src, "_providerFromModelValue"),
+        _function(ui_src, "_modelPickerOptionIdentity"),
+        _function(ui_src, "_modelPickerCanonicalIdentity"),
+        _function(ui_src, "_providerQualifiedPresetRest"),
+        _function(ui_src, "_modelStateForSelect"),
+        _function(ui_src, "_captureModelDropdownSelection"),
+    ]
+    panels_parts = [
+        _function(panels_src, "_auxAdvancedValue"),
+        _function(panels_src, "_auxAdvancedInputHtml"),
+        _function(panels_src, "_openAuxAdvancedOptions"),
+    ]
+
+    driver = tmp_path / "driver_advanced_save.js"
+    driver.write_text(
+        "\n".join(ui_parts + panels_parts)
+        + r"""
+let apiCalls = [];
+globalThis.api = async (url, opts) => {
+  apiCalls.push({url, opts, body: JSON.parse(opts.body)});
+  return {ok: true};
+};
+globalThis.t = k => k;
+globalThis.esc = s => s;
+globalThis.showToast = () => {};
+globalThis._loadAuxiliaryModels = () => {};
+globalThis.window = {_activeProvider: null};
+
+const elements = {};
+globalThis.$ = id => {
+  if (!elements[id]) elements[id] = {value: '', style: {}, focus: () => {}};
+  if (!elements[id].focus) elements[id].focus = () => {};
+  return elements[id];
+};
+
+globalThis._ensureAuxAdvancedModal = () => elements['auxAdvancedOverlay'];
+globalThis._mainModelSupportsServiceTier = () => true;
+globalThis._auxTaskLabelFromMeta = (k) => ({task: k, label: k});
+globalThis._auxTimingInputHtml = () => '';
+
+// Case 1: Main OpenRouter preset
+const optPreset = {
+  tagName: 'OPTION',
+  value: 'openrouter/@preset/blue',
+  textContent: '@preset/blue',
+  dataset: {},
+  parentElement: {tagName: 'OPTGROUP', dataset: {provider: 'openrouter'}},
+};
+const settingsModel = {
+  id: 'settingsModel',
+  value: 'openrouter/@preset/blue',
+  options: [optPreset],
+  selectedOptions: [optPreset],
+};
+elements['settingsModel'] = settingsModel;
+elements['auxAdvancedOverlay'] = {style: {}, dataset: {}};
+elements['auxAdvancedTitle'] = {textContent: ''};
+elements['auxAdvancedBody'] = {innerHTML: ''};
+elements['auxAdvancedSave'] = {onclick: null};
+elements['auxAdvancedBaseUrl'] = {value: 'https://openrouter.ai/api/v1', focus: () => {}};
+elements['auxAdvancedExtraBody'] = {value: '{"transforms":[]}'};
+elements['auxAdvancedApiKey'] = {value: 'sk-or-v1-test'};
+elements['auxAdvancedApiKeyClear'] = {checked: false};
+elements['auxAdvancedServiceTier'] = {value: 'auto'};
+
+_openAuxAdvancedOptions('__main__', {provider: 'openrouter', model: 'openrouter/@preset/blue'});
+elements['auxAdvancedSave'].onclick();
+
+// Case 2: Auxiliary mode
+elements['aux-prov-title'] = {value: 'anthropic'};
+elements['aux-model-title'] = {value: 'claude-3-5-haiku-20241022'};
+elements['auxAdvancedBaseUrl'] = {value: '', focus: () => {}};
+elements['auxAdvancedExtraBody'] = {value: ''};
+elements['auxAdvancedApiKey'] = {value: ''};
+elements['auxAdvancedApiKeyClear'] = {checked: false};
+elements['auxAdvancedTimeout'] = {value: '30'};
+elements['auxAdvancedDownloadTimeout'] = {value: '60'};
+elements['auxAdvancedMaxConcurrency'] = {value: '2'};
+
+_openAuxAdvancedOptions('title', {provider: 'anthropic', model: 'claude-3-5-haiku-20241022'});
+elements['auxAdvancedSave'].onclick();
+
+setTimeout(() => {
+  process.stdout.write(JSON.stringify(apiCalls));
+}, 50);
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run([NODE, str(driver)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(result.stdout)
+    assert len(calls) == 2, f"Expected 2 API calls, got {len(calls)}"
+
+    # Check main OpenRouter call
+    main_call = calls[0]
+    assert main_call["url"] == "/api/model/set"
+    assert main_call["body"]["scope"] == "main"
+    assert main_call["body"]["task"] == ""
+    assert main_call["body"]["provider"] == "openrouter"
+    assert main_call["body"]["model"] == "@preset/blue"
+    assert main_call["body"]["advanced"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert main_call["body"]["advanced"]["extra_body"] == {"transforms": []}
+    assert main_call["body"]["advanced"]["api_key"] == "sk-or-v1-test"
+    assert main_call["body"]["advanced"]["service_tier"] == "auto"
+
+    # Check auxiliary call
+    aux_call = calls[1]
+    assert aux_call["url"] == "/api/model/set"
+    assert aux_call["body"]["scope"] == "auxiliary"
+    assert aux_call["body"]["task"] == "title"
+    assert aux_call["body"]["provider"] == "anthropic"
+    assert aux_call["body"]["model"] == "claude-3-5-haiku-20241022"
+    assert aux_call["body"]["advanced"]["timeout"] == "30"
+    assert aux_call["body"]["advanced"]["download_timeout"] == "60"
+    assert aux_call["body"]["advanced"]["max_concurrency"] == "2"
+
+
+def test_behavioral_save_settings_payload_branches(tmp_path):
+    """#6946 re-gate item 4: behavioral ordinary saveSettings() payload test for password
+    and no-password branches, including the unchanged-baseline no-op."""
+    ui_src = UI_JS_PATH.read_text(encoding="utf-8")
+    panels_src = PANELS_JS_PATH.read_text(encoding="utf-8")
+
+    ui_parts = [
+        _function(ui_src, "_getOptionProviderId"),
+        _function(ui_src, "_providerFromModelValue"),
+        _function(ui_src, "_modelPickerOptionIdentity"),
+        _function(ui_src, "_modelPickerCanonicalIdentity"),
+        _function(ui_src, "_providerQualifiedPresetRest"),
+        _function(ui_src, "_modelStateForSelect"),
+        _function(ui_src, "_captureModelDropdownSelection"),
+    ]
+
+    start = panels_src.index("async function saveSettings(andClose){")
+    brace = panels_src.index("{", start)
+    depth = 0
+    end = -1
+    for i in range(brace, len(panels_src)):
+        if panels_src[i] == "{":
+            depth += 1
+        elif panels_src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    save_settings_src = panels_src[start:end]
+
+    driver = tmp_path / "driver_save_settings.js"
+    driver.write_text(
+        "\n".join(ui_parts)
+        + "\n"
+        + save_settings_src
+        + r"""
+let postedSettings = [];
+let defaultModelCalls = [];
+
+globalThis._enqueueSettingsPost = async (opts) => {
+  postedSettings.push(JSON.parse(opts.body));
+  return {ok: true};
+};
+globalThis.api = async (url, opts) => {
+  if (url === '/api/default-model') {
+    defaultModelCalls.push(JSON.parse(opts.body));
+  }
+  return {ok: true};
+};
+globalThis.window = globalThis;
+globalThis.t = k => k;
+globalThis.showToast = () => {};
+globalThis.localStorage = {getItem: () => null, setItem: () => {}};
+globalThis._speechPreferencesPayloadFromUi = () => ({});
+globalThis._structuredCodeViewFromUi = () => ({});
+globalThis._composerControlVisibilityPayload = () => ({});
+globalThis._getComposerControlOrder = () => [];
+globalThis._updateAuthDisabledWarning = () => {};
+globalThis._resetSettingsPanelState = () => {};
+globalThis._hideSettingsPanel = () => {};
+
+const elements = {};
+globalThis.$ = id => {
+  if (!elements[id]) elements[id] = {value: '', style: {}, dataset: {}, focus: () => {}};
+  if (!elements[id].dataset) elements[id].dataset = {};
+  return elements[id];
+};
+
+async function runTests() {
+  const optPreset = {
+    tagName: 'OPTION',
+    value: 'openrouter/@preset/blue',
+    textContent: '@preset/blue',
+    dataset: {},
+    parentElement: {tagName: 'OPTGROUP', dataset: {provider: 'openrouter'}},
+  };
+  elements['settingsModel'] = {
+    id: 'settingsModel',
+    value: 'openrouter/@preset/blue',
+    options: [optPreset],
+    selectedOptions: [optPreset],
+  };
+
+  // --- Branch 1: No password, model changed ---
+  globalThis._settingsHermesDefaultModelOnOpen = 'claude-3-sonnet';
+  globalThis._settingsHermesDefaultModelProviderOnOpen = 'anthropic';
+  elements['settingsPassword'] = {value: ''};
+  postedSettings = [];
+  defaultModelCalls = [];
+  await saveSettings(false);
+  const branch1Settings = postedSettings[0];
+  const branch1DefaultModel = defaultModelCalls[0];
+
+  // --- Branch 2: Password set, model changed ---
+  elements['settingsPassword'] = {value: 'my-super-secret-pw'};
+  elements['settingsCurrentPassword'] = {value: ''};
+  globalThis._settingsPasswordAuthEnabled = false;
+  postedSettings = [];
+  defaultModelCalls = [];
+  await saveSettings(false);
+  const branch2Settings = postedSettings[0];
+  const branch2DefaultModel = defaultModelCalls[0];
+
+  // --- Branch 3: Unchanged baseline no-op ---
+  globalThis._settingsHermesDefaultModelOnOpen = '@preset/blue';
+  globalThis._settingsHermesDefaultModelProviderOnOpen = 'openrouter';
+  elements['settingsPassword'] = {value: ''};
+  postedSettings = [];
+  defaultModelCalls = [];
+  await saveSettings(false);
+  const branch3DefaultModelCallsCount = defaultModelCalls.length;
+
+  process.stdout.write(JSON.stringify({
+    branch1: {
+      has_set_password: Object.prototype.hasOwnProperty.call(branch1Settings, '_set_password'),
+      default_model_call: branch1DefaultModel,
+    },
+    branch2: {
+      set_password: branch2Settings._set_password,
+      default_model_call: branch2DefaultModel,
+    },
+    branch3: {
+      default_model_calls_count: branch3DefaultModelCallsCount,
+    }
+  }));
+}
+
+runTests();
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run([NODE, str(driver)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+
+    # Branch 1: no password, default-model called with canonical captured pair
+    assert out["branch1"]["has_set_password"] is False
+    assert out["branch1"]["default_model_call"] == {
+        "model": "@preset/blue",
+        "provider": "openrouter",
+    }
+
+    # Branch 2: password set, default-model called
+    assert out["branch2"]["set_password"] == "my-super-secret-pw"
+    assert out["branch2"]["default_model_call"] == {
+        "model": "@preset/blue",
+        "provider": "openrouter",
+    }
+
+    # Branch 3: unchanged baseline, /api/default-model NOT called
+    assert out["branch3"]["default_model_calls_count"] == 0
+
