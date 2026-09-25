@@ -132,6 +132,20 @@
   /* ── Skin: Mono (gray) ── */
   :root[data-skin="mono"]{--accent:#666666;--accent-hover:#555555;--accent-bg:rgba(102,102,102,0.08);--accent-bg-strong:rgba(102,102,102,0.15);--accent-text:#555555;}
   :root.dark[data-skin="mono"]{--accent:#CCCCCC;--accent-hover:#999999;--accent-bg:rgba(204,204,204,0.08);--accent-bg-strong:rgba(204,204,204,0.15);--accent-text:#CCCCCC;}
+  /* #7092: dark-mode skins whose --accent is light (mono, catppuccin,
+     hepburn, sienna, geist-contrast, …) rendered hardcoded #fff foregrounds
+     on the light accent fill — white-on-#CCCCCC is ~1.2:1, far below WCAG AA.
+     Instead of another per-skin override, follow #3810's recommendation and
+     paint solid-accent foregrounds with var(--bg): --accent is by design
+     contrasted against --bg, so this is correct for every palette, light or
+     dark, without touching the per-skin overrides that pin specific colors
+     (graphite/codex/terracotta/github keep theirs). */
+  :root.dark button.send-btn:not(:disabled),
+  :root.dark .send-btn:not(:disabled),
+  :root.dark #mainSettings .settings-btn,
+  :root.dark #mainSettings .sm-btn[onclick^="saveSettings"],
+  :root.dark .toolsets-apply-btn,
+  :root.dark .msg-edit-send{color:var(--bg);}
   /* ── Skin: Graphite (neutral workbench) ──
      Full palette rewrite with restrained graphite surfaces, soft contrast,
      and neutral action chrome. Uses native system fonts so it stays local,
