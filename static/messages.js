@@ -6327,9 +6327,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
+          // #6112: capture the pre-settle transcript so the guard after the carry-forward can
+          // put it back. `_carryForwardEphemeralTurnFields` returns the NEW list whenever
+          // either side is empty, so a `done` payload with no messages blanked the whole
+          // visible transcript — and a payload that never received the in-flight assistant
+          // turn (context compression rotating the session at the turn boundary) dropped the
+          // answer the reader was watching. Neither is recoverable downstream: a blank
+          // transcript stays blank, and the #373 no-reply guard is gated on `!assistantText`,
+          // so no "No response received." card is pushed either. A reload restores it because
+          // the server copy was never touched — which is the whole #6112 symptom.
+          let _doneFinalAnswer='';
+          try{ if(typeof _streamDisplay==='function') _doneFinalAnswer=_streamDisplay()||''; }catch(_){}
+          const _preSettle=Array.isArray(S.messages)?S.messages:[];
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
+          // #6112 settle guard.
+          S.messages=_adoptDoneSnapshotMessages(_preSettle, S.messages, _doneFinalAnswer);
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -7122,6 +7136,71 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   if(typeof window!=='undefined'){
     window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
+  }
+  // #6112 — a `done` settle must never leave the transcript without the final answer.
+  //
+  // The settled snapshot used to be adopted with no questions asked:
+  //     S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);
+  // `_carryForwardEphemeralTurnFields` returns the NEW list unconditionally whenever either
+  // side is empty, so a payload whose `session.messages` was absent, null, or [] replaced the
+  // whole visible transcript with []. Two concrete ways the streamed answer then disappears
+  // while the server copy stays intact:
+  //   1. empty/absent snapshot -> every message the reader was watching is dropped;
+  //   2. snapshot whose transcript simply never received the streamed answer (context
+  //      compression rotates the session at the turn boundary, and the rotated session's
+  //      message list is built without the in-flight assistant turn) -> adopted verbatim, and
+  //      the answer lives only in the live segment, which the settled rebuild throws away.
+  // Either way `_filterRecoveryControlMessages` does not recover it and the #373 no-reply
+  // guard is suppressed (it is gated on `!assistantText`), so NO "No response received." card
+  // is pushed either: the pane just renders empty, exactly as reported, and a reload — which
+  // re-reads the intact server transcript — brings the same answer back.
+  //
+  // The `stream_end` path has had the matching shorter-snapshot protection since #5224/#3195
+  // (`preserveVisibleOnShorterTerminalSnapshot` / prefix+suffix matching). This is the `done`
+  // counterpart: only a snapshot that actually carries the turn's answer may replace what the
+  // reader is already looking at.
+  //
+  // `finalAnswer` is the display-ready streamed text (thinking/tool-call markup already
+  // stripped by the caller). An empty one disables the answer-presence rule, so callers that
+  // cannot supply it keep today's behaviour.
+  function _finalAnswerIsInTranscript(messages, finalAnswer){
+    const answer=String(finalAnswer||'').trim();
+    if(!answer) return true;
+    const tail=answer.slice(-160);
+    const list=Array.isArray(messages)?messages:[];
+    for(const m of list){
+      if(!m||m.role!=='assistant') continue;
+      let c=m.content;
+      if(Array.isArray(c)) c=c.map(p=>(p&&typeof p==='object')?((p.text||p.input_text||'')||''):(p||'')).join('');
+      c=String(c||'').trim();
+      if(!c) continue;
+      if(c===answer) return true;
+      if(answer.indexOf(c)>=0) return true;
+      if(c.indexOf(answer)>=0) return true;
+      if(tail&&c.indexOf(tail)>=0) return true;
+    }
+    return false;
+  }
+  // Settle guard, run right after the #3018 carry-forward assignment in the `done` handler.
+  // `preSettleMessages` is the transcript as the reader was looking at it, `settledMessages`
+  // is what the snapshot reconciled to. Two rules:
+  //   1. an empty settled list may not replace a non-empty transcript — there is nothing in
+  //      it to reconcile, so it would only blank the pane;
+  //   2. whatever wins must still contain the streamed final answer — otherwise the answer is
+  //      re-attached to the tail so the settled rebuild has something to render.
+  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer){
+    const pre=Array.isArray(preSettleMessages)?preSettleMessages:[];
+    const settled=Array.isArray(settledMessages)?settledMessages:[];
+    const adopted=settled.length>0;
+    const messages=(adopted||!pre.length)?settled:pre;
+    const answer=String(finalAnswer||'').trim();
+    if(!answer) return {adopted:adopted,messages:messages};
+    if(_finalAnswerIsInTranscript(messages,answer)) return {adopted:adopted,messages:messages};
+    if(!messages.length) return {adopted:adopted,messages:messages};
+    return {adopted:true,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}])};
+  }
+  if(typeof window!=='undefined'){
+    window._adoptDoneSnapshotMessages=_adoptDoneSnapshotMessages;
   }
 
   async function _restoreSettledSession(source, options=null){
