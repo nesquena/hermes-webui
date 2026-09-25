@@ -874,3 +874,39 @@ def test_set_state_db_archived_require_source_in(isolated_state_db):
         api, True, require_source_in=("api", "api_server")
     ) is True
     assert _read_archived(db, api) == 1
+
+
+def test_stale_cleanup_manifest_unsafe_id_recovers_without_failure(isolated_state_db, monkeypatch, tmp_path):
+    """Crash-recovery: a stale cleanup manifest containing an unsafe API-server ID
+    whose database row is absent must be cleared without error, and must NOT
+    poison subsequent deletes with state_db_cleanup_failed."""
+    from api.models import _process_stale_cleanup_manifests
+
+    # Create state.db with proper schema
+    db = isolated_state_db["db"]
+    _make_state_db(db, "unrelated-existing-session", source="cli", title="Unrelated")
+
+    # Create sessions dir in hermes_home
+    cli_sessions_dir = tmp_path / "sessions"
+    cli_sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a stale cleanup manifest containing an unsafe API-server ID
+    unsafe_sid = "miloco:agent:main:123"
+    manifest_file = cli_sessions_dir / ".cleanup_manifest_test_stale.json"
+    manifest_file.write_text(json.dumps([unsafe_sid]), encoding="utf-8")
+
+    # 1. Processing the stale manifest succeeds and removes the manifest file
+    assert _process_stale_cleanup_manifests(tmp_path) is True
+    assert not manifest_file.exists(), "stale cleanup manifest should have been unlinked"
+
+    # 2. Deleting an unrelated safe WebUI row does not inherit state_db_cleanup_failed
+    safe_webui_sid = "safe-webui-session-1"
+    sidecar = isolated_state_db["sessions_dir"] / f"{safe_webui_sid}.json"
+    sidecar.write_text(json.dumps({"session_id": safe_webui_sid, "profile": "default", "messages": []}), encoding="utf-8")
+    isolated_state_db["index_path"].write_text(json.dumps([{"session_id": safe_webui_sid}]), encoding="utf-8")
+
+    captured = _capture_post(monkeypatch, {"session_id": safe_webui_sid})
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert captured["status"] == 200, captured
+    assert captured["payload"].get("ok") is True
+    assert captured["payload"].get("state_db_cleanup_failed") is not True

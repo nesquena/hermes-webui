@@ -11526,7 +11526,12 @@ def _clean_pending_artifact(sessions_dir, removed_id):
     DB transaction.  Returns True when every artifact is gone (or absent).
     """
     if not is_safe_session_id(removed_id):
-        return False
+        # Non-path-safe ids (e.g. imported api_server rows like
+        # ``miloco:...``) never have sidecar/artifact files on
+        # disk — they are state.db-only rows. The recovery query proved
+        # the DB row is absent, so there are no artifacts to clean and
+        # this is NOT a failure (#6843).
+        return True
     ok = True
     for suffix in (".json", ".jsonl"):
         artifact = sessions_dir / f"{removed_id}{suffix}"
