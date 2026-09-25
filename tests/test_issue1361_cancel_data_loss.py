@@ -490,6 +490,9 @@ def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoin
     )
     s.pending_started_at = 1778098700.0
     s.pending_attachments = [{"name": "screen.png"}]
+    s.messages[-1]["_active_turn_token"] = models.build_active_turn_token(
+        s.active_stream_id, s.pending_started_at,
+    )
 
     appended = _materialize_pending_user_turn_before_error(s)
 
@@ -646,13 +649,16 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
     def test_cancel_stream_does_not_duplicate_existing_worker_cancel_marker(self):
         sid = "test_1361_idempotent"
         stream_id = "stream_idempotent"
-        _make_session(
+        s = _make_session(
             session_id=sid,
             messages=[
                 {'role': 'user', 'content': 'Help me debug this', 'timestamp': 100},
                 {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Hermes finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
             ],
         )
+        s.pending_started_at = 100.0
+        s.save()
+        models.SESSIONS[s.session_id] = s
         _setup_cancel_state(sid, stream_id)
         config.STREAM_PARTIAL_TEXT[stream_id] = "partial text before cancel"
 

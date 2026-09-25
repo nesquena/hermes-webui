@@ -160,13 +160,18 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
     return result
 
 
-def _session_payload_with_full_messages(session, *, tool_calls=None):
+def _session_payload_with_full_messages(
+    session,
+    *,
+    tool_calls=None,
+):
     """Return compact session metadata plus the embedded full transcript.
 
     ``Session.compact()`` may intentionally use metadata-only counts from an
     index/sidebar load. A settled SSE payload that embeds ``session.messages``
     must report the count of that embedded transcript, otherwise completion and
     reconcile paths can mistake a complete payload for a stale short window.
+
     """
     messages = list(getattr(session, 'messages', None) or [])
     raw = session.compact() | {
@@ -8964,16 +8969,30 @@ def _materialize_pending_user_turn_before_error(
         if is_lcm_context_recovery_marker(existing):
             return False
         existing_token = existing.get('_active_turn_token')
-        if existing_token and active_turn_token and existing_token != active_turn_token:
-            return False
+        if active_turn_token:
+            if existing_token != active_turn_token:
+                return False
         existing_source = existing.get('_source') or 'webui'
-        try:
-            existing_ts = int(existing.get('timestamp'))
-        except (TypeError, ValueError):
-            return False
+        if not active_turn_token:
+            try:
+                existing_ts = existing.get('timestamp')
+                if (
+                    isinstance(existing_ts, bool)
+                    or not isinstance(existing_ts, (int, float))
+                    or isinstance(pending_started_at, bool)
+                    or not isinstance(pending_started_at, (int, float))
+                ):
+                    return False
+                existing_ts = float(existing_ts)
+                identity_ts = float(pending_started_at)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isfinite(existing_ts) or not math.isfinite(identity_ts):
+                return False
+            if existing_ts != identity_ts:
+                return False
         return (
             _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
         )
@@ -14934,7 +14953,11 @@ def cancel_stream(stream_id: str) -> bool:
                     _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
-                    _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _pending_started_raw = getattr(_cs, 'pending_started_at', None)
+                    _pending_started = _pending_started_raw or 0
+                    _pending_started_ts = _message_timestamp_as_float(
+                        {'timestamp': _pending_started_raw}
+                    )
                     _expected_token = build_active_turn_token(stream_id, _pending_started)
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
@@ -14946,12 +14969,17 @@ def cancel_stream(stream_id: str) -> bool:
                         _already_persisted = False
                         if _last_user is not None:
                             _last_content = _last_user.get('content')
-                            _last_ts = _message_timestamp_as_float(_last_user) or 0
+                            _last_ts = _message_timestamp_as_float(_last_user)
                             _last_token = _last_user.get('_active_turn_token')
                             if _expected_token and _last_token == _expected_token:
                                 _already_persisted = True
                             elif not _last_token and not is_lcm_context_recovery_marker(_last_user):
-                                if isinstance(_last_content, str) and _last_ts >= _pending_started:
+                                if (
+                                    isinstance(_last_content, str)
+                                    and _pending_started_ts is not None
+                                    and _last_ts is not None
+                                    and _last_ts == _pending_started_ts
+                                ):
                                     # Tolerate the workspace prefix on tokenless provider replay.
                                     _already_persisted = _pending_user == _last_content or _pending_user in _last_content
                         if not _already_persisted:

@@ -2940,6 +2940,21 @@ def test_strict_prefix_distinguishes_unequal_timestamps(timestamp_field):
     assert not _session_messages_have_prefix([first], [second])
 
 
+def test_state_db_delta_does_not_trim_prefix_with_boolean_timestamp():
+    from api.models import state_db_delta_after_context
+
+    context = [
+        {"role": "user", "content": "first", "timestamp": 1.0},
+        {"role": "assistant", "content": "second", "timestamp": 2.0},
+    ]
+    state = [
+        {"role": "user", "content": "first", "timestamp": True},
+        {"role": "assistant", "content": "second", "timestamp": 2.0},
+    ]
+
+    assert state_db_delta_after_context(context, state) == state
+
+
 def test_display_union_near_cumulative_probe_bound(monkeypatch):
     import api.models as models
 
@@ -3020,13 +3035,15 @@ def test_empty_primary_private_identity_probe_growth(monkeypatch, field, count):
     assert probes < count * 8
 
 
-def test_display_union_promotes_inserted_mirror_without_dropping_primary_repeats():
+def test_display_union_preserves_inserted_rows_without_shared_identity():
     from api.models import merge_session_display_messages
     history = dict(role='assistant', content='Prior', timestamp=1)
     user = dict(role='user', content='Current', timestamp=2)
     answer = dict(role='assistant', content='Answer', timestamp=2)
     owner = dict(user, _active_turn_token='current:2')
-    assert merge_session_display_messages([history, dict(history)], [user, answer, owner]) == [history, history, owner, answer]
+    assert merge_session_display_messages(
+        [history, dict(history)], [user, answer, owner]
+    ) == [history, history, user, answer, owner]
 
 
 def test_empty_primary_partial_identity_finds_late_mirror():
@@ -3222,6 +3239,18 @@ def test_display_idless_replay_does_not_hide_equal_length_repeated_turn():
     assert merged == primary + incoming
 
 
+def test_display_preserves_duplicate_idless_incoming_rows_after_nonmatching_primary():
+    from api.models import merge_session_display_messages
+
+    primary = [dict(role='user', content='existing', timestamp=1.0)]
+    incoming = [
+        dict(role='assistant', content='same answer', timestamp=2.0),
+        dict(role='assistant', content='same answer', timestamp=2.0),
+    ]
+
+    assert merge_session_display_messages(primary, incoming) == primary + incoming
+
+
 def test_display_idless_four_row_repeated_exchange_preserves_both_sequences():
     from api.models import merge_session_display_messages
 
@@ -3280,6 +3309,35 @@ def test_display_blank_separator_dedupe_requires_safe_same_turn_identity():
     anonymous = dict(role='assistant', content='', timestamp=7)
     assert merge_session_display_messages([anonymous, dict(anonymous)], []) == [anonymous]
     assert merge_session_display_messages([first, dict(anonymous)], []) == [first, dict(anonymous)]
+
+
+def test_display_recovered_blank_anchors_keep_stream_ownership():
+    from api.models import merge_session_display_messages
+
+    base = dict(
+        role='assistant', content='', timestamp=7,
+        _recovered_from_run_journal=True,
+    )
+    first = dict(base, _recovered_stream_id='stream-a')
+    second = dict(base, _recovered_stream_id='stream-b')
+    assert merge_session_display_messages([first, second], []) == [first, second]
+    assert merge_session_display_messages(
+        [first, dict(first)], []
+    ) == [first]
+
+
+def test_state_db_distinct_row_ids_survive_idless_sidecar_dedup_bucket():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [dict(role='assistant', content='same', timestamp=7)]
+    durable = [
+        dict(role='assistant', content='same', timestamp=7, _state_db_row_id=row_id)
+        for row_id in (1, 2)
+    ]
+    merged = merge_session_messages_append_only(
+        sidecar, durable, incoming_provenance='state_db'
+    )
+    assert merged == sidecar + durable
 
 
 def test_display_blank_assistant_dedupe_identity_work_is_bounded(monkeypatch):
@@ -3566,6 +3624,79 @@ def test_display_prefix_does_not_claim_restamped_anonymous_answer():
     second = dict(first, timestamp=2)
     tail = dict(role='user', content='Next', timestamp=3)
     assert merge_session_display_messages([first], [second, tail]) == [first, second, tail]
+
+
+def test_exact_timestamp_details_rejects_conflicting_or_malformed_aliases():
+    from api.models import _message_exact_timestamp_details
+
+    assert _message_exact_timestamp_details({"timestamp": 1, "_ts": 1.0}) == (1.0, True)
+    assert _message_exact_timestamp_details({"timestamp": 1, "_ts": 2}) == (None, False)
+    for invalid in (True, "bad", float("inf"), []):
+        assert _message_exact_timestamp_details({"timestamp": 1, "_ts": invalid}) == (None, False)
+    assert _message_exact_timestamp_details({}) == (None, True)
+
+
+def test_display_prefix_does_not_claim_row_with_conflicting_timestamp_aliases():
+    from api.models import merge_session_display_messages
+
+    first = {"role": "assistant", "content": "same", "timestamp": 1, "_ts": 2}
+    second = {"role": "assistant", "content": "same", "_ts": 3}
+    assert merge_session_display_messages([first], [second]) == [first, second]
+
+
+def test_append_only_retains_row_when_sidecar_timestamp_aliases_conflict():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = {"role": "assistant", "content": "same", "timestamp": 2, "_ts": 1}
+    state = {"role": "assistant", "content": "same", "timestamp": 1}
+
+    merged = merge_session_messages_append_only(
+        [sidecar], [state], incoming_provenance="state_db",
+    )
+
+    assert merged == [sidecar, state]
+
+
+@pytest.mark.parametrize("timestamp", [None, "malformed", True])
+def test_display_anonymous_mirror_requires_valid_equal_timestamps_or_identity(timestamp):
+    from api.models import merge_session_display_messages
+
+    left = dict(role="assistant", content="same")
+    right = dict(left)
+    if timestamp is not None:
+        left["timestamp"] = timestamp
+        right["timestamp"] = timestamp
+    assert merge_session_display_messages([left], [right]) == [left, right]
+
+
+def test_display_anonymous_mirror_accepts_shared_identity_or_equal_valid_timestamp():
+    from api.models import merge_session_display_messages
+
+    anonymous = dict(role="assistant", content="same")
+    assert merge_session_display_messages(
+        [dict(anonymous, id="message-1")], [dict(anonymous, id="message-1")]
+    ) == [dict(anonymous, id="message-1")]
+    assert merge_session_display_messages(
+        [dict(anonymous, timestamp=1)], [dict(anonymous, timestamp=1.0)]
+    ) == [dict(anonymous, timestamp=1)]
+
+
+def test_display_prefix_compares_tool_use_id():
+    from api.models import _session_messages_have_prefix
+
+    first = dict(role="tool", content="result", timestamp=1, tool_use_id="use-a")
+    second = dict(first, tool_use_id="use-b")
+    assert not _session_messages_have_prefix([first], [second], compatible=True)
+    assert _session_messages_have_prefix(
+        [dict(first, tool_call_id="call-1")],
+        [dict(first, tool_call_id="call-1")],
+        compatible=True,
+    )
+    assert _session_messages_have_prefix(
+        [dict(first, id="stable", timestamp=1)],
+        [dict(first, id="stable", timestamp=2)],
+        compatible=True,
+    )
 
 
 @pytest.mark.parametrize('count', [128, 512, 5000])

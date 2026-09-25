@@ -3,6 +3,8 @@
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 import api.models as models
 import api.routes as routes
 
@@ -177,6 +179,116 @@ def test_state_db_keeps_older_legacy_collision_without_reordering_sidecar_rows()
     ]
 
 
+def test_state_db_keeps_older_anonymous_user_with_unequal_timestamp():
+    sidecar = [_user("same", 102.0), _assistant("later", 103.0)]
+    state = [_user("same", 100.75)]
+
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, incoming_provenance="state_db",
+    )
+
+    assert sorted(
+        message["timestamp"] for message in merged if message["content"] == "same"
+    ) == [100.75, 102.0]
+
+
+def test_state_db_context_delta_requires_identity_for_restamped_prefix():
+    sidecar_context = [_user("q", 99.0), _assistant("same", 100.0)]
+    state = [
+        _user("q", 199.0, _state_db_row_id=7001),
+        _assistant("same", 200.0, _state_db_row_id=7002),
+    ]
+
+    assert models.state_db_delta_after_context(sidecar_context, state) == state
+
+    shared_identity_context = [
+        _user("q", 99.0, id="user-row", _state_db_row_id=7001),
+        _assistant("same", 100.0, id="answer-row", _state_db_row_id=7002),
+    ]
+    shared_identity_state = [
+        _user("q", 199.0, id="user-row", _state_db_row_id=7001),
+        _assistant("same", 200.0, id="answer-row", _state_db_row_id=7002),
+    ]
+
+    assert models.state_db_delta_after_context(
+        shared_identity_context, shared_identity_state,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("malformed_side", "timestamp"),
+    [
+        pytest.param("state", "not-a-timestamp", id="state-unparseable"),
+        pytest.param("state", float("nan"), id="state-nan"),
+        pytest.param("state", float("inf"), id="state-infinite"),
+        pytest.param("sidecar", "not-a-timestamp", id="sidecar-unparseable"),
+        pytest.param("sidecar", float("nan"), id="sidecar-nan"),
+    ],
+)
+def test_state_db_context_delta_preserves_rows_with_malformed_timestamps(
+    malformed_side, timestamp,
+):
+    sidecar_context = [
+        _user("same question", 100.0),
+        _assistant("same answer", 101.0),
+    ]
+    state = [
+        _user("same question", 100.0),
+        _assistant("same answer", 101.0),
+    ]
+    rows = state if malformed_side == "state" else sidecar_context
+    rows[0]["timestamp"] = timestamp
+
+    delta = models.state_db_delta_after_context(sidecar_context, state)
+
+    assert [message["content"] for message in delta] == [
+        "same question",
+        "same answer",
+    ]
+    merged = models.merge_session_messages_append_only(
+        sidecar_context, state, incoming_provenance="state_db",
+    )
+    assert [message["content"] for message in merged].count("same question") == 2
+    assert [message["content"] for message in merged].count("same answer") == 1
+
+
+def test_state_db_context_delta_keeps_idless_restamped_pending_user_collision():
+    stream_id = "pending-context-stream"
+    token = models.build_active_turn_token(stream_id, 99.0)
+    sidecar_context = [
+        _user("old", 10.0),
+        _assistant("answer", 20.0),
+        _user("q", 99.0, _active_turn_token=token),
+    ]
+    state = [
+        _user("old", 10.0),
+        _assistant("answer", 20.0),
+        _user("q", 199.0),
+    ]
+    session = models.Session(
+        messages=sidecar_context,
+        context_messages=sidecar_context,
+        active_stream_id=stream_id,
+        pending_started_at=99.0,
+        pending_user_message="q",
+        pending_user_source="webui",
+        _webui_pending_user_timestamp_identity=(stream_id, 99.0),
+    )
+
+    assert session._webui_pending_user_timestamp_identity == (stream_id, 99.0)
+    assert models.state_db_delta_after_context(sidecar_context, state) == [state[-1]]
+    reconciled = models.reconciled_state_db_messages_for_session(
+        session,
+        prefer_context=True,
+        state_messages=state,
+    )
+    assert [
+        (message["content"], message["timestamp"])
+        for message in reconciled
+        if message.get("role") == "user" and message["content"] == "q"
+    ] == [("q", 99.0), ("q", 199.0)]
+
+
 def test_state_db_prefix_replay_uses_full_precision_and_shared_identity():
     cases = [
         (_assistant("same", 100.0), _assistant("same", 100.0)),
@@ -190,8 +302,16 @@ def test_state_db_prefix_replay_uses_full_precision_and_shared_identity():
             _assistant("same", 101.0, _state_db_row_id=42),
         ),
         (
+            _user("same", 100.0, _state_db_row_id=43),
+            _user("same", 101.0, _state_db_row_id=43),
+        ),
+        (
             _assistant("same", 100.0, _active_turn_token="turn:1"),
             _assistant("same", 101.0, _active_turn_token="turn:1"),
+        ),
+        (
+            _user("same", 100.0, _active_turn_token="turn:2"),
+            _user("same", 101.0, _active_turn_token="turn:2"),
         ),
     ]
 

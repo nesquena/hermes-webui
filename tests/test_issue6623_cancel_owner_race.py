@@ -992,6 +992,70 @@ def test_issue6636_gateway_prestart_cancel_clears_writeback_owner(tmp_path, monk
     )
 
 
+@pytest.mark.parametrize("barrier_point", ["register", "journal"])
+def test_gateway_startup_stop_does_not_republish_cancel_state(barrier_point, monkeypatch):
+    import api.gateway_chat as gateway_chat
+
+    session_id = f"gateway-start-stop-{barrier_point}"
+    stream_id = f"stream-start-stop-{barrier_point}"
+    config.STREAMS[stream_id] = queue.Queue()
+    config.register_stream_owner(stream_id, session_id)
+    config.register_session_writeback_owner(session_id, stream_id)
+    entered = threading.Event()
+    resume = threading.Event()
+    requested = []
+    worked = []
+
+    if barrier_point == "register":
+        original = gateway_chat.register_active_run
+
+        def blocked_register(*args, **kwargs):
+            entered.set()
+            assert resume.wait(5)
+            original(*args, **kwargs)
+
+        monkeypatch.setattr(gateway_chat, "register_active_run", blocked_register)
+    else:
+        def blocked_journal(*_args, **_kwargs):
+            entered.set()
+            assert resume.wait(5)
+            return None
+
+        monkeypatch.setattr(gateway_chat, "RunJournalWriter", blocked_journal)
+
+    monkeypatch.setattr(
+        gateway_chat.urllib.request, "urlopen",
+        lambda *a, **k: requested.append((a, k)),
+    )
+    def note_session_lookup(*_args, **_kwargs):
+        worked.append("session lookup")
+        raise KeyError(session_id)
+
+    monkeypatch.setattr(gateway_chat, "get_session", note_session_lookup)
+    monkeypatch.setattr(gateway_chat, "_settle_gateway_terminal_error", lambda *_a, **_k: None)
+    worker = threading.Thread(
+        target=gateway_chat._run_gateway_chat_streaming,
+        args=(session_id, "hello", "model", "/tmp", stream_id),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert streaming.cancel_stream(stream_id) is True
+    finally:
+        resume.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not requested
+    assert not worked
+    assert stream_id not in config.STREAMS
+    assert stream_id not in config.CANCEL_FLAGS
+    assert stream_id not in config.ACTIVE_RUNS
+    assert config.stream_owner_session_id(stream_id) is None
+    assert config.session_writeback_owner(session_id) is None
+
+
 def test_issue6636_gateway_clear_only_affects_owned_stream(tmp_path, monkeypatch):
     """The Gateway teardown clear must be compare-and-clear: if a successor has
     already taken writeback ownership by the time the old worker tears down, the

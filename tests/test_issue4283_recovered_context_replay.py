@@ -330,6 +330,27 @@ def test_materialize_skips_mirror_when_context_messages_empty():
     assert s.messages[-1].get("_recovered") is True
 
 
+def test_materialize_does_not_treat_tokenless_same_second_row_as_current_turn():
+    s = _DummySession(
+        messages=[{
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": 100.25,
+            "_source": "webui",
+            "attachments": [],
+        }],
+        context_messages=None,
+        pending_msg="same prompt",
+    )
+    s.pending_started_at = 100.75
+
+    assert _materialize_pending_user_turn_before_error(
+        s, active_turn_identity={"token": "active:100.75"}
+    ) is True
+    assert s.messages[-1]["timestamp"] == 100
+    assert s.messages[-1]["_active_turn_token"] == "active:100.75"
+
+
 def test_sanitize_strips_recovered_user_from_context_messages():
     """End-to-end: recovered user mirrored to context_messages with
     _recovered flag → _sanitize_messages_for_api strips it (pure cancel).

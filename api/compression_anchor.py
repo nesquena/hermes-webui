@@ -75,7 +75,7 @@ def is_lcm_context_recovery_marker(message):
     if not isinstance(role, str) or role not in ("user", "assistant"):
         return False
     active_turn_token = message.get("_active_turn_token")
-    if role == "user" and isinstance(active_turn_token, str) and active_turn_token.strip():
+    if isinstance(active_turn_token, str) and active_turn_token.strip():
         return False
     text = _normalized_marker_text(message)
     return (

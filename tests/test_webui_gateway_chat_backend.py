@@ -468,6 +468,98 @@ def test_gateway_chat_worker_records_turn_journal_completion(tmp_path, monkeypat
     ), "the gateway success writeback must record a completed turn journal event"
 
 
+def test_gateway_success_save_failure_emits_current_run_error(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda req, timeout=0: FakeResponse(),
+    )
+
+    session = new_session()
+    stream_id = "stream-gateway-success-save-failure"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Say hello"
+    session.pending_attachments = []
+    session.pending_started_at = 456.25
+    session.save()
+    config.register_session_writeback_owner(session.session_id, stream_id)
+    events = []
+    channel = create_stream_channel()
+    channel.put_nowait = events.append
+    STREAMS[stream_id] = channel
+
+    original_save = models.Session.save
+    failed = False
+
+    def fail_success_save(current, *args, **kwargs):
+        nonlocal failed
+        if (
+            current is session
+            and not failed
+            and any(
+                message.get("role") == "assistant" and message.get("content") == "hello"
+                for message in current.messages
+            )
+        ):
+            failed = True
+            raise OSError("forced success writeback failure")
+        return original_save(current, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", fail_success_save)
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    apperrors = [data for event, data, *_rest in events if event == "apperror"]
+    assert failed
+    assert apperrors
+    assert apperrors[-1]["session_id"] == session.session_id
+    assert apperrors[-1]["session"]["session_id"] == session.session_id
+    assert apperrors[-1]["session"]["messages"][-1]["_error"] is True
+    apperror_event = next(item for item in events if item[0] == "apperror")
+    assert apperror_event[2].startswith(f"{stream_id}:")
+
+    session.active_stream_id = "successor-stream"
+    session.pending_user_message = "successor prompt"
+    config.register_session_writeback_owner(session.session_id, "successor-stream")
+    before = list(session.messages)
+    assert gateway_chat._settle_gateway_terminal_error(
+        session.session_id,
+        stream_id,
+        str(tmp_path),
+        "test-model",
+        None,
+        "late stale error",
+    ) is None
+    assert session.messages == before
+    assert session.pending_user_message == "successor prompt"
+    assert config.session_writeback_owner(session.session_id) == "successor-stream"
+
+
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
     """Gateway terminal errors must survive an empty assistant stream."""
     from unittest.mock import MagicMock

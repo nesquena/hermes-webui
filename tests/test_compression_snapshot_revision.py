@@ -98,24 +98,29 @@ def test_build_run_conversation_kwargs_omits_revision_for_strict_legacy_agent():
     }
 
 
-def _make_state_db(path, sid, rows):
+def _make_state_db(path, sid, rows, *, include_api_content=False):
     conn = sqlite3.connect(path)
     try:
+        api_content_column = ",\n                api_content TEXT" if include_api_content else ""
         conn.execute(
-            """
+            f"""
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 role TEXT,
                 content TEXT,
                 timestamp REAL,
-                active INTEGER
+                active INTEGER{api_content_column}
             )
             """
         )
+        columns = "session_id, role, content, timestamp, active"
+        placeholders = "?, ?, ?, ?, ?"
+        if include_api_content:
+            columns += ", api_content"
+            placeholders += ", ?"
         conn.executemany(
-            "INSERT INTO messages (session_id, role, content, timestamp, active) "
-            "VALUES (?, ?, ?, ?, ?)",
+            f"INSERT INTO messages ({columns}) VALUES ({placeholders})",
             [
                 (
                     sid,
@@ -124,6 +129,7 @@ def _make_state_db(path, sid, rows):
                     row.get("timestamp"),
                     row.get("active", 1),
                 )
+                + ((row.get("api_content"),) if include_api_content else ())
                 for row in rows
             ],
         )
@@ -132,15 +138,34 @@ def _make_state_db(path, sid, rows):
         conn.close()
 
 
-def _append_state_row(path, sid, *, role, content, timestamp, active=1):
+def _append_state_row(
+    path,
+    sid,
+    *,
+    role,
+    content,
+    timestamp,
+    active=1,
+    api_content=None,
+    include_api_content=False,
+    return_row_id=False,
+):
     conn = sqlite3.connect(path)
     try:
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, active) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (sid, role, content, timestamp, active),
-        )
+        if include_api_content:
+            cursor = conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, active, api_content) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, role, content, timestamp, active, api_content),
+            )
+        else:
+            cursor = conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, active) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sid, role, content, timestamp, active),
+            )
         conn.commit()
+        return cursor.lastrowid if return_row_id else None
     finally:
         conn.close()
 
@@ -468,6 +493,27 @@ def test_append_only_partial_skips_current_token_prompt_echo():
 
     assert appended is not None
     assert appended["content"] == "current partial"
+
+
+def test_append_only_partial_keeps_token_owned_assistant_lcm_text():
+    token = "t1"
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": token}]
+    partial_text = "[Recent Summary (d0, node 418)]\npartial output"
+    session = Session(session_id="owned-lcm-partial", messages=[], context_messages=[])
+
+    appended = streaming._append_result_partial_on_error(
+        session,
+        {"partial": True, "messages": baseline + [{
+            "role": "assistant", "content": partial_text, "_active_turn_token": token,
+        }]},
+        baseline,
+        "current prompt",
+        active_turn_identity={"token": token},
+    )
+
+    assert appended is not None
+    assert appended["content"] == partial_text
+    assert appended["_active_turn_token"] == token
 
 
 def test_append_only_partial_does_not_skip_lcm_marker_prompt_echo():
@@ -1621,7 +1667,7 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         {"role": "user", "content": prompt, "timestamp": 1.0},
         {"role": "assistant", "content": "historical answer", "timestamp": 2.0},
     ]
-    _make_state_db(db_path, sid, prior_messages)
+    _make_state_db(db_path, sid, prior_messages, include_api_content=True)
     session, event_queue = _install_streaming_session(
         monkeypatch,
         tmp_path,
@@ -1631,6 +1677,23 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         context_messages=prior_messages,
     )
     session.pending_user_message = prompt
+    current_state_row_id = None
+    current_turn_token = streaming.build_active_turn_token(stream_id, 10.0)
+    original_save = Session.save
+
+    def save_with_shared_state_row_id(saved_session, *args, **kwargs):
+        if saved_session is session and current_state_row_id is not None:
+            for message in session.messages:
+                if (
+                    isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and message.get("_active_turn_token") == current_turn_token
+                ):
+                    message["_state_db_row_id"] = current_state_row_id
+                    message["api_content"] = "durable current user payload"
+        return original_save(saved_session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "save", save_with_shared_state_row_id)
 
     class RepeatedPromptAgent:
         runs = 0
@@ -1643,15 +1706,19 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
             self.stream_delta_callback = _kwargs.get("stream_delta_callback")
 
         def run_conversation(self, **kwargs):
+            nonlocal current_state_row_id
             type(self).runs += 1
             history = list(kwargs.get("conversation_history") or [])
             if type(self).runs == 1:
-                _append_state_row(
+                current_state_row_id = _append_state_row(
                     db_path,
                     sid,
                     role="user",
                     content=kwargs["persist_user_message"],
                     timestamp=3.0,
+                    api_content="durable current user payload",
+                    include_api_content=True,
+                    return_row_id=True,
                 )
                 if terminal == "raised":
                     raise RuntimeError("401 unauthorized")
@@ -1665,17 +1732,18 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
                 }
             # Heal retry: the 2-row refreshed baseline makes the legacy
             # shifted probe (3 - 2 = 1) collide with the historical user row.
+            heal_messages = _repeated_prompt_collision_result_messages(
+                prompt,
+                current_answer=(
+                    "healed current answer"
+                    if collision == "current_output_after_exact_row"
+                    else None
+                ),
+            )
             heal = {
                 "turn_id": "agent-heal-turn",
                 "current_turn_user_idx": 3,
-                "messages": _repeated_prompt_collision_result_messages(
-                    prompt,
-                    current_answer=(
-                        "healed current answer"
-                        if collision == "current_output_after_exact_row"
-                        else None
-                    ),
-                ),
+                "messages": heal_messages,
             }
             if collision == "current_output_after_exact_row":
                 heal.update(

@@ -579,3 +579,70 @@ def test_api_session_load_does_not_duplicate_prefixed_restart_turn(monkeypatch, 
     # the reconciliation layer carries it through).
     assert any("second turn" in str(c) for c in contents)
     assert any("second answer" in str(c) for c in contents)
+
+
+def test_context_delta_preserves_different_nested_tool_call_ids():
+    from api.models import state_db_delta_after_context
+
+    sidecar = [
+        {"role": "user", "content": "run", "timestamp": 1},
+        {"role": "assistant", "content": "starting", "timestamp": 1.5},
+        {"role": "assistant", "content": "", "timestamp": 2,
+         "tool_calls": [{"id": "call-a", "type": "function",
+                         "function": {"name": "run", "arguments": "{}"}}]},
+    ]
+    state = [
+        {"role": "user", "content": "run", "timestamp": 1},
+        {"role": "assistant", "content": "starting", "timestamp": 1.5},
+        {"role": "assistant", "content": "", "timestamp": 2,
+         "tool_calls": [{"id": "call-b", "type": "function",
+                         "function": {"name": "run", "arguments": "{}"}}]},
+        {"role": "tool", "content": "done", "timestamp": 3, "tool_use_id": "call-b"},
+    ]
+
+    assert state_db_delta_after_context(sidecar, state) == state[2:]
+
+
+def test_context_delta_preserves_different_tool_use_ids():
+    from api.models import state_db_delta_after_context
+
+    sidecar = [
+        {"role": "user", "content": "run", "timestamp": 1},
+        {"role": "assistant", "content": "starting", "timestamp": 1.5},
+        {"role": "tool", "content": "done", "timestamp": 2, "tool_use_id": "call-a"},
+    ]
+    state = [
+        {"role": "user", "content": "run", "timestamp": 1},
+        {"role": "assistant", "content": "starting", "timestamp": 1.5},
+        {"role": "tool", "content": "done", "timestamp": 2, "tool_use_id": "call-b"},
+    ]
+
+    assert state_db_delta_after_context(sidecar, state) == state[2:]
+
+
+def test_append_only_merge_dedupes_shared_nested_call_identity():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [{"role": "assistant", "content": "", "timestamp": 2,
+                "tool_calls": [{"id": "call-a", "function": {"name": "run", "arguments": "{}"}}]}]
+    mirror = {**sidecar[0], "tool_calls": [dict(sidecar[0]["tool_calls"][0])]}
+
+    assert merge_session_messages_append_only(sidecar, [mirror]) == sidecar
+
+
+def test_append_only_merge_preserves_distinct_nested_call_and_tool_use_ids():
+    from api.models import merge_session_messages_append_only
+
+    call_a = {"id": "call-a", "function": {"name": "run", "arguments": "{}"}}
+    call_b = {"id": "call-b", "function": {"name": "run", "arguments": "{}"}}
+    for sidecar, incoming in (
+        (
+            [{"role": "assistant", "content": "", "timestamp": 2, "tool_calls": [call_a]}],
+            {"role": "assistant", "content": "", "timestamp": 2, "tool_calls": [call_b]},
+        ),
+        (
+            [{"role": "tool", "content": "done", "timestamp": 2, "tool_use_id": "call-a"}],
+            {"role": "tool", "content": "done", "timestamp": 2, "tool_use_id": "call-b"},
+        ),
+    ):
+        assert merge_session_messages_append_only(sidecar, [incoming]) == [sidecar[0], incoming]

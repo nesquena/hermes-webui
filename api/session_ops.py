@@ -331,7 +331,11 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
     return snap["tail"]
 
 
-def regeneration_state(session, *, use_sidecar=False):
+def regeneration_state(
+    session,
+    *,
+    use_sidecar=False,
+):
     """Read one immutable state.db snapshot and reconcile both transcript views.
 
     ``use_sidecar=True`` (#6826) anchors the state.db read to the already
@@ -347,6 +351,7 @@ def regeneration_state(session, *, use_sidecar=False):
     occurrence collision + compression anchor coverage), and the tail rows
     come from the SAME single read transaction as the proof (no TOCTOU);
     otherwise the read falls back to the full transcript.
+
     """
     from api.models import (
         get_state_db_session_messages,
@@ -809,9 +814,15 @@ def truncate_context_for_display_keep(
             return None, None
         token = message.get('_active_turn_token')
         if isinstance(token, str) and token.strip():
-            exact = _first_at_or_after(token_positions.get(token), start_idx)
-            if exact is not None:
-                return exact, None
+            for exact in token_positions.get(token, []):
+                if exact < start_idx:
+                    continue
+                candidate = ctx[exact]
+                if (
+                    context_records[exact][1] == msg_sig
+                    and _message_private_identity_compatible(message, candidate)
+                ):
+                    return exact, None
             stable_id, _ = _stable_message_identity_details(message)
             row_id = _state_db_row_identity(message)
             for idx in signature_positions.get(msg_sig, []):

@@ -287,6 +287,22 @@ def test_lcm_recovery_marker_active_turn_token_is_not_classified(marker):
     assert is_context_compression_marker(recovery_envelope)
 
 
+def test_token_owned_assistant_lcm_text_survives_display_projection():
+    from types import SimpleNamespace
+    from api.models import reconciled_state_db_messages_for_session
+
+    partial = {
+        "role": "assistant",
+        "content": "[Recent Summary (d0, node 418)]\npartial output",
+        "_active_turn_token": "stream:123",
+    }
+    session = SimpleNamespace(messages=[partial], context_messages=[partial])
+
+    assert not is_lcm_context_recovery_marker(partial)
+    assert reconciled_state_db_messages_for_session(session, state_messages=[]) == [partial]
+    assert is_lcm_context_recovery_marker({"role": "assistant", "content": partial["content"]})
+
+
 @pytest.mark.parametrize("role", ["system", "custom", None, ["user"]])
 def test_lcm_recovery_marker_requires_hashable_provider_role(role):
     from api.streaming import _deduplicate_context_messages

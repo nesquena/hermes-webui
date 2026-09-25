@@ -14865,19 +14865,60 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        from api.gateway_chat import (
+            _snapshot_gateway_run_owner,
+            gateway_stream_has_lifecycle,
+        )
+
+        gateway_owner_snapshot = _snapshot_gateway_run_owner(stream_id)
+
+        known_stream = False
+        with STREAMS_LOCK:
+            with ACTIVE_RUNS_LOCK:
+                known_stream = (
+                    stream_id in STREAMS
+                    or stream_id in ACTIVE_RUNS
+                    or gateway_stream_has_lifecycle(stream_id)
+                )
+                if known_stream:
+                    cancel_event = CANCEL_FLAGS.get(stream_id)
+                    if cancel_event is None:
+                        cancel_event = CANCEL_FLAGS.setdefault(stream_id, threading.Event())
+                    cancel_event.set()
+        if not known_stream:
+            return j(handler, {"ok": True, "cancelled": False, "stream_id": stream_id})
+
+        from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+        if runtime_adapter_enabled():
+            adapter = LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
+            cancelled = adapter.cancel_run(stream_id).accepted
+        else:
+            cancelled = cancel_stream(stream_id)
+
         gateway_stop_blocked = False
         try:
             from api.gateway_chat import (
                 GATEWAY_RUN_ID_WAIT_TIMEOUT,
                 stop_gateway_run,
-                wait_for_gateway_run_id,
+                wait_for_gateway_run_owner,
             )
 
-            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+            if gateway_owner_snapshot:
+                run_id, endpoint = gateway_owner_snapshot
+                structured_gateway = True
+            else:
+                structured_gateway, run_id, endpoint = wait_for_gateway_run_owner(
+                    stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT
+                )
             if not run_id and structured_gateway:
                 gateway_stop_blocked = True
             if run_id:
-                if stop_gateway_run(run_id):
+                stopped = (
+                    stop_gateway_run(run_id, endpoint=endpoint)
+                    if endpoint else stop_gateway_run(run_id)
+                )
+                if stopped:
                     owner_sid = stream_owner_session_id(stream_id)
                     if owner_sid:
                         settle_gateway_pending_run(
@@ -14895,20 +14936,12 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 {
                     "ok": False,
-                    "cancelled": False,
+                    "cancelled": cancelled,
                     "stream_id": stream_id,
                     "error": "Gateway stop failed",
                 },
                 status=502,
             )
-
-        from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
-
-        if runtime_adapter_enabled():
-            adapter = LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
-            cancelled = adapter.cancel_run(stream_id).accepted
-        else:
-            cancelled = cancel_stream(stream_id)
         return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
 
     if parsed.path == "/api/chat/stream":

@@ -75,7 +75,7 @@ def test_done_payload_uses_full_message_count_helper():
     block_start = STREAMING_SOURCE.rfind("raw_session =", 0, done_idx)
     block = STREAMING_SOURCE[block_start:done_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=tool_calls)" in block
+    assert "raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)" in block
     assert "s.compact() | {'messages': s.messages" not in block
 
 
@@ -97,5 +97,8 @@ def test_gateway_done_payload_uses_full_message_count_helper():
     block_start = gateway_source.rfind("gateway_session_payload =", 0, done_idx)
     block = gateway_source[block_start:done_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=[])" in block
+    assert (
+        "gateway_session_payload = _session_payload_with_full_messages("
+        "s, tool_calls=[])"
+    ) in block
     assert 's.compact() | {"messages": s.messages' not in block

@@ -2745,6 +2745,50 @@ def test_pending_recovery_preserves_conflicting_token_owner(hermes_home, termina
         assert snapshot.pending_user_message is None
 
 
+def test_pending_recovery_turn_start_rejects_tokenless_repeated_prompt_at_tail():
+    session = _make_stale_session(pending_msg="Repeat", stream_id="new")
+    session.pending_started_at = 100.25
+    session.messages = [{"role": "user", "content": "Repeat", "timestamp": 100.25}]
+
+    assert models._pending_recovery_turn_start(session) is None
+
+
+def test_legacy_pending_checkpoint_uses_exact_finite_timestamp():
+    message = {"role": "user", "content": "Repeat", "timestamp": 100.25}
+    checkpoint = ("Repeat", 100.25, None, [])
+
+    assert models._message_matches_pending_checkpoint(message, *checkpoint)
+    assert not models._message_matches_pending_checkpoint(
+        message, "Repeat", 100.75, None, [],
+    )
+    for malformed_timestamp in ("not-a-time", "nan", "inf"):
+        assert not models._message_matches_pending_checkpoint(
+            {**message, "timestamp": malformed_timestamp}, *checkpoint,
+        )
+
+
+def test_completed_pending_recovery_materializes_tokenless_repeated_prompt_at_tail(
+    hermes_home,
+):
+    session = _make_stale_session(pending_msg="Repeat")
+    session.pending_started_at = 100.25
+    old_prompt = {"role": "user", "content": "Repeat", "timestamp": 100.25}
+    session.messages = [old_prompt]
+    session.context_messages = [dict(old_prompt)]
+    session.save()
+    RunJournalWriter(session.session_id, "stream_1").append_sse_event(
+        "done", {"session_id": session.session_id},
+    )
+
+    assert _apply_core_sync_or_error_marker(session, hermes_home / "missing.json")
+
+    users = [message for message in session.messages if message.get("role") == "user"]
+    assert [message.get("_active_turn_token") for message in users] == [
+        None, streaming.build_active_turn_token("stream_1", 100.25),
+    ]
+    assert session.pending_user_message is None
+
+
 def test_recovered_context_does_not_dedupe_conflicting_token(hermes_home):
     heading = '[Recent Summary (d0, node 418)]'
     old = {'role': 'user', 'content': heading, 'timestamp': 100, '_active_turn_token': 'old:100.125'}
@@ -2770,7 +2814,9 @@ def test_terminal_materialization_rejects_conflicting_owner(hermes_home, heading
     session.pending_started_at = 100.75
     session.messages = [old]
     session.context_messages = [dict(old)]
-    needs_owner = existing_token == 'old:100.125' or (existing_token is None and heading.startswith('['))
+    # A token-bearing pending turn cannot be represented by a tokenless row,
+    # even when ordinary text and the truncated display second happen to match.
+    needs_owner = existing_token != 'new:100.75'
     if path == 'helper':
         assert streaming._materialize_pending_user_turn_before_error(session, active_turn_identity={}) is needs_owner
         assert streaming._materialize_pending_user_turn_before_error(session) is False
@@ -2785,3 +2831,56 @@ def test_terminal_materialization_rejects_conflicting_owner(hermes_home, heading
         assert context_users == users
         if needs_owner:
             assert users[-1]['_active_turn_token'] == 'new:100.75'
+
+
+def test_display_merge_does_not_claim_one_primary_occurrence_twice():
+    incoming = [
+        {"role": "user", "content": "X", "timestamp": 1},
+        {"role": "user", "content": "Y", "timestamp": 2},
+        {"role": "user", "content": "Y", "timestamp": 2},
+    ]
+
+    merged = models.merge_session_display_messages(
+        [{"role": "user", "content": "Y", "timestamp": 2}], incoming
+    )
+
+    assert [(row["content"], row["timestamp"]) for row in merged] == [
+        ("X", 1), ("Y", 2), ("Y", 2)
+    ]
+
+
+def test_display_merge_matches_two_identical_primary_mirrors_one_to_one():
+    primary = [
+        {"role": "user", "content": "Y", "timestamp": 2},
+        {"role": "user", "content": "Y", "timestamp": 2},
+    ]
+    incoming = [dict(row) for row in primary]
+
+    assert models.merge_session_display_messages(primary, incoming) == primary
+
+
+def test_display_merge_prefix_keeps_excess_incoming_occurrences():
+    row = {"role": "user", "content": "Y", "timestamp": 2}
+
+    merged = models.merge_session_display_messages([dict(row)], [dict(row), dict(row)])
+
+    assert merged == [row, row]
+
+
+def test_display_merge_keeps_same_time_recovered_streams_distinct():
+    primary = [{"role": "assistant", "content": "answer", "timestamp": 2,
+                "_recovered_from_run_journal": True, "_recovered_stream_id": "stream-a"}]
+    incoming = [{"role": "assistant", "content": "answer", "timestamp": 2,
+                 "_recovered_from_run_journal": True, "_recovered_stream_id": "stream-b"}]
+
+    merged = models.merge_session_display_messages(primary, incoming)
+
+    assert len(merged) == 2
+    assert [row["_recovered_stream_id"] for row in merged] == ["stream-a", "stream-b"]
+
+    same_stream = [dict(primary[0])]
+    assert len(models.merge_session_display_messages(primary, same_stream)) == 1
+    assert len(models.merge_session_display_messages(
+        [{"role": "assistant", "content": "answer", "timestamp": 2}],
+        [{"role": "assistant", "content": "answer", "timestamp": 2}],
+    )) == 1
