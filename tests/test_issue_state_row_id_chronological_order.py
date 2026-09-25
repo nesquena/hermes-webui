@@ -141,10 +141,9 @@ def test_state_db_prefix_replay_keeps_anonymous_cross_second_rows():
     ) == [sidecar, replay]
 
 
-def test_state_db_prefix_replay_keeps_same_second_and_shared_identity_mirrors():
+def test_state_db_prefix_replay_uses_full_precision_and_shared_identity():
     cases = [
         (_assistant("same", 100.0), _assistant("same", 100.0)),
-        (_assistant("same", 100.25), _assistant("same", 100.75)),
         (_assistant("same", None), _assistant("same", 101.0)),
         (
             _assistant("same", 100.0, id="message-1"),
@@ -164,6 +163,12 @@ def test_state_db_prefix_replay_keeps_same_second_and_shared_identity_mirrors():
         assert models.merge_session_messages_append_only(
             [sidecar], [replay], incoming_provenance="state_db",
         ) == [sidecar]
+
+    sidecar = _assistant("same", 100.25)
+    replay = _assistant("same", 100.75)
+    assert models.merge_session_messages_append_only(
+        [sidecar], [replay], incoming_provenance="state_db",
+    ) == [sidecar, replay]
 
 
 def test_unverified_prefix_replay_still_dedupes_nonuniform_restamps():

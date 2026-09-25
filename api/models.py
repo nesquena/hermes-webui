@@ -13042,8 +13042,7 @@ def _merge_session_messages_append_only_impl(
             or not source_timestamp_valid
             or target_timestamp is None
             or source_timestamp is None
-            or _normalized_message_timestamp_for_key(target_timestamp)
-            == _normalized_message_timestamp_for_key(source_timestamp)
+            or target_timestamp == source_timestamp
         ):
             return True
 
@@ -13198,11 +13197,33 @@ def _merge_session_messages_append_only_impl(
             )
             else None
         )
-        if (
-            multimodal_replay_target is not None
-            and not _message_private_identity_compatible(multimodal_replay_target, msg)
-        ):
-            multimodal_replay_target = None
+        if multimodal_replay_target is not None:
+            rich_row_id, rich_row_id_valid = _state_db_row_identity_details(
+                multimodal_replay_target
+            )
+            scalar_row_id, scalar_row_id_valid = _state_db_row_identity_details(msg)
+            token = multimodal_replay_target.get("_active_turn_token")
+            trusted_input = multimodal_replay_target.get(
+                _WEBUI_TRUSTED_AGENT_INPUT_FIELD
+            )
+            leading_text = _native_image_leading_text(multimodal_replay_target)
+            from api.streaming import _submitted_user_text_matches
+
+            if not (
+                isinstance(token, str)
+                and token.strip()
+                and isinstance(trusted_input, str)
+                and leading_text is not None
+                and _submitted_user_text_matches(leading_text, trusted_input)
+                and rich_row_id_valid
+                and scalar_row_id_valid
+                and rich_row_id is not None
+                and rich_row_id == scalar_row_id
+                and sidecar_row_id_counts.get(rich_row_id, 0) == 1
+                and state_row_id_counts.get(scalar_row_id, 0) == 1
+                and _message_private_identity_compatible(multimodal_replay_target, msg)
+            ):
+                multimodal_replay_target = None
         if multimodal_replay_target is not None:
             _copy_api_content_sidecar(multimodal_replay_target, msg)
             if (

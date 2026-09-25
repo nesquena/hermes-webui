@@ -1601,7 +1601,9 @@ def test_state_db_reconciliation_dedupes_numeric_equivalent_timestamps(monkeypat
     assert handler.response_json["session"]["message_count"] == 1
 
 
-def test_state_db_reconciliation_dedupes_same_second_state_rows(monkeypatch, tmp_path):
+def test_state_db_reconciliation_keeps_fractional_rows_without_shared_identity(
+    monkeypatch, tmp_path
+):
     import api.routes as routes
 
     sid = "webui_reconcile_fractional_state_timestamp"
@@ -1627,9 +1629,13 @@ def test_state_db_reconciliation_dedupes_same_second_state_rows(monkeypatch, tmp
     routes.handle_get(handler, urlparse(handler.path))
     assert handler.status == 200
     session = handler.response_json["session"]
-    assert [m["role"] for m in session["messages"]] == ["user", "assistant"]
-    assert [m["content"] for m in session["messages"]] == ["hi", "Hi there"]
-    assert session["message_count"] == 2
+    assert [(m["role"], m["content"]) for m in session["messages"]] == [
+        ("user", "hi"),
+        ("assistant", "Hi there"),
+        ("user", "hi"),
+        ("assistant", "Hi there"),
+    ]
+    assert session["message_count"] == 4
 
 
 def test_state_db_reconciliation_preserves_same_second_state_repeats(monkeypatch, tmp_path):

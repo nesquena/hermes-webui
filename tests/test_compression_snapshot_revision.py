@@ -450,6 +450,75 @@ def test_append_only_partial_skips_one_current_user_echo_and_stops_at_next_user(
     assert [message["content"] for message in session.messages] == ["current partial"]
 
 
+def test_append_only_partial_skips_current_token_prompt_echo():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    session = Session(session_id="append-only-token-echo", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": "current prompt", "_active_turn_token": "t1"},
+            {"role": "assistant", "content": "current partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+
+
+def test_append_only_partial_does_not_skip_lcm_marker_prompt_echo():
+    marker = "[Recent Summary (d0, node 418)]"
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": marker, "_active_turn_token": "t1"}]
+    session = Session(session_id="append-only-lcm-echo", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            {"role": "user", "content": marker},
+            {"role": "assistant", "content": "stale partial"},
+        ],
+    }
+    assert streaming.is_lcm_context_recovery_marker(result["messages"][1])
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, marker, active_turn_identity=identity
+    )
+
+    assert appended is None
+    assert session.messages == []
+
+
+def test_append_only_partial_skips_workspace_multimodal_prompt_echo():
+    identity = {"token": "t1"}
+    baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t1"}]
+    echo = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "[Workspace::v1: /fixture]\ncurrent prompt"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+    }
+    session = Session(session_id="append-only-workspace-image-echo", messages=[], context_messages=[])
+    result = {
+        "partial": True,
+        "messages": baseline + [
+            echo,
+            {"role": "assistant", "content": "current partial", "_active_turn_token": "t1"},
+        ],
+    }
+
+    appended = streaming._append_result_partial_on_error(
+        session, result, baseline, "current prompt", active_turn_identity=identity
+    )
+
+    assert appended is not None
+    assert appended["content"] == "current partial"
+
+
 def test_append_only_partial_rejects_foreign_token_baseline_with_same_prompt():
     identity = {"token": "t1"}
     baseline = [{"role": "user", "content": "current prompt", "_active_turn_token": "t2"}]
