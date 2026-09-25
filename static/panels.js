@@ -7024,7 +7024,37 @@ function _openProfileSwitchSessionBrowser(){
   }catch(_){}
 }
 
+async function _restoreStaleProfileCookie(switchedName){
+  const current=S.activeProfile||'default';
+  if(switchedName===current) return true;
+  let restoreRequestId;
+  try{
+    const restoring=api('/api/profile/switch',{method:'POST',body:JSON.stringify({name:current}),timeoutToast:false});
+    restoreRequestId=_profileSwitchApiIntent;
+    const data=await restoring;
+    if(typeof _profileSwitchApiIntent!=='undefined'&&restoreRequestId!==_profileSwitchApiIntent) return null;
+    return !!data&&data.active===current;
+  }catch(_){return typeof _profileSwitchApiIntent!=='undefined'&&restoreRequestId!==_profileSwitchApiIntent?null:false;}
+}
 async function switchToProfile(name) {
+  const _switchOptions=arguments[1]||{};
+  const _deferProfileDefaults=!!_switchOptions.deferDefaults;
+  const _navigationGeneration=Number.isFinite(_switchOptions.navigationGeneration)
+    ? Number(_switchOptions.navigationGeneration) : null;
+  const _navigationCurrent=()=>_navigationGeneration===null
+    || (typeof _sessionNavigationGenerationIsCurrent==='function'&&_sessionNavigationGenerationIsCurrent(_navigationGeneration));
+  const _restoreCookieIfStale=async(...args)=>{
+    if(typeof _restoreStaleProfileCookie!=='function') return true;
+    if(args[1]&&typeof _profileSwitchApiIntent!=='undefined'&&args[2]!==_profileSwitchApiIntent){
+      if(typeof _profileSwitchApiPending==='undefined'||_profileSwitchApiPending) S._profileCookieOwnershipUncertain=true;
+      return false;
+    }
+    const wasUncertain=!!S._profileCookieOwnershipUncertain;S._profileCookieOwnershipUncertain=true;
+    const restored=args[1]?await _restoreStaleProfileCookie(args[0]):true;
+    if(restored!==null&&_switchGen===_profileSwitchGeneration) S._profileCookieOwnershipUncertain=wasUncertain||!restored;
+    if(restored===false) _switchOptions._profileCookieOwnershipUncertain=true;
+    return restored===true;
+  };
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7048,7 +7078,12 @@ async function switchToProfile(name) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
-  if (name && name === S.activeProfile) return true;
+  if (name && (typeof _profileMatchesProfileState === 'function'
+        ? _profileMatchesProfileState(name, S.activeProfile, S.activeProfileIsDefault)
+        : name === S.activeProfile) && !_switchOptions.force
+      && !S._profileCookieOwnershipUncertain
+      && !(typeof _profileSwitchApiPending!=='undefined'&&_profileSwitchApiPending)) return true;
+  if(!_navigationCurrent()) return false;
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7063,7 +7098,8 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
-  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _openingExistingSidebarSession = !!(_switchOptions.openExistingSession
+    || (typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession));
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -7101,6 +7137,7 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let profileSwitchRequestId=null;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7128,10 +7165,14 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
+    profileSwitchRequestId=typeof _profileSwitchApiIntent==='number'?_profileSwitchApiIntent+1:null;
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    if(!(await _restoreCookieIfStale(data.active||name,_switchGen!==_profileSwitchGeneration||!_navigationCurrent(),data._profileSwitchRequestId))) return false;
     if (_switchGen !== _profileSwitchGeneration) return false;
+    if(!_navigationCurrent()) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    S._profileCookieOwnershipUncertain = false;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7173,12 +7214,21 @@ async function switchToProfile(name) {
     // Apply the profile defaults returned by /api/profile/switch immediately.
     // Refreshing the full model/workspace catalogs is useful, but it should not
     // hold the visible switch animation open.
-    if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-    else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    if(_deferProfileDefaults){
+      if(_switchOptions._deferredProfileDefaults&&typeof _switchOptions._deferredProfileDefaults==='object'){
+        Object.assign(_switchOptions._deferredProfileDefaults,{
+          default_model:data.default_model||null,
+          default_model_provider:data.default_model_provider||null,
+          default_workspace:data.default_workspace||null,
+        });
+      }
+    }else{
+    if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+    else localStorage.removeItem('hermes-webui-model');
+    window._defaultModel = data.default_model||null;
+    window._activeProvider = data.default_model_provider||null;
 
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
@@ -7246,6 +7296,7 @@ async function switchToProfile(name) {
         } catch (_) {}
       }
     }
+    }
 
     // ── Session ────────────────────────────────────────────────────────────
     // Keep the all-profiles sidebar scope sticky across profile switches. It is
@@ -7258,7 +7309,9 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
+      if(!(await _restoreCookieIfStale(data.active||name,_switchGen!==_profileSwitchGeneration||!_navigationCurrent(),data._profileSwitchRequestId))) return false;
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!_navigationCurrent()) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
@@ -7266,7 +7319,9 @@ async function switchToProfile(name) {
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      if(!(await _restoreCookieIfStale(data.active||name,_switchGen!==_profileSwitchGeneration||!_navigationCurrent(),data._profileSwitchRequestId))) return false;
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!_navigationCurrent()) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7280,7 +7335,9 @@ async function switchToProfile(name) {
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
+      if(!(await _restoreCookieIfStale(data.active||name,_switchGen!==_profileSwitchGeneration||!_navigationCurrent(),data._profileSwitchRequestId))) return false;
       if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!_navigationCurrent()) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7303,7 +7360,9 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if(!(await _restoreCookieIfStale(data.active||name,_switchGen!==_profileSwitchGeneration||!_navigationCurrent(),data._profileSwitchRequestId))) return false;
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if(!_navigationCurrent()) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
@@ -7320,10 +7379,13 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    if(!(await _restoreCookieIfStale(data.active||name,_switchGen!==_profileSwitchGeneration||!_navigationCurrent(),data._profileSwitchRequestId))) return false;
+    if(!_navigationCurrent()) return false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
   } catch (e) {
+    await _restoreCookieIfStale(name,true,profileSwitchRequestId);
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
@@ -7339,7 +7401,7 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       _sessionListSkeletonActive = false;
       if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
-      if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
+      if (!_switchOptions._profileCookieOwnershipUncertain && _workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —

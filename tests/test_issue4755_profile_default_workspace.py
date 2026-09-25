@@ -85,6 +85,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         f"""
         let captured=null;
         var _newSessionInFlight=null;
+        var _sessionNavigationGeneration=0,_sessionNavigationRollbackAnchor=null;
         var _messagesTruncated=false;
         var _oldestIdx=0;
         var _activeProject=null;
