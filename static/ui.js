@@ -4102,11 +4102,21 @@ function _normalizeConfiguredModelKey(modelId){
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
+  // A row synthesized from an ungrouped top-level OPTION (temporary/custom
+  // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
+  // even when the option carries provider identity, so that row's provider
+  // authority has to fall back to its badge provider (same fallback already
+  // used by _modelProviderForSelectedBadge below). Without it neither the
+  // same-normalized fast path nor the routed spellings can see the row as
+  // belonging to that provider (#7290).
+  const _entryProvider=(entry)=>String(
+    (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
+  ).toLowerCase();
   const matchingEntries=(entries||[]).filter(existing=>
     _normalizeConfiguredModelKey(existing.value)===normalized
   );
   if(matchingEntries.some(existing=>{
-    const entryProvider=String(existing.providerId||'').toLowerCase();
+    const entryProvider=_entryProvider(existing);
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
   // @provider:model is an equivalent routing spelling only when an existing
@@ -4114,24 +4124,11 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
   const rawId=String(modelId||'');
-  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
-  // key must not become a second picker row. configured_model_badges holds every
-  // spelling of a configured model and renderModelDropdown() synthesises a row
-  // for each key this predicate does not recognise. The provider-qualified
-  // spelling was missed because _normalizeConfiguredModelKey() strips only one
-  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
-  // so `acme/example-model` and `custom/acme/example-model` normalise to
-  // different keys and the picker lists one model twice.
-  // Match it the way the `@provider:` rule below does: the badge declares a
-  // provider, the key starts with that provider's `<provider>/` prefix, and an
-  // existing row from the same provider normalises equal to the remainder. Two
-  // different models never satisfy the last clause, so this can only drop a
-  // duplicate of a row the catalog already produced.
   const slashPrefix=provider?`${provider}/`:'';
   if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
     const slashRoutedId=rawId.slice(slashPrefix.length);
     if(slashRoutedId&&(entries||[]).some(entry=>
-      String(entry.providerId||'').toLowerCase()===provider
+      _entryProvider(entry)===provider
       &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
     )) return true;
   }
@@ -4139,7 +4136,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
   return (entries||[]).some(entry=>
-    String(entry.providerId||'').toLowerCase()===provider
+    _entryProvider(entry)===provider
     &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
   );
 }
@@ -4584,7 +4581,15 @@ function renderModelDropdown(){
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      // Keep the option's own provider authority: _ensureModelOptionInDropdown
+      // stamps dataset.provider on the temporary options it adds, and that
+      // authority has to reach both places later comparisons read (the
+      // structural providerId and the configured badge lookup). Storing
+      // providerId:'' here let a badge-owned `@commandcode:model-a` row claim
+      // providerless authority and suppress another provider's
+      // same-normalized configured entries (#7290).
+      const optionProviderId=_getOptionProviderId(child);
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:optionProviderId,badge:_getConfiguredModelBadge(child.value,_badgeMap,optionProviderId),hiddenByDefault:false});
       _groupMeta.get(groupKey).modelCount++;
     }
   }
@@ -4595,6 +4600,10 @@ function renderModelDropdown(){
       name:esc(getModelLabel(modelId)),
       id:esc(modelId),
       group:'',
+      // Stamp the badge provider onto the appended row so its provider
+      // authority is structural here instead of depending on the badge
+      // fallback later (#7290).
+      providerId:String((badge&&badge.provider)||''),
       badge,
     });
   }
