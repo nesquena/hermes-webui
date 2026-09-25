@@ -12484,6 +12484,7 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
     try{extra=JSON.parse(extraText);}catch(e){if(typeof showToast==='function') showToast(t('settings_aux_advanced_extra_body_invalid_json')||'Extra body must be valid JSON');return;}
     if(!extra||Array.isArray(extra)||typeof extra!=='object'){if(typeof showToast==='function') showToast(t('settings_aux_advanced_extra_body_object_required')||'Extra body must be a JSON object');return;}
    }
+   const provSel=isMain?null:$('aux-prov-'+taskKey),modelSel=isMain?$('settingsModel'):$('aux-model-'+taskKey);
    let provider=isMain?((cfg&&cfg.provider)||''):(provSel?provSel.value:((cfg&&cfg.provider)||'auto'));
    let model=modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):((cfg&&cfg.model)||'');
    if(isMain && modelSel && typeof _captureModelDropdownSelection==='function'){
