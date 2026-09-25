@@ -264,3 +264,15 @@ def test_session_counts_computed_after_archived_limit_pagination(monkeypatch):
     # 2 webui rows belonged to other_profile, so 3 remain
     assert body["webui_session_count"] == 3
 
+    # 5. Mixed-source request without sidebar_source: archived_limit=4
+    # Badges must match the returned page, len(sessions) == webui_count + cli_count
+    routes._session_list_cache_clear()
+    mixed_rows = _session_rows(webui_count=5, cli_count=5, archived_webui_count=4, archived_cli_count=4)
+    _install_common_monkeypatches(monkeypatch, mixed_rows)
+    handler = _handle_sessions("http://example.com/api/sessions?include_archived=1&archived_limit=4")
+    body = handler.json_body()
+    assert len(body["sessions"]) == 6
+    assert body["webui_session_count"] + body["cli_session_count"] == len(body["sessions"])
+    assert body["webui_session_count"] == sum(1 for s in body["sessions"] if not routes._is_cli_session_for_settings(s))
+    assert body["cli_session_count"] == sum(1 for s in body["sessions"] if routes._is_cli_session_for_settings(s))
+

@@ -2571,17 +2571,28 @@ def _build_session_list_cache_payload(
             ]
             # #6624: source badge counts computed after archived_limit/archived_offset
             # truncation so badges match the post-pagination sets.
-            webui_vis = [s for s in visible_scoped if not s.get("archived") and not _is_cli_session_for_settings(s)]
-            webui_arch = [s for s in archived_scoped if s.get("archived") and not _is_cli_session_for_settings(s)][
-                normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
-            ]
-            webui_session_count = len(webui_vis) + len(webui_arch)
+            if sidebar_source in ("webui", "cli"):
+                webui_vis = [s for s in visible_scoped if not s.get("archived") and not _is_cli_session_for_settings(s)]
+                webui_arch = [s for s in archived_scoped if s.get("archived") and not _is_cli_session_for_settings(s)][
+                    normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
+                ]
+                webui_session_count = len(webui_vis) + len(webui_arch)
 
-            cli_vis = [s for s in visible_scoped if not s.get("archived") and _is_cli_session_for_settings(s)]
-            cli_arch = [s for s in archived_scoped if s.get("archived") and _is_cli_session_for_settings(s)][
-                normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
-            ]
-            cli_session_count = len(cli_vis) + len(cli_arch)
+                cli_vis = [s for s in visible_scoped if not s.get("archived") and _is_cli_session_for_settings(s)]
+                cli_arch = [s for s in archived_scoped if s.get("archived") and _is_cli_session_for_settings(s)][
+                    normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
+                ]
+                cli_session_count = len(cli_vis) + len(cli_arch)
+            else:
+                # When sidebar_source is omitted (mixed-source request), count the actual
+                # rows present in the combined post-pagination page (scoped) so badges
+                # accurately describe the returned page rather than independent slices.
+                webui_session_count = sum(
+                    1 for s in scoped if not _is_cli_session_for_settings(s)
+                )
+                cli_session_count = sum(
+                    1 for s in scoped if _is_cli_session_for_settings(s)
+                )
         else:
             webui_session_count = sum(
                 1 for s in full_scoped_all_sources
