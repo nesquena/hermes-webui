@@ -9038,6 +9038,24 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
     : 'No override';
 }
 
+function bindSettingsRtlPreference(settings, rtlCb){
+  const cb = rtlCb || (typeof $ === 'function' ? $('settingsRtl') : null);
+  if(!cb) return;
+  const cfg = settings || {};
+  let storageVal = null;
+  try{ storageVal = localStorage.getItem('hermes-rtl'); }catch(_){}
+  const saved = typeof cfg.rtl === 'boolean' ? cfg.rtl : (storageVal === 'true');
+  cb.checked = saved;
+  try{ localStorage.setItem('hermes-rtl', saved ? 'true' : 'false'); }catch(_){}
+  document.documentElement.classList.toggle('chat-content-rtl', saved);
+  cb.addEventListener('change', () => {
+    const on = cb.checked;
+    try{ localStorage.setItem('hermes-rtl', on ? 'true' : 'false'); }catch(_){}
+    document.documentElement.classList.toggle('chat-content-rtl', on);
+    if(typeof _schedulePreferencesAutosave === 'function') _schedulePreferencesAutosave();
+  }, {once: false});
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -9505,19 +9523,11 @@ async function loadSettingsPanel(){
     if(whatsNewSummaryCb){whatsNewSummaryCb.checked=!!settings.whats_new_summary_enabled;whatsNewSummaryCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const soundCb=$('settingsSoundEnabled');
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+
     // Right-to-left chat layout (#1721 salvage) — Settings-only, no composer button.
     const rtlCb=$('settingsRtl');
     if(rtlCb){
-      const saved=!!settings.rtl || localStorage.getItem('hermes-rtl')==='true';
-      rtlCb.checked=saved;
-      try{localStorage.setItem('hermes-rtl',saved?'true':'false');}catch(_){}
-      document.documentElement.classList.toggle('chat-content-rtl',saved);
-      rtlCb.addEventListener('change',()=>{
-        const on=rtlCb.checked;
-        try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}
-        document.documentElement.classList.toggle('chat-content-rtl',on);
-        _schedulePreferencesAutosave();
-      },{once:false});
+      bindSettingsRtlPreference(settings, rtlCb);
     }
     if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings);
     const persistedSpeechKeys = new Set(

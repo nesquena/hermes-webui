@@ -290,10 +290,35 @@ const docEl = { lang:'', dir:'', cls:new Set(), attrs:{},
   getAttribute(k){return this.attrs[k]??null;},
   classList: { toggle(c,on){ on?docEl.cls.add(c):docEl.cls.delete(c); },
                contains(c){ return docEl.cls.has(c); } } };
-global.document = { documentElement: docEl, querySelectorAll: () => [] };
-global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+const store = new Map();
+global.localStorage = {
+  getItem: (k) => store.has(k) ? store.get(k) : null,
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: (k) => store.delete(k),
+};
+const rtlCheckbox = {
+  checked: false,
+  _listeners: {},
+  addEventListener(event, fn){ this._listeners[event] = fn; },
+  dispatch(event){ if(this._listeners[event]) this._listeners[event](); }
+};
+global.document = {
+  documentElement: docEl,
+  querySelectorAll: () => [],
+  getElementById: (id) => (id === 'settingsRtl' ? rtlCheckbox : null),
+};
+global.$ = global.document.getElementById;
 global.window = global;
-eval(fs.readFileSync(process.argv[2], 'utf8'));
+
+eval(fs.readFileSync(process.argv[2], 'utf8')); // i18n.js
+
+// Extract and execute the real production helper from static/panels.js (#6699 re-gate)
+const panelsSrc = fs.readFileSync(process.argv[4], 'utf8');
+const fnIdx = panelsSrc.indexOf('function bindSettingsRtlPreference(');
+if (fnIdx === -1) throw new Error('bindSettingsRtlPreference not found in static/panels.js');
+const fnEnd = panelsSrc.indexOf('\nasync function loadSettingsPanel', fnIdx);
+const fnCode = panelsSrc.slice(fnIdx, fnEnd === -1 ? undefined : fnEnd);
+eval(fnCode);
 
 function makeEl(classes, parent){
   const el = { cls:new Set(classes), parent: parent||null };
@@ -358,10 +383,14 @@ function computed(el){
 }
 function caseRun(locale, manualOn){
   setLocale(locale);
-  docEl.classList.toggle('chat-content-rtl', manualOn);
+  // Drive the production RTL preference binding from static/panels.js
+  store.clear();
+  rtlCheckbox.checked = false;
+  bindSettingsRtlPreference({rtl: manualOn}, rtlCheckbox);
   return {
     dir: docEl.dir,
     manual: docEl.cls.has('chat-content-rtl'),
+    checkboxChecked: rtlCheckbox.checked,
     group: computed(toolGroup),
     groupChild: computed(toolGroupChild),
     result: computed(toolResult),
@@ -373,6 +402,15 @@ out.case1 = caseRun('fa', false);
 out.case2 = caseRun('fa', true);
 out.case3 = caseRun('en', true);
 out.case4 = caseRun('fa', false); out.case4_restored = caseRun('en', false);
+
+// Drive the production checkbox change listener
+rtlCheckbox.checked = true;
+rtlCheckbox.dispatch('change');
+out.changeEventOn = docEl.cls.has('chat-content-rtl');
+rtlCheckbox.checked = false;
+rtlCheckbox.dispatch('change');
+out.changeEventOff = !docEl.cls.has('chat-content-rtl');
+
 process.stdout.write(JSON.stringify(out));
 """
     with tempfile.NamedTemporaryFile(
@@ -382,7 +420,13 @@ process.stdout.write(JSON.stringify(out));
         script = tf.name
     try:
         result = subprocess.run(
-            [node, script, str(REPO / "static" / "i18n.js"), str(REPO / "static" / "style.css")],
+            [
+                node,
+                script,
+                str(REPO / "static" / "i18n.js"),
+                str(REPO / "static" / "style.css"),
+                str(REPO / "static" / "panels.js"),
+            ],
             capture_output=True,
             text=True,
             timeout=60,
@@ -392,20 +436,27 @@ process.stdout.write(JSON.stringify(out));
     finally:
         os.unlink(script)
 
+    # Verify production change listener behavior
+    assert out.get("changeEventOn") is True, "checkbox change to true must set chat-content-rtl"
+    assert out.get("changeEventOff") is True, "checkbox change to false must clear chat-content-rtl"
+
     # Case 1 — fa / manual off: automatic html[dir=rtl] rules isolate tool rows.
     assert out["case1"]["dir"] == "rtl" and out["case1"]["manual"] is False, out["case1"]
+    assert out["case1"]["checkboxChecked"] is False
     for surf in ("group", "groupChild", "result", "resultChild"):
         assert out["case1"][surf]["dir"] == "ltr", (surf, out["case1"][surf])
         assert out["case1"][surf]["bid"] == "isolate", (surf, out["case1"][surf])
 
     # Case 2 — fa / manual on: both rule sets active; still LTR + isolated.
     assert out["case2"]["dir"] == "rtl" and out["case2"]["manual"] is True, out["case2"]
+    assert out["case2"]["checkboxChecked"] is True
     for surf in ("group", "groupChild", "result", "resultChild"):
         assert out["case2"][surf]["dir"] == "ltr", (surf, out["case2"][surf])
         assert out["case2"][surf]["bid"] == "isolate", (surf, out["case2"][surf])
 
     # Case 3 — LTR / manual on: legacy .chat-content-rtl rules isolate tool rows.
     assert out["case3"]["dir"] == "ltr" and out["case3"]["manual"] is True, out["case3"]
+    assert out["case3"]["checkboxChecked"] is True
     for surf in ("group", "groupChild", "result", "resultChild"):
         assert out["case3"][surf]["dir"] == "ltr", (surf, out["case3"][surf])
         assert out["case3"][surf]["bid"] == "isolate", (surf, out["case3"][surf])
@@ -415,6 +466,7 @@ process.stdout.write(JSON.stringify(out));
     assert out["case4"]["dir"] == "rtl", out["case4"]
     assert out["case4_restored"]["dir"] == "ltr", out["case4_restored"]
     assert out["case4_restored"]["manual"] is False, out["case4_restored"]
+    assert out["case4_restored"]["checkboxChecked"] is False
     for surf in ("group", "groupChild", "result", "resultChild"):
         assert out["case4_restored"][surf]["dir"] is None, (surf, out["case4_restored"][surf])
 
