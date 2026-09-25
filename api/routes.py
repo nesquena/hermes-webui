@@ -20437,6 +20437,25 @@ def handle_post(handler, parsed) -> bool:
                 _resolved_profile = cli_meta.get("profile")
                 if _resolved_profile and not _profiles_match(_resolved_profile, _arch_profile):
                     return j(handler, {"error": "Session belongs to another profile", "code": "session_profile_mismatch"}, 409)
+            # #7549/#7826: the session exists in another profile's store.
+            # Mirror the detail-load endpoint's cross-profile contract (#7710)
+            # instead of a bare 404: a KNOWN other profile gets 409 with its
+            # name so the client can offer a profile switch, while
+            # unknown/legacy None-profile rows keep the 404 self-heal firing.
+            # #7826: a profile-less metadata row must stay on the bare-404
+            # path. Materializing it into whichever profile happens to be
+            # active would silently re-parent a foreign session — the 404
+            # keeps the browser's stale-URL self-heal firing instead.
+            _arch_profile = cli_meta.get("profile") or None
+            if not _arch_profile:
+                return bad(handler, "Session not found", 404)
+            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+                return j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": _arch_profile,
+                }, 409)
             # #7731: remember the resolved identity for the re-stamp after the
             # lock-held reload below. ``_archive_cli_meta`` is captured from the
             # ACTIVE profile only, so on the cross-profile path it is empty and
