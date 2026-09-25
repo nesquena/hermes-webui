@@ -55,6 +55,23 @@ Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).
 
+For structured messages containing text and native images, title generation
+uses the user text without flattening or modifying the stored message. Title
+comparison and title-model inputs remove the internal `[Workspace::v1: ...]`
+prefix and one terminal `[Attached files: ...]` or
+`[Attached files for this steer: ...]` suffix separated by a blank line.
+For structured content, this cleanup applies to the first text part that
+provides title content. Literal legacy `[Workspace: ...]` text and later text
+parts remain unchanged. Initial generation, explicit regeneration, and adaptive
+refresh use this title-specific cleanup.
+
+Background generation requires user text and a substantive assistant response.
+It recognizes the sanitized provisional title as well as the existing raw
+placeholder, so internal metadata does not make an image-containing turn look
+manually titled. Image-only or metadata-only content does not provide title
+text. Existing manual-title protection and the title-generation setting still
+apply; this cleanup does not rewrite the transcript or native image parts.
+
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):
 
@@ -101,6 +118,8 @@ HERMES_WEBUI_GATEWAY_USE_RUNS_API=true \
 ```
 
 Use this when the connected gateway advertises approval support and you want tool approval cards to appear in WebUI. Without `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`, gateway chat stays on the legacy chat-completions transport and approval-capable commands can remain pending in the agent without a WebUI approval card.
+
+On the runs API path the turn is executed by the Gateway, so restarting WebUI does not stop it. WebUI stores the Gateway `run_id` on the pending turn (and submits it with an `Idempotency-Key` so the Gateway keeps a durable run record). On startup, WebUI reattaches to every such run by polling `GET /v1/runs/{run_id}` until it settles, then writes the real final answer into the session instead of a "Response interrupted" marker. Stop still cancels a reattached run, and a pending approval is shown again. Token-by-token output from before the restart is not replayed; the reattached turn shows only the final answer. If the Gateway no longer knows the run (for example, it restarted too and the run was interrupted), the turn ends with an error message instead. The legacy chat-completions transport cannot reattach: its turn ends when the WebUI process that holds the HTTP stream exits.
 
 When YOLO is enabled for a gateway-backed browser session, WebUI approves every
 approval already parked for that session: Runs API prompts are relayed by their

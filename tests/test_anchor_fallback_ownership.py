@@ -416,6 +416,10 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     legacy_metadata_source = _function_source(
         _ui_js(), "_legacySettledFallbackHasToolMetadata"
     )
+    # #2051: renderMessages() inserts a message block through this helper, so it is
+    # evaluated with it. The shim's createElement() returns no template `content`, so the
+    # helper takes its insertAdjacentHTML fallback here, exactly as before.
+    insert_block_source = _function_source(_ui_js(), "_insertSegmentBlock")
     script = textwrap.dedent(
         f"""
         class FakeClassList {{
@@ -675,6 +679,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _scrollAfterMessageRender() {{}}
         function _maybeRecoverVirtualizedBlankViewport() {{ return false; }}
         function _updateMessageVirtualMeasurements() {{}}
+        function _resetMessageVirtualMeasurementBurst() {{}}
         function postProcessRenderedMessages() {{}}
         function _postProcessWithAnchorSuppression() {{}}
         function _formatGatewayModelLabel() {{ return ''; }}
@@ -682,6 +687,15 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _gatewayModelWarningText() {{ return ''; }}
         function _usedModelTurnChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
+        function _loadedCompactionMarkerRawIdxs() {{ return []; }}
+        function _selectCompactionCardPlacements() {{
+          return {{ preWindowMarkers: [], inlineMarkers: [], taskOwner: null }};
+        }}
+        function _insertCompactionCardNodes() {{
+          return {{ insertedNodes: [], taskOwnerNode: null }};
+        }}
+        function _insertPreservedCompressionTaskFallback() {{ return false; }}
+        function _pinCompactionCardAtTop() {{ return false; }}
         function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group agent-activity-group';
@@ -693,6 +707,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
+        eval({json.dumps(insert_block_source)});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};

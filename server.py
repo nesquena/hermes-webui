@@ -99,10 +99,12 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth, reset_trusted_auth_request_state
+from api.request_logging import emit_request_log
+from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
+    advertise_connection_close,
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
@@ -331,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -338,10 +341,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _safe_webui_print(message: str) -> None:
         """Emit a request log line without letting logging break responses."""
-        try:
-            print(message, flush=True)
-        except Exception:
-            pass
+        emit_request_log(message)
 
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
@@ -378,7 +378,8 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            # Body-pending-aware: a body-bearing GET failing auth would poison reuse (#7550).
+            if not check_auth_or_close(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -403,10 +404,8 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            _is_csp_report_post = (
-                parsed.path == "/api/csp-report" and self.command == "POST"
-            )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            _is_csp_report_post = parsed.path == "/api/csp-report" and self.command == "POST"
+            if not _is_csp_report_post and not check_auth_or_close(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -670,6 +669,7 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
+    from api.gateway_chat import resume_gateway_runs_after_restart; resume_gateway_runs_after_restart()  # bound, not yet serving
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
@@ -716,9 +716,9 @@ def main() -> None:
 
     try:
         signal.signal(signal.SIGTERM, _request_shutdown)
+        signal.signal(signal.SIGINT, _request_shutdown)  # Ctrl-C / ctl.sh daemons (#7078)
     except (ValueError, OSError):
-        # Not on the main thread (e.g. embedded/test harness); skip handler.
-        logger.debug("Could not install SIGTERM handler", exc_info=True)
+        logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
     try:
         httpd.serve_forever()

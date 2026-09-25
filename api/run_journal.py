@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
@@ -45,6 +46,14 @@ TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_
 SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
 # Back-compat alias used by older call sites / tests.
 _TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
+# Events that are live-UI-only telemetry with no recovery value in the run
+# journal. They are skipped at WRITE time (never durably journaled, so they
+# cannot bloat the journal on marathon runs) and filtered at REPLAY time (so
+# legacy journals that already contain a backlog never stream it to a
+# reconnecting browser tab). Readers deliberately do NOT filter: cursor math
+# (``cursor_event_missing`` bound) and the offline-gap coverage check count
+# journal seqs and must keep seeing every row.
+REPLAY_SKIPPED_SSE_EVENTS = frozenset({"metering"})
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
@@ -122,7 +131,7 @@ def _get_cached_summary(path: Path) -> dict | None:
             _SUMMARY_CACHE.pop(key, None)
             return None
         _SUMMARY_CACHE.move_to_end(key)
-        return dict(summary)
+        return deepcopy(summary)
 
 
 def _cache_summary(
@@ -139,7 +148,7 @@ def _cache_summary(
         return
     key = str(path)
     with _SUMMARY_CACHE_LOCK:
-        _SUMMARY_CACHE[key] = (signature, dict(summary))
+        _SUMMARY_CACHE[key] = (signature, deepcopy(summary))
         _SUMMARY_CACHE.move_to_end(key)
         while len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ENTRIES:
             _SUMMARY_CACHE.popitem(last=False)
@@ -443,23 +452,43 @@ class RunJournalWriter:
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
-        self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
-    def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+    def append_sse_event(self, event_name: str, payload=None) -> dict | None:
+        # Live-UI-only telemetry (metering) has no recovery value in the journal:
+        # nothing reads those rows back for recovery, and journaling them at ~10 Hz
+        # on marathon runs balloons the durable file (12+ MB of a single 18 MB run
+        # was metering). Skip the write entirely and return None so callers'
+        # journal-id plumbing (``(journaled or {}).get("event_id")``) is untouched.
+        # Not reserving a seq keeps the remaining journaled seqs contiguous, which
+        # the offline-gap coverage and replay-cursor contiguity checks rely on.
+        if str(event_name or "").strip() in REPLAY_SKIPPED_SSE_EVENTS:
+            return None
+        # Allocate the sequence inside the same per-path transaction that writes
+        # the row. Reserving here, then releasing the lock before append, lets a
+        # concurrent writer put a higher sequence on disk first.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
+
+
+def journal_replay_visible(event) -> bool:
+    """Return True when a journal row should be streamed to a reconnecting tab.
+
+    Live-UI-only telemetry rows (see ``REPLAY_SKIPPED_SSE_EVENTS``) carry no
+    recovery value — replaying a metering backlog only re-paints a stale TPS
+    number while multiplying the reconnect burst size. Writers no longer journal
+    them, but legacy journals may already contain them, so the replay emit sites
+    filter through this predicate. Non-dict rows are passed through (visible) so
+    an unexpected shape can never silently swallow user-visible output.
+    """
+    if not isinstance(event, dict):
+        return True
+    name = str(event.get("event") or event.get("type") or "")
+    return name not in REPLAY_SKIPPED_SSE_EVENTS
 
 
 def read_run_events(
@@ -506,6 +535,37 @@ def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
     )
 
 
+def runtime_model_from_events(session_id: str, stream_id: str, events: Iterable[dict]) -> dict | None:
+    """Project only observed serving identity for this journal owner.
+
+    A fallback warning or malformed later observation invalidates old evidence;
+    the configured selection and free-text status never supply serving identity.
+    """
+    observed = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("session_id") != session_id or event.get("run_id") != stream_id:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            if event.get("event") == "runtime_model":
+                observed = None
+            continue
+        if event.get("event") == "warning" and payload.get("type") == "fallback":
+            observed = None
+        elif event.get("event") == "runtime_model":
+            observed = None
+            if (payload.get("session_id") != session_id or payload.get("stream_id") != stream_id
+                or not isinstance(payload.get("model"), str) or not payload["model"].strip()
+                or not isinstance(payload.get("fallback_active"), bool)
+                or payload.get("phase") not in ("observed_output", "route_observed")):
+                continue
+            observed = {key: payload[key] for key in (
+                "session_id", "stream_id", "model", "fallback_active", "phase")}
+            if isinstance(payload.get("provider"), str) and payload["provider"].strip():
+                observed["provider"] = payload["provider"]
+    return observed
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
@@ -521,6 +581,7 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
         "terminal": bool(terminal),
         "terminal_state": status,
         "last_event": (last or {}).get("event"),
+        "runtime_model": runtime_model_from_events(session_id, run_id, ordered),
     }
 
 
@@ -584,6 +645,27 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
             _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
+    return None
+
+
+def find_run_file(run_id: str, *, session_dir: Path | None = None) -> tuple[str, Path] | None:
+    """Locate a run journal file by run id WITHOUT parsing its body.
+
+    Hot callers that immediately read the full journal (the live-snapshot
+    rebuild) must not pay :func:`find_run_summary`'s full-file parse first:
+    on a long live run the file holds tens of thousands of rows and parsing
+    it twice per rebuild dominated the snapshot cost. Returns
+    ``(session_id, path)`` for the first match, or ``None`` when the run id
+    is invalid or no journal exists.
+    """
+    try:
+        rid = _validate_id(run_id, "run_id")
+    except ValueError:
+        return None
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    for path in journal_root.glob(f"*/{rid}.jsonl"):
+        return path.parent.name, path
     return None
 
 

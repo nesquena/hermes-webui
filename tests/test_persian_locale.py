@@ -260,7 +260,6 @@ def test_rtl_four_case_behavior_matrix():
     import tempfile
 
     css = read(REPO / "static" / "style.css")
-    src = read(REPO / "static" / "i18n.js")
 
     # Small source-presence guard (explicitly allowed by the review) — the real
     # behavior assertions follow below. Rule lists end either with ',' (mid-list)

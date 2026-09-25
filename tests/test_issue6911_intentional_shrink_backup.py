@@ -162,6 +162,36 @@ def test_generation_save_load_round_trip_is_in_metadata_prefix(monkeypatch, tmp_
     assert metadata.intentional_shrink_generation == generation
 
 
+def test_transcript_generation_round_trips_and_advances_only_on_shrink(monkeypatch, tmp_path):
+    models, _session_dir = _seed_session_dir(monkeypatch, tmp_path)
+    from api.session_ops import truncate_session_at_keep
+    from api.webui_session_db import WebUIJsonSessionDB
+
+    session = models.Session(
+        session_id="issue6911_transcript_generation",
+        messages=_history(),
+        transcript_generation=4,
+    )
+    session.save()
+
+    truncate_session_at_keep(session, len(session.messages))
+    assert session.transcript_generation == 4
+    truncate_session_at_keep(session, 2)
+    assert session.transcript_generation == 5
+    assert session.transcript_generation_baseline == 2
+    session.save()
+
+    loaded = models.Session.load(session.session_id)
+    metadata = models.Session.load_metadata_only(session.session_id)
+    listed = WebUIJsonSessionDB().list_sessions()
+    assert loaded.transcript_generation == 5
+    assert loaded.transcript_generation_baseline == 2
+    assert metadata.transcript_generation == 5
+    assert metadata.transcript_generation_baseline == 2
+    assert listed[0]["transcript_generation"] == 5
+    assert listed[0]["transcript_generation_baseline"] == 2
+
+
 def test_no_actual_message_shrink_keeps_generation(monkeypatch, tmp_path):
     models, _session_dir = _seed_session_dir(monkeypatch, tmp_path)
     from api.session_ops import truncate_session_at_keep
