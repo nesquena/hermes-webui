@@ -10592,6 +10592,7 @@ from api.models import (
     _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
+    _has_compression_continuation,
     prune_session_from_index,
     agent_session_rows_existing,
     agent_session_zero_message_sids,
@@ -17457,9 +17458,46 @@ def handle_post(handler, parsed) -> bool:
         if body.get("lineage"):
             state_db_path = _active_state_db_path()
             request_profile = _get_active_profile_name()
-            lineage_ids = read_session_lineage_ids(state_db_path, sid, request_profile)
-            if not lineage_ids:
+
+            def resolve_archive_scope():
+                resolution = read_session_lineage_ids(
+                    state_db_path,
+                    sid,
+                    request_profile,
+                )
+                if resolution.status == "found":
+                    return list(resolution.session_ids)
+                if resolution.reason == "profile_mismatch":
+                    raise KeyError(sid)
+                session = _get_or_materialize_session(sid, persist=False)
+                # The singleton compatibility path is only for a durable local
+                # sidecar, never for an in-memory CLI/state.db materialization.
+                local_session = Session.load(sid)
+                if local_session is None:
+                    raise KeyError(sid)
+                session = local_session
+                if not _session_visible_to_active_profile(
+                    getattr(session, "profile", None),
+                    handler,
+                ):
+                    raise KeyError(sid)
+                has_local_ancestry = bool(
+                    getattr(session, "pre_compression_snapshot", False)
+                    or getattr(session, "parent_session_id", None)
+                    or _has_compression_continuation(session)
+                )
+                if has_local_ancestry:
+                    raise RuntimeError("Session lineage authority is incomplete")
+                return [sid]
+
+            try:
+                lineage_ids = resolve_archive_scope()
+            except KeyError:
                 return bad(handler, "Session lineage not found", 404)
+            except PermissionError as exc:
+                return bad(handler, str(exc), 400)
+            except RuntimeError as exc:
+                return bad(handler, str(exc), 409)
             archived = bool(body.get("archived", True))
             # Hold every target lock in a stable order, then resolve again under
             # those locks.  If compression added or moved a segment between the
@@ -17470,11 +17508,16 @@ def handle_post(handler, parsed) -> bool:
                 with ExitStack() as locks:
                     for lineage_sid in sorted(lineage_ids):
                         locks.enter_context(_get_session_agent_lock(lineage_sid))
-                    current_ids = read_session_lineage_ids(state_db_path, sid, request_profile)
+                    try:
+                        current_ids = resolve_archive_scope()
+                    except KeyError:
+                        return bad(handler, "Session lineage not found", 404)
+                    except PermissionError as exc:
+                        return bad(handler, str(exc), 400)
+                    except RuntimeError as exc:
+                        return bad(handler, str(exc), 409)
                     if set(current_ids) != set(lineage_ids):
                         lineage_ids = current_ids
-                        if not lineage_ids:
-                            return bad(handler, "Session lineage not found", 404)
                         continue
                     sessions = []
                     try:

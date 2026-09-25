@@ -7,6 +7,7 @@ import threading
 from collections import OrderedDict
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,7 +36,9 @@ def test_lineage_ids_enumerates_complete_continuation_tree_only(tmp_path):
     conn.commit()
     conn.close()
 
-    assert set(read_session_lineage_ids(db, "tip-b")) == {"root", "tip-a", "mid-b", "tip-b"}
+    resolution = read_session_lineage_ids(db, "tip-b")
+    assert resolution.status == "found"
+    assert set(resolution.session_ids) == {"root", "tip-a", "mid-b", "tip-b"}
 
 
 def test_lineage_ids_excludes_cross_profile_continuations(tmp_path):
@@ -56,8 +59,12 @@ def test_lineage_ids_excludes_cross_profile_continuations(tmp_path):
     conn.commit()
     conn.close()
 
-    assert set(read_session_lineage_ids(db, "own-tip", "default")) == {"root", "own-tip"}
-    assert read_session_lineage_ids(db, "foreign-tip", "default") == []
+    own = read_session_lineage_ids(db, "own-tip", "default")
+    foreign = read_session_lineage_ids(db, "foreign-tip", "default")
+    assert own.status == "found"
+    assert set(own.session_ids) == {"root", "own-tip"}
+    assert foreign.status == "incompatible"
+    assert foreign.reason == "profile_mismatch"
 
 
 def test_lineage_ids_uses_renamed_root_profile_aliases(tmp_path, monkeypatch):
@@ -88,13 +95,15 @@ def test_lineage_ids_uses_renamed_root_profile_aliases(tmp_path, monkeypatch):
     )
     profiles._invalidate_root_profile_cache()
     try:
-        assert set(read_session_lineage_ids(db, "legacy-tip", "kinni")) == {
+        legacy = read_session_lineage_ids(db, "legacy-tip", "kinni")
+        assert legacy.status == "found"
+        assert set(legacy.session_ids) == {
             "root",
             "legacy-tip",
             "named-root-tip",
         }
-        assert read_session_lineage_ids(db, "foreign-tip", "kinni") == []
-        assert read_session_lineage_ids(db, "legacy-tip", "research") == []
+        assert read_session_lineage_ids(db, "foreign-tip", "kinni").reason == "profile_mismatch"
+        assert read_session_lineage_ids(db, "legacy-tip", "research").reason == "profile_mismatch"
     finally:
         profiles._invalidate_root_profile_cache()
 
@@ -122,8 +131,8 @@ def test_lineage_ids_without_profile_column_stay_reachable_for_named_profiles(tm
     conn.commit()
     conn.close()
 
-    assert set(read_session_lineage_ids(db, "tip", "research")) == {"root", "tip"}
-    assert set(read_session_lineage_ids(db, "tip", "default")) == {"root", "tip"}
+    assert set(read_session_lineage_ids(db, "tip", "research").session_ids) == {"root", "tip"}
+    assert set(read_session_lineage_ids(db, "tip", "default").session_ids) == {"root", "tip"}
 
 
 @pytest.fixture
@@ -178,6 +187,214 @@ def _assert_cold_archive_parity(session_dir, expected):
     for sid in ("lineage-root", "lineage-tip"):
         assert Session.load(sid).archived is expected
         assert by_id[sid]["archived"] is expected
+
+
+def _write_lineage_test_db(path, schema):
+    conn = sqlite3.connect(path)
+    if schema == "complete-empty":
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT, "
+            "started_at REAL, ended_at REAL, source TEXT, session_source TEXT, profile TEXT)"
+        )
+    elif schema == "legacy-incomplete":
+        conn.execute("CREATE TABLE sessions (id TEXT)")
+        conn.execute("INSERT INTO sessions VALUES (?)", ("local-singleton",))
+    else:  # pragma: no cover - test helper misuse
+        raise AssertionError(schema)
+    conn.commit()
+    conn.close()
+
+
+def _call_lineage_archive_route(monkeypatch, db, *, archived):
+    import api.routes as routes
+
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda _handler: {
+            "session_id": "local-singleton",
+            "archived": archived,
+            "lineage": True,
+        },
+    )
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_is_subagent_child_session_id", lambda _sid: False)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: captured.update(
+            payload=payload,
+            status=status,
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: captured.update(
+            payload={"error": message},
+            status=status,
+        )
+        or True,
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/archive")) is True
+    return captured
+
+
+@pytest.mark.parametrize("archived", [True, False], ids=["archive", "restore"])
+@pytest.mark.parametrize("schema", ["complete-empty", "legacy-incomplete"])
+def test_lineage_route_archives_authorized_local_singleton_without_agent_row(
+    lineage_session_store,
+    monkeypatch,
+    schema,
+    archived,
+):
+    """A mutable local sidecar need not already be mirrored into state.db."""
+    from api.models import Session
+
+    session = Session(
+        session_id="local-singleton",
+        title="Local singleton",
+        workspace="",
+        model="test-model",
+        profile="default",
+        messages=[{"role": "user", "content": "local"}],
+    )
+    session.archived = not archived
+    session.save(touch_updated_at=False)
+    db = lineage_session_store.parent / f"{schema}.db"
+    _write_lineage_test_db(db, schema)
+    resolution = read_session_lineage_ids(db, "local-singleton", "default")
+    assert resolution.status == (
+        "absent" if schema == "complete-empty" else "incompatible"
+    )
+
+    captured = _call_lineage_archive_route(monkeypatch, db, archived=archived)
+
+    assert captured["status"] == 200
+    assert captured["payload"]["session_ids"] == ["local-singleton"]
+    sidecar = json.loads(
+        (lineage_session_store / "local-singleton.json").read_text(encoding="utf-8")
+    )
+    index = {
+        row["session_id"]: row
+        for row in json.loads(
+            (lineage_session_store / "_index.json").read_text(encoding="utf-8")
+        )
+    }
+    assert sidecar["archived"] is archived
+    assert index["local-singleton"]["archived"] is archived
+
+
+def test_lineage_route_does_not_singleton_fallback_for_local_ancestry(
+    lineage_session_store,
+    monkeypatch,
+):
+    """An incomplete DB cannot narrow a sidecar with local ancestry to one row."""
+    from api.models import Session
+
+    session = Session(
+        session_id="local-singleton",
+        title="Local continuation",
+        workspace="",
+        model="test-model",
+        profile="default",
+        parent_session_id="missing-parent",
+        messages=[{"role": "user", "content": "local"}],
+    )
+    session.save(touch_updated_at=False)
+    db = lineage_session_store.parent / "legacy-incomplete.db"
+    _write_lineage_test_db(db, "legacy-incomplete")
+
+    captured = _call_lineage_archive_route(monkeypatch, db, archived=True)
+
+    assert captured["status"] == 409
+    assert json.loads(
+        (lineage_session_store / "local-singleton.json").read_text(encoding="utf-8")
+    )["archived"] is False
+
+
+@pytest.mark.parametrize("case", ["foreign", "read-only"])
+def test_lineage_route_does_not_singleton_fallback_for_foreign_or_read_only_target(
+    lineage_session_store,
+    monkeypatch,
+    case,
+):
+    """The local-sidecar fallback must not weaken profile or mutability checks."""
+    from api.models import Session
+
+    session = Session(
+        session_id="local-singleton",
+        title="Read-only local shadow",
+        workspace="",
+        model="test-model",
+        profile="default",
+        messages=[{"role": "user", "content": "local"}],
+        read_only=case == "read-only",
+    )
+    session.save(touch_updated_at=False)
+    db = lineage_session_store.parent / f"{case}.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT, "
+        "started_at REAL, ended_at REAL, source TEXT, session_source TEXT, profile TEXT)"
+    )
+    if case == "foreign":
+        conn.execute(
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+            ("local-singleton", None, None, 1, None, "webui", None, "research"),
+        )
+    conn.commit()
+    conn.close()
+
+    captured = _call_lineage_archive_route(monkeypatch, db, archived=True)
+
+    assert captured["status"] in {400, 404}
+    assert json.loads(
+        (lineage_session_store / "local-singleton.json").read_text(encoding="utf-8")
+    )["archived"] is False
+
+
+def test_lineage_route_does_not_singleton_fallback_for_agent_only_materialization(
+    lineage_session_store,
+    monkeypatch,
+):
+    """A mutable-looking Agent row is not a durable local sidecar."""
+    import api.routes as routes
+
+    def missing_session(sid, **_kwargs):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes, "get_session", missing_session)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda sid: {
+            "id": sid,
+            "title": "Agent only",
+            "model": "test-model",
+            "profile": "default",
+            "source": "cli",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda _sid, **_kwargs: [{"role": "user", "content": "agent"}],
+    )
+    db = lineage_session_store.parent / "complete-empty.db"
+    _write_lineage_test_db(db, "complete-empty")
+
+    captured = _call_lineage_archive_route(monkeypatch, db, archived=True)
+
+    assert captured["status"] == 404
+    assert not (lineage_session_store / "local-singleton.json").exists()
 
 
 def _duplicate_partial_messages(label):
@@ -1252,7 +1469,11 @@ def test_lineage_route_reports_durable_recovery_disposition(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(routes, "_active_state_db_path", lambda: tmp_path / "state.db")
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "read_session_lineage_ids", lambda *_args: ["lineage-root"])
+    monkeypatch.setattr(
+        routes,
+        "read_session_lineage_ids",
+        lambda *_args: SimpleNamespace(status="found", session_ids=("lineage-root",), reason=None),
+    )
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: nullcontext())
     monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_args, **_kwargs: session)
@@ -1286,10 +1507,10 @@ def test_lineage_archive_rechecks_scope_while_all_target_locks_are_held():
     assert "with ExitStack() as locks:" in archive
     assert "for lineage_sid in sorted(lineage_ids):" in archive
     assert archive.index("locks.enter_context(_get_session_agent_lock(lineage_sid))") < archive.index(
-        "current_ids = read_session_lineage_ids(state_db_path, sid, request_profile)"
+        "current_ids = resolve_archive_scope()"
     )
     assert "if set(current_ids) != set(lineage_ids):" in archive
-    assert "read_session_lineage_ids(state_db_path, sid, request_profile)" in archive
+    assert archive.count("read_session_lineage_ids(") == 1
     assert "_session_visible_to_active_profile(getattr(session, \"profile\", None), handler)" in archive
     assert 'return bad(handler, "Session lineage changed during archive; retry", 409)' in archive
 

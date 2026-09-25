@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
 
@@ -1087,31 +1088,76 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
     }
 
 
+@dataclass(frozen=True)
+class SessionLineageResolution:
+    """Outcome of consulting state.db for an archive/restore lineage."""
+
+    status: str
+    session_ids: tuple[str, ...] = ()
+    reason: str | None = None
+
+
 def read_session_lineage_ids(
     db_path: Path,
     session_id: str | None,
     profile: str | None = None,
-) -> list[str]:
-    """Resolve the complete continuation tree represented by a collapsed row."""
+) -> SessionLineageResolution:
+    """Resolve a lineage without conflating absence with unusable authority."""
     sid = str(session_id or '').strip()
     db_path = Path(db_path)
-    if not sid or not db_path.exists():
-        return []
-    with closing(open_state_db_readonly(db_path)) as conn:
-        conn.row_factory = sqlite3.Row
-        session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-        profile_projection = ", profile" if "profile" in session_cols else ""
-        rows = [dict(row) for row in conn.execute(
-            f"SELECT id, parent_session_id, end_reason, started_at, ended_at, source, session_source{profile_projection} FROM sessions"
-        )]
+    if not sid:
+        return SessionLineageResolution("incompatible", reason="invalid_session_id")
+    if not db_path.exists():
+        return SessionLineageResolution("incompatible", reason="missing_database")
+    lineage_columns = {
+        "parent_session_id",
+        "end_reason",
+        "started_at",
+        "ended_at",
+        "source",
+        "session_source",
+    }
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "id" not in session_cols:
+                return SessionLineageResolution("incompatible", reason="missing_sessions_schema")
+            projections = ["s.id"]
+            projections.extend(
+                _optional_col(name, session_cols)
+                for name in sorted(lineage_columns)
+            )
+            projections.append(_optional_col("profile", session_cols))
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT {', '.join(projections)} FROM sessions s"
+                )
+            ]
+    except (OSError, sqlite3.Error):
+        return SessionLineageResolution("incompatible", reason="unreadable_database")
+
+    rows_by_id = {row['id']: row for row in rows}
+    target = rows_by_id.get(sid)
+    schema_complete = lineage_columns.issubset(session_cols)
+    if target is None:
+        status = "absent" if schema_complete else "incompatible"
+        reason = None if schema_complete else "incomplete_sessions_schema"
+        return SessionLineageResolution(status, reason=reason)
     # Canonical profile equivalence (_profiles_match): missing/'default' rows
     # and a renamed root profile are the same identity. A profile-local
     # state.db may predate the optional sessions.profile column entirely; its
     # rows all belong to the requesting profile, so no row-level filter can
     # apply — the route's per-materialized-session visibility prevalidation
     # remains the authority there.
-    if profile is not None and profile_projection:
+    if profile is not None and "profile" in session_cols:
         requested_profile = str(profile or "default").strip() or "default"
+        if not _profiles_match(
+            (str(target.get("profile") or "").strip() or None),
+            requested_profile,
+        ):
+            return SessionLineageResolution("incompatible", reason="profile_mismatch")
         rows = [
             row for row in rows
             if _profiles_match(
@@ -1119,9 +1165,9 @@ def read_session_lineage_ids(
                 requested_profile,
             )
         ]
+    if not schema_complete:
+        return SessionLineageResolution("incompatible", reason="incomplete_sessions_schema")
     rows_by_id = {row['id']: row for row in rows}
-    if sid not in rows_by_id:
-        return []
     root_id = _continuation_root_id(rows_by_id, sid) or sid
     children: dict[str, list[dict]] = {}
     for row in rows:
@@ -1137,7 +1183,7 @@ def read_session_lineage_ids(
         seen.add(row['id'])
         result.append(row['id'])
         stack.extend(child for child in children.get(row['id'], []) if _is_continuation_session(row, child))
-    return result
+    return SessionLineageResolution("found", tuple(result))
 
 
 def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[str]) -> dict[str, dict]:
