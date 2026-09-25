@@ -338,6 +338,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         str(tmp_path),
         stream_id,
         [],
+        persisted_model="alias-target-model",
+        persisted_model_provider="model-alias-profile-bound-lane",
     )
 
     saved = models.get_session(s.session_id)
@@ -347,6 +349,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
     assert saved.active_stream_id is None
+    assert saved.model == "alias-target-model"
+    assert saved.model_provider == "model-alias-profile-bound-lane"
     assert stream_id not in STREAMS
     assert captured["url"] == "http://gateway.local/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
@@ -523,10 +527,12 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
         "Say hello",
-        "test-model",
+        "east",
         str(tmp_path),
         stream_id,
         [],
+        persisted_model="shared-model",
+        persisted_model_provider="model-alias-profile-bound-lane",
     )
 
     apperrors = [item[1] for item in events if item[0] == "apperror"]
@@ -543,6 +549,8 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert context_users[-1]["timestamp"] == 222
     assert context_users[-1]["attachments"] == [{"name": "current.png"}]
     assert saved.messages[-1].get("_error") is True
+    assert saved.model == "shared-model"
+    assert saved.model_provider == "model-alias-profile-bound-lane"
 
     response_error[0] = ""
     empty_stream_id = "stream-gateway-empty-response-test"

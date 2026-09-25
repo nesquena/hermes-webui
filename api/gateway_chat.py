@@ -1034,7 +1034,17 @@ def _resume_gateway_run_for_session(session) -> bool:
     ).start()
     return True
 
-def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+def _settle_gateway_terminal_error(
+    session_id,
+    stream_id,
+    workspace,
+    model,
+    model_provider,
+    terminal_error,
+    *,
+    persisted_model=None,
+    persisted_model_provider=None,
+):
     from api.streaming import (
         _classify_provider_error,
         _materialize_pending_user_turn_before_error,
@@ -1083,8 +1093,12 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             session.messages = []
         session.messages.append(error_message)
         session.workspace = str(workspace)
-        session.model = model
-        session.model_provider = model_provider
+        session.model = persisted_model if persisted_model is not None else model
+        session.model_provider = (
+            persisted_model_provider
+            if persisted_model_provider is not None
+            else model_provider
+        )
         terminal_session_persisted = False
         try:
             session.save()
@@ -1154,6 +1168,8 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    persisted_model=None,
+    persisted_model_provider=None,
     goal_related=False,
     regeneration=False,
     reattach_run=None,
@@ -1346,6 +1362,8 @@ def _run_gateway_chat_streaming(
                     model,
                     model_provider,
                     str(exc),
+                    persisted_model=persisted_model,
+                    persisted_model_provider=persisted_model_provider,
                 )
                 if error_payload is None:
                     return
@@ -1521,6 +1539,8 @@ def _run_gateway_chat_streaming(
                 model,
                 model_provider,
                 terminal_error,
+                persisted_model=persisted_model,
+                persisted_model_provider=persisted_model_provider,
             )
             if error_payload is None:
                 return
@@ -1646,8 +1666,12 @@ def _run_gateway_chat_streaming(
             s.pending_started_at = None
             s.pending_user_source = None
             s.workspace = str(workspace)
-            s.model = model
-            s.model_provider = model_provider
+            s.model = persisted_model if persisted_model is not None else model
+            s.model_provider = (
+                persisted_model_provider
+                if persisted_model_provider is not None
+                else model_provider
+            )
 
             def _restore_cancelled_success_writeback():
                 if pending_source == "process_wakeup":

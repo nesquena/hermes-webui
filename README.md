@@ -301,6 +301,53 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
+#### Model aliases in `/model`
+
+`/model <alias>` accepts any alias configured for the profile, in either of Hermes's two formats:
+
+```yaml
+model_aliases:                     # canonical
+  sol:
+    model: gpt-5.6-sol
+    provider: openai-codex
+
+model:
+  provider: openrouter
+  aliases:                         # legacy
+    sol: openai-codex/gpt-5.6-sol  # provider-qualified
+    fast: gpt-4                    # unqualified
+```
+
+Alias resolution follows the format of the alias:
+
+- A **canonical `model_aliases` entry** and a **provider-qualified legacy target** name their own
+  route. The target is authoritative, so `/model sol` selects that provider even when a
+  same-named model exists on another provider. A canonical entry also takes precedence over a
+  legacy entry with the same name.
+- An **unqualified legacy target** names only a model, so it keeps the ordinary lookup: the
+  active provider first, then the normal fuzzy match. This is the behavior `/model` had before,
+  and it is unchanged.
+
+Aliases that carry their own endpoint or credentials are resolved server-side; the browser only
+receives the model, the provider id, and an opaque route id, never a base URL or key.
+
+A session stores that opaque route id, not the endpoint, so an alias that is later deleted or renamed
+leaves the session pointing at a route nothing owns. That send fails closed — on every backend, the
+in-process worker, the gateway and the runner alike — with a controlled "model alias unavailable"
+error instead of quietly falling back to another provider; pick the model again to store a live route.
+
+With `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`, `/goal <text>` returns HTTP 501
+(`status: unsupported`) without changing an existing goal or starting a run. The
+runner contract does not yet provide atomic goal replacement and kickoff; WebUI
+never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
+`clear` delegate to the runner when supported. Legacy-direct and legacy-journal
+goal kickoff behavior is unchanged. Normal runner chat still supports model aliases.
+
+Server-initiated turns retain the pre-session stale-Agent-runtime barrier. It
+runs before loading the session; named-profile alias and Gateway routing happen
+only after admission. A stale default local runtime can therefore reject a wakeup
+before the session's named-profile Gateway ownership is known.
+
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts

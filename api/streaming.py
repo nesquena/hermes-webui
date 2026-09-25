@@ -44,10 +44,14 @@ from api.config import (
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
+    resolve_model_alias_runtime,
+    merge_model_alias_runtime_bundle,
     resolve_custom_provider_connection,
     apply_custom_provider_connection_authority,
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
+    MODEL_ALIAS_ROUTE_UNRESOLVED,
+    raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
     custom_provider_route_error,
@@ -809,6 +813,24 @@ def _resolve_runtime_connection_bundle(
             resolved_base_url,
             runtime_provider,
             lookup_provider=lookup_provider,
+            connection_resolver=resolve_custom_provider_connection,
+        )
+
+
+def _resolve_model_alias_connection_bundle(
+    alias_route: dict,
+    runtime_provider: dict | None,
+    profile_name: str | None = None,
+) -> dict:
+    """Resolve an alias bundle inside the session profile's config scope."""
+    from api import profiles as _profiles_api
+
+    with _profiles_api.profile_scope_for_detached_worker(
+        profile_name, "model alias connection", logger_override=logger
+    ):
+        return merge_model_alias_runtime_bundle(
+            alias_route,
+            runtime_provider,
             connection_resolver=resolve_custom_provider_connection,
         )
 
@@ -1672,7 +1694,9 @@ def _custom_provider_route_classification(error) -> dict:
         reason = getattr(error, 'reason', None)
         hint = getattr(error, 'hint', '') or ''
         message = getattr(error, 'message', None) or str(error)
-    if reason == CUSTOM_ROUTE_NO_CREDENTIAL:
+    if reason == MODEL_ALIAS_ROUTE_UNRESOLVED:
+        label = 'Model alias unavailable'
+    elif reason == CUSTOM_ROUTE_NO_CREDENTIAL:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
@@ -11258,34 +11282,56 @@ def _run_agent_streaming(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
-                resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                    model_with_provider_context(model, provider_context),
-                    explicitly_picked=_explicitly_picked,
-                )
+                _alias_route = resolve_model_alias_runtime(provider_context, expected_model=model)
+                if _alias_route is not None:
+                    resolved_model = _alias_route["model"]
+                    resolved_provider = _alias_route["provider"]
+                    resolved_base_url = _alias_route.get("base_url") or None
+                    resolved_api_key = _alias_route.get("api_key") or None
+                else:
+                    # An opaque alias lane that did not resolve (alias deleted,
+                    # owned by another profile, or now targeting a different
+                    # model) is terminal: the digest is not a provider id, so
+                    # falling through to generic provider resolution would let
+                    # the ambient/fallback chain answer a route the session no
+                    # longer owns. Stop before the agent kwargs, before
+                    # _AIAgent(), and before the cache write below; the outer
+                    # handler turns the typed error into a controlled
+                    # provider_unroutable apperror.
+                    raise_for_unresolved_model_alias_route(provider_context)
+                    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                        model_with_provider_context(model, provider_context),
+                        explicitly_picked=_explicitly_picked,
+                    )
+                    resolved_api_key = None
                 configured_base_url = resolved_base_url
 
-                # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-                # Pass the resolved provider so non-default providers get their own credentials.
-                resolved_api_key = None
                 # Default to an empty runtime dict so the constructor-routing
                 # bundle below stays buildable when resolution raises.
                 _rt = {}
-                try:
-                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                    from hermes_cli.runtime_provider import resolve_runtime_provider
-                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                        resolve_runtime_provider,
-                        requested=resolved_provider,
-                        target_model=resolved_model,
-                    )
-                    resolved_api_key = _rt.get("api_key")
-                    if not resolved_provider:
-                        resolved_provider = _rt.get("provider")
-                    resolved_base_url = _runtime_preferred_base_url(
-                        _rt, resolved_provider, configured_base_url
-                    )
-                except Exception as _e:
-                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                # An alias-declared endpoint is already a complete routing
+                # authority. Do not ask the active/provider resolver for a key
+                # that could then be sent to that unrelated endpoint.
+                _alias_has_endpoint = bool(
+                    _alias_route is not None and _alias_route.get("base_url_explicit")
+                )
+                if not _alias_has_endpoint:
+                    try:
+                        from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+                        _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                            resolve_runtime_provider,
+                            requested=resolved_provider,
+                            target_model=resolved_model,
+                        )
+                        resolved_api_key = _rt.get("api_key")
+                        if not resolved_provider:
+                            resolved_provider = _rt.get("provider")
+                        resolved_base_url = _runtime_preferred_base_url(
+                            _rt, resolved_provider, configured_base_url
+                        )
+                    except Exception as _e:
+                        print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
                 # Named custom providers (custom:slug) may not be resolvable by
                 # hermes_cli.runtime_provider directly. Fall back to config.yaml
@@ -11302,11 +11348,18 @@ def _run_agent_streaming(
                 # a mixed authority: the list row's URL and key, but the ambient
                 # provider's transport, wire protocol and credential source.
                 _session_requested_provider = resolved_provider
-                _runtime_bundle = _resolve_runtime_connection_bundle(
-                    resolved_provider, resolved_api_key, resolved_base_url, _rt,
-                    profile_name=_resolved_profile_name,
-                    custom_provider_lookup=_session_requested_provider,
-                )
+                if _alias_route is not None:
+                    _runtime_bundle = _resolve_model_alias_connection_bundle(
+                        _alias_route,
+                        _rt,
+                        profile_name=_resolved_profile_name,
+                    )
+                else:
+                    _runtime_bundle = _resolve_runtime_connection_bundle(
+                        resolved_provider, resolved_api_key, resolved_base_url, _rt,
+                        profile_name=_resolved_profile_name,
+                        custom_provider_lookup=_session_requested_provider,
+                    )
                 # Stop HERE on a terminal route verdict — before the agent
                 # kwargs, before _AIAgent(), before the agent-cache write. A
                 # named custom:<slug> that resolved no complete
@@ -12450,11 +12503,18 @@ def _run_agent_streaming(
                             # return a different runtime authority, and a
                             # custom-provider override must clear its
                             # credential_pool / api_mode / ACP fields here too.
-                            _runtime_bundle = _resolve_runtime_connection_bundle(
-                                resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
-                                profile_name=_resolved_profile_name,
-                                custom_provider_lookup=_session_requested_provider,
-                            )
+                            if _alias_route is not None:
+                                _runtime_bundle = _resolve_model_alias_connection_bundle(
+                                    _alias_route,
+                                    _heal_rt,
+                                    profile_name=_resolved_profile_name,
+                                )
+                            else:
+                                _runtime_bundle = _resolve_runtime_connection_bundle(
+                                    resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
+                                    profile_name=_resolved_profile_name,
+                                    custom_provider_lookup=_session_requested_provider,
+                                )
                             # The re-resolve can turn a previously routable named
                             # route terminal (the record's key_cmd stopped
                             # minting, the pool drained, the row was edited
@@ -13803,11 +13863,18 @@ def _run_agent_streaming(
                     # above): replacing only provider/key/base_url would leave
                     # the pre-heal credential_pool / api_mode / ACP fields on a
                     # custom endpoint that owns none of them.
-                    _runtime_bundle = _resolve_runtime_connection_bundle(
-                        resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
-                        profile_name=_resolved_profile_name,
-                        custom_provider_lookup=_session_requested_provider,
-                    )
+                    if _alias_route is not None:
+                        _runtime_bundle = _resolve_model_alias_connection_bundle(
+                            _alias_route,
+                            _heal_rt,
+                            profile_name=_resolved_profile_name,
+                        )
+                    else:
+                        _runtime_bundle = _resolve_runtime_connection_bundle(
+                            resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
+                            profile_name=_resolved_profile_name,
+                            custom_provider_lookup=_session_requested_provider,
+                        )
                     _heal_route_verdict = custom_provider_route_error(_runtime_bundle)
                     if _heal_route_verdict is not None:
                         # The refreshed credential did not produce a routable
