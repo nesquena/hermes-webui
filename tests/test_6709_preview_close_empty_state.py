@@ -1918,3 +1918,34 @@ def test_a_background_refresh_of_the_same_preview_keeps_the_retained_owner():
     assert out["modeAfterOtherSync"] == "preview", (
         f"with no retained owner the historical reopen applies: {out}"
     )
+
+# ── Window budget guard ───────────────────────────────────────────────────────
+#
+# Two CI failures in this PR came from the same trap: the repo has tests that inspect a
+# FIXED CHARACTER WINDOW of a function body (test_sprint35 reads the first 600 chars after
+# `function clearPreview`, test_issue3337 the first 8000 of `openFile`). Adding a comment
+# inside those bodies shifted real code past the window and failed them — twice, on
+# different functions, with a misleading "missing statement" message.
+#
+# This guard fails LOCALLY, with a clear reason, when a window runs out of headroom, so
+# the next comment lands in the right place instead of on a red shard.
+
+_WINDOW_BUDGET = [
+    # (file, function marker, window size, must-appear marker, label)
+    ("static/boot.js", "function clearPreview", 600, "renderBreadcrumb", "test_sprint35"),
+    ("static/workspace.js", "async function openFile(", 8000,
+     "renderCodePreviewContent(path, data.content);", "test_issue3337"),
+]
+
+
+@pytest.mark.parametrize("rel,marker,size,needle,label", _WINDOW_BUDGET)
+def test_project_character_windows_still_contain_their_marker(rel, marker, size, needle, label):
+    """Keep this PR's comments out of the fixed windows other tests rely on."""
+    src = _read(rel)
+    start = src.index(marker)
+    window = src[start : start + size]
+    assert needle in window, (
+        f"{label} inspects only the first {size} characters of {marker}() and no longer "
+        f"finds {needle!r} — a comment added inside that body pushed real code out of the "
+        f"window. Move the comment ABOVE the function."
+    )
