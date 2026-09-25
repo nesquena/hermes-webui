@@ -1,11 +1,13 @@
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import textwrap
 from unittest.mock import patch
 
 import bootstrap
+import pytest
 
 
 def _repo_venv_python(repo_root: pathlib.Path) -> pathlib.Path:
@@ -34,6 +36,7 @@ def test_agent_probe_activates_hermes_before_importing_webui_dependencies(monkey
     assert script.index("from run_agent import AIAgent") < script.index("import yaml")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="PM re-exec fixture uses a POSIX shebang launcher")
 def test_agent_probe_survives_pm_style_reexec_before_webui_dependency_import(tmp_path, monkeypatch):
     """Exercise the source-install relaunch that exposed the original failure."""
     agent_dir = tmp_path / "agent"
@@ -112,16 +115,55 @@ def test_agent_probe_survives_pm_style_reexec_before_webui_dependency_import(tmp
     assert "No module named 'yaml'" in old.stderr
 
 
-def test_server_adds_its_repository_to_sys_path_before_api_imports():
-    """PM relaunches external scripts through runpy.run_path() in isolated mode."""
-    source = (pathlib.Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
+def test_server_pm_runpath_relaunch_activates_deps_before_api_imports(tmp_path):
+    """Exercise server.py under the isolated PM ``runpy.run_path`` shape."""
+    webui_root = tmp_path / "webui"
+    api_root = webui_root / "api"
+    agent_root = tmp_path / "agent"
+    managed_deps = tmp_path / "managed-deps"
+    marker = tmp_path / "bootstrap-ran"
+    api_root.mkdir(parents=True)
+    agent_root.mkdir()
+    managed_deps.mkdir()
+    shutil.copyfile(pathlib.Path(__file__).parent.parent / "server.py", webui_root / "server.py")
+    (api_root / "__init__.py").write_text("", encoding="utf-8")
+    (managed_deps / "yaml.py").write_text("MANAGED = True\n", encoding="utf-8")
+    (agent_root / "hermes_bootstrap.py").write_text(
+        f"import sys\nfrom pathlib import Path\nsys.path.insert(0, {str(managed_deps)!r})\n"
+        f"Path({str(marker)!r}).write_text('activated', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
 
-    assert source.index("sys.path.insert(0, REPO_ROOT)") < source.index(
-        "from api.request_logging import emit_request_log"
+    modules = {
+        "runtime_bootstrap.py": "def activate_hermes_runtime():\n    import hermes_bootstrap\n\ndef ignore_sigpipe():\n    pass\n",
+        "request_logging.py": "import yaml\nassert yaml.MANAGED\nemit_request_log = lambda *args, **kwargs: None\n",
+        "auth.py": "check_auth_or_close = reset_trusted_auth_request_state = lambda *args, **kwargs: None\n",
+        "config.py": "from pathlib import Path\nHOST = '127.0.0.1'\nPORT = 0\nSTATE_DIR = SESSION_DIR = DEFAULT_WORKSPACE = Path('.')\n",
+        "helpers.py": "j = advertise_connection_close = get_profile_cookie = _build_csp_report_only_policy = lambda *args, **kwargs: None\n_CLIENT_DISCONNECT_ERRORS = (OSError,)\n",
+        "profiles.py": "set_request_profile = clear_request_profile = lambda *args, **kwargs: None\n",
+        "routes.py": "handle_delete = handle_get = handle_patch = handle_post = handle_put = apply_cors_preflight_headers = lambda *args, **kwargs: None\n",
+        "startup.py": "auto_install_agent_deps = fix_credential_permissions = lambda *args, **kwargs: None\n",
+        "updates.py": "WEBUI_VERSION = 'test'\n",
+        "crash_visibility.py": "install_crash_visibility = lambda *args, **kwargs: None\n",
+    }
+    for name, content in modules.items():
+        (api_root / name).write_text(content, encoding="utf-8")
+
+    command = (
+        "import runpy, sys; "
+        f"sys.path.insert(0, {str(agent_root)!r}); "
+        f"runpy.run_path({str(webui_root / 'server.py')!r}, run_name='pm_runpath_test'); "
+        "print('pm-runpath-ok')"
     )
-    assert source.index("import hermes_bootstrap") < source.index(
-        "from api.request_logging import emit_request_log"
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", command],
+        capture_output=True,
+        text=True,
     )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8") == "activated"
+    assert "pm-runpath-ok" in result.stdout
 
 
 def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(monkeypatch, tmp_path):

@@ -11,30 +11,9 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Hermes PM can re-exec this external script via runpy.run_path() in isolated
-# mode.  Unlike normal script execution, that path does not put this repository
-# on sys.path, so sibling ``api`` imports below would otherwise fail.
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-# A source-installed Hermes can relaunch this external entry point through
-# runpy.run_path() before its PM-managed dependencies are activated.  Activate
-# them before importing WebUI modules, while still allowing agent-free
-# onboarding to report the normal unavailable-agent state. Test servers keep
-# their network-isolation contract: bootstrap may synchronise dependencies.
-if not os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
-    try:
-        import hermes_bootstrap  # noqa: F401
-    except ModuleNotFoundError as exc:
-        if exc.name != "hermes_bootstrap":
-            raise
-
-
-def _ignore_sigpipe() -> None:
-    """Keep broken client writes from terminating the server process."""
-    if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
-        signal.signal(sigpipe, signal.SIG_IGN)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from api.runtime_bootstrap import activate_hermes_runtime, ignore_sigpipe
+activate_hermes_runtime()
 
 # Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
@@ -567,7 +546,7 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
-    _ignore_sigpipe()
+    ignore_sigpipe()
 
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /

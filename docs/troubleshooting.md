@@ -106,6 +106,35 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+## Source-installed Hermes fails with `No module named 'yaml'`
+
+**Symptom.** A systemd or other supervised WebUI launch repeatedly exits during
+bootstrap with `ModuleNotFoundError: No module named 'yaml'`, even though
+`PyYAML` is installed in the Hermes Agent environment.
+
+**Why it happens.** Hermes Agent source installs can relaunch an external Python
+entry point into a PM-managed runtime. Older WebUI bootstrap probes imported
+`yaml` before `run_agent`, so the re-executed probe evaluated that import before
+Hermes had activated the managed dependency environment. The external server
+entry point also needs to establish the WebUI repository import root before its
+`api` modules load under an isolated relaunch.
+
+**Fix.** Update Hermes WebUI to a version containing the PM-runtime bootstrap
+compatibility fix, then restart the service. Do not remove or reinstall PyYAML
+solely because this error appears: first verify the selected interpreter and
+agent source path in the WebUI startup log.
+
+```bash
+systemctl --user restart hermes-webui.service
+systemctl --user status hermes-webui.service --no-pager
+curl --fail http://127.0.0.1:8787/health
+```
+
+If the issue persists after updating, include the startup banner and the first
+traceback in a bug report, with secrets and private paths redacted.
+
+---
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.
