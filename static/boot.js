@@ -3363,6 +3363,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode);
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
+    window._profileSwitchResumeSession=!!s.profile_switch_resume_session;  // opt-in: resume target profile's most recent session on profile switch
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     // #6819: persist the resolved auto-follow value into the global mirror.
     // The mirror is NOT profile-keyed (the backend setting is one global
@@ -3617,7 +3618,16 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {
+          status: 'resolved',
+          profile: p.name || 'default',
+          isDefault: !!p.is_default,
+          rootNames: Array.isArray(p.root_names) ? p.root_names : null,
+          // False when the server listing failed and `root_names` is just the
+          // fail-closed default: authority still fails closed, but it REVALIDATES
+          // instead of treating that partial set as the final word (round 14).
+          rootNamesAuthoritative: p.root_names_authoritative !== false,
+        };
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -3646,6 +3656,19 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  // Canonical root-profile alias set, delivered by the same /api/profile/active
+  // response as the name/is_default pair above — so it is available on the cold
+  // boot that profile-scope authority must handle (Greptile gate, round 12). The
+  // UI roster (_profilesCache) is NOT an acceptable authority input: it starts
+  // empty, can be five minutes stale from localStorage, and is warmed only after
+  // the window-load timer.
+  // Replace or CLEAR on every transition (gate round 13), and never mark a MISSING
+  // scope authoritative (Greptile P1, round 15) — both rules live in the single
+  // writer in sessions.js, which loads before this script, so boot cannot drift
+  // from the switch and revalidation paths.
+  // Guarded for the same reason as the switch call site: a partial context must not
+  // throw, and an absent writer leaves the scope cleared (the fail-closed side).
+  if (typeof _applyActiveProfileRootScope === 'function') _applyActiveProfileRootScope(activeProfileState);
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

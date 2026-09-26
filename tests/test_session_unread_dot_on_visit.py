@@ -74,7 +74,9 @@ def test_load_session_acknowledges_visit_before_and_after_message_load():
     block = _load_session_block()
     # Metadata-arrival acknowledgment.
     first_ack = block.find("_acknowledgeSessionVisit(\n    S.session.session_id,")
-    loading_clear = block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
+    # #6712 (round 9 + gate G2): the marker retirement goes through the one
+    # owner-checked helper.
+    loading_clear = block.find("_retireLoadMarkerIfOwned();\n\n  // Re-acknowledge")
     second_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
 
     assert first_ack != -1, "loadSession must acknowledge the visit when metadata arrives"
@@ -92,7 +94,7 @@ def test_post_load_reack_is_guarded_by_active_view():
     # correctly marked unread — an UNCONDITIONAL post-load ack would wrongly
     # clear that hidden-tab-completion marker.
     block = _load_session_block()
-    loading_clear = block.find("if (_isCurrentLoad()) _loadingSessionId = null;\n\n  // Re-acknowledge")
+    loading_clear = block.find("_retireLoadMarkerIfOwned();\n\n  // Re-acknowledge")
     guard = block.find("_isSessionActivelyViewedForList(sid)", loading_clear)
     second_ack = block.find("_acknowledgeSessionVisit(", loading_clear)
     assert guard != -1 and guard < second_ack, (
@@ -331,6 +333,10 @@ def _hidden_completion_script(*, hidden: bool) -> str:
     delayed messages fetch, marks a completion mid-fetch, and reports whether the
     completion-unread marker survives."""
     ensure = _extract_async("_ensureMessagesLoaded")
+    # #6712 (gate round 8): _ensureMessagesLoaded() folds profile-switch ownership
+    # into its guard through this shared rule; the harness injects only extracted
+    # functions, so ship the helper or the guard throws ReferenceError.
+    ownership = _extract("_profileSwitchOwnsLoad")
     set_viewed = _extract("_setSessionViewedCount")
     clear_unread = _extract("_clearSessionCompletionUnread")
     get_unread = _extract("_getSessionCompletionUnread")
@@ -396,6 +402,7 @@ async function api(url) {{ _apiCalled = true; return _apiResult; }}
 {mark_unread}
 {set_viewed}
 {actively_viewed}
+{ownership}
 {ensure}
 {unread_store_helpers.BLOCK}
 

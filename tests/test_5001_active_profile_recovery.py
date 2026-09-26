@@ -38,6 +38,21 @@ function extractFunction(source, name) {
   return source.slice(start, end);
 }
 
+// Extract a plain (non-async) function up to its closing brace. Used to ship the
+// root-scope writer from sessions.js verbatim.
+function extractPlainFunction(source, name) {
+  const marker = `function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) {
+    throw new Error(`missing function: ${name}`);
+  }
+  const end = source.indexOf('\n}\n', start);
+  if (end < 0) {
+    throw new Error(`missing function end: ${name}`);
+  }
+  return source.slice(start, end + 3);
+}
+
 function extractBlock(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   if (start < 0) {
@@ -155,6 +170,18 @@ eval(budgetBlock.replace(
   '  globalThis._bootActiveProfileUnauthRedirectBudget=(()=>{'
 ));
 eval(extractFunction(bootSrc, '_resolveActiveProfileBootstrapState'));
+// The shipped boot block ingests the server root scope through the ONE writer that
+// lives in sessions.js (script order: sessions.js loads before boot.js). Ship it
+// verbatim so this driver exercises the real ingestion rule, not a stand-in — the
+// rule that a payload WITHOUT a scope clears the scope and stays non-authoritative
+// (Greptile P1, round 15).
+const sessionsSrc = fs.readFileSync(
+  require('path').join(require('path').dirname(process.argv[2]), 'sessions.js'),
+  'utf8'
+);
+globalThis._applyActiveProfileRootScope = eval(
+  '(' + extractPlainFunction(sessionsSrc, '_applyActiveProfileRootScope') + ')'
+);
 const bootActiveProfileBlock = extractBlock(
   bootSrc,
   'const activeProfileState = await _resolveActiveProfileBootstrapState();',
@@ -221,6 +248,10 @@ return (async () => {
     }
 
     const bootState = {};
+    // The scripts share ONE global scope in the browser (var S), so the shipped
+    // root-scope writer reads the same S the boot block writes through. Mirror that
+    // here: expose bootState globally while the block runs.
+    globalThis.S = bootState;
     let applyBotNameCalls = 0;
     const bootResult = await runBootActiveProfileBlock(
       async () => state,
@@ -242,6 +273,16 @@ return (async () => {
       )
         ? bootState.activeProfileIsDefault
         : null,
+      // Round 15: what the real boot block did with the canonical root scope. A
+      // fallback (no server scope) must CLEAR it and leave it non-authoritative.
+      bootRootNames: Object.prototype.hasOwnProperty.call(bootState, 'activeProfileRootNames')
+        ? bootState.activeProfileRootNames
+        : 'absent',
+      bootRootNamesAuthoritative: Object.prototype.hasOwnProperty.call(
+        bootState, 'activeProfileRootNamesAuthoritative'
+      )
+        ? bootState.activeProfileRootNamesAuthoritative
+        : 'absent',
       applyBotNameCalls,
     });
     storageHistory.push(storage.snapshot());
@@ -278,6 +319,52 @@ def _run_boot_profile_scenario(driver_path, scenario):
     if process.returncode != 0:
         raise RuntimeError(f"node profile driver failed: {process.stderr.strip()}")
     return json.loads(process.stdout)
+
+
+def test_boot_fallback_clears_the_root_scope_and_keeps_it_non_authoritative(driver_path):
+    """Greptile P1, round 15: a boot fallback carries no scope. Marking that absence
+    authoritative left authority rejecting an unverifiable renamed-root pane while
+    revalidation refused to refresh — the conversation stopped receiving live updates
+    until the next navigation or reload. The real boot block ships here, so this
+    asserts the ingestion rule end-to-end."""
+    out = _run_boot_profile_scenario(
+        driver_path,
+        {
+            "markerKey": "test-5001-round15-scope",
+            "useDefaultLoader": True,
+            "attempts": [
+                {"type": "throw", "status": 500, "message": "listing unavailable", "nextUrl": "/"},
+                {"type": "throw", "status": 500, "message": "listing unavailable", "nextUrl": "/"},
+            ],
+        },
+    )
+    fallback = out["attempts"][0]
+    assert fallback["status"] == "fallback", fallback
+    assert fallback["bootRootNames"] is None, (
+        f"a boot fallback must CLEAR the canonical root scope rather than inherit one: "
+        f"{fallback}"
+    )
+    assert fallback["bootRootNamesAuthoritative"] is not True, (
+        f"a missing scope was marked authoritative, which disables the revalidation that "
+        f"reconnects a renamed-root stream (Greptile P1, round 15): {fallback}"
+    )
+    # And a successful payload still installs a real scope.
+    out_ok = _run_boot_profile_scenario(
+        driver_path,
+        {
+            "markerKey": "test-5001-round15-scope-ok",
+            "useDefaultLoader": True,
+            "attempts": [
+                {"type": "success", "payload": {"name": "default", "is_default": True,
+                                                "root_names": ["default", "kinni"],
+                                                "root_names_authoritative": True},
+                 "nextUrl": "/"},
+            ],
+        },
+    )
+    ok = out_ok["attempts"][0]
+    assert ok["bootRootNames"] == ["default", "kinni"], ok
+    assert ok["bootRootNamesAuthoritative"] is True, ok
 
 
 def test_active_profile_boot_recovery_is_one_shot_and_bounded(driver_path):

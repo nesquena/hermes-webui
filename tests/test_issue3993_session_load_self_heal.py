@@ -97,5 +97,25 @@ def test_stale_load_guard_present_before_self_heal():
     assert block.index(guard) < block.index("localStorage.removeItem('hermes-webui-session')"), \
         "stale-load guard must precede the 404 inline self-heal"
     # It re-arms the active stream rather than leaving it torn down.
-    guard_tail = block[block.index(guard): block.index(guard) + 120]
+    # #6712 (round 9): this stale exit also releases its in-flight marker before
+    # re-arming. Brace-match the guard body instead of slicing a fixed window —
+    # a comment inside the guard would otherwise fall outside it.
+    _gstart = block.index(guard)
+    _depth, _gpos = 0, block.index("{", _gstart)
+    for _i in range(_gpos, len(block)):
+        if block[_i] == "{":
+            _depth += 1
+        elif block[_i] == "}":
+            _depth -= 1
+            if _depth == 0:
+                guard_tail = block[_gstart:_i + 1]
+                break
+    else:
+        raise AssertionError("stale-load guard braces did not balance")
     assert "_rearmActiveSessionStream()" in guard_tail
+    # Gate round 12 (G2): every marker retirement goes through ONE owner-checked
+    # helper, so no exit can silently omit it again.
+    assert "_retireLoadMarkerIfOwned();" in guard_tail, (
+        "a stale exit must retire the in-flight marker it still owns, otherwise the "
+        "abandoned session stays marked as loading (Greptile P1, round 9; gate G2)"
+    )

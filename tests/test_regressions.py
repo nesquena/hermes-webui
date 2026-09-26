@@ -769,7 +769,11 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1200]
+    # Slice to the next sibling statement instead of a fixed byte budget: adding a
+    # line anywhere above the call silently pushed it outside the old 1200-char
+    # window and the assertion stopped reaching the code it names (#6712).
+    _tail_idx = src.index("S.toolCalls=(INFLIGHT[sid].toolCalls||[])", inflight_idx)
+    inflight_block = src[inflight_idx:_tail_idx]
 
     assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
