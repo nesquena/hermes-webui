@@ -117,8 +117,8 @@ def test_stream_display_uses_shared_inline_thinking_extractor():
     assert fn_idx >= 0, "_streamDisplay function not found in messages.js"
     fn_end = MSG_JS.find("\n  }", fn_idx) + 4
     fn_body = MSG_JS[fn_idx:fn_end]
-    assert "_extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content" in fn_body, \
-        "_streamDisplay must route through the shared inline thinking extractor"
+    assert "_semanticSnapshot().content" in fn_body, \
+        "_streamDisplay must read the shared incremental semantic snapshot"
 
 
 def test_shared_extractor_scans_known_open_tags():

@@ -44,7 +44,7 @@ class TestStreamDisplayStripsThinkBlocksAlways:
         m = re.search(r'function _streamDisplay\(\)\{.*?\n  \}', js, re.DOTALL)
         assert m
         fn = m.group(0)
-        assert "_extractInlineThinkingFromContent" in fn
+        assert "_semanticSnapshot().content" in fn
         helper = _inline_extractor_body(js)
         assert "_thinkPairs" in helper
         assert "text.startsWith(candidate.open,index)" in helper
@@ -56,6 +56,6 @@ class TestStreamDisplayStripsThinkBlocksAlways:
         m = re.search(r'function _streamDisplay\(\)\{.*?\n  \}', js, re.DOTALL)
         assert m
         fn = m.group(0)
-        assert "_extractInlineThinkingFromContent" in fn
+        assert "_semanticSnapshot().content" in fn
         helper = _inline_extractor_body(js)
         assert "candidate.open.startsWith(rest)" in helper

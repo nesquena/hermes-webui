@@ -151,6 +151,7 @@ def test_snapshot_restore_rechecks_request_owner_after_await():
 const assert=require('assert');
 const activeSid='current',streamId='turn-1';
 let current=true,resolveSnapshot;
+let _anchorPaintGeneration=0,_anchorPaintDisposed=false;
 const S={session:{session_id:activeSid},activeStreamId:streamId};
 let _streamFinalized=false;
 function _isActiveSession(){return true;}

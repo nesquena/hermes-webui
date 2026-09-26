@@ -38,13 +38,31 @@ if(window===window.top && 'serviceWorker' in navigator){
   navigator.serviceWorker.register=()=>Promise.reject(new Error('Disabled in reconnect harness'));
 }
 window.fixtureSources=[];
+window.fixtureJournal=new Map();
 class FixtureEventSource {
   static OPEN=1; static CONNECTING=0; static CLOSED=2;
-  constructor(url){this.url=String(url);this.readyState=1;this.listeners={};window.fixtureSources.push(this);}
+  constructor(url){
+    this.url=String(url);this.readyState=1;this.listeners={};window.fixtureSources.push(this);
+    if(this.url.includes('api/chat/stream?')){
+      const query=new URL(this.url,location.href).searchParams;
+      const floor=Number(query.get('after_seq')||0);
+      // The session snapshot is fixed at seq 1000. Real reattachment replays
+      // the durable suffix; a fake source must not silently drop that contract.
+      setTimeout(()=>{
+        if(this.readyState!==1)return;
+        for(const [id,event] of window.fixtureJournal){
+          if(Number(id.split(':').pop())>floor)this.emit(event.name,event.data,id);
+        }
+      },0);
+    }
+  }
   addEventListener(name,fn){(this.listeners[name]||=[]).push(fn);}
   removeEventListener(){}
   close(){this.readyState=2;}
-  emit(name,data,id){for(const fn of this.listeners[name]||[])fn({data:JSON.stringify(data),lastEventId:id||''});}
+  emit(name,data,id){
+    if(id)window.fixtureJournal.set(id,{name,data});
+    for(const fn of this.listeners[name]||[])fn({data:JSON.stringify(data),lastEventId:id||''});
+  }
 }
 window.EventSource=FixtureEventSource;
 """
@@ -93,6 +111,12 @@ def main():
                                                active_stream_id=stream_id,pending_user_message='Inspect the fixture',
                                                pending_started_at=1,runtime_journal_snapshot=snapshot)
                                 page.route('**/api/session?*',session_route(session,sid,temp))
+                                # Keep list authority consistent with the running session fixture.
+                                # Otherwise real stale-entry pruning treats it as deleted on switch.
+                                page.route('**/api/sessions?*',lambda r:r.fulfill(json={'sessions':[
+                                    dict(session_id=sid,title='Reconnect performance fixture',is_streaming=True,active_stream_id=stream_id),
+                                    dict(session_id='idle-fixture',title='Idle fixture',is_streaming=False),
+                                ]}))
                                 page.route('**/api/chat/stream/status?*',lambda r:r.fulfill(json={'active':True}))
                                 page.goto(base,wait_until='load')
                                 # WebKit's wait_for_function uses eval, blocked by
@@ -135,22 +159,34 @@ def main():
                                 assert cursor['after_seq']==[str(snapshot['last_seq'])], (result,errors)
                                 if mode!='hide_all_activity':
                                     # Subsequent real SSE handler updates still paint the existing owner.
-                                    updated=page.evaluate("""({sid,stream})=>{
+                                    updated=page.evaluate("""async ({sid,stream,expected})=>{
                                       const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
                                       if(!source)throw new Error('missing chat stream');
                                       source.emit('tool',{name:'terminal',tid:'after-reconnect',args:{command:'printf later'},preview:'later'},stream+':1001');
                                       source.emit('tool_complete',{name:'terminal',tid:'after-reconnect',preview:'LATER RESULT',duration:1},stream+':1002');
+                                      // Live paint is frame-coalesced; observe its output, not synchronous dispatch.
+                                      const paintDeadline=performance.now()+2000;
+                                      while(performance.now()<paintDeadline){
+                                        if(document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length===expected+1
+                                           &&document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT')) break;
+                                        await new Promise(r=>setTimeout(r,10));
+                                      }
                                       return {rows:document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length,
                                         result:document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT')};
-                                    }""",{'sid':sid,'stream':stream_id})
+                                    }""",{'sid':sid,'stream':stream_id,'expected':expected})
                                     assert updated=={'rows':expected+1,'result':True},updated
                                     switched=page.evaluate("""async sid=>{
                                       await loadSession('idle-fixture');
                                       await loadSession(sid);
+                                      const paintDeadline=performance.now()+2000;
+                                      while(performance.now()<paintDeadline){
+                                        if(document.querySelector('#liveAssistantTurn')?.textContent.includes('LATER RESULT')) break;
+                                        await new Promise(r=>setTimeout(r,10));
+                                      }
                                       return {rows:document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length,
                                         result:document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT')};
                                     }""",sid)
-                                    assert switched==updated,switched
+                                    assert switched==updated,(switched,errors)
                                 artifact=os.environ.get('SCREENSHOT_DIR')
                                 if artifact:
                                     Path(artifact).mkdir(parents=True,exist_ok=True)
