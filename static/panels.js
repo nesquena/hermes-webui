@@ -10175,7 +10175,9 @@ async function _checkExtensionSidecarHealth(sidecar,index,seq){
       controller=new AbortController();
       timeoutId=setTimeout(()=>controller.abort(),2500);
     }
-    const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined});
+    // This endpoint belongs to the sidecar even when proxied on our origin.
+    // A 401 here cannot be repaired by reloading WebUI's auth session.
+    const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined,__hermesRedirect401:false});
     if(seq!==_extensionsSidecarMonitorSeq) return;
     if(res.ok){
       _setExtensionSidecarHealth(index,'healthy','healthy');
@@ -12307,14 +12309,14 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,{force:true});
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,{force:true});
       }
     }
   } catch(e){

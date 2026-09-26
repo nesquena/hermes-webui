@@ -27,6 +27,7 @@ from api.config import (
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
     coerce_reasoning_effort_for_model,
+    effective_reasoning_effort,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     peek_stream,
@@ -333,11 +334,8 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
 def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
     """Read and coerce user-configured reasoning effort for a gateway request."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
+        coerced = effective_reasoning_effort(
+            cfg,
             model,
             provider_id=model_provider,
         )

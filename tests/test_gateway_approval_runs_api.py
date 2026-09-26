@@ -314,7 +314,7 @@ def test_gateway_runs_api_submission():
         with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
-                 patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value="high"), \
+                 patch("api.config.get_config", return_value={"agent": {"reasoning_effort": "low", "reasoning_overrides": {"@openai:test-model": "high"}}}), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
@@ -324,6 +324,7 @@ def test_gateway_runs_api_submission():
                     model="test-model",
                     workspace="/tmp",
                     stream_id=stream_id,
+                    model_provider="openai",
                 )
     finally:
         with STREAMS_LOCK:

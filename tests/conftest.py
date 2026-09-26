@@ -1230,6 +1230,14 @@ _REAL_HERMES_STATE = sys.modules.get("hermes_state")
 _AGENT_PATH_ENV_KEYS = ("HERMES_WEBUI_AGENT_DIR", "PYTHONPATH", "HERMES_WEBUI_PYTHON")
 _REAL_AGENT_ENV = {k: os.environ.get(k) for k in _AGENT_PATH_ENV_KEYS}
 _REAL_SYS_PATH = list(sys.path)
+# Runtime initialization adds the discovered Agent checkout lazily, after this
+# snapshot. Preserve that legitimate import root as well: otherwise the first
+# test's teardown removes it and later shared-DB fixtures mistake an installed
+# Agent for an absent one, seeding a reduced schema the server cannot write.
+# Use the same discovered checkout as the integration server, never a test's
+# later environment override or fake-agent directory.
+if HERMES_AGENT is not None and str(HERMES_AGENT) not in _REAL_SYS_PATH:
+    _REAL_SYS_PATH.append(str(HERMES_AGENT))
 
 # Keep the Windows restart seams inert after the suite isolation snapshots.
 from api import updates as _updates

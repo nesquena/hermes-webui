@@ -27,7 +27,7 @@ def test_sync_session_title_persists_generated_title(tmp_path, monkeypatch):
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         state_sync.sync_session_title("sess-gen", "Generated Title", profile="default")
@@ -54,7 +54,7 @@ def test_sync_session_title_does_not_overwrite_manual_rename(tmp_path, monkeypat
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         # A background generation now tries to sync an auto title — must be a no-op.
@@ -78,7 +78,7 @@ def test_sync_session_title_preserves_existing_source_on_ensure(tmp_path, monkey
         monkeypatch.setattr(
             state_sync,
             "_get_state_db",
-            lambda profile=None: _make_db(tmp_path),
+            lambda profile=None, **kwargs: _make_db(tmp_path),
         )
 
         # Sync (which calls ensure_session(source='webui')) on a pre-existing cli row.
