@@ -167,6 +167,155 @@ def test_display_resolver_does_not_wait_on_inflight_rebuild(monkeypatch):
     assert provider is None or isinstance(provider, str)
 
 
+class _AliasPredicateCase:
+    """A single alias-equal vs cross-provider decision for the no-wait hint predicate."""
+
+    __slots__ = ("hint", "requested", "expected", "label")
+
+    def __init__(self, hint, requested, expected, label):
+        self.hint = hint
+        self.requested = requested
+        self.expected = expected
+        self.label = label
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # The exact defect from greptile P1 (2026-09-25): a persisted
+        # ``@anthropic:claude-opus-4.7`` with ``model_provider="claude"`` was
+        # wrongly treated as a cross-provider pair because the previous
+        # predicate canonicalized only the hint side. Mirror the test in both
+        # directions (alias-on-hint and alias-on-requested) to lock the fix.
+        _AliasPredicateCase(
+            "anthropic", "claude", True,
+            "P1 regression: hint=canonical-anthropic, requested=alias-claude",
+        ),
+        _AliasPredicateCase(
+            "claude", "anthropic", True,
+            "symmetric: hint=alias-claude, requested=canonical-anthropic",
+        ),
+        # Other alias pairs the WebUI ships — must also be preserved, not
+        # repaired, on the no-wait display path.
+        _AliasPredicateCase("copilot", "github", True, "alias: copilot/github"),
+        _AliasPredicateCase("github", "copilot", True, "alias: github/copilot"),
+        _AliasPredicateCase("gemini", "google", True, "alias: gemini/google"),
+        _AliasPredicateCase("google", "gemini", True, "alias: google/gemini"),
+        # Raw-equal and first-party identities must still match.
+        _AliasPredicateCase("openai", "openai", True, "raw-equal: openai/openai"),
+        _AliasPredicateCase("anthropic", "anthropic", True, "raw-equal: anthropic/anthropic"),
+        # A genuinely cross-provider pair must STILL fall through to the
+        # compatibility-repair path (return False so the caller repairs it).
+        _AliasPredicateCase("ollama", "kilocode", False, "cross-provider: must repair"),
+        _AliasPredicateCase("anthropic", "openai", False, "cross-provider: must repair"),
+        _AliasPredicateCase("copilot", "openai-codex", False, "cross-provider: must repair"),
+        # Empty/None inputs are never preservable.
+        _AliasPredicateCase("", "claude", False, "empty hint"),
+        _AliasPredicateCase("claude", "", False, "empty requested"),
+        _AliasPredicateCase(None, "claude", False, "None hint"),
+        _AliasPredicateCase("claude", None, False, "None requested"),
+    ],
+    ids=lambda c: c.label,
+)
+def test_non_authoritative_hint_matches_requested_provider_mirrors_authoritative_chain(case):
+    """The no-wait display predicate must mirror ``hint_matches_active``.
+
+    P1 (greptile 2026-09-25): the previous one-sided canonicalization
+    (``_resolve_alias(hint) == requested``) compared the canonical form of the
+    HINT against the RAW form of the requested provider, so a hint of
+    ``"anthropic"`` paired with a requested of ``"claude"`` was wrongly
+    treated as a cross-provider pair and repaired to the catalog default
+    during a no-wait display lookup. The authoritative
+    ``hint_matches_active`` chain canonicalizes the active-provider side on
+    every non-raw-equal clause; this predicate must do the same on the
+    requested-provider side. Asserts both that the alias-equal defect is fixed
+    AND that a genuinely cross-provider pair still returns False (i.e. the
+    compatibility-repair path is preserved).
+    """
+    got = routes._non_authoritative_hint_matches_requested_provider(
+        case.hint, case.requested
+    )
+    assert got is case.expected, (
+        f"{case.label}: hint={case.hint!r} requested={case.requested!r} "
+        f"-> {got!r}, expected {case.expected!r}"
+    )
+
+
+def test_non_authoritative_preserves_alias_equal_persisted_pair(monkeypatch):
+    """End-to-end: a non-authoritative no-wait display must preserve an
+    alias-equal persisted ``@provider:model`` / ``model_provider`` pair.
+
+    P1 (greptile 2026-09-25): with a non-authoritative catalog and a
+    session storing ``@anthropic:claude-opus-4.7`` / ``claude`` (a pair that
+    is alias-equal because ``claude`` is an alias of ``anthropic``), the
+    resolver previously returned the catalog default — a silent
+    cross-provider repair of a valid selection. The display result becomes
+    the browser's persisted pair (static/sessions.js:2994-2999) and is sent
+    as the next turn's routing state, so a single bad no-wait response can
+    silently reroute a subsequent /api/chat/start call.
+
+    This exercises the real ``_resolve_compatible_session_model_state``
+    resolver with a minimal non-authoritative catalog and asserts the
+    persisted pair is returned unchanged (no repair, model_string preserved).
+    """
+    _force_catalog_lookup(monkeypatch)
+    # Minimal non-authoritative catalog: lacks the anthropic group, so
+    # ``@anthropic:claude-opus-4.7`` is not in the snapshot. The active
+    # provider is intentionally a DIFFERENT first-party (openai-codex) so
+    # that, before the fix, the alias-asymmetric predicate would treat the
+    # pair as a stale cross-provider artifact and repair to openai-codex.
+    minimal_catalog = {
+        "groups": [
+            {
+                "provider_id": "openai-codex",
+                "models": [{"id": "gpt-5.5"}],
+            }
+        ],
+        "active_provider": "openai-codex",
+        "default_model": "gpt-5.5",
+        "_non_authoritative": True,
+    }
+    monkeypatch.setattr(cfg, "get_available_models", lambda *a, **kw: minimal_catalog)
+
+    session = _FakeSession("@anthropic:claude-opus-4.7", "claude")
+    # Exercise the real resolver directly so we can observe the
+    # (model, provider, changed) tuple and assert the persistence-vs-repair
+    # decision that the display path ultimately returns.
+    model, provider, changed = routes._resolve_compatible_session_model_state(
+        "@anthropic:claude-opus-4.7",
+        "claude",
+        prefer_cached_catalog=True,
+        wait_for_inflight_rebuild=False,
+    )
+    # And assert the display wrappers (the only observable surface on
+    # GET /api/session) return the same persisted pair to the browser.
+    display_model = routes._resolve_effective_session_model_for_display(session)
+    display_provider = routes._resolve_effective_session_model_provider_for_display(session)
+
+    # The persisted pair is alias-equal (claude ↔ anthropic) and the hint
+    # is statically known. After the fix the no-wait path returns it
+    # unchanged so the browser's echo does not silently reroute.
+    assert changed is False, (
+        f"non-authoritative no-wait path repaired an alias-equal pair "
+        f"(model={model!r}, provider={provider!r}, changed={changed!r})"
+    )
+    assert model == "@anthropic:claude-opus-4.7", (
+        f"@provider:model hint was stripped or replaced: got {model!r}"
+    )
+    assert provider == "claude", (
+        f"alias-equal pair was repaired to a different provider: got {provider!r}"
+    )
+    # Display wrappers must surface the same pair the resolver decided on.
+    assert display_model == "@anthropic:claude-opus-4.7", (
+        f"display resolver returned a different model than the resolver: "
+        f"got {display_model!r}"
+    )
+    assert display_provider == "claude", (
+        f"display resolver returned a different provider than the resolver: "
+        f"got {display_provider!r}"
+    )
+
+
 def test_wakeup_resolution_joins_inflight_rebuild(monkeypatch):
     """Observable contract: wakeup routing must join an in-flight rebuild."""
     _force_catalog_lookup(monkeypatch)

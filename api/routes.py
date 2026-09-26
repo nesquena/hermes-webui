@@ -6802,10 +6802,21 @@ def _non_authoritative_hint_matches_requested_provider(
         return True
     from api.config import _resolve_provider_alias as _resolve_alias
 
-    if _resolve_alias(hint) == requested:
+    # The authoritative ``hint_matches_active`` chain compares against the
+    # canonical form of the active provider on the alias-equal and
+    # normalized-equal clauses, so it handles either side carrying an alias
+    # (e.g. ``hint="claude"`` vs ``active="anthropic"`` AND ``hint="anthropic"``
+    # vs ``active="claude"``). Mirror it: canonicalize the REQUESTED side
+    # too. The previous one-sided ``_resolve_alias(hint) == requested``
+    # silently failed when the hint was the canonical form and the request
+    # carried the alias, which let a no-wait display lookup repair a valid
+    # persisted ``@anthropic:claude-opus-4.7`` / ``claude`` pair to the
+    # catalog default (greptile P1, 2026-09-25).
+    requested_canonical = _resolve_alias(requested)
+    if _resolve_alias(hint) == requested_canonical:
         return True
     normalized = _normalize_provider_id(hint)
-    return bool(normalized) and normalized == requested
+    return bool(normalized) and normalized == requested_canonical
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
