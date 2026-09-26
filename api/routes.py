@@ -6384,6 +6384,24 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
     return _request_client_ip(handler)
 
 
+def _login_client_ip(handler) -> str:
+    """Client IP that the login rate limiter keys on.
+
+    Behind a reverse proxy the raw socket peer is the proxy, so every user
+    would share one bucket. Consult the forwarded chain under the same opt-in
+    trusted-proxy gate as ``_onboarding_request_is_local``, and fall back to
+    the raw peer whenever the result is not an IP address.
+    """
+    import ipaddress
+
+    if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR") and _raw_peer_is_trusted_proxy(handler):
+        try:
+            return str(ipaddress.ip_address(_forwarded_client_ip_from_trusted_proxy(handler)))
+        except ValueError:
+            pass
+    return _client_ip_for_rate_limit(handler)
+
+
 def _onboarding_request_is_local(handler) -> bool:
     """Return True when an unauthenticated onboarding request is local/private.
 
@@ -18048,7 +18066,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
-        client_ip = handler.client_address[0]
+        client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(
                 handler,
@@ -18096,7 +18114,7 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
-        client_ip = handler.client_address[0]
+        client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
         try:
