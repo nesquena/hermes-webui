@@ -1152,6 +1152,13 @@ function _cronExpansionSet(key, expanded){
   try { localStorage.setItem(key, expanded ? '1' : '0'); } catch(_) {}
 }
 
+// #7303: last payload fetched for a run body, keyed the same way as the
+// expansion state. The toggle needs the projection to re-render the
+// already-mounted body (collapsed snippet vs. response-first) without
+// a second round-trip. Cleared whenever the runs list is rebuilt, so
+// it is bounded by the number of rows on screen.
+let _cronRunBodyCache = {};
+
 function toggleCronPromptExpanded(jobId){
   const key = _cronPanelExpandKey(jobId, 'prompt');
   _cronExpansionSet(key, !_cronExpansionGet(key));
@@ -1173,6 +1180,23 @@ function toggleCronRunExpanded(jobId, filename, runId){
     btn.title = expanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
     btn.setAttribute('aria-label', btn.title);
   }
+  // #7303: the mounted body was rendered for the previous expansion
+  // state, so a bare class toggle would leave the truncated snippet
+  // visible while expanded (and the full response mounted while
+  // collapsed). Re-render from the cached projection; if the row has
+  // never been opened, fall back to a fetch.
+  const cached = _cronRunBodyCache[key];
+  if (body && item && item.classList.contains('open') && cached) {
+    _renderCronRunBody(body, cached, jobId, filename);
+  }
+  // #7303 re-gate 9/24 (release blocker): no else-branch fetch here.
+  // On a cache miss while the row's fetch is still pending, this used
+  // to call _loadRunContent(), which sees ``item.classList`` already
+  // carrying 'open' and treats the click as a *collapse* request — it
+  // closes the row the user just opened. The pending fetch already
+  // reads the current expansion state when it resolves, so it renders
+  // the just-toggled state on its own; the fallback only duplicated
+  // that work while flipping the row shut.
 }
 
 function _isCronScriptJob(job){
@@ -1378,9 +1402,190 @@ async function _loadCronDetailRuns(jobId, detailKey){
         <div class="detail-run-body ${runExpanded ? 'expanded' : ''}" style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
       </div>`;
     }).join('');
+    // A fresh list invalidates any cached run payloads: the previous
+    // rows are gone from the DOM, so their projections must not leak
+    // into a re-mounted row that happens to share an expansion key.
+    _cronRunBodyCache = {};
     const countLabel = data.total > 50 ? ` (${data.total} runs, showing latest 50)` : ` (${data.total} runs)`;
     card.innerHTML = `<div class="detail-card-title">${esc(outputTitle)}${countLabel}</div>${rows}`;
   } catch(e) { /* ignore */ }
+}
+
+// #7303: single renderer for a cron run body. Both the fetch path
+// (_loadRunContent) and the expansion toggle (toggleCronRunExpanded)
+// call this so the mounted content always matches the *current*
+// expansion state — the body previously kept whichever view was
+// rendered when the row was first opened.
+//
+// *data* is the ``/api/crons/run`` payload; *jobId* / *filename*
+// are needed for the expansion key that the raw-output affordance
+// writes.
+function _renderCronRunBody(body, data, jobId, filename){
+  const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
+  // When the run has a parsed projection with a *non-empty* recognized
+  // response boundary, show the response body first and tuck the
+  // pre-response context (front-matter, prompt, skill text) into a
+  // keyboard-accessible disclosure. Script/no-agent/malformed runs
+  // (no boundary) keep the legacy raw-primary view.
+  //
+  // #7303 re-gate 9/24 (finding 3): two extra gates the review found
+  // missing, both necessary to keep the raw view the default for runs
+  // that are not a real agent reply:
+  //  - a script (no_agent) job never gets response-first, no matter
+  //    what its stdout happens to contain — a script that prints
+  //    ``## Response`` is still a script, and switching it to
+  //    response-first silently changed its established raw view.
+  //  - a boundary with an EMPTY response body is not a reply either
+  //    (a run that emitted nothing after the heading), and rendering
+  //    it response-first shows a blank primary block.
+  const parsed = data.parsed || null;
+  const isScriptJob = _isCronScriptJob(_currentCronDetail);
+  const hasResponseText = !!(parsed && typeof parsed.response === 'string' && parsed.response.trim());
+  const showResponseFirst = !isScriptJob && !!(parsed && parsed.has_response_boundary) && hasResponseText;
+  let output;
+  if (showResponseFirst) {
+    // Collapsed: short snippet (unchanged). Expanded: the response
+    // body, with the full context behind a toggle.
+    output = expanded ? parsed.response : (data.snippet || parsed.response || '');
+  } else {
+    output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
+  }
+  body.classList.toggle('expanded', expanded);
+  // Cron run output is never authored Markdown — render as literal
+  // preformatted text using DOM-created <pre><code> so all content
+  // (including shapes starting with #, |, >, ``` and embedded fences)
+  // renders verbatim without Markdown interpretation.
+  body.innerHTML = '';
+  if (showResponseFirst && expanded) {
+    // Response block: the agent's reply rendered as a labelled pre.
+    const responseWrap = document.createElement('div');
+    responseWrap.className = 'cron-run-response-block';
+    const responseLabel = document.createElement('div');
+    responseLabel.className = 'cron-run-section-label';
+    responseLabel.textContent = t('cron_run_response_label') || 'Response';
+    responseWrap.appendChild(responseLabel);
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = parsed.response || '';
+    pre.appendChild(code);
+    responseWrap.appendChild(pre);
+    body.appendChild(responseWrap);
+    // Disclosure for the pre-response context (front-matter, prompt,
+    // skill text, intermediate tool output). Rendered as <details>
+    // so it is keyboard-accessible and screen-reader labelled.
+    if (parsed.context) {
+      const details = document.createElement('details');
+      details.className = 'cron-run-context-disclosure';
+      const summary = document.createElement('summary');
+      summary.textContent = t('cron_run_show_prompt_context') || 'Show prompt & context';
+      summary.setAttribute('aria-label', t('cron_run_show_prompt_context') || 'Show prompt & context');
+      details.appendChild(summary);
+      const contextPre = document.createElement('pre');
+      contextPre.className = 'cron-run-pre cron-run-context-pre';
+      const contextCode = document.createElement('code');
+      contextCode.textContent = parsed.context;
+      contextPre.appendChild(contextCode);
+      details.appendChild(contextPre);
+      body.appendChild(details);
+    }
+    // #7303 re-gate 9/24 (CORE 1): the context disclosure only holds
+    // the text BEFORE the boundary, and the projection drops the
+    // ``## Response`` heading line and trims both sides — so the
+    // response block plus the disclosure cannot reconstruct the
+    // original artifact. Keep a raw-output control that renders
+    // ``data.content`` (the verbatim file) as literal text.
+    _appendCronRawOutputControl(body, data, jobId, filename);
+  } else {
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = output;
+    pre.appendChild(code);
+    body.appendChild(pre);
+  }
+  const usageStrip = _formatCronRunUsageStrip(data.usage);
+  if (usageStrip) {
+    const usage = document.createElement('div');
+    usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+    usage.textContent = usageStrip;
+    body.appendChild(usage);
+  }
+  // "View full output" button: legacy (no-boundary) path only. The
+  // response-first path mounts its own raw-output control above.
+  if (!showResponseFirst && !expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
+    const btn = document.createElement('button');
+    btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
+    btn.textContent = t('cron_view_full_output') || 'View full output';
+    btn.onclick = () => {
+      _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
+      body.classList.add('expanded');
+      body.innerHTML = '';
+      const pre = document.createElement('pre');
+      pre.className = 'cron-run-pre';
+      const code = document.createElement('code');
+      code.textContent = data.content || '';
+      pre.appendChild(code);
+      body.appendChild(pre);
+      const usageStrip = _formatCronRunUsageStrip(data.usage);
+      if (usageStrip) {
+        const usage = document.createElement('div');
+        usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+        usage.textContent = usageStrip;
+        body.appendChild(usage);
+      }
+      btn.remove();
+    };
+    body.appendChild(btn);
+  }
+}
+
+// #7303 re-gate 9/24 (CORE 1): "View raw output" control for the
+// response-first view. The projection is lossy on purpose — it drops
+// the ``## Response`` heading line and trims the response and context
+// — so a user who needs the original artifact (copy/paste, exact
+// prompt engineering forensics) could not rebuild it from what the UI
+// renders. ``data.content`` is the verbatim file from the API and is
+// rendered through a DOM-created <pre> like every other run body.
+function _appendCronRawOutputControl(body, data, jobId, filename){
+  const content = data && typeof data.content === 'string' ? data.content : '';
+  if (!content) return;
+  const btn = document.createElement('button');
+  btn.className = 'cron-run-raw-output-btn';
+  btn.type = 'button';
+  btn.textContent = t('cron_view_raw_output') || 'View raw output';
+  btn.onclick = () => {
+    // Mirror the legacy control: persisting the expansion state first
+    // means a later re-render (toggle, refresh) stays consistent.
+    _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
+    btn.remove();
+    body.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = content;
+    pre.appendChild(code);
+    body.appendChild(pre);
+    const usageStrip = _formatCronRunUsageStrip(data.usage);
+    if (usageStrip) {
+      const usage = document.createElement('div');
+      usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+      usage.textContent = usageStrip;
+      body.appendChild(usage);
+    }
+    // Back to the response view: the cached payload still holds the
+    // projection, so this never re-fetches.
+    const back = document.createElement('button');
+    back.className = 'cron-run-raw-output-btn';
+    back.type = 'button';
+    back.textContent = t('cron_view_response') || 'View response';
+    back.onclick = () => {
+      const cached = _cronRunBodyCache[_cronRunExpandKey(jobId, filename)];
+      if (cached) _renderCronRunBody(body, cached, jobId, filename);
+    };
+    body.appendChild(back);
+  };
+  body.appendChild(btn);
 }
 
 async function _loadRunContent(jobId, filename, runId){
@@ -1409,53 +1614,8 @@ async function _loadRunContent(jobId, filename, runId){
       body.textContent = data.error;
       return;
     }
-    const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
-    const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
-    body.classList.toggle('expanded', expanded);
-    // Cron run output is never authored Markdown — render as literal
-    // preformatted text using DOM-created <pre><code> so all content
-    // (including shapes starting with #, |, >, ``` and embedded fences)
-    // renders verbatim without Markdown interpretation.
-    body.innerHTML = '';
-    const pre = document.createElement('pre');
-    pre.className = 'cron-run-pre';
-    const code = document.createElement('code');
-    code.textContent = output;
-    pre.appendChild(code);
-    body.appendChild(pre);
-    const usageStrip = _formatCronRunUsageStrip(data.usage);
-    if (usageStrip) {
-      const usage = document.createElement('div');
-      usage.className = 'cron-run-usage-strip cron-run-usage-footer';
-      usage.textContent = usageStrip;
-      body.appendChild(usage);
-    }
-    // Show "View full output" button only for collapsed previews. Expanded rows render the full body inline.
-    if (!expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
-      const btn = document.createElement('button');
-      btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
-      btn.textContent = t('cron_view_full_output') || 'View full output';
-      btn.onclick = () => {
-        _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
-        body.classList.add('expanded');
-        body.innerHTML = '';
-        const pre = document.createElement('pre');
-        pre.className = 'cron-run-pre';
-        const code = document.createElement('code');
-        code.textContent = data.content || '';
-        pre.appendChild(code);
-        body.appendChild(pre);
-        const usageStrip = _formatCronRunUsageStrip(data.usage);
-        if (usageStrip) {
-          const usage = document.createElement('div');
-          usage.className = 'cron-run-usage-strip cron-run-usage-footer';
-          usage.textContent = usageStrip;
-          body.appendChild(usage);
-        }
-        btn.remove();
-      };
-      body.appendChild(btn);
-    }
+    _cronRunBodyCache[_cronRunExpandKey(jobId, filename)] = data;
+    _renderCronRunBody(body, data, jobId, filename);
   } catch(e) {
     body.textContent = 'Error: ' + e.message;
   }

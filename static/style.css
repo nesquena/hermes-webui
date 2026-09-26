@@ -6507,6 +6507,35 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .rightpanel:not([data-active-tab="todos"]) .workspace-todos{display:none!important;}
 .cron-run-usage-strip{display:inline-flex;align-items:center;gap:4px;margin-left:8px;color:var(--text-secondary);font-size:11px;opacity:.72;white-space:nowrap;}
 .cron-run-usage-footer{display:flex;margin:8px 0 0 0;padding-top:8px;border-top:1px solid var(--border-subtle);}
+/* #7303: response-first view inside the run detail. The agent's
+   reply sits in a labelled block; the pre-response context (prompt,
+   skill text, intermediate tool output) is tucked behind a
+   keyboard-accessible <details> disclosure. */
+.cron-run-response-block{margin-bottom:6px;}
+.cron-run-section-label{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
+.cron-run-context-disclosure{margin-top:4px;border:1px solid var(--border-subtle);border-radius:6px;padding:4px 8px;background:var(--surface-subtle);}
+.cron-run-context-disclosure>summary{cursor:pointer;font-size:11px;color:var(--text-secondary);list-style:none;outline:none;user-select:none;}
+/* #7303 re-gate 9/21 (accessibility): the disclosure removed its
+   only focus indicator. Re-add a visible focus-visible ring using
+   the same pattern the rest of the stylesheet already uses for
+   custom controls. Mouse focus stays invisible (``outline:none``);
+   keyboard focus paints the ring. */
+.cron-run-context-disclosure>summary:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:4px;}
+.cron-run-context-disclosure>summary::-webkit-details-marker{display:none;}
+.cron-run-context-disclosure>summary::before{content:"▸";display:inline-block;width:10px;color:var(--muted);transition:transform .12s ease;}
+.cron-run-context-disclosure[open]>summary::before{transform:rotate(90deg);}
+.cron-run-context-disclosure[open] .cron-run-context-pre{margin-top:6px;}
+.cron-run-context-pre{margin:0;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
+.cron-run-context-pre code{background:transparent;padding:0;font-family:var(--font-mono);}
+/* #7303 re-gate 9/24 (CORE 1): the response-first view is a lossy
+   projection (the ## Response heading is dropped and both sides are
+   trimmed), so it keeps a "View raw output" control that renders the
+   verbatim artifact. Shares the secondary-control styling with the
+   legacy "View full output" affordance and is safe at narrow widths
+   (no min-width, wraps with the block). */
+.cron-run-raw-output-btn{margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px;max-width:100%;}
+.cron-run-raw-output-btn:hover{border-color:var(--border-strong);color:var(--text-primary);}
+.cron-run-raw-output-btn:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;}
 .cron-item.active,.ws-row.active,.profile-card.active{background:var(--accent-bg);}
 .cron-item.active .cron-name,.ws-row.active .ws-row-name,.profile-card.active .profile-card-name{color:var(--accent-text);}
 
