@@ -2701,6 +2701,11 @@ async function loadSession(sid){
       return;
     }
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    // Drop the completed assistant only once its content has been preserved
+    // into a live row (drop-and-replace, never drop-then-maybe-empty).  If
+    // the live assistant has no text yet, the completed assistant is still
+    // the authoritative response and must not be removed — dropping it
+    // would lose the settled answer before any live row can take over.
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
@@ -3882,6 +3887,22 @@ function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
   if(role!==String(b.role||'')) return false;
+  const aId=a.id, bId=b.id;
+  if(aId && bId){
+    if(aId === bId) return true;
+    return false;
+  }
+  const aTs=(a.timestamp||a._ts||0), bTs=(b.timestamp||b._ts||0);
+  if(aTs && bTs && role==='user'){
+    // Timestamp equality alone can over-match two genuinely different user
+    // messages submitted within the same millisecond. Require normalized
+    // user-text equality IN ADDITION to the timestamp match.
+    if(aTs !== bTs) return false;
+    const sameText=_messageComparableText(a)===_messageComparableText(b);
+    if(sameText) return true;
+    return _normalizeUserTranscriptText(_messageComparableText(a))===
+      _normalizeUserTranscriptText(_messageComparableText(b));
+  }
   const aText=_messageComparableText(a);
   const bText=_messageComparableText(b);
   if(aText===bText) return true;
@@ -3911,6 +3932,30 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   if(!candidate||String(candidate.role||'')!=='user') return false;
   const existing=_currentTailUserMessage(messages);
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
+}
+
+// _currentTailUserMessage stops at a completed (non-live) assistant because
+// the pending-user recovery path must NOT match a pending turn to a previous
+// turn's user. The INFLIGHT merge context is different: when the `done` event
+// was lost, the base may legitimately end with a completed assistant that
+// belongs to the SAME turn the inflight is re-supplying, and the reverse scan
+// must walk past it to find the current-turn user for dedup (#6649 greptile P2).
+function _hasInflightTailUserDuplicate(messages,candidate){
+  if(!candidate||String(candidate.role||'')!=='user') return false;
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user'){
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+      return !!_sameTranscriptMessage(msg,candidate);
+    }
+    // Skip past live rows, tool rows, and completed (non-live) assistants
+    // so the scan reaches the current-turn user behind them.
+    if(msg._live||String(msg.role||'')==='tool'||String(msg.role||'')==='assistant') continue;
+    return false;
+  }
+  return false;
 }
 
 // Keep pending-user recovery ordering identical across load, reconnect, and
@@ -4213,6 +4258,25 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
       live.content=persistedText;
     }
   }
+  // If a settled response exists in the base, only return true when the
+  // live row now reflects the SAME text. Returning true with genuinely
+  // different text would let the loadSession drop remove the authoritative
+  // settled response and leave only the stale partial stream in the
+  // restored transcript (#6649 greptile P1).
+  //
+  // Also reconcile the live row's content to the persisted text (same style
+  // as the backfill branches above) so the subsequent
+  // _mergeInflightTailMessages call's _sameTranscriptMessage text equality
+  // dedupes the stale live partial away instead of appending it as a second
+  // assistant row. Without this in-place reconciliation the settled
+  // response and the divergent live partial coexist on screen (#6649
+  // greptile P1 follow-up: "Stale response remains visible" — the settled
+  // row survives the drop but the merge then appends the stale partial
+  // beside it).
+  if(persistedText && _messageComparableText(live) !== persistedText){
+    live.content = persistedText;
+    return false;
+  }
   return !!_messageComparableText(live);
 }
 
@@ -4232,7 +4296,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
     let candidate=msg;
     if(!candidate) continue;
     const duplicate=String(candidate.role||'')==='user'
-      ? _hasCurrentTailUserDuplicate(merged,candidate)
+      ? _hasInflightTailUserDuplicate(merged,candidate)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }
