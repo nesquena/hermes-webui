@@ -41,22 +41,35 @@ def _render_profile_concept_help_body():
     return PANELS_JS[start:end]
 
 
-def test_i18n_keys_are_english_fallback_owned():
-    """Profile concept keys live in English and fall back from every other locale."""
+def test_i18n_keys_are_translated_whole_or_fallback():
+    """Profile concept keys live in English (the source of truth) and fall back
+    to EN per key when a locale does not carry them.
+
+    A locale may either translate the whole set or none of it, but must never
+    carry a PARTIAL set — that would render the help card with a French title
+    and English body (or vice-versa), which is a real UX bug.
+    """
     locale_blocks = _locale_blocks()
     en_block = locale_blocks["en"]
     for key in PROFILE_CONCEPT_KEYS:
         assert re.search(rf"\b{re.escape(key)}:\s*'", en_block), (
             f"missing key {key!r} in en locale block"
         )
+    assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS, (
+        "per-key English fallback must stay the safety net"
+    )
     for locale, block in locale_blocks.items():
         if locale == "en":
             continue
-        for key in PROFILE_CONCEPT_KEYS:
-            assert not re.search(rf"\b{re.escape(key)}:\s*'", block), (
-                f"key {key!r} must be absent from non-English locale {locale!r}"
+        present = [k for k in PROFILE_CONCEPT_KEYS
+                   if re.search(rf"\b{re.escape(k)}:\s*'", block)]
+        if present:
+            missing = [k for k in PROFILE_CONCEPT_KEYS if k not in present]
+            assert not missing, (
+                f"locale {locale!r} translates profile-concept keys partially "
+                f"({len(present)}/{len(PROFILE_CONCEPT_KEYS)}); "
+                f"either translate all of them or none: missing {missing}"
             )
-    assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS
 
 
 def test_help_card_uses_i18n_keys():
