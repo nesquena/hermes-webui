@@ -192,6 +192,13 @@ render. Subsequent streamed content must not pull the reader back to the bottom.
 Use the jump-to-latest control to resume following the live tail; after that,
 new streamed content should remain visible at the bottom.
 
+Small browser-only layout shifts at the transcript tail must not disable follow.
+Real reader intent still wins: wheel, touch, keyboard, gutter or overlay-scrollbar
+drags (including a scroll delivered just after pointer release) must unpin. If a
+scrollbar interaction is abandoned because the window blurs or the document is
+hidden, its pending intent is discarded and must not be inherited by a later
+layout shift.
+
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
 and **skips gracefully** (clear message) when it isn't — so environments without the
