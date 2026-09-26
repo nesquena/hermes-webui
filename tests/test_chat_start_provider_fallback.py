@@ -147,12 +147,41 @@ def _run_model_state_helper(driver_path, payload):
 
 
 @node_test
-def test_model_provider_for_send_preserves_session_provider(driver_path):
+def test_model_provider_for_send_prefers_dropdown_over_stale_session_provider(driver_path):
+    """#7860: the dropdown is the user's most recent intent — it outranks a stale session.
+
+    This case was previously named ``..._preserves_session_provider`` and
+    asserted the session provider won even though the dropdown had already
+    moved to the very model being sent. That expectation contradicted this
+    module's own docstring (the provider follows when the dropdown describes
+    the same model) and the sibling ``..._falls_back_to_matching_dropdown``
+    test, and it encoded exactly the #7860 defect: ``S.session.model_provider``
+    is only refreshed on apply/pending paths, never on a plain picker change,
+    so treating it as authoritative overrode the picker and pinned the session
+    to the previous provider's model.
+
+    A session provider still wins when the dropdown says nothing about the
+    model being sent (see ``..._does_not_steal_unrelated_dropdown_provider``
+    and the no-dropdown-at-all case below).
+    """
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
         "sessionProvider": "session-provider",
         "initialValue": "grok-4.3",
         "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],
+    })
+
+    assert provider == "xai-oauth"
+
+
+@node_test
+def test_model_provider_for_send_keeps_session_provider_without_dropdown_intent(driver_path):
+    """No dropdown selection / no matching option → the session provider still leads."""
+    provider = _run_helper(driver_path, {
+        "model": "grok-4.3",
+        "sessionProvider": "session-provider",
+        "initialValue": "",
+        "options": [],
     })
 
     assert provider == "session-provider"
