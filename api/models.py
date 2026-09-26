@@ -4353,6 +4353,9 @@ def _append_journaled_partial_output(
                 else max(reasoning_start, min(initial_message_count, dedupe_max_index))
             )
             for existing_idx in range(reasoning_start, reasoning_stop):
+            # Bounded by the caller's dedupe window when supplied: an
+            # empty-anchor reuse must never escape past the current turn.
+            # (re-gate #7167 CI fix — see the re-gate note above.)
                 if existing_idx in claimed_existing_assistant_indexes:
                     continue
                 existing_message = session.messages[existing_idx]
@@ -5637,12 +5640,32 @@ def _apply_core_sync_or_error_marker(
             ),
             None,
         )
+        # ``_already_checkpointed`` is the TOKEN-bound identity proof: it may
+        # only be used for decisions that suppress appending a recovered row
+        # (safe only when the row provably IS the pending turn). The tail
+        # predicate, however, has always been a *textual* tail check against
+        # the transcript's LAST message (master behaviour): the pending user
+        # row itself, with no assistant answer after it, must take the normal
+        # recovery branch. Reusing the token-bound value here made the
+        # "pending row + genuine final answer" case look like "tail already
+        # checkpointed" and skipped the #6366 transcript-advance suppression
+        # (test_full_recovery_suppresses_duplicates_on_turn_journal_completion).
         _already_checkpointed = _pending_user_row_already_materialized(
             session,
             _latest_user,
             session.pending_started_at,
         )
-        _tail_user_already_checkpointed = _already_checkpointed
+        _tail_message = session.messages[-1] if session.messages else None
+        _tail_user_already_checkpointed = _message_matches_pending_checkpoint(
+            _tail_message,
+            session.pending_user_message,
+            session.pending_started_at,
+            session.pending_user_source,
+            session.pending_attachments,
+        ) or _message_matches_pending_text(
+            _tail_message,
+            session.pending_user_message,
+        )
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not _already_checkpointed:
@@ -5705,7 +5728,7 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
-                dedupe_existing=True,
+                dedupe_existing=False,
                 terminal_recovery=_terminal_recovery,
             )
         )
