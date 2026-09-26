@@ -1233,8 +1233,30 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  // #7140: render `next_run_at` / `last_run_at` in the zone the timestamp
+  // itself was stamped in — NOT the operator's browser zone, and NOT a
+  // single process-wide server zone.
+  //
+  // The agent serialises these timestamps with the offset of the zone the
+  // job was scheduled in (per-profile: `hermes_time._resolve_timezone_name()`
+  // reads the ACTIVE PROFILE's config.yaml `timezone`).  So on a UTC
+  // container whose profile configures `timezone: America/New_York` the
+  // value on the wire is "2026-09-24T09:00:00-07:00" and the operator must
+  // read 9:00 AM — neither the browser zone nor `_server_tz_offset()` knows
+  // that, and per-profile the same process can host jobs on different
+  // offsets (DST flips the offset twice a year too).
+  //
+  // `_formatInIsoTz()` parses the ±HH:MM out of the string, shifts the
+  // instant by it and formats with timeZone:'UTC' — so the wall clock comes
+  // from the job's own data.  Fallbacks keep the old behaviour when the
+  // ISO string carries no offset (naive) or the helper is out of scope:
+  // first the process-level server tz, then the original browser-zone
+  // `toLocaleString()`, so the panel always renders.
+  const _isoTz = (typeof _formatInIsoTz === 'function') ? _formatInIsoTz : () => null;
+  const _fmtDate = (value) => _isoTz(value)
+    || ((typeof _formatInServerTz === 'function') ? _formatInServerTz(new Date(value)) : new Date(value).toLocaleString());
+  const nextRun = job.next_run_at ? _fmtDate(job.next_run_at) : t('not_available');
+  const lastRun = job.last_run_at ? _fmtDate(job.last_run_at) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';

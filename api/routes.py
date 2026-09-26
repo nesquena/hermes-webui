@@ -27,6 +27,69 @@ import sys
 import threading
 import time
 import uuid
+# ── server timezone offset (#7140) — DEGRADED FALLBACK ONLY ────────────────
+# `_server_tz_offset()` resolves ONE process-wide zone.  The cron timestamps
+# it is meant to display are stamped per-job with the offset of the zone the
+# job's profile configured (`hermes_time._resolve_timezone_name()` reads the
+# ACTIVE PROFILE's config.yaml `timezone`).  A single process-wide offset is
+# therefore wrong for two independent reasons:
+#   1. It cannot know that an operator on a UTC container who only sets
+#      `timezone: America/Sao_Paulo` in config.yaml (no HERMES_TIMEZONE env
+#      export) still has -03:00 jobs — so that operator kept seeing UTC.
+#   2. It is a point-in-time ("current") offset, so it is wrong across DST
+#      for a timestamp in the other half of the year, and it is wrong for
+#      any profile whose configured zone differs from the resolving env.
+#
+# The canonical fix is on the client: `static/panels.js` now formats cron
+# `next_run_at` / `last_run_at` with `_formatInIsoTz()` (static/sessions.js),
+# which parses the ±HH:MM offset out of the timestamp string ITSELF and
+# shifts by it.  The agent already writes the right offset for that job into
+# the ISO string, so this helper needs no timezone inference at all — and it
+# is correct per-job, per-profile and across DST.
+#
+# `server_tz` in the /api/sessions payload is kept (other panels use
+# `_serverTzOptions()` / `_formatInServerTz()`) but this helper is now only
+# the last-resort fallback for values that carry no offset of their own.
+def _server_tz_offset() -> str:
+    """Return a coarse server wall-clock offset like '+0800' or '-0330'.
+
+    .. deprecated::
+        Use the timestamp's own ISO offset instead (client-side
+        ``_formatInIsoTz``).  This resolver can only ever produce ONE
+        offset for the whole process and only for the CURRENT instant, so
+        it is systematically wrong for per-profile zones and across DST.
+        It remains as the fallback for naive timestamps that carry no
+        offset.
+
+    Resolution order:
+      1. ``HERMES_TIMEZONE`` env var (the canonical knob for self-hosted
+         deployments that already configure the agent with a non-UTC zone).
+      2. ``TZ`` env var (the POSIX timezone the OS is configured to;
+         read by libc but not by Python's ``time`` module by default).
+      3. ``time.strftime("%z")`` of the process (which is correct when
+         the container's TZ matches the Hermes timezone, e.g. when the
+         operator launches the WebUI with ``docker run -e TZ=...``).
+    """
+    tz_name = os.environ.get("HERMES_TIMEZONE") or os.environ.get("TZ") or None
+    if tz_name:
+        try:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZoneInfo
+            tz = _ZoneInfo(tz_name)
+            offset = _dt.now(tz).utcoffset()
+            if offset is not None:
+                total_min = int(offset.total_seconds() // 60)
+                sign = "+" if total_min >= 0 else "-"
+                total_min = abs(total_min)
+                return f"{sign}{total_min // 60:02d}{total_min % 60:02d}"
+        except Exception:
+            # Unknown IANA name, or zoneinfo missing on this Python build,
+            # or anything else — fall through to the next resolver.
+            pass
+    fallback = time.strftime("%z")
+    return fallback if fallback else "+0000"
+
+
 import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
@@ -2693,7 +2756,7 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         "active_profile": payload.get("active_profile"),
         "other_profile_count": int(payload.get("other_profile_count", 0)),
         "server_time": time.time(),
-        "server_tz": time.strftime("%z"),
+        "server_tz": _server_tz_offset(),
     }
     if "webui_session_count" in payload:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
