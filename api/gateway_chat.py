@@ -361,6 +361,48 @@ def _gateway_session_owner_cfg(session) -> dict:
         return dict(resolved)
 
 
+def _gateway_session_api_key(session) -> str:
+    """Resolve the Gateway API key for the profile owning ``session``.
+
+    Mirrors ``_gateway_session_owner_cfg()``'s profile-isolation guarantee.
+    The session-owning profile's ``HERMES_WEBUI_GATEWAY_API_KEY`` (or
+    ``API_SERVER_KEY``) is read on the REQUEST thread — where the dispatch
+    runs and where the request can know the session's profile home — and
+    the result is handed into the detached gateway worker as
+    ``session_api_key``. A bare ``_gateway_api_key()`` inside the worker
+    reads ``os.environ``, which on a multi-profile instance holds the
+    process-active profile's credentials; that is exactly the cross-profile
+    leak the #7170 round-7 P1 finding called out (the worker could send
+    profile A's credential to profile B's gateway endpoint, or fail auth
+    because the keys disagree).
+
+    Returns the empty string when the session profile's ``.env`` does not
+    configure a key (matches the historical contract of ``_gateway_api_key``,
+    which also returns ``""`` on absence). The worker is the only consumer;
+    it treats an empty string identically to a missing key (no
+    ``Authorization`` header is sent — issue #7074 keeps the anonymous path
+    for unauthenticated local gateways working).
+    """
+    try:
+        from api.models import _get_profile_home
+        from api.profiles import get_profile_runtime_env
+        home = _get_profile_home(getattr(session, "profile", None))
+    except Exception:
+        return ""
+    if not home:
+        return ""
+    try:
+        runtime_env = get_profile_runtime_env(home) or {}
+    except Exception:
+        return ""
+    raw = (
+        runtime_env.get("HERMES_WEBUI_GATEWAY_API_KEY")
+        or runtime_env.get("API_SERVER_KEY")
+        or ""
+    )
+    return str(raw).strip()
+
+
 def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
     """Return True only when the operator has explicitly opted into the runs API path."""
     source = os.environ if environ is None else environ
@@ -1213,6 +1255,7 @@ def _run_gateway_chat_streaming(
     reattach_run=None,
     reattach_endpoint=None,
     session_cfg=None,
+    session_api_key=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1231,6 +1274,16 @@ def _run_gateway_chat_streaming(
     profile's request. The dispatch passes the owner config in instead; the
     worker only falls back to resolving the session's own profile home for
     legacy direct callers that did not capture a snapshot.
+
+    ``session_api_key`` is the corresponding Gateway API key the dispatch
+    captured for the session-owning profile (issue #7170 round-7 P1:
+    ``_gateway_api_key()`` reads ``os.environ`` which holds the AMBIENT
+    process-active profile's key, not the session owner's — pairing the
+    session's gateway URL with the ambient profile's credential either
+    fails auth or sends the wrong credential to the wrong endpoint). The
+    worker prefers this captured value and only falls back to
+    ``_gateway_api_key()`` for legacy direct callers that pre-date the
+    capture.
     """
     q = peek_stream(stream_id)
     if q is None:
@@ -1332,7 +1385,19 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        # #7170 round-7 P1: prefer the dispatch-captured session api key (which
+        # was read on the request thread from the session-owning profile's .env)
+        # over ``_gateway_api_key()``, which reads ``os.environ`` and on a
+        # multi-profile instance holds the AMBIENT process-active profile's
+        # key. Pairing the session's URL with the ambient profile's credential
+        # either fails auth or sends the wrong credential to the wrong
+        # endpoint. Legacy direct callers that pre-date the dispatch capture
+        # pass ``session_api_key=None`` and fall through to the env read.
+        if isinstance(session_api_key, str) and session_api_key:
+            _api_key = session_api_key
+        else:
+            _api_key = _gateway_api_key()
+        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _api_key)
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:

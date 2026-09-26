@@ -2834,7 +2834,9 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str, *, explicitly_picked: bool = False, config_obj: dict | None = None
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2864,7 +2866,29 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     leftover, e.g. #433's ``openai/gpt-5.4`` on a bare-only relay) still gets the
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
+
+    ``config_obj`` (when a dict) lets a caller scope the resolution to a
+    specific profile's config snapshot instead of the module-global ``cfg``
+    (issue #7170 round-7: without this, a profile-scoped reasoning lookup
+    reads the ambient process profile's ``model.provider``/``providers``/
+    ``custom_providers`` and probes the wrong endpoint). When omitted the
+    module-global cache is used (historical behaviour, preserved for the
+    25+ in-tree callers that don't carry a profile scope).
     """
+    # Local rebind: every ``cfg.get(...)`` below (and the nested closures
+    # ``_finalize`` / ``_entry_owns_model``) now sees the caller's scoped
+    # snapshot when ``config_obj`` is supplied, falling back to the module
+    # global otherwise. No nested function reads ``cfg`` from its own
+    # closure chain, so this rebind is safe and surgical.
+    #
+    # Resolve the module global via ``globals()`` rather than a module-level
+    # alias so monkeypatched cfg (e.g. ``monkeypatch.setattr(api.config,
+    # "cfg", fake_cfg)``) is observed — the test suite relies on it.
+    cfg: dict = (
+        config_obj
+        if isinstance(config_obj, dict)
+        else globals()["cfg"]
+    )
     config_provider = None
     config_base_url = None
     model_cfg = cfg.get("model", {})
@@ -5746,7 +5770,14 @@ def _resolve_model_reasoning_efforts_impl(
     _scope_cfg = config_data if isinstance(config_data, dict) else cfg
     if not provider:
         try:
-            _, provider, resolved_base_url = resolve_model_provider(model)
+            # Pass the scoped snapshot through so the model->provider/base_url
+            # resolution reads THIS profile's config, not the ambient process
+            # global (issue #7170 round-7: ``resolve_model_provider`` used to
+            # ignore ``config_data`` and let a profile-A ``model.provider`` leak
+            # into a profile-B /api/reasoning probe).
+            _, provider, resolved_base_url = resolve_model_provider(
+                model, config_obj=_scope_cfg
+            )
         except Exception:
             provider = str((_scope_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
