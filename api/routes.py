@@ -15969,9 +15969,12 @@ def _render_index_shell_base() -> str:
 # share a result. The key below therefore carries everything the payload is
 # derived from — profile, pagination/window, truncation, active-stream
 # ownership and the CLI metadata merged into it — plus the on-disk generation
-# of both state layers (sidecar stat signature and the session-scoped state.db
-# revision). Equal keys mean both requests observed the same bytes when they
-# arrived, so a follower receives exactly the snapshot it would have built
+# of every other input: the child sidecar stat signature and the session-scoped
+# state.db revision, the compression-snapshot parent sidecars that the lineage
+# stitch folds into the transcript, the run journal that supplies
+# ``runtime_journal``/``runtime_journal_snapshot``, and settings.json, which
+# drives redaction. Equal keys mean both requests observed the same bytes when
+# they arrived, so a follower receives exactly the snapshot it would have built
 # itself; nothing is reused after the in-flight window closes, and only the
 # finished redacted payload is ever published (never an unredacted
 # intermediate).
@@ -15981,6 +15984,45 @@ _SESSION_GET_FLIGHT_LOCK = threading.Lock()
 # itself, so one wedged leader can never park N request threads on an event
 # nobody will set.
 _SESSION_GET_FLIGHT_WAIT_SECONDS = 30.0
+
+
+def _session_get_lineage_token(session, sidecar_sig):
+    """Stat generation of every sidecar stitched into this session's transcript.
+
+    ``_webui_sidecar_lineage_messages_for_display`` walks compression-snapshot
+    parents and their messages reach the payload, so a flight may only be
+    shared while those parents are provably unchanged. The lineage display
+    cache already records the child signature plus every parent path and its
+    stat, which keeps this stat-only instead of re-parsing parent transcripts on
+    every reload. Returns ``None`` whenever the generation cannot be proven —
+    no coalescing rather than a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    if not str(getattr(session, "parent_session_id", "") or "").strip():
+        # No parent link: nothing outside this sidecar can be stitched in.
+        return ()
+    sid = str(getattr(session, "session_id", "") or "")
+    with _lineage_display_cache_lock:
+        entry = _lineage_display_cache.get(sid)
+        recorded_self = entry.get("self_sig") if entry else None
+        recorded_parents = entry.get("parent_sigs") if entry else None
+        provenance_complete = bool(entry and entry.get("provenance_complete"))
+    if (
+        not provenance_complete
+        or recorded_self != sidecar_sig
+        or recorded_parents is None
+    ):
+        # No verified record of the chain (cold or already stale): the lineage
+        # walk has not proven which parents contribute, so refuse to share.
+        return None
+    live = []
+    for parent_path, recorded_sig in recorded_parents:
+        current = _sidecar_stat_signature(Path(parent_path))
+        if current is None or current != recorded_sig:
+            return None
+        live.append((str(parent_path), current))
+    return tuple(live)
 
 
 def _session_get_flight_key(session, profile, cli_meta, query_shape):
@@ -16010,6 +16052,23 @@ def _session_get_flight_key(session, profile, cli_meta, query_shape):
             return None
     else:
         cli_sig = ""
+    lineage_token = _session_get_lineage_token(session, sidecar_sig)
+    if lineage_token is None:
+        return None
+    active_stream_id = str(getattr(session, "active_stream_id", "") or "")
+    journal_fp = session_journal_fingerprint(sid, session_dir=SESSION_DIR)
+    if active_stream_id and journal_fp == (0, 0.0, 0):
+        # The payload reads this run's journal, but its file is not under this
+        # session's journal directory — a fingerprint this cheap cannot see it,
+        # so refuse to share rather than assume it is frozen.
+        return None
+    try:
+        _settings_stat = SETTINGS_FILE.stat()
+        settings_sig = (_settings_stat.st_mtime_ns, _settings_stat.st_size)
+    except OSError:
+        # No settings.json at all: redaction runs on pure defaults, which is
+        # one well-defined generation.
+        settings_sig = ()
     return (
         sid,
         profile,
@@ -16017,6 +16076,9 @@ def _session_get_flight_key(session, profile, cli_meta, query_shape):
         sidecar_sig,
         state_sig,
         cli_sig,
+        lineage_token,
+        journal_fp,
+        settings_sig,
         getattr(session, "active_stream_id", None),
         bool(getattr(session, "pending_user_message", None)),
         getattr(session, "truncation_watermark", None),

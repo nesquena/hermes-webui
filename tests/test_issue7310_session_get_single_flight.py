@@ -110,6 +110,11 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setattr(
         models, "_agent_state_db_path", lambda *, profile=None: state_db
     )
+    # Module caches outlive a single test otherwise, and every test here uses
+    # the same session id, so a warm entry from an earlier test would fake a
+    # verified parent generation (or a flight) for the next one.
+    routes._lineage_display_cache.clear()
+    routes._SESSION_GET_FLIGHTS.clear()
     return session_dir
 
 
@@ -293,3 +298,109 @@ def test_session_get_flight_key_scopes_by_shape_and_generation(isolated_home):
     assert (
         routes._session_get_flight_key(session, None, {}, ("1",)) is None
     )
+
+
+def test_run_journal_growth_changes_the_flight_key(isolated_home):
+    """A live run appending journal rows must not be served from an earlier
+    in-flight build (#7310 review: live run updates go missing)."""
+    import api.routes as routes
+
+    session = _FakeSession([{"role": "user", "content": "hi"}])
+    key_before = routes._session_get_flight_key(session, None, {}, ("1",))
+    assert key_before is not None
+
+    # A run writes its first journal row while the leader is still building.
+    journal_dir = routes.SESSION_DIR / "_run_journal" / SESSION_ID
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    (journal_dir / "run-1.jsonl").write_text('{"event": "tool"}\n')
+
+    key_after = routes._session_get_flight_key(session, None, {}, ("1",))
+    assert key_after is not None
+    assert key_after != key_before, (
+        "journal growth must change the flight key"
+    )
+
+
+def test_active_stream_without_a_visible_journal_fails_closed(isolated_home):
+    """The journal contributes to the payload, so a run whose file is not under
+    this session's own journal directory cannot be fingerprinted — refuse to
+    share rather than hand out a projection built before it moved."""
+    import api.routes as routes
+
+    session = _FakeSession([{"role": "user", "content": "hi"}])
+    session.active_stream_id = "run_elsewhere"
+    assert routes._session_get_flight_key(session, None, {}, ("1",)) is None
+
+
+def test_parent_sidecar_generation_guards_the_flight_key(isolated_home):
+    """Compression-snapshot parents are stitched into the transcript, so a
+    flight may only be shared while those parents are provably unchanged
+    (#7310 review: parent transcript updates go missing)."""
+    import api.routes as routes
+    from api.models import _sidecar_stat_signature
+
+    session = _FakeSession([{"role": "user", "content": "hi"}])
+    session.parent_session_id = "sflight_parent"
+
+    # Cold lineage cache: nothing proves what the parent chain looked like, so
+    # sharing would be a guess.
+    assert routes._session_get_flight_key(session, None, {}, ("1",)) is None
+
+    # Warm cache: the lineage stitch already recorded child + parent stats.
+    parent_path = routes.SESSION_DIR / "sflight_parent.json"
+    parent_path.write_text('{"session_id": "sflight_parent", "messages": []}')
+    routes._lineage_display_cache[SESSION_ID] = {
+        "messages": [],
+        "self_sig": _sidecar_stat_signature(
+            routes.SESSION_DIR / f"{SESSION_ID}.json"
+        ),
+        "parent_sigs": [(str(parent_path), _sidecar_stat_signature(parent_path))],
+        "provenance_complete": True,
+    }
+    key = routes._session_get_flight_key(session, None, {}, ("1",))
+    assert key is not None
+
+    # A rewritten parent transcript must invalidate it.
+    parent_path.write_text(
+        '{"session_id": "sflight_parent", "messages": ["rewritten"]}'
+    )
+    key_after_parent_write = routes._session_get_flight_key(
+        session, None, {}, ("1",)
+    )
+    assert key_after_parent_write != key, (
+        "a parent sidecar rewrite must change the flight key"
+    )
+
+    # An incomplete provenance record proves nothing: fail closed.
+    routes._lineage_display_cache[SESSION_ID] = {
+        "messages": [],
+        "self_sig": _sidecar_stat_signature(
+            routes.SESSION_DIR / f"{SESSION_ID}.json"
+        ),
+        "parent_sigs": [(str(parent_path), _sidecar_stat_signature(parent_path))],
+        "provenance_complete": False,
+    }
+    assert routes._session_get_flight_key(session, None, {}, ("1",)) is None
+
+
+def test_settings_rewrite_changes_the_flight_key(isolated_home):
+    """Redaction and display rules come from settings.json, so a rewrite while
+    a build is in flight must not be served to a later reader."""
+    import api.routes as routes
+
+    session = _FakeSession([{"role": "user", "content": "hi"}])
+    owned_settings = routes.SESSION_DIR / "settings-sig.json"
+    owned_settings.write_text('{"theme": "dark"}')
+    original = routes.SETTINGS_FILE
+    try:
+        routes.SETTINGS_FILE = owned_settings
+        key_before = routes._session_get_flight_key(session, None, {}, ("1",))
+        assert key_before is not None
+        time.sleep(0.01)
+        owned_settings.write_text('{"theme": "oled"}')
+        key_after = routes._session_get_flight_key(session, None, {}, ("1",))
+        assert key_after != key_before, (
+            "settings rewrite must change the flight key"
+        )
+    finally:
+        routes.SETTINGS_FILE = original
