@@ -4263,7 +4263,18 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   // different text would let the loadSession drop remove the authoritative
   // settled response and leave only the stale partial stream in the
   // restored transcript (#6649 greptile P1).
+  //
+  // Also reconcile the live row's content to the persisted text (same style
+  // as the backfill branches above) so the subsequent
+  // _mergeInflightTailMessages call's _sameTranscriptMessage text equality
+  // dedupes the stale live partial away instead of appending it as a second
+  // assistant row. Without this in-place reconciliation the settled
+  // response and the divergent live partial coexist on screen (#6649
+  // greptile P1 follow-up: "Stale response remains visible" — the settled
+  // row survives the drop but the merge then appends the stale partial
+  // beside it).
   if(persistedText && _messageComparableText(live) !== persistedText){
+    live.content = persistedText;
     return false;
   }
   return !!_messageComparableText(live);
