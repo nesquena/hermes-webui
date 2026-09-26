@@ -12467,15 +12467,18 @@ def handle_get(handler, parsed) -> bool:
                 _cached_agent_version_from_gateway,
             )
             settings["webui_version"] = WEBUI_VERSION
+            settings["agent_version"] = AGENT_VERSION
             # Prefer live gateway health detection so Docker gateway
             # deployments always show the actual running Agent version
             # even when the import-time AGENT_VERSION is stale (#6150).
             # Uses a TTL cache so unreachable gateways don't block every
             # page load (#6289).
-            settings["agent_version"] = (
-                _cached_agent_version_from_gateway()
-                or AGENT_VERSION
-            )
+            try:
+                live_version = _cached_agent_version_from_gateway()
+                if live_version:
+                    settings["agent_version"] = live_version
+            except Exception:
+                pass
         except Exception:
             pass
         # Channel-scoped display badge — SEPARATE from webui_version (which is

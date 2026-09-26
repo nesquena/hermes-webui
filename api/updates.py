@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -557,21 +558,24 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
 
 def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
     """Best-effort cross-container gateway API fallback for Agent version."""
-    base = _gateway_health_base_url()
-    if not base:
+    try:
+        base = _gateway_health_base_url()
+        if not base:
+            return None
+        parsed = urlparse(base)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            return None
+        for path in ('/health', '/health/detailed'):
+            try:
+                with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
+                    payload = json.loads(resp.read().decode('utf-8'))
+            except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError, http.client.HTTPException, ValueError):
+                continue
+            version = _version_from_gateway_health_payload(payload)
+            if version:
+                return version
+    except Exception:
         return None
-    parsed = urlparse(base)
-    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
-        return None
-    for path in ('/health', '/health/detailed'):
-        try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        version = _version_from_gateway_health_payload(payload)
-        if version:
-            return version
     return None
 
 

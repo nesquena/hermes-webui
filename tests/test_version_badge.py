@@ -281,6 +281,14 @@ class TestDetectAgentVersion:
         )
         assert result == 'not detected'
 
+    def test_import_or_probe_with_malformed_gateway_url_returns_none(self, monkeypatch):
+        """A malformed HERMES_API_URL must not raise ValueError at import or probe time."""
+        import api.updates as upd
+        monkeypatch.setenv("HERMES_API_URL", "http://[::1")
+        monkeypatch.setenv("HERMES_GATEWAY_HEALTH_URL", "http://[::1")
+        res = upd._detect_agent_version_from_gateway_health()
+        assert res is None
+
 
 # ---------------------------------------------------------------------------
 # 3. WEBUI_VERSION module constant
@@ -433,6 +441,34 @@ class TestSettingsEndpointVersion:
             'route must fall back to AGENT_VERSION when the gateway probe '
             'returns None'
         )
+
+    def test_api_settings_preserves_agent_version_when_probe_raises(self):
+        """When the live gateway probe raises, /api/settings retains AGENT_VERSION."""
+        import api.routes as routes
+        import api.updates as upd
+
+        handler = MagicMock()
+        from urllib.parse import urlparse
+        parsed = urlparse('/api/settings')
+
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured['data'] = data
+
+        def _raising_probe():
+            raise RuntimeError("network failure during live probe")
+
+        with patch('api.routes.load_settings', return_value={}), \
+             patch('api.routes.j', side_effect=fake_j), \
+             patch.object(upd, '_cached_agent_version_from_gateway',
+                          side_effect=_raising_probe):
+            routes.handle_get(handler, parsed)
+
+        assert 'agent_version' in captured['data'], (
+            'route must not drop agent_version when probe raises'
+        )
+        assert captured['data']['agent_version'] == upd.AGENT_VERSION
 
 
 # ---------------------------------------------------------------------------
