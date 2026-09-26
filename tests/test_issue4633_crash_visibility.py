@@ -23,8 +23,12 @@ No live server socket is required — the helpers are exercised directly.
 """
 import faulthandler
 import logging
+import os
+import signal
+import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -120,6 +124,41 @@ def test_install_is_idempotent(fresh_hooks):
     assert cv.install_crash_visibility(stream=stream, register_sigusr1_dump=False) is True
     # Second call must be a no-op (no stacked hooks / duplicate atexit handlers).
     assert cv.install_crash_visibility(stream=stream, register_sigusr1_dump=False) is False
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="SIGUSR1 is POSIX-only")
+def test_sigusr1_stack_dump_does_not_terminate_process():
+    """The diagnostic signal must dump stacks without chaining to SIG_DFL.
+
+    Chaining invokes SIGUSR1's default action after faulthandler writes the dump,
+    terminating the WebUI process and prompting service managers to restart it.
+    Exercise the real signal in a child so a regression cannot kill pytest.
+    """
+    script = """
+import os
+import signal
+from api.crash_visibility import install_crash_visibility
+
+# An ignored SIGUSR1 disposition survives exec on POSIX.  Force the production
+# default so chain=True would terminate this child after writing the dump.
+signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+install_crash_visibility()
+os.kill(os.getpid(), signal.SIGUSR1)
+print('survived-sigusr1', flush=True)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=os.fspath(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "survived-sigusr1" in completed.stdout
+    assert "Current thread" in completed.stderr
+    assert "most recent call first" in completed.stderr
 
 
 # ── 2. threading.excepthook ─────────────────────────────────────────────────

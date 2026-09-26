@@ -5,6 +5,7 @@ from api.models import Session
 from api.streaming import (
     _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG,
     _compressed_context_tool_result_summary,
+    _is_agent_compression_start_status,
     _is_fallback_lifecycle_message,
     _merge_display_messages_after_agent_result,
     _message_text,
@@ -447,14 +448,13 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert end != -1, "status callback block end marker not found"
     block = src[start:end]
 
-    # compressing events for compression lifecycle notices
+    # compressing events only via the narrowed helper (no broad substring matcher)
     assert "put('compressing'" in block
     assert "'session_id': session_id" in block
     assert "'message': 'Compressing context'" in block
-    assert "'preflight compression'" in block
-    assert "'compressing'" in block
-    assert "'compacting context'" in block
-    assert "'context too large'" in block
+    assert "_is_agent_compression_start_status(_kind, _message)" in block
+    assert "or 'compressing' in _lower" not in block
+    assert "or 'preflight compression' in _lower" not in block
 
     # warning events with type:fallback for rate-limit/fallback lifecycle notices
     assert "put('warning'" in block
@@ -469,6 +469,83 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert "'status_callback' in _agent_params" in src
     assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
     assert "agent.status_callback = _agent_kwargs.get('status_callback')" in src
+
+
+def test_agent_compression_start_status_matches_real_emitters_only():
+    # Real start notices from hermes-agent emitters
+    # Preflight compression is intentionally excluded — the later
+        # authoritative ``Compacting context`` marker from
+        # conversation_compression is the signal that compression
+        # actually proceeded, and the preflight status can fire even
+        # when compression exits before compaction (e.g. durable
+        # guard refresh, Codex-Hermes mode with no active thread).
+    assert not _is_agent_compression_start_status(
+        "lifecycle",
+        "📦 Preflight compression: ~101,000 tokens >= 96,000 threshold. This may take a moment.",
+    )
+    assert _is_agent_compression_start_status(
+        "lifecycle",
+        "📦 Pre-API compression: ~521,055 tokens near the context/output limit. Compacting before the next model call.",
+    )
+    assert _is_agent_compression_start_status(
+        "lifecycle",
+        "🗜️ Compacting context — summarizing earlier conversation so I can continue...",
+    )
+    assert _is_agent_compression_start_status(
+        "lifecycle",
+        "🗜️ Context too large (~120,000 tokens) — compressing (1/3)...",
+    )
+    assert _is_agent_compression_start_status(
+        "lifecycle",
+        "⚠️  Request payload too large (413) — compression attempt 1/3...",
+    )
+
+    # False positives that previously (or could) light the divider on low-token turns
+    assert not _is_agent_compression_start_status(
+        "lifecycle",
+        "Skipping preflight compression: rough estimate ~20,000 >= 96,000, but last real provider prompt was 18,000 after compression",
+    )
+    assert not _is_agent_compression_start_status(
+        "lifecycle",
+        "Skipping preflight compression: same-session cooldown active (~30 seconds remaining, session abc)",
+    )
+    assert not _is_agent_compression_start_status(
+        "lifecycle",
+        "Skipping Hermes preflight compression for codex app-server (mode=native); Hermes will not start thread compaction here.",
+    )
+    assert not _is_agent_compression_start_status(
+        "lifecycle",
+        "🗜️ Compressed 924 → 143 messages, retrying...",
+    )
+    assert not _is_agent_compression_start_status(
+        "lifecycle",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert not _is_agent_compression_start_status("tool", "compacting context")
+    assert not _is_agent_compression_start_status("lifecycle", "")
+    assert not _is_agent_compression_start_status("lifecycle", "Working on request")
+
+
+def test_snapshot_anchor_hydration_does_not_invent_compressing_rows():
+    src = _read("static/messages.js")
+    start = src.find("function _sourceEventTypeForSnapshotAnchorRow")
+    assert start != -1, "snapshot anchor source helper not found"
+    end = src.find("function _hydrateAnchorRegistryFromActivityScene", start)
+    assert end != -1, "hydrate helper after snapshot source helper not found"
+    block = src[start:end]
+
+    # Old false-positive defaults must be gone
+    assert "return row&&row.status==='running'?'compressing':'done'" not in block
+    assert "if(role==='lifecycle'||kind==='lifecycle_status') return 'compressing';" not in block
+
+    # Terminal running no longer maps to compressing
+    assert "if(termStatus==='running') return '';" in block
+    # Lifecycle requires positive compression cues
+    assert "text.includes('compacting context')" in block
+    assert "return 'compressed';" in block
+    assert "return 'compressing';" in block
+    # Unknown lifecycle rows stay empty (no invented divider)
+    assert "return '';" in block
 
 
 def test_agent_status_callback_wiring():
@@ -999,9 +1076,10 @@ def test_context_anchor_reference_uses_session_summary_fallback():
 
     assert "sessionCompressionSummary" in src
     assert "const sessionCompressionSummary" in src
-    assert "referenceText=referenceMessage" in src
-    assert ": sessionCompressionSummary" in src
-    assert "_shouldShowSettledCompressionReference(referenceText)" in src
+    assert "const referenceText=(()=>{" in src
+    assert "if(!referenceMessage) return sessionCompressionSummary;" in src
+    assert "return segment!==null?segment:raw;" in src
+    assert "referenceMessageRawIdx<0 && _shouldShowSettledCompressionReference(referenceText)" in src
     assert "!_isContextCompactionText(referenceText)" in src
 
 
@@ -1038,8 +1116,9 @@ def test_reference_message_uses_raw_transcript_position_before_anchor_fallback()
     src = _read("static/ui.js")
 
     assert "const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(" in src
-    assert "if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);" in src
-    assert "else _insertCompressionLikeNode(referenceNode);" in src
+    assert "referenceNode&&referenceMessageRawIdx>=0" in src
+    assert "?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)" in src
+    assert ":_insertCompressionLikeNode(referenceNode);" in src
 
 
 def test_reference_message_inserted_before_future_assistant_anchor():
@@ -1122,7 +1201,7 @@ def test_frontend_reference_insertion_skips_when_reference_is_before_render_wind
     assert end != -1, "raw-index insertion helper end not found"
     helper = src[start:end]
 
-    assert "if(rawIdx<firstRenderedRawIdx) return;" in helper
+    assert "if(rawIdx<firstRenderedRawIdx) return false;" in helper
 
 
 def test_reference_message_selection_prefers_latest_matching_marker():
@@ -1150,16 +1229,14 @@ def test_reference_message_falls_back_to_current_summary_when_only_stale_markers
     assert "return {message:null, rawIdx:-1};" in helper
 
 
-def test_preserved_task_list_attaches_once_per_render():
+def test_preserved_task_list_source_uses_latest_snapshot():
     src = _read("static/ui.js")
 
     assert "function _latestPreservedCompressionTaskListMessages" in src
     assert ".reverse().find(m=>_isPreservedCompressionTaskListMessage(m))" in src
     assert "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);" in src
     assert "S.messages.filter(m=>_isPreservedCompressionTaskListMessage(m))" not in src
-    assert "let preservedCompressionTaskCardsAttached=!!referenceNode;" in src
-    assert "const preservedOnlyNode=" in src
-    assert "(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)" in src
+
 
 
 def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_items():

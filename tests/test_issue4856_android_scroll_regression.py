@@ -133,7 +133,7 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
         "low-delta message-pane wheel intent so a gentle trackpad scroll-up is "
         "not swallowed."
     )
-    assert listener.find("return;") < listener.find("if(movedUp){"), (
+    assert listener.find("return;") < listener.find("if(movedUp&&bottomDistance>1){"), (
         "recent render artifact scrolls must return before the movedUp branch "
         "can mark the reader unpinned."
     )
@@ -362,7 +362,7 @@ def test_low_delta_wheel_intent_is_tracked_separately():
     assert "function _recentMessageWheelIntent" in UI_JS
     rec_idx = UI_JS.find("function _recordNonMessageScrollIntent")
     assert rec_idx != -1, "_recordNonMessageScrollIntent not found"
-    rec = UI_JS[rec_idx: rec_idx + 1400]
+    rec = UI_JS[rec_idx: rec_idx + 2000]
     assert "e.deltaY<0) _lastMessageWheelIntentMs=performance.now()" in rec, (
         "#4970: _recordNonMessageScrollIntent must record low-delta upward wheel "
         "intent (deltaY<0) separately from the decisive deltaY<-30 unpin."

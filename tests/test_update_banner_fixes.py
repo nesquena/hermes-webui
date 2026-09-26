@@ -1785,8 +1785,8 @@ class TestUpdateSummaryRouteModelSelection:
             'SKILL_MODULE_DIR': profile_home / 'skills',
         }
         assert captured['aux_create']['model'] == 'profile-compression-model'
-        assert getattr(fake_skill_module, 'HERMES_HOME') == 'default-home'
-        assert getattr(fake_skill_module, 'SKILLS_DIR') == 'default-home/skills'
+        assert fake_skill_module.HERMES_HOME == 'default-home'
+        assert fake_skill_module.SKILLS_DIR == 'default-home/skills'
         assert os.environ.get('HERMES_HOME') == 'default-home'
         assert os.environ.get('HERMES_TEST_PROFILE_ENV') == 'default-runtime'
 

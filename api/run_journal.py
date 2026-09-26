@@ -10,8 +10,10 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
+from collections import OrderedDict
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -27,13 +29,42 @@ _WRITER_LOCKS_GUARD = threading.Lock()
 # ``_reserve_next_seq`` and ``delete_run_journal`` (which evicts stale entries).
 _SEQ_CACHE: dict[str, int] = {}
 _SEQ_CACHE_LOCK = threading.Lock()
-_TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
+# Summary callers only need terminal state and the latest cursor. Re-parsing a
+# completed journal's full payload (which can include multi-megabyte tool or
+# session results) on every status/reconnect probe is needless. This process
+# cache is keyed by a complete stat identity, so it is never used after an
+# atomic replacement, append, truncate, or same-path file recreation.
+_SUMMARY_CACHE_MAX_ENTRIES = 128
+_SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
+_SUMMARY_CACHE_LOCK = threading.Lock()
+# Events that mark a run terminal in the journal / summary sense.
+TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_end"})
+# Events that should close an SSE relay drain loop. `done` is intentionally
+# excluded: background title generation and `stream_end` are emitted after
+# `done`, and breaking early would drop them. `apperror` is included because
+# it terminates with no trailing `stream_end`.
+SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
+# Back-compat alias used by older call sites / tests.
+_TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
+# Events that are live-UI-only telemetry with no recovery value in the run
+# journal. They are skipped at WRITE time (never durably journaled, so they
+# cannot bloat the journal on marathon runs) and filtered at REPLAY time (so
+# legacy journals that already contain a backlog never stream it to a
+# reconnecting browser tab). Readers deliberately do NOT filter: cursor math
+# (``cursor_event_missing`` bound) and the offline-gap coverage check count
+# journal seqs and must keep seeing every row.
+REPLAY_SKIPPED_SSE_EVENTS = frozenset({"metering"})
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 _SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_REPLAY_MAX_ROWS = 4096
 _SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
+_SNAPSHOT_ARGS_MAX_ITEMS = 64
+_SNAPSHOT_ARGS_MAX_DEPTH = 8
+_SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
+_SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
+_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
 
 
 def _default_session_dir() -> Path:
@@ -64,6 +95,68 @@ def _lock_for(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _WRITER_LOCKS[key] = lock
         return lock
+
+
+def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return the complete filesystem identity used for summary-cache validity.
+
+    Includes ``st_ctime_ns`` so a same-inode, same-size rewrite that restores the
+    original ``mtime_ns`` (e.g. an atomic replace) still invalidates the cache —
+    ctime advances on any metadata/content change and cannot be forged back.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _get_cached_summary(path: Path) -> dict | None:
+    signature = _summary_cache_signature(path)
+    if signature is None:
+        return None
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        cached = _SUMMARY_CACHE.get(key)
+        if cached is None:
+            return None
+        cached_signature, summary = cached
+        if cached_signature != signature:
+            _SUMMARY_CACHE.pop(key, None)
+            return None
+        _SUMMARY_CACHE.move_to_end(key)
+        return deepcopy(summary)
+
+
+def _cache_summary(
+    path: Path,
+    summary: dict,
+    *,
+    expected_signature: tuple[int, int, int, int, int] | None = None,
+) -> None:
+    signature = _summary_cache_signature(path)
+    # The pre-read signature is an enforced TOCTOU precondition. In particular,
+    # a journal created after a missing-file read has ``None -> signature`` and
+    # must not cache the empty/unknown result under the new file's identity.
+    if signature is None or signature != expected_signature:
+        return
+    key = str(path)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[key] = (signature, deepcopy(summary))
+        _SUMMARY_CACHE.move_to_end(key)
+        while len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX_ENTRIES:
+            _SUMMARY_CACHE.popitem(last=False)
+
+
+def _discard_cached_summary(path: Path) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.pop(str(path), None)
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
@@ -101,6 +194,65 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     except (TypeError, ValueError):
         return run_id or None, None
     return run_id or None, seq
+
+
+def _snapshot_args_take_budget(budget: dict[str, int], amount: int) -> int:
+    remaining = max(0, int(budget.get("remaining") or 0))
+    take = min(remaining, max(0, amount))
+    budget["remaining"] = remaining - take
+    return take
+
+
+def _bound_snapshot_args_string(value: str, budget: dict[str, int]) -> str:
+    max_chars = min(len(value), _SNAPSHOT_ARGS_MAX_STRING_CHARS)
+    take = _snapshot_args_take_budget(budget, max_chars)
+    out = value[:take]
+    if take < len(value):
+        suffix_take = _snapshot_args_take_budget(budget, len(_SNAPSHOT_ARGS_TRUNCATED_SUFFIX))
+        out += _SNAPSHOT_ARGS_TRUNCATED_SUFFIX[:suffix_take]
+    return out
+
+
+def _bound_run_journal_snapshot_value(value: Any, budget: dict[str, int], depth: int) -> Any:
+    if budget.get("remaining", 0) <= 0:
+        return None
+    if isinstance(value, str):
+        return _bound_snapshot_args_string(value, budget)
+    if isinstance(value, dict):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return {}
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _SNAPSHOT_ARGS_MAX_ITEMS or budget.get("remaining", 0) <= 0:
+                break
+            bounded_key = _bound_snapshot_args_string(str(key), budget)
+            if not bounded_key:
+                continue
+            out[bounded_key] = _bound_run_journal_snapshot_value(item, budget, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        if depth >= _SNAPSHOT_ARGS_MAX_DEPTH:
+            return []
+        return [
+            _bound_run_journal_snapshot_value(item, budget, depth + 1)
+            for item in value[:_SNAPSHOT_ARGS_MAX_ITEMS]
+            if budget.get("remaining", 0) > 0
+        ]
+    if isinstance(value, (bool, int, float)) or value is None:
+        try:
+            _snapshot_args_take_budget(budget, len(json.dumps(value)))
+        except (TypeError, ValueError):
+            return None
+        return value
+    return _bound_snapshot_args_string(str(value), budget)
+
+
+def bound_run_journal_snapshot_args(args: Any) -> Any:
+    """Return recovery tool args with realistic values intact and pathological payloads bounded."""
+    if args is None:
+        return {}
+    budget = {"remaining": _SNAPSHOT_ARGS_MAX_TOTAL_CHARS}
+    return _bound_run_journal_snapshot_value(args, budget, 0)
 
 
 def _next_seq(path: Path) -> int:
@@ -287,6 +439,7 @@ def append_run_event(
             fh.flush()
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
+        _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
         return event
@@ -299,23 +452,43 @@ class RunJournalWriter:
         self.session_id = _validate_id(session_id, "session_id")
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
-        self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
-    def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+    def append_sse_event(self, event_name: str, payload=None) -> dict | None:
+        # Live-UI-only telemetry (metering) has no recovery value in the journal:
+        # nothing reads those rows back for recovery, and journaling them at ~10 Hz
+        # on marathon runs balloons the durable file (12+ MB of a single 18 MB run
+        # was metering). Skip the write entirely and return None so callers'
+        # journal-id plumbing (``(journaled or {}).get("event_id")``) is untouched.
+        # Not reserving a seq keeps the remaining journaled seqs contiguous, which
+        # the offline-gap coverage and replay-cursor contiguity checks rely on.
+        if str(event_name or "").strip() in REPLAY_SKIPPED_SSE_EVENTS:
+            return None
+        # Allocate the sequence inside the same per-path transaction that writes
+        # the row. Reserving here, then releasing the lock before append, lets a
+        # concurrent writer put a higher sequence on disk first.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
+
+
+def journal_replay_visible(event) -> bool:
+    """Return True when a journal row should be streamed to a reconnecting tab.
+
+    Live-UI-only telemetry rows (see ``REPLAY_SKIPPED_SSE_EVENTS``) carry no
+    recovery value — replaying a metering backlog only re-paints a stale TPS
+    number while multiplying the reconnect burst size. Writers no longer journal
+    them, but legacy journals may already contain them, so the replay emit sites
+    filter through this predicate. Non-dict rows are passed through (visible) so
+    an unexpected shape can never silently swallow user-visible output.
+    """
+    if not isinstance(event, dict):
+        return True
+    name = str(event.get("event") or event.get("type") or "")
+    return name not in REPLAY_SKIPPED_SSE_EVENTS
 
 
 def read_run_events(
@@ -340,14 +513,63 @@ def read_run_events(
     }
 
 
+def select_authoritative_terminal_event(events: Iterable[dict]) -> dict | None:
+    """Return the terminal event that owns the run's settled outcome.
+
+    ``stream_end`` is transport closure, so a preceding semantic terminal event
+    (done, cancel, or error) remains authoritative. Among semantic terminal
+    events, the latest journal row wins.
+    """
+    terminal_events = [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("terminal")
+    ]
+    return next(
+        (
+            event
+            for event in reversed(terminal_events)
+            if event.get("event") != "stream_end"
+        ),
+        terminal_events[-1] if terminal_events else None,
+    )
+
+
+def runtime_model_from_events(session_id: str, stream_id: str, events: Iterable[dict]) -> dict | None:
+    """Project only observed serving identity for this journal owner.
+
+    A fallback warning or malformed later observation invalidates old evidence;
+    the configured selection and free-text status never supply serving identity.
+    """
+    observed = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("session_id") != session_id or event.get("run_id") != stream_id:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            if event.get("event") == "runtime_model":
+                observed = None
+            continue
+        if event.get("event") == "warning" and payload.get("type") == "fallback":
+            observed = None
+        elif event.get("event") == "runtime_model":
+            observed = None
+            if (payload.get("session_id") != session_id or payload.get("stream_id") != stream_id
+                or not isinstance(payload.get("model"), str) or not payload["model"].strip()
+                or not isinstance(payload.get("fallback_active"), bool)
+                or payload.get("phase") not in ("observed_output", "route_observed")):
+                continue
+            observed = {key: payload[key] for key in (
+                "session_id", "stream_id", "model", "fallback_active", "phase")}
+            if isinstance(payload.get("provider"), str) and payload["provider"].strip():
+                observed["provider"] = payload["provider"]
+    return observed
+
+
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
-    terminal_events = [event for event in ordered if event.get("terminal")]
-    terminal = next(
-        (event for event in reversed(terminal_events) if event.get("event") != "stream_end"),
-        terminal_events[-1] if terminal_events else None,
-    )
+    terminal = select_authoritative_terminal_event(ordered)
     status = terminal.get("terminal_state") if terminal else ("running" if ordered else "unknown")
     return {
         "session_id": str(session_id),
@@ -359,12 +581,20 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
         "terminal": bool(terminal),
         "terminal_state": status,
         "last_event": (last or {}).get("event"),
+        "runtime_model": runtime_model_from_events(session_id, run_id, ordered),
     }
 
 
 def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
-    journal = read_run_events(session_id, run_id, session_dir=session_dir)
-    return _summary_from_events(session_id, run_id, journal.get("events") or [])
+    path = _run_path(session_id, run_id, session_dir=session_dir)
+    cached = _get_cached_summary(path)
+    if cached is not None:
+        return cached
+    pre_read_signature = _summary_cache_signature(path)
+    events, _malformed = _read_jsonl(path)
+    summary = _summary_from_events(session_id, run_id, events)
+    _cache_summary(path, summary, expected_signature=pre_read_signature)
+    return summary
 
 
 def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = None) -> tuple[int, float, int]:
@@ -407,10 +637,35 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
     journal_root = root / RUN_JOURNAL_DIR_NAME
     for path in journal_root.glob(f"*/{rid}.jsonl"):
         session_id = path.parent.name
-        events, _malformed = _read_jsonl(path)
-        summary = _summary_from_events(session_id, rid, events)
+        summary = _get_cached_summary(path)
+        if summary is None:
+            pre_read_signature = _summary_cache_signature(path)
+            events, _malformed = _read_jsonl(path)
+            summary = _summary_from_events(session_id, rid, events)
+            _cache_summary(path, summary, expected_signature=pre_read_signature)
         summary["path"] = str(path)
         return summary
+    return None
+
+
+def find_run_file(run_id: str, *, session_dir: Path | None = None) -> tuple[str, Path] | None:
+    """Locate a run journal file by run id WITHOUT parsing its body.
+
+    Hot callers that immediately read the full journal (the live-snapshot
+    rebuild) must not pay :func:`find_run_summary`'s full-file parse first:
+    on a long live run the file holds tens of thousands of rows and parsing
+    it twice per rebuild dominated the snapshot cost. Returns
+    ``(session_id, path)`` for the first match, or ``None`` when the run id
+    is invalid or no journal exists.
+    """
+    try:
+        rid = _validate_id(run_id, "run_id")
+    except ValueError:
+        return None
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    for path in journal_root.glob(f"*/{rid}.jsonl"):
+        return path.parent.name, path
     return None
 
 
@@ -576,8 +831,11 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         # ``_note_assigned_seq`` take — so a concurrent append on another path
         # cannot mutate the dict mid-iteration (``dictionary changed size``).
         with _SEQ_CACHE_LOCK:
-            for key in [k for k in _SEQ_CACHE if str(Path(k).parent) == dir_key]:
-                del _SEQ_CACHE[key]
+            for cache_key in [entry for entry in _SEQ_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SEQ_CACHE[cache_key]
+        with _SUMMARY_CACHE_LOCK:
+            for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
+                del _SUMMARY_CACHE[cache_key]
     return removed
 
 

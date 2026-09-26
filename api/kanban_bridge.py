@@ -19,7 +19,9 @@ import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
 
+from api.agent_compat import agent_attr
 from api.helpers import bad, j
+from api.workspace import resolve_trusted_workspace
 
 BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
@@ -30,6 +32,11 @@ def _kb():
     from hermes_cli import kanban_db as kb
 
     return kb
+
+
+def _kb_connect(kb, board=None):
+    """Raw ``kb.connect`` (moved to ``hermes_cli.kanban_db_connect`` by the Agent split)."""
+    return agent_attr(kb, "connect", "hermes_cli.kanban_db_connect")(board=board)
 
 
 def _resolve_board(parsed):
@@ -92,13 +99,13 @@ def _conn(board=None):
     """
     kb = _kb()
     kb.init_db(board=board)
-    closing = getattr(kb, "connect_closing", None)
+    closing = agent_attr(kb, "connect_closing", "hermes_cli.kanban_db_connect", None)
     if closing is not None:
         return closing(board=board)
     # Older kanban_db builds (and lightweight test doubles) without
     # connect_closing: fall back to the raw connection; sqlite3's own
     # context manager at least scopes the transaction.
-    return kb.connect(board=board)
+    return _kb_connect(kb, board=board)
 
 
 def _obj_dict(value):
@@ -719,10 +726,11 @@ def _dispatch_payload(parsed):
     kb = _kb()
     dry_run = _bool_query(parsed, "dry_run", False)
     max_spawn = _int_query(parsed, "max", 8, minimum=1, maximum=100)
-    if not hasattr(kb, "dispatch_once"):
+    dispatch_once = agent_attr(kb, "dispatch_once", "hermes_cli.kanban_db_dispatch", None)
+    if dispatch_once is None:
         raise ValueError("dispatcher is unavailable")
     with _conn(board=board) as conn:
-        result = kb.dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
+        result = dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
     if isinstance(result, dict):
         return result
     try:
@@ -786,7 +794,7 @@ def _board_counts_for_slug(slug):
     if not kb.board_exists(slug):
         return {}
     try:
-        conn = kb.connect(board=slug)
+        conn = _kb_connect(kb, board=slug)
     except Exception:
         return {}
     try:
@@ -855,6 +863,13 @@ def _create_board_payload(body):
     slug = str(body.get("slug") or "").strip()
     if not slug:
         raise ValueError("slug is required")
+    board_kwargs = {}
+    if "default_workdir" in body:
+        raw_workdir = str(body.get("default_workdir") or "").strip()
+        if raw_workdir:
+            board_kwargs["default_workdir"] = str(resolve_trusted_workspace(raw_workdir))
+        else:
+            board_kwargs["default_workdir"] = ""
     try:
         meta = kb.create_board(
             slug,
@@ -862,6 +877,7 @@ def _create_board_payload(body):
             description=body.get("description") or None,
             icon=body.get("icon") or None,
             color=body.get("color") or None,
+            **board_kwargs,
         )
     except (ValueError, AttributeError) as exc:
         raise ValueError(str(exc)) from exc
@@ -894,6 +910,10 @@ def _update_board_payload(slug, body):
         raise ValueError(f"invalid board slug: {slug!r}") from exc
     if not normed or not kb.board_exists(normed):
         raise LookupError(f"board {slug!r} does not exist")
+    board_kwargs = {}
+    if "default_workdir" in body:
+        raw_workdir = str(body.get("default_workdir") or "").strip()
+        board_kwargs["default_workdir"] = str(resolve_trusted_workspace(raw_workdir)) if raw_workdir else ""
     archived = body.get("archived")
     if isinstance(archived, str):
         archived = archived.strip().lower() in {"1", "true", "yes", "on"}
@@ -904,6 +924,7 @@ def _update_board_payload(slug, body):
         icon=body.get("icon"),
         color=body.get("color"),
         archived=archived if isinstance(archived, bool) else None,
+        **board_kwargs,
     )
     return {"board": _board_meta_dict(meta), "read_only": False}
 
@@ -1007,7 +1028,7 @@ def _kanban_sse_fetch_new(board, cursor):
         if board != default_slug and not kb.board_exists(board):
             return cursor, []
     try:
-        conn = kb.connect(board=board)
+        conn = _kb_connect(kb, board=board)
     except Exception:
         return cursor, []
     try:

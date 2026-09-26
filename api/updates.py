@@ -28,6 +28,7 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.subprocess_utils import windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
+_FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -74,6 +76,29 @@ _GIT_LOCK_SIGNATURES = (
     'another git process seems to be running',
     'unable to create .git/index.lock',
 )
+
+
+def _windows_restart_spawn(args, **kwargs):
+    """Spawn the replacement process for a Windows self-restart."""
+    return subprocess.Popen(args, **kwargs)
+
+
+def _windows_restart_exit(code):
+    """Exit the old process after a Windows replacement is running."""
+    os._exit(code)
+
+
+def _windows_restart_command():
+    """Return the canonical replacement command for the current packaging mode."""
+    if getattr(sys, "frozen", False):
+        return list(sys.argv)
+
+    executable = sys.executable
+    if executable.lower().endswith("python.exe"):
+        windowless_executable = executable[:-4] + "w.exe"
+        if os.path.isfile(windowless_executable):
+            executable = windowless_executable
+    return [executable, str(REPO_ROOT / "server.py")]
 # Lock files we previously enumerated for auto-removal in v2. v2.2 no longer
 # removes anything on the server, so the enumerable list is no longer needed;
 # ``_inventory_locks`` reports whatever ``.git/**/*.lock`` files currently exist
@@ -214,9 +239,14 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            [git_executable] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
-            encoding='utf-8', errors='replace',
+            [git_executable] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
@@ -430,21 +460,15 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # diff-index --quiet exits 1 with no stdout/stderr to *signal* a dirty tree
-    # (not an error). _run_git() substitutes a synthetic "git exited with
-    # status N" diagnostic when both streams are empty, which makes the naive
-    # `if not out` guard always false on dirty trees — silently dropping the
-    # suffix and defeating dev-build cache busting (static/foo.js?v=… stays
-    # identical to the last-committed version). Treat the synthetic shape as
-    # the dirty signal; real errors (timeouts, missing git) carry a different
-    # diagnostic and correctly suppress the suffix.
-    if not out or out.startswith('git exited with status '):
-        diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
-        if diff_ok and diff:
-            digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
-            return f"-dirty-{digest}"
-        return "-dirty"
-    return ""
+    # Only diff-index status 1 means dirty. Keep version display consistent
+    # with the strict action-time probe; all other failures suppress the suffix.
+    if out != 'git exited with status 1':
+        return ""
+    diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
+    if diff_ok and diff:
+        digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
+        return f"-dirty-{digest}"
+    return "-dirty"
 
 
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:
@@ -456,7 +480,7 @@ def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | No
 
 
 def _detect_webui_version() -> str:
-    """Detect the running WebUI version from git or a baked-in fallback file.
+    """Detect the running WebUI version from git or installed fallback files.
 
     Resolution order:
       1. ``git describe --tags --always --dirty`` — works in any git checkout.
@@ -466,7 +490,9 @@ def _detect_webui_version() -> str:
       2. ``api/_version.py`` — a fallback written by the Docker / CI release
          workflow when ``.git`` is not present in the image.  Expected to define
          ``__version__ = 'vX.Y.Z'``.
-      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+      3. ``api/_scm_version.py`` — setuptools-scm output in an installed wheel.
+         Its PEP 440 value is normalized to the channel-neutral ``v...`` form.
+      4. ``'unknown'`` — last resort; displayed as-is in the settings badge.
     """
     # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
     # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
@@ -489,6 +515,16 @@ def _detect_webui_version() -> str:
                 return m.group(1)
         except Exception:
             pass
+
+    # Installed-wheel fallback: setuptools-scm writes a generated module that
+    # is separate from the Docker/Nix-owned _version.py contract above.
+    try:
+        from api._scm_version import __version__ as scm_version
+        scm_version = str(scm_version).strip()
+        if scm_version:
+            return scm_version if scm_version.startswith(('v', 'exp-v')) else f'v{scm_version}'
+    except Exception:
+        pass
 
     return 'unknown'
 
@@ -1267,6 +1303,22 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     return None
 
 
+def _probe_dirty(
+    path: Path, timeout: int = 1, *, legacy_empty_is_dirty: bool = False,
+) -> bool | None:
+    """Return dirty, clean, or unknown for a working-tree probe."""
+    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    if ok:
+        return False
+    if out == 'git exited with status 1' or (legacy_empty_is_dirty and (not out or out.startswith('git exited with status '))):
+        return True
+    logger.warning(
+        'git dirty probe failed; treating working-tree state as unknown: %s',
+        out,
+    )
+    return None
+
+
 def _is_dirty(path: Path, timeout: int = 1) -> bool:
     """Return True when the working tree has uncommitted changes vs HEAD.
 
@@ -1276,10 +1328,11 @@ def _is_dirty(path: Path, timeout: int = 1) -> bool:
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
     """
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
-    if ok:
-        return False
-    return not out or out.startswith('git exited with status ')
+    # Older checker consumers model diff-index status 1 as ('', False). Keep
+    # that boolean contract here; force updates use the strict tri-state form.
+    return _probe_dirty(
+        path, timeout=timeout, legacy_empty_is_dirty=True,
+    ) is True
 
 
 def _ignored_agent_update_info() -> dict:
@@ -1687,9 +1740,9 @@ def _schedule_restart(delay: float = 2.0) -> None:
     loaded on the next request, rather than running with a mix of old and
     new Python modules in sys.modules.
 
-    os.execv() replaces the current process image with a fresh interpreter
-    running the same argv — sessions are preserved on disk, the HTTP port
-    is reclaimed within the delay window, and the client's own
+    The restart replaces the current process image or starts the canonical
+    server entrypoint, depending on platform and packaging mode. Sessions are
+    preserved on disk, the HTTP port is reclaimed within the delay window, and the client's own
     ``setTimeout(() => location.reload(), 2500)`` lands after the restart.
 
     Coordinates with ``_apply_lock``: when the user updates both webui
@@ -1727,84 +1780,47 @@ def _schedule_restart(delay: float = 2.0) -> None:
             try:
                 # Re-exec into the just-pulled image.
                 #
-                # sys.argv[0]'s meaning depends on how the server was launched:
-                #
-                #   * Source checkout (`python server.py` via bootstrap.py /
-                #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
-                #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
-                #     the interpreter. CPython treats argv[1] as the script to
-                #     run, so we must pass [sys.executable] + sys.argv.
-                #
-                #   * Frozen/packaged build (PyInstaller, embedded zipapp,
-                #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
-                #     [sys.executable] + sys.argv would re-insert the binary as
-                #     argv[1] — the kernel launches it, the interpreter treats
-                #     the binary itself as the "script" to run, and execv
-                #     effectively becomes a recursive no-op that never reaches
-                #     bind(), leaving the WebUI stuck "offline" after every
-                #     self-update. Pass argv as-is instead.
-                #
-                # Distinguish the two cases with sys.frozen (set by
-                # PyInstaller / zipapp / similar). For source checkouts the
-                # `[sys.executable] + sys.argv` form is the canonical CPython
-                # re-exec idiom (same shape Flask/Django reloaders use) and
-                # is the correct path.
-                #
                 # IMPORTANT: On Windows, os.execv() does NOT replace the
                 # current process — it spawns a new process while the old
                 # one keeps running.  This causes "address already in use"
                 # because the old process still holds the port.  On Windows
-                # we use subprocess.Popen() + os._exit() instead.
+                # we use a detached spawn + exit instead.
                 if sys.platform == 'win32':
-                    import subprocess
-                    if getattr(sys, "frozen", False):
-                        args = sys.argv
-                    else:
-                        args = [sys.executable] + sys.argv
-                    # Prefer pythonw.exe over python.exe so the restarted
-                    # server does not create a visible console window.
-                    # sys.executable may point at python.exe (console
-                    # subsystem); substitute pythonw.exe if it exists
-                    # next to python.exe.
-                    _exe = sys.executable
-                    if _exe.lower().endswith('python.exe'):
-                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
-                        if os.path.isfile(_w_exe):
-                            if getattr(sys, "frozen", False):
-                                args = sys.argv
-                            else:
-                                args = [_w_exe] + sys.argv
+                    args = _windows_restart_command()
                     # Start new process fully detached with NO console
                     # window.  DETACHED_PROCESS alone is not sufficient
                     # on modern Windows — without CREATE_NO_WINDOW a
                     # python.exe (console-subsystem) child still flashes
                     # an empty terminal window, which the user then
                     # manually kills (taking the WebUI with it).
-                    subprocess.Popen(
-                        args,
-                        cwd=os.getcwd(),
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                        close_fds=True,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    try:
+                        _windows_restart_spawn(
+                            args,
+                            cwd=os.getcwd(),
+                            creationflags=(
+                                subprocess.DETACHED_PROCESS
+                                | subprocess.CREATE_NEW_PROCESS_GROUP
+                                | subprocess.CREATE_NO_WINDOW
+                            ),
+                            close_fds=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        logger.exception("Windows WebUI restart spawn failed")
+                        return
                     # Exit immediately — the port is released as soon as
                     # this process dies, allowing the new process to bind.
-                    os._exit(0)
+                    _windows_restart_exit(0)
                 else:
                     if getattr(sys, "frozen", False):
                         os.execv(sys.executable, sys.argv)
                     else:
                         os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
-                # Last-resort: if execv fails for any reason, just exit so the
-                # process supervisor (start.sh / Docker) restarts us.
-                os._exit(0)
+                # Last-resort: let the process supervisor restart us.
+                _windows_restart_exit(0)
 
     threading.Thread(target=_do, daemon=True).start()
 
@@ -1887,17 +1903,41 @@ def _agent_gateway_restart_failure_message(target: str, restart_result: dict) ->
     )
 
 
+def _discard_local_changes(path: Path, reset_ref: str) -> bool:
+    """Discard local changes and reset *path* to *reset_ref*."""
+    # Do not use -x: ignored build/cache artifacts should survive force update.
+    _run_git(['checkout', '.'], path)
+    # Best-effort clean: a `git clean -fd` failure is NOT fatal. The
+    # following `reset --hard` overwrites any tracked-file collisions
+    # regardless, and residual untracked files that git can't delete are
+    # harmless. In particular, on Windows a file named after a reserved
+    # device name (nul, con, prn, aux, com1-9, lpt1-9) — which can appear
+    # in the working tree when a shell command redirects to `> nul` under
+    # Git Bash — cannot be removed via the normal Win32 path that git uses,
+    # so `clean` exits non-zero. Aborting the whole force update over that
+    # left users stuck (issue #4914). Log the stderr for diagnostics and
+    # proceed to the reset, which is what actually applies the update.
+    clean_out, clean_ok = _run_git(['clean', '-fd'], path)
+    if not clean_ok:
+        logger.warning(
+            'force_apply_update: `git clean -fd` failed (non-fatal, '
+            'continuing to reset --hard): %s',
+            clean_out,
+        )
+    _, ok = _run_git(['reset', '--hard', reset_ref], path)
+    return ok
+
+
 def apply_force_update(target: str, channel=None) -> dict:
-    """Force-reset the target repo to the latest remote HEAD.
+    """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
     merge conflicts, this discards all local modifications (checkout .) and
-    resets to origin/<branch> — equivalent to what the diverged/conflict
-    error messages ask the user to run manually.
+    resets to the selected update ref. A dirty stable WebUI checkout with no
+    promoted ref resets to its symbolic HEAD so the commit itself is unchanged.
 
-    Should only be called when apply_update() has already returned a
-    response with ``conflict: True`` or ``diverged: True`` and the user
-    has confirmed they want to discard local changes.
+    The endpoint is called after the user has confirmed they want to discard
+    local changes, including the stable no-ref dirty-checkout recovery path.
 
     CHANNEL SAFETY (rewind guard): ``reset --hard`` is destructive. When the
     selected channel resolves to a ref that is an ANCESTOR of HEAD (i.e. the
@@ -1955,13 +1995,19 @@ def apply_force_update(target: str, channel=None) -> dict:
         # force to. Do NOT fall back to origin/master (firehose). See
         # _select_apply_compare_ref channel semantics.
         if compare_ref is None:
-            return {
-                'ok': True,
-                'message': f'{target} is already up to date on the {channel} channel.',
-                'target': target,
-                'up_to_date': True,
-                'channel': channel,
-            }
+            dirty_state = None
+            if target == 'webui' and channel == 'stable':
+                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+            if dirty_state is True:
+                compare_ref = 'HEAD'
+            else:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
 
         # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
         # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
@@ -1983,28 +2029,7 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'channel': channel,
                 'refused_rewind': True,
             }
-        # Discard local modifications and untracked colliders before resetting.
-        # Do not use -x: ignored build/cache artifacts should survive force update.
-        _run_git(['checkout', '.'], path)
-        # Best-effort clean: a `git clean -fd` failure is NOT fatal. The
-        # following `reset --hard` overwrites any tracked-file collisions
-        # regardless, and residual untracked files that git can't delete are
-        # harmless. In particular, on Windows a file named after a reserved
-        # device name (nul, con, prn, aux, com1-9, lpt1-9) — which can appear
-        # in the working tree when a shell command redirects to `> nul` under
-        # Git Bash — cannot be removed via the normal Win32 path that git uses,
-        # so `clean` exits non-zero. Aborting the whole force update over that
-        # left users stuck (issue #4914). Log the stderr for diagnostics and
-        # proceed to the reset, which is what actually applies the update.
-        clean_out, clean_ok = _run_git(['clean', '-fd'], path)
-        if not clean_ok:
-            logger.warning(
-                'force_apply_update: `git clean -fd` failed (non-fatal, '
-                'continuing to reset --hard): %s',
-                clean_out,
-            )
-        _, ok = _run_git(['reset', '--hard', compare_ref], path)
-        if not ok:
+        if not _discard_local_changes(path, compare_ref):
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
         with _cache_lock:
@@ -2367,11 +2392,8 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
-    # git pull leaves stale Python modules in sys.modules — agent imports that
-    # reference new symbols (functions, classes) added in the update will fail
-    # on the next request with AttributeError / ImportError.  os.execv() re-
-    # execs the same interpreter with the same argv, picking up the new code
-    # cleanly without requiring the user to restart manually.
+    # git pull leaves stale Python modules in sys.modules. Replacing the process
+    # loads the updated code cleanly without requiring a manual restart.
     #
     # The 2 s delay gives the HTTP response time to flush to the client before
     # the process replaces itself.  The client already does

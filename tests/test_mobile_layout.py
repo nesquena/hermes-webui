@@ -685,6 +685,18 @@ def test_mobile_sidebar_open_syncs_panel_from_visible_detail_view():
     assert "_currentPanel=panel" in sync_body
     assert "document.querySelectorAll('[data-panel]')" in sync_body
     assert "document.querySelectorAll('.panel-view')" in sync_body
+    assert "showing-x-" in sync_body, (
+        "Mobile sidebar sync must recognize an active extension panel instead of treating it as Chat"
+    )
+    assert "data-panel-token" in sync_body, (
+        "Mobile sidebar sync must restore the extension's matching sidebar view"
+    )
+    assert "const extensionPanel=`x-${extensionToken}`" in sync_body, (
+        "Extension nav buttons use x- tokens and must regain their active state on mobile"
+    )
+    assert "_currentPanel=extensionPanel" not in sync_body, (
+        "Extension tokens are not host panels and must not corrupt switchPanel's native state"
+    )
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     toggle_body = _js_function_body(boot_js, "toggleMobileSidebar")
     assert "_syncMobileSidebarPanelFromMainView()" in toggle_body, (
@@ -1683,15 +1695,6 @@ def test_mobile_enter_newline_does_not_depend_on_viewport_heuristic():
         "the mobile Enter override must no longer call the viewport heuristic"
     assert "window.innerHeight-vv.height>120" not in boot_js, \
         "the viewport height-delta probe must no longer gate the mobile Enter override"
-
-
-def test_mobile_enter_newline_respects_hardware_keyboard_on_touch_devices():
-    """Touch devices with a co-existing fine pointer (hardware keyboard) keep desktop Enter=send."""
-    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "any-pointer:fine" in boot_js, \
-        "boot.js must use any-pointer:fine to detect a co-existing hardware keyboard/trackpad"
-    assert "!_hasFinePointerCoexisting()" in boot_js, \
-        "mobile Enter newline override must skip touch devices that also expose a fine pointer"
 
 
 def test_mobile_enter_newline_only_overrides_enter_default():

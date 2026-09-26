@@ -1,11 +1,11 @@
 import json
 import os
 import pathlib
-import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
 
+import tests.conftest as _conftest
 from tests._pytest_port import BASE
 from tests.conftest import requires_agent_modules
 
@@ -20,7 +20,7 @@ def _remove_path(path: pathlib.Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.exists():
-        shutil.rmtree(path)
+        _conftest._rmtree_retry(path)
 
 
 class _IsolatedSkillsDirs:

@@ -195,3 +195,57 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+def sync_session_title(session_id: str, title: str, profile: Optional[str] = None) -> None:
+    """Sync an auto-generated title to state.db (not gated by sync_to_insights).
+
+    Background title generation writes the title to the WebUI sidecar JSON but
+    not to hermes-agent's state.db, so ``hermes sessions list`` shows blank
+    titles for WebUI sessions.  This function bridges that gap and is called
+    from the background title update/refresh paths after a title is persisted.
+
+    Uses ``set_auto_title`` (LLM provenance) so it will only populate a row that
+    is NULL or holds a lower-authority auto-title, and never overwrites a manual
+    rename made via CLI/Gateway/TUI (``set_auto_title`` returns ``False``,
+    untouched, when a higher-authority title holds the row).  This means title
+    refreshes (where state.db already holds the initial auto-title) are
+    effectively no-ops at the state.db layer -- acceptable because the primary
+    goal is ensuring ``hermes sessions list`` is not blank.
+
+    On a title collision (two sessions with the same auto-title), the title is
+    de-duplicated via ``get_next_title_in_lineage`` (e.g. "My Session" ->
+    "My Session #2") and retried, so the second session is never left blank.
+    """
+    if not title:
+        return
+    db = _get_state_db(profile=profile)
+    if not db:
+        return
+    try:
+        # Ensure the session row exists (idempotent) so the UPDATE has a target.
+        db.ensure_session(session_id=session_id, source='webui')
+        # hermes-agent's SessionDB.set_auto_title_if_empty was renamed to
+        # set_auto_title(session_id, title, *, source) in the state-module
+        # split (agent commit 53db597201, released v2026.9.7). set_auto_title
+        # preserves the same "only populate NULL / never clobber a manual
+        # rename" semantics (returns False, untouched, when a higher-authority
+        # title holds the row) and requires an explicit auto source.
+        _llm_source = getattr(db, "TITLE_SOURCE_LLM", "llm")
+        try:
+            db.set_auto_title(session_id, title, source=_llm_source)
+        except ValueError:
+            # state.db enforces uniqueness on sessions.title, so a byte-identical
+            # auto-title generated for two sessions raises ValueError here. Derive
+            # a de-duplicated variant (e.g. "My Session" -> "My Session #2") and
+            # retry instead of leaving the second row blank (#6964).
+            alt = db.get_next_title_in_lineage(title)
+            if alt and alt != title:
+                db.set_auto_title(session_id, alt, source=_llm_source)
+    except Exception:
+        logger.debug("Failed to sync session title to state.db for %s", session_id)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close state.db")

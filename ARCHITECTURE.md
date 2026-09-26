@@ -50,15 +50,17 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
     ctl.sh                 Daemon lifecycle wrapper (start/stop/restart/status/logs) for homelab installs.
-    pyproject.toml         Tooling config (ruff lint gate). NOT a packaged distribution.
+    pyproject.toml         Standard build metadata plus the Ruff lint gate; source-checkout launch surface still centers on bootstrap.py / start.sh / ctl.sh.
     Dockerfile             python:3.12-slim container image
     docker-compose.yml     Compose config with named volume and optional auth
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
     api/
       __init__.py          Package marker
+      agent_compat.py      Resolver for Hermes Agent names moved to sibling modules (compatibility-only)
       auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
+      goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
@@ -235,6 +237,67 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Session transcript reconciliation with `state.db`
+
+`reconciled_state_db_messages_for_session()` uses
+`merge_session_messages_append_only()` to combine a WebUI sidecar or context
+projection with active Agent `state.db` rows. Its explicit
+`incoming_provenance="state_db"` fence permits a state-only row whose timestamp
+predates the sidecar tail to use a safe chronological slot. Paginated
+`msg_limit` consumers rely on this merged order directly rather than applying a
+later timestamp sort.
+
+The same merge helper also stitches ordered child sidecars onto archived
+compression parents. Those calls leave incoming provenance unverified, so their
+stable message sequence remains append-only even when parent rows carry later,
+restamped timestamps. Timestamp alone is never authority to move a continuation
+inside its parent transcript.
+
+If an older row could only be placed before the first surviving sidecar/context
+row, the insertion helper declines it to avoid resurrecting compacted history.
+Reconciliation then appends that row instead of dropping it; rows without a
+usable timestamp and rows at or after the sidecar tail also append normally.
+The fallback therefore preserves an accepted state-only row when exact ordering
+is ambiguous, while safely placeable recovery rows remain chronological.
+
+#### Imported `state.db` sidebar projection
+
+`api.models.get_cli_sessions()` projects conversations from the active Hermes
+profile's `state.db` into sidebar-shaped rows. The default projection keeps
+interactive sources (CLI, TUI, ACP, messaging, and similar user-facing sessions)
+in a bounded 20-row candidate window. Background sources use independent recovery
+passes so a high-volume worker source cannot consume that interactive window:
+
+- Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
+- Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
+- Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+
+Source-specific views still use their dedicated bounds, and the later sidebar
+visibility stage decides whether recovered background rows are shown. In
+`all_profiles=True` mode the per-profile source bounds are disabled before rows
+are merged; cross-profile scoping, visibility, deduplication, and final route
+limits remain downstream responsibilities.
+
+#### Compression lineage and session-list invalidation
+
+`api.agent_sessions._is_continuation_session()` is the shared classifier for
+sidebar projection, lineage metadata/reporting, and `state.db` transcript
+stitching. It uses the direct parent link, no conflicting non-empty source,
+`compression` or `cli_close` parent end reason, and the existing two-second
+`started_at` overlap allowance. A `source="tool"` child is always a separate
+conversation, even when its parent is also a tool session or has no source.
+A direct `_branched_from`, `_delegate_from`, or `_reset_from` marker in the
+child's `model_config` also makes a boundary; inherited ancestor markers do
+not. Malformed or unverifiable marker evidence fails closed as a boundary.
+The overlap allowance is the existing master policy, not a new window set by
+this change.
+
+The gateway watcher's cheap database fingerprint includes `model_config`, so
+a marker-only update causes a fresh projection. Its published-payload hash
+covers every emitted session field, not just ID, activity time and message
+count; a changed projected title or lineage field can therefore emit
+`sessions_changed` even without message-row churn.
+
 ### 4.3 SSE Streaming Engine
 
 This is the most architecturally interesting part. Two endpoints cooperate:
@@ -376,6 +439,108 @@ read_file_content(workspace, rel):
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
 
+### 4.8 Persistent Goal Profile Boundary
+
+`api/goals.py` exposes the WebUI `/goal` command payloads and post-turn evaluation hook.
+Hermes Agent's native `GoalManager` is the authoritative owner of goal evaluation,
+continuation decisions, wait barriers, failure counters, contracts, subgoals, and
+`state.db` persistence.
+
+For a profile-scoped WebUI session, the bridge delegates only when the Agent exposes
+both the context-local `set_hermes_home_override()` API and call-time default
+`SessionDB` path resolution. The bridge probes the resolved default path under the
+selected context before constructing the native manager, then binds that profile's
+Hermes home before every native call. The override is reset in a `finally` block after
+every operation, so concurrent sessions using the same session ID under different
+profiles cannot cross-read or cross-write goal state. Goal snapshot rollback uses the
+same scoped native persistence path.
+
+Older Hermes Agent versions that lack either capability continue through
+`_LegacyProfileGoalManager`, which pins persistence to the selected profile's explicit
+`state.db` path. This includes intermediate versions whose context API is present but
+whose default `SessionDB()` path remains frozen at module import. Keep this fallback
+compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
+than a second WebUI implementation.
+
+### 4.9 Hermes Agent Moved-Name Compatibility
+
+Hermes Agent owns its module layout. Its September 2026 decomposition moved names the
+WebUI uses (for example `tools.approval.set_current_session_key` to
+`tools.approval_context`) into `<stem>_<topic>` sibling modules. The old paths resolve
+only through temporary PLUGIN-COMPAT `__getattr__` pointers that emit
+`HermesPluginCompatWarning` and are removed on schedule. The Agent's
+`compat_manifest.json` is the authoritative map of what moved where.
+
+WebUI code reaches a moved name only through
+`api.agent_compat.agent_attr(owner, name, home, default=...)`, which resolves in this
+order:
+
+1. the owner module's own namespace: pre-split Agents, and tests that stub the original
+   module in `sys.modules` or patch the name onto it;
+2. the `home` module: split Agents, with or without the old-path pointer (no warning);
+3. plain attribute access on the owner: non-module test doubles.
+
+It raises like the import it replaces (or returns `default`), so each call site keeps its
+existing fallback. Current users: approval session identity and MCP discovery
+(`streaming.py`), `/reload-mcp` (`commands.py`), MCP runtime status (`routes.py`), Claude
+Code credential linking (`oauth.py`), LM Studio reasoning options (`config.py`), and
+kanban connections and dispatch (`kanban_bridge.py`).
+
+Import names that are still native to their module directly. Never
+`from <old module> import <moved name>`, and never feature-detect a moved name with
+`hasattr`/`getattr` on the old module: once the pointers are removed those silently turn
+"moved" into "missing" behind the call sites' broad `except` blocks. When a later Agent
+split moves another name, route it through `agent_attr` and add pre-split and
+pointer-removed cases to `tests/test_agent_compat.py`. The resolver is
+compatibility-only: delete it, and import directly from the new homes, once the WebUI
+stops supporting Agents that predate the split.
+
+### 4.10 MCP Runtime Profile Boundary
+
+Hermes Agent owns the in-process MCP ledger. It keys a connection by
+`(profile_home_key, name)` and registers its tools in that profile's registry overlay
+only when the calling task serves a *routed* profile: the context-local Hermes-home
+override differs from the process home. Otherwise the connection uses the bare server
+name and the global registry slot, which belong to the process profile.
+
+- `api.profiles._set_hermes_home()` is the single writer of the process-profile home:
+  startup (`init_profile_state()`) and `switch_profile(process_wide=True)` both go
+  through it, so `get_process_profile_home()` and the Agent pin
+  (`hermes_constants.pin_process_hermes_home()`, when the Agent provides it) are updated
+  in the same step as `HERMES_HOME`. Streaming turns still mirror their profile into
+  `os.environ['HERMES_HOME']` for legacy readers; without the pin, that mirror makes a
+  turn's own profile look like the process profile, so same-named servers of different
+  profiles share one bare-name connection.
+- `/api/mcp/servers`, `/api/mcp/tools`, `/api/notes/sources` and `/reload-mcp` run
+  their Agent calls inside `api.mcp_runtime.mcp_runtime_scope()`, which binds the
+  request profile's home and secret scope (root profile included) without touching
+  `os.environ`. Status, tool count and inventory are read from one scope; the inventory
+  lists only tools in that profile's own registry slot for servers it configures.
+- A connection *serves* a profile when that profile owns it (`_server_scope_keys`, else
+  the scope in the key) or adopted it (`_server_tool_scopes`, an identical shared
+  connection). `api.mcp_runtime.ledger_key_serves_view()` is the one predicate for
+  status, inventory and the reload summary. The Agent's launch-profile view (scope
+  `None`) is process-wide, so `filter_runtime_status_to_view()` downgrades
+  `get_mcp_status()` rows of servers the root profile does not serve to `configured`
+  rather than showing a routed profile's connection, tool count or connect error.
+- The scope is trusted only when the Agent's routing decision matches the profile WebUI
+  resolved. When it cannot be confirmed (for example a same-profile turn's mirror on an
+  Agent without the pin), status and inventory withhold runtime data
+  (`runtime_scope: "unavailable"`, shown as a notice in the MCP panel) and
+  `/reload-mcp` refuses instead of resetting another owner's connection.
+- `/reload-mcp` calls `shutdown_mcp_servers(scope=..., names=...)` with the profile's
+  own scope and the names of its live connections; `scope=None` without `names` is the
+  process-wide wildcard and is used only with Agents that predate profile-scoped MCP
+  (`runtime_scope: "legacy_process"`). A scoped shutdown only clears connect backoff for
+  the live keys it tears down, so WebUI also drops the profile's own cooldown/error
+  entries (`clear_profile_connect_cooldowns()`) before rediscovery: a server that failed
+  to spawn is retried by the reload, as the wildcard did, without touching another
+  owner's backoff.
+
+Status and inventory stay passive: they never start or probe an MCP server. Ledger key
+helpers resolve to Hermes Agent's `tools.mcp_tool_scope` when present so the key shape
+has one owner; the local fallbacks only cover Agents that predate that module.
+
 ---
 
 ## 5. Frontend Architecture: Current State
@@ -435,7 +600,9 @@ to the active conversation rather than a global app setting.
 
 Session management:
     newSession()          POST /api/session/new, update S.session, save to localStorage
-    loadSession(sid)      GET /api/session?session_id=X, check INFLIGHT first, update S
+    loadSession(sid)      GET /api/session?session_id=X (initial load uses the
+                          bounded tail `msg_limit=30`; jump-to-start and outline
+                          jump pass `msg_limit=all`), check INFLIGHT first, update S
     deleteSession(sid)    POST /api/session/delete, handle active/inactive cases correctly
     renderSessionList()   GET /api/sessions, rebuild #sessionList DOM
 
@@ -1303,7 +1470,14 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /                          Returns full HTML app (index page)
     /index.html                Same as /
     /health                    {"status":"ok","sessions":N}
-    /api/session               ?session_id=X -> full session + messages. 400 if no ID.
+    /api/session               ?session_id=X -> session + messages. 400 if no ID.
+                               Bare (no msg_limit) keeps the historical full-transcript
+                               contract. Recovery paths request a bounded tail
+                               (`msg_limit=30`) and restore `_messages_truncated` /
+                               `_messages_offset` before persisting anchor-scene
+                               metadata. Outline jump and jump-to-start opt in to the
+                               full transcript via the explicit `msg_limit=all`
+                               escape hatch. See #7310 / #7625 / #7628.
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
@@ -1312,7 +1486,11 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/chat/stream           ?stream_id=X -> SSE stream. Long-lived. Emits token/tool/
                                approval/done/error events.
     /api/chat/stream/status    ?stream_id=X -> {"active": true/false, "stream_id": X}
-    /api/approval/pending      ?session_id=X -> {"pending": entry_or_null}
+    /api/approval/pending      ?session_id=X -> {"pending": entry_or_null}. The approval/clarify
+                               fallback pollers stop on a 409 session_profile_mismatch.
+    /api/git-info              ?session_id=X -> {"git": status_or_null}. State.db-only sessions
+                               (CLI, subagents) use their stored workspace if it resolves via
+                               resolve_trusted_workspace; missing/untrusted -> {"git": null}.
     /api/approval/inject_test  ?session_id=X&pattern_key=K&command=C -> test-only endpoint.
                                Injects a pending approval entry into the server process.
     /api/file/raw              ?session_id=X&path=P -> raw file bytes with correct MIME type.

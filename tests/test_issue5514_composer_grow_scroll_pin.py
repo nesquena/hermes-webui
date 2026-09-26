@@ -35,15 +35,308 @@ from pathlib import Path
 
 import pytest
 
+from tests._composer_metrics import CONFIG_LARGE
+
 ROOT = Path(__file__).parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Static wiring
-# ---------------------------------------------------------------------------
+def _function_source(source: str, name: str) -> str:
+    start = source.find(f"function {name}(")
+    assert start != -1, f"{name} not found"
+    open_brace = source.find("{", start)
+    depth = 0
+    for index in range(open_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"{name} is not balanced")
+
+
+def test_single_line_growth_does_not_write_height_in_node_fixture():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = '';
+        let writes = 0;
+        const msg = {
+          value: 'a',
+          offsetHeight: 44,
+          scrollHeight: 44,
+          style: {
+            set height(_value) { writes += 1; },
+            get height() { return '44px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        const getComputedStyle = () => ({ minHeight: '44px' });
+        let sendUpdates = 0;
+        function updateSendBtn() { sendUpdates += 1; }
+        function _repinMessagesAfterComposerResize() { throw new Error('one-line append must not repin transcript'); }
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, lastValue: _composerLastResizeValue, sendUpdates }));
+        """
+    ) % {"autoresize": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"writes": 0, "lastValue": "a", "sendUpdates": 1}
+
+
+def test_session_restore_replaces_tall_composer_with_natural_one_line_height():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = 'a\\nb';
+        let height = 150, writes = 0;
+        const msg = {
+          // Mirrors sessions.js draft restore: a prior multi-line value is
+          // replaced directly, then autoResize() runs without an input event.
+          value: 'a longer one-line restored draft',
+          get offsetHeight() { return height; },
+          get scrollHeight() { return height > 44 ? height : 44; },
+          style: {
+            set height(value) { writes += 1; height = value === 'auto' ? 44 : parseInt(value, 10); },
+            get height() { return height + 'px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        function updateSendBtn() {}
+        function _repinMessagesAfterComposerResize() {}
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, height, lastValue: _composerLastResizeValue }));
+        """
+    ) % {"autoresize": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "writes": 2,
+        "height": 44,
+        "lastValue": "a longer one-line restored draft",
+    }
+
+
+def test_append_to_an_oversized_composer_remeasures_natural_height():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = 'short prefi';
+        let height = 176, writes = 0;
+        const msg = {
+          // The content is an append-only update, but the textarea is still
+          // taller than the content needs. The fast path must not preserve it.
+          value: 'short prefix',
+          get offsetHeight() { return height; },
+          get scrollHeight() { return height > 44 ? height : 44; },
+          style: {
+            set height(value) { writes += 1; height = value === 'auto' ? 44 : parseInt(value, 10); },
+            get height() { return height + 'px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        const getComputedStyle = () => ({ minHeight: '44px' });
+        function updateSendBtn() {}
+        function _repinMessagesAfterComposerResize() {}
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, height, lastValue: _composerLastResizeValue }));
+        """
+    ) % {"autoresize": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "writes": 2,
+        "height": 44,
+        "lastValue": "short prefix",
+    }
+
+
+def test_programmatic_one_line_fill_refreshes_primary_button_without_height_writes():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    auto_resize = _autoresize_body()
+    composer_has_content = _function_source(UI_JS, "_composerHasContent")
+    primary_action = _function_source(UI_JS, "getComposerPrimaryAction")
+    button_icon = _function_source(UI_JS, "_setComposerPrimaryButtonIcon")
+    update_send = _function_source(UI_JS, "updateSendBtn")
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = '';
+        let heightWrites = 0;
+        const classes = new Set();
+        const btn = {
+          dataset: {}, style: {}, disabled: true, title: 'Type a message to send', innerHTML: '',
+          classList: {
+            toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+            contains(name) { return classes.has(name); },
+            add(name) { classes.add(name); },
+            remove(name) { classes.delete(name); },
+          },
+          setAttribute(name, value) { this[name] = value; },
+        };
+        const msg = {
+          value: 'prefilled', disabled: false, offsetHeight: 44, scrollHeight: 44,
+          style: { set height(_value) { heightWrites += 1; }, get height() { return '44px'; } },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : id === 'btnSend' ? btn : null;
+        const S = { busy: false, pendingFiles: [] };
+        const getComputedStyle = () => ({ minHeight: '44px' });
+        const window = { _hasPendingSelections() { return false; } };
+        function t(_key) { return _key; }
+        function requestAnimationFrame(callback) { callback(); return 1; }
+        function _applyBusyComposerPlaceholder() {}
+        function _repinMessagesAfterComposerResize() { throw new Error('one-line programmatic fill must not repin transcript'); }
+        %(composer_has_content)s
+        %(primary_action)s
+        %(button_icon)s
+        %(update_send)s
+        %(auto_resize)s
+        // This models URL prefill and other programmatic fills: no DOM input event
+        // is dispatched before autoResize() runs.
+        autoResize();
+        console.log(JSON.stringify({
+          heightWrites,
+          disabled: btn.disabled,
+          action: btn.dataset.action,
+          title: btn.title,
+          ariaLabel: btn['aria-label'],
+        }));
+        """
+    ) % {
+        "composer_has_content": composer_has_content,
+        "primary_action": primary_action,
+        "button_icon": button_icon,
+        "update_send": update_send,
+        "auto_resize": auto_resize,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "heightWrites": 0,
+        "disabled": False,
+        "action": "send",
+        "title": "Send message",
+        "ariaLabel": "Send message",
+    }
+
+
+def test_single_line_delete_still_runs_the_height_round_trip_in_node_fixture():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = 'hello';
+        let writes = 0, height = 100;
+        const msg = {
+          value: 'a',
+          get offsetHeight() { return height; },
+          scrollHeight: 44,
+          style: {
+            set height(value) { writes += 1; height = value === 'auto' ? 44 : parseInt(value, 10); },
+            get height() { return height + 'px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        let sendUpdates = 0;
+        function updateSendBtn() { sendUpdates += 1; }
+        function _repinMessagesAfterComposerResize() {}
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, height, lastValue: _composerLastResizeValue, sendUpdates }));
+        """
+    ) % {"autoresize": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"writes": 2, "height": 44, "lastValue": "a", "sendUpdates": 1}
+
+
+def _run_resize_boundary_fixture(*, value: str, previous_value: str, offset_height: int, scroll_height: int):
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = %(previous_value)r;
+        let writes = 0, height = %(offset_height)s, repins = 0;
+        const msg = {
+          value: %(value)r,
+          get offsetHeight() { return height; },
+          scrollHeight: %(scroll_height)s,
+          style: {
+            set height(value) { writes += 1; height = value === 'auto' ? 44 : parseInt(value, 10); },
+            get height() { return height + 'px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        function updateSendBtn() {}
+        function _repinMessagesAfterComposerResize() { repins += 1; }
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, height, lastValue: _composerLastResizeValue, repins }));
+        """
+    ) % {
+        "previous_value": previous_value,
+        "offset_height": offset_height,
+        "scroll_height": scroll_height,
+        "value": value,
+        "autoresize": body,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_newline_growth_keeps_full_resize_and_repin_path():
+    out = _run_resize_boundary_fixture(
+        value="a\nb",
+        previous_value="a",
+        offset_height=44,
+        scroll_height=68,
+    )
+    assert out == {"writes": 2, "height": 68, "lastValue": "a\nb", "repins": 1}
+
+
+def test_equal_length_replacement_keeps_full_resize_path():
+    out = _run_resize_boundary_fixture(
+        value="ab",
+        previous_value="cd",
+        offset_height=44,
+        scroll_height=44,
+    )
+    assert out == {"writes": 2, "height": 44, "lastValue": "ab", "repins": 0}
+
 
 def _helper_body() -> str:
     start = UI_JS.find("function _repinMessagesAfterComposerResize(")
@@ -118,8 +411,88 @@ def test_resize_observer_installed_on_composer():
     assert "can't strand" in BOOT_JS
 
 
-# ---------------------------------------------------------------------------
-# Behavioral (node vm) — the pin guard under a viewport shrink
+def _run_composer_single_row_fixture(*, value: str, previous_value: str,
+                                     offset_height: int, content_height: int | None = None,
+                                     config=None):
+    """Run the REAL autoResize() body against a faithful textarea stub whose
+    ``getComputedStyle`` returns a real composer's computed styles, and report the
+    observable resize behaviour (height writes, settled height, repins).
+
+    The configuration (and therefore every dimension) is derived from
+    ``static/style.css`` by ``tests/_composer_metrics.py`` instead of being typed
+    in here: the composer's box depends on the appearance font-size setting, and
+    hardcoding one configuration is exactly how the first revision of this test
+    encoded the 18px ``data-font-size=large`` composer as "stock".
+
+    ``content_height`` is the height the content WANTS (default: one row); a real
+    textarea reports its box height in scrollHeight while the box is taller than
+    the content and the content height once the box collapses to ``height:'auto'``.
+    """
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    config = CONFIG_LARGE if config is None else config
+    if content_height is None:
+        content_height = config.offset_height
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = %(previous_value)r;
+        let writes = 0, height = %(offset_height)s, repins = 0;
+        const NATURAL_ROW = %(natural_row)s;
+        const CONTENT_H = %(content_height)s;
+        const msg = {
+          value: %(value)r,
+          get offsetHeight() { return height; },
+          get scrollHeight() { return height > NATURAL_ROW ? height : CONTENT_H; },
+          style: {
+            set height(value) { writes += 1; height = value === 'auto' ? NATURAL_ROW : parseInt(value, 10); },
+            get height() { return height + 'px'; },
+          },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        const COMPUTED = %(computed)s;
+        function getComputedStyle() { return COMPUTED; }
+        function updateSendBtn() {}
+        function _repinMessagesAfterComposerResize() { repins += 1; }
+        %(autoresize)s
+        autoResize();
+        console.log(JSON.stringify({ writes, height, lastValue: _composerLastResizeValue, repins }));
+        """
+    ) % {
+        "previous_value": previous_value,
+        "offset_height": offset_height,
+        "content_height": content_height,
+        "natural_row": config.offset_height,
+        "value": value,
+        "computed": json.dumps(config.computed),
+        "autoresize": body,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+def test_single_line_growth_skips_the_height_round_trip():
+    # The one-row fast path must be REACHABLE. It gates on el.offsetHeight against
+    # the min-height ceiling, and the composer's natural one-row height
+    # (line-height + vertical padding + borders) is 47.7px in the reported
+    # configuration (the 18px `data-font-size=large` composer) against a pre-fix
+    # ceiling of ceil(44px)+1 = 45px - so every append at rest missed the skip and
+    # paid the height:'auto' round trip, whose scrollHeight read forces a
+    # synchronous full-document reflow (typing lag that grows with the rendered
+    # transcript). Behaviour, not source: the fixture runs the real autoResize().
+    one_row = CONFIG_LARGE.offset_height
+    out = _run_composer_single_row_fixture(value="a", previous_value="", offset_height=one_row)
+    assert out == {"writes": 0, "height": one_row, "lastValue": "a", "repins": 0}, out
+    # ...and the widened ceiling stays BOUNDED: an oversized composer is far above
+    # one row, so it still remeasures back down (the #5514 shrink-back invariant).
+    oversized = _run_composer_single_row_fixture(
+        value="a", previous_value="", offset_height=CONFIG_LARGE.oversized_box
+    )
+    assert oversized == {"writes": 2, "height": one_row, "lastValue": "a", "repins": 0}, oversized
 # ---------------------------------------------------------------------------
 
 def _run(scenario):
@@ -232,6 +605,7 @@ def _run_autoresize(scenario):
         const $ = (id) => (id === 'msg' ? msgEl : id === 'messages' ? msgsEl : null);
         let _messageUserUnpinned = %(unpinned)s, _scrollPinned = %(pinned)s;
         let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = '';
         let _repinCalls = 0;
         function updateSendBtn(){}
         function _messageBottomDistance(){ return msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight; }
@@ -278,3 +652,178 @@ def test_steady_state_keystroke_preserves_near_bottom_unpinned_reader():
     out = _run_autoresize({"unpinned": "true", "pinned": "false", "scrolltop": 7990, "composerH": 164})
     assert out["scrollTop"] == 7990, f"near-bottom unpinned reader must not move; got {out}"
     assert out["repinCalls"] == 0, "must not re-pin an unpinned reader"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral (node vm) — native field-sizing avoids per-keystroke layout reads
+# ---------------------------------------------------------------------------
+
+def test_composer_declares_native_field_sizing_and_capped_overflow():
+    composer_rules = [part.split("}", 1)[0] for part in STYLE_CSS.split("textarea#msg{")[1:]]
+    required = ("field-sizing:content", "overflow-y:auto", "min-height:44px", "max-height:200px")
+    assert any(all(declaration in rule for declaration in required) for rule in composer_rules)
+    base_at = STYLE_CSS.index("  textarea#msg{")
+    state_rule = "  textarea#msg:placeholder-shown{field-sizing:fixed;}"
+    assert state_rule in STYLE_CSS
+    state_at = STYLE_CSS.index(state_rule)
+    assert state_at > base_at
+    assert "field-sizing:content" in STYLE_CSS[base_at : STYLE_CSS.index("}", base_at)]
+
+
+def test_native_field_sizing_skips_geometry_and_height_writes():
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        let geometryReads = 0, heightWrites = 0, sendUpdates = 0;
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = 'first line';
+        const msg = {
+          value: 'first line',
+          style: {
+            _height: '',
+            set height(value) { heightWrites += 1; this._height = value; },
+            get height() { return this._height; },
+          },
+          get scrollHeight() { geometryReads += 1; return 200; },
+          get offsetHeight() { geometryReads += 1; return 44; },
+        };
+        const messages = { scrollTop: 0 };
+        const $ = (id) => id === 'msg' ? msg : id === 'messages' ? messages : null;
+        let supportsNative = true;
+        const supportCalls = [];
+        const CSS = {
+          supports: (property, value) => {
+            supportCalls.push([property, value]);
+            return supportsNative && property === 'field-sizing' && value === 'content';
+          },
+        };
+        function getComputedStyle() { geometryReads += 1; return { minHeight: '44px' }; }
+        function updateSendBtn() { sendUpdates += 1; }
+        function _repinMessagesAfterComposerResize() { throw new Error('native path must not repin'); }
+        %(autoresize)s
+
+        msg.value += '\\nsecond line';
+        autoResize();
+        const first = { geometryReads, heightWrites, lastValue: _composerLastResizeValue, sendUpdates };
+
+        msg.style._height = '120px';
+        msg.value += '\\nthird line';
+        autoResize();
+        const native = { first, geometryReads, heightWrites, height: msg.style.height, lastValue: _composerLastResizeValue, sendUpdates };
+
+        supportsNative = false;
+        geometryReads = 0;
+        heightWrites = 0;
+        msg.style._height = '';
+        msg.value += '\\nfourth line';
+        autoResize();
+        console.log(JSON.stringify({ native, fallback: { geometryReads, heightWrites }, supportCalls }));
+        """
+    ) % {"autoresize": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["native"] == {
+        "first": {"geometryReads": 0, "heightWrites": 0, "lastValue": "first line\nsecond line", "sendUpdates": 1},
+        "geometryReads": 0,
+        "heightWrites": 1,
+        "height": "",
+        "lastValue": "first line\nsecond line\nthird line",
+        "sendUpdates": 2,
+    }
+    assert result["fallback"]["geometryReads"] > 0
+    assert result["fallback"]["heightWrites"] == 2
+    assert result["supportCalls"] == [["field-sizing", "content"]] * 3
+
+
+# ---------------------------------------------------------------------------
+# Strict min-height parse (#6349 Codex re-gate): the single-row fast path must
+# only fire when getComputedStyle(el).minHeight is a genuine "<number>px". A
+# percentage / auto / calc min-height must fail closed to the FULL resize —
+# otherwise a bogus parseFloat("50%")===50 would wrongly enable the fast path
+# and leave an oversized composer stuck tall.
+# ---------------------------------------------------------------------------
+
+def _run_fastpath_minheight(min_height_css, composer_h=50, content_h=44):
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _autoresize_body()
+    harness = textwrap.dedent(
+        """
+        // A composer at offsetHeight=%(composerH)s whose content fits %(contentH)s.
+        // An append-only keystroke arrives. The fast path (early return, NO resize)
+        // fires only when minHeight parses to a finite px AND offsetHeight is at
+        // that minimum. This scenario is chosen so a BUGGY lax parse of a
+        // percentage min-height ("50%%" -> parseFloat -> 50) would compute
+        // _isAtMinimumHeight = (50 <= ceil(50)+1) = true and WRONGLY skip, leaving
+        // the composer stuck at %(composerH)s. The strict /^<number>px$/ parse
+        // yields NaN for "50%%", forcing the full resize that shrinks it to %(contentH)s.
+        let _composerH = %(composerH)s;
+        let _styleHeightWrites = 0;
+        const msgEl = {
+          value: '',
+          get offsetHeight(){ return _composerH; },
+          scrollHeight: %(contentH)s,
+          style: {
+            set height(v){
+              _styleHeightWrites++;
+              if(v === 'auto'){ _composerH = %(contentH)s; }
+              else { _composerH = Math.min(parseInt(v,10) || _composerH, 200); }
+            },
+            get height(){ return _composerH + 'px'; },
+          },
+        };
+        const msgsEl = { scrollHeight: 1000, clientHeight: 500, scrollTop: 0 };
+        const $ = (id) => (id === 'msg' ? msgEl : id === 'messages' ? msgsEl : null);
+        function getComputedStyle(){ return { minHeight: %(minheight)r }; }
+        let _messageUserUnpinned = false, _scrollPinned = false;
+        let _composerAutoResizeRaf = 0;
+        let _composerLastResizeValue = '';
+        function updateSendBtn(){}
+        function _messageBottomDistance(){ return 0; }
+        function _setMessageScrollToBottom(){}
+        function _repinMessagesAfterComposerResize(){}
+
+        %(autoresize)s
+
+        msgEl.value = 'abc';   // append-only keystroke
+        autoResize();
+        console.log(JSON.stringify({ offsetHeight: _composerH, styleWrites: _styleHeightWrites }));
+        """
+    ) % {"minheight": min_height_css, "autoresize": body,
+         "composerH": composer_h, "contentH": content_h}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_percentage_minheight_never_enables_fast_path():
+    # THE #6349 Codex re-gate defect, red-before-green. A composer at 50px whose
+    # content fits 44px gets an append. With a "50%" min-height, a LAX
+    # parseFloat("50%")===50 would read _isAtMinimumHeight = (50 <= 51) = true and
+    # WRONGLY skip the resize, leaving the composer stuck at 50px. The strict
+    # /^<number>px$/ parse yields NaN, forcing the full resize down to 44px.
+    out = _run_fastpath_minheight("50%", composer_h=50, content_h=44)
+    assert out["styleWrites"] >= 1, f"percentage min-height must force the full resize; got {out}"
+    assert out["offsetHeight"] == 44, f"composer must shrink to its real content height; got {out}"
+
+
+def test_auto_and_calc_minheight_fail_closed_to_full_resize():
+    # auto / empty / calc min-height are equally unparseable as a fixed pixel min
+    # and must fail closed to the full resize path.
+    for css in ("auto", "", "calc(44px + 2%)"):
+        out = _run_fastpath_minheight(css, composer_h=50, content_h=44)
+        assert out["styleWrites"] >= 1, f"min-height={css!r} must force full resize; got {out}"
+        assert out["offsetHeight"] == 44, f"min-height={css!r}: composer must remeasure; got {out}"
+
+
+def test_valid_px_minheight_fast_path_still_skips_at_minimum():
+    # The optimization must still work: a composer already AT its 44px min-height
+    # with a valid "44px" min-height takes the fast path (no style.height write).
+    out = _run_fastpath_minheight("44px", composer_h=44, content_h=44)
+    assert out["styleWrites"] == 0, f"at-minimum append with valid px min-height must fast-path (no resize write); got {out}"
+    assert out["offsetHeight"] == 44

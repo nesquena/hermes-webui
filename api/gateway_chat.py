@@ -6,11 +6,14 @@ import logging
 import os
 import threading
 import time
+import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
 from api.config import (
+    AGENT_INSTANCES,
     CANCEL_FLAGS,
     PENDING_GOAL_CONTINUATION,
     STREAM_GOAL_RELATED,
@@ -21,9 +24,12 @@ from api.config import (
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
+    _parse_provider_qualified_model_id,
+    clear_session_writeback_owner_if_owned,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
+    peek_stream,
     register_active_run,
     unregister_active_run,
     unregister_stream_owner,
@@ -31,18 +37,163 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.turn_journal import append_turn_journal_event_for_stream
 
 logger = logging.getLogger(__name__)
 
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}
+_STREAM_RUN_LIFECYCLE: dict[str, dict[str, Any]] = {}
+_STREAM_RUN_STARTING_CONDITION = threading.Condition()
+GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
+# stream_id -> (base_url, api_key) of the Gateway the stream's run lives on, for Stop
+# and approval replies; a reattached run's Gateway need not be the process profile's.
+_STREAM_ENDPOINTS: dict[str, tuple[str, str]] = {}
+
+
+def gateway_run_endpoint(run_id: str) -> tuple[str, str]:
+    """URL and key of the Gateway that owns run_id; the process Gateway if no live stream holds it."""
+    run_id = str(run_id or "").strip()
+    with _STREAM_RUN_STARTING_CONDITION:
+        for stream_id, mapped in list(_STREAM_RUN_IDS.items()):
+            if run_id and mapped == run_id and stream_id in _STREAM_ENDPOINTS:
+                return _STREAM_ENDPOINTS[stream_id]
+    from api.config import get_config
+
+    return _gateway_base_url(get_config()), _gateway_api_key()
+
+
+def _mark_gateway_run_starting(stream_id: str) -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "pending",
+            "run_id": "",
+            "waiters": 0,
+            "owner_done": False,
+        }
+
+
+def _publish_gateway_run_id(stream_id: str, run_id: str) -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_RUN_IDS[stream_id] = run_id
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id) or {}
+        _STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "ready",
+            "run_id": run_id,
+            "waiters": int(state.get("waiters") or 0),
+            "owner_done": bool(state.get("owner_done")),
+        }
+        _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def _finish_gateway_run_starting(stream_id: str, *, result: str = "failed") -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id) or {}
+        if str(state.get("phase") or "").strip().lower() == "ready":
+            return
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "fallback" if result == "fallback" else "failed",
+            "run_id": "",
+            "waiters": int(state.get("waiters") or 0),
+            "owner_done": bool(state.get("owner_done")),
+        }
+        _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def _retire_gateway_run_starting_if_done(stream_id: str) -> bool:
+    state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+    if not state:
+        return False
+    if int(state.get("waiters") or 0) > 0:
+        return False
+    if not bool(state.get("owner_done")):
+        return False
+    _STREAM_RUN_LIFECYCLE.pop(stream_id, None)
+    _STREAM_RUN_IDS.pop(stream_id, None)
+    return True
+
+
+def _clear_gateway_run_starting(stream_id: str) -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+        if state:
+            state["owner_done"] = True
+        _retire_gateway_run_starting_if_done(stream_id)
+        _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def gateway_run_id_pending(stream_id: str) -> bool:
+    with _STREAM_RUN_STARTING_CONDITION:
+        return str((_STREAM_RUN_LIFECYCLE.get(stream_id) or {}).get("phase") or "").strip().lower() == "pending"
+
+
+def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    with _STREAM_RUN_STARTING_CONDITION:
+        state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+        if state:
+            state["waiters"] = int(state.get("waiters") or 0) + 1
+        try:
+            while True:
+                state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+                phase = str((state or {}).get("phase") or "").strip().lower()
+                if phase == "fallback":
+                    return False, None
+                if phase == "failed":
+                    return True, None
+                run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+                if phase == "ready":
+                    stored_run_id = str((state or {}).get("run_id") or "").strip()
+                    return True, run_id or stored_run_id or None
+                if run_id:
+                    return True, run_id
+                if not state:
+                    return False, None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return True, None
+                _STREAM_RUN_STARTING_CONDITION.wait(timeout=remaining)
+        finally:
+            state = _STREAM_RUN_LIFECYCLE.get(stream_id)
+            if state:
+                waiters = max(0, int(state.get("waiters") or 0) - 1)
+                state["waiters"] = waiters
+                if _retire_gateway_run_starting_if_done(stream_id):
+                    _STREAM_RUN_STARTING_CONDITION.notify_all()
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+# Backend tag of the in-process WebUI runtime. Local workers register their
+# active run with it; cache-only Steer only enqueues on this explicit value.
+WEBUI_LOCAL_CHAT_BACKEND = "legacy"
+
+
+def _gateway_model_field(model: str | None) -> str:
+    """Return the bare model name to put in a gateway request body.
+
+    The picker and ``_resolve_compatible_session_model_state`` intentionally
+    keep the full ``@provider:model`` string for internal routing (#1253), but
+    the gateway expects a bare model name and carries the provider separately.
+    Sent verbatim, ``@ollama-cloud:minimax-m2.7`` is forwarded to the upstream
+    provider API, which 404s on the ``@``-prefixed string (#6722).
+
+    Parsing is delegated to ``config._parse_provider_qualified_model_id()`` so
+    a multi-segment custom provider ID (``@custom:backup:model-a``) yields the
+    real model (``model-a``) instead of a positional-split fragment.
+    """
+    if not model:
+        return ""
+    value = str(model).strip()
+    parsed = _parse_provider_qualified_model_id(value)
+    if parsed:
+        return str(parsed[0] or "").strip()
+    return value
 
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
@@ -140,7 +291,7 @@ def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = N
     ).strip().lower()
     if raw in _GATEWAY_CHAT_BACKENDS:
         return "gateway"
-    return "legacy"
+    return WEBUI_LOCAL_CHAT_BACKEND
 
 
 def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
@@ -194,6 +345,73 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def _gateway_session_yolo_enabled(session_id: str) -> bool:
+    """Return the WebUI-owned, in-memory YOLO state for a browser session."""
+    try:
+        from tools.approval import is_session_yolo_enabled
+
+        return bool(is_session_yolo_enabled(str(session_id or "")))
+    except Exception:
+        return False
+
+
+def _settle_gateway_run_approval(
+    session_id: str,
+    approval_data: dict,
+    base_url: str,
+    api_key: str,
+) -> tuple[bool, dict | None, int]:
+    """Auto-approve or mirror one run approval at a session-linearized point."""
+    from api.route_approvals import gateway_yolo_handoff, submit_gateway_pending_mirror
+
+    run_id = str(approval_data.get("run_id") or "").strip()
+    identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
+    with gateway_yolo_handoff(session_id):
+        if _gateway_session_yolo_enabled(session_id):
+            try:
+                _auto_approve_gateway_run(
+                    base_url,
+                    api_key,
+                    run_id,
+                    approval_data["approval_id"] if identity_v1 else "",
+                )
+                return True, None, 0
+            except Exception:
+                # Fail closed: if remote approval fails, surface the real card
+                # before allowing a same-session toggle to pass the handoff.
+                logger.warning(
+                    "WebUI YOLO could not auto-approve run %s; showing approval card",
+                    run_id,
+                    exc_info=True,
+                )
+        head, total = submit_gateway_pending_mirror(session_id, approval_data)
+        return False, head, total
+
+
+def _auto_approve_gateway_run(
+    base_url: str,
+    api_key: str,
+    run_id: str,
+    approval_id: str,
+) -> None:
+    """Resolve one Runs API prompt using only the shipped approval contract.
+
+    This is a WebUI-owned compatibility path: the Runs API does not yet expose
+    session YOLO, so WebUI answers each approval request while its own session
+    flag is enabled. Native Agent-side YOLO would be preferable because it can
+    bypass gates before they pause and also covers Agent-owned computer-use
+    policy; https://github.com/NousResearch/hermes-agent/pull/61946 tracks that
+    API capability. Until then, do not send speculative fields to the Agent.
+    """
+    from api.runner_client import HttpRunnerClient
+
+    HttpRunnerClient(base_url=base_url, api_key=api_key).respond_approval(
+        run_id,
+        approval_id,
+        "once",
+    )
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -314,7 +532,9 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
         "preview": payload.get("label") or payload.get("preview"),
-        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "args": bound_run_journal_snapshot_args(payload.get("args"))
+        if isinstance(payload.get("args"), dict)
+        else {},
         "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
     if tid:
@@ -333,7 +553,10 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     pattern_key = str(payload.get("pattern_key") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
-    approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    raw_approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    approval_id = raw_approval_id
+    if not approval_id:
+        approval_id = uuid.uuid4().hex
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
@@ -351,19 +574,49 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "risk_level": risk,
         "run_id": run_id,
         "approval_id": approval_id,
+        "_gateway_raw_approval_id_present": bool(raw_approval_id),
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
     }
 
 
-def _run_gateway_runs_api_streaming(
-    session_id, msg_text, model, workspace, stream_id,
-    base_url, api_key, prefill_messages, body_extras,
-    *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
-):
-    """Submit via POST /v1/runs and relay SSE events including approval."""
-    url_runs = f"{base_url.rstrip('/')}/v1/runs"
+def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> None:
+    """Auto-approve or surface one runs-API approval request as a WebUI approval card."""
+    approval_data = _gateway_runs_approval_event(payload)
+    if not approval_data:
+        return
+    approval_data["run_id"] = run_id
+    from api.config import gateway_supports_approval_identity_v1
+    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
+    approval_data["_gateway_agent_identity_v1"] = identity_v1
+    auto_approved, head, total = _settle_gateway_run_approval(
+        session_id,
+        approval_data,
+        base_url,
+        api_key,
+    )
+    if not auto_approved:
+        put_gateway_event("approval", {**(head or approval_data), "pending_count": total})
+
+
+def _admit_gateway_run(url_runs, headers, run_body, stream_id) -> str:
+    """POST /v1/runs; the same stream and body return the originally admitted run id."""
+    req = urllib.request.Request(
+        url_runs,
+        data=json.dumps(run_body).encode("utf-8"),
+        # Durable run record on the gateway: GET /v1/runs/{id} survives either side restarting.
+        headers={**headers, "Idempotency-Key": f"webui-{stream_id}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        run_data = json.loads(resp.read(65536))
+    run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
+    if not run_id:
+        raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+    return run_id
+
+
+def _gateway_run_headers(session_id, api_key) -> dict:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -372,79 +625,92 @@ def _run_gateway_runs_api_streaming(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
-    message_content: Any = str(msg_text or "")
-    if attachments:
-        try:
-            from api.streaming import _build_native_multimodal_message
+    return headers
 
-            message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
-        except Exception:
-            logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
-            message_content = str(msg_text or "")
-    from api.streaming import _strip_oob_blocks
 
-    instructions_parts = []
-    conversation_history = []
-    for entry in getattr(session, "context_messages", None) or []:
-        if not isinstance(entry, dict):
-            continue
-        role = str(entry.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = entry.get("content")
-        if content is not None:
-            content = _strip_oob_blocks(content)
+def _run_gateway_runs_api_streaming(
+    session_id, msg_text, model, workspace, stream_id,
+    base_url, api_key, prefill_messages, body_extras,
+    *, put_gateway_event, cancel_event,
+    attachments=None, cfg=None, session=None,
+    active_provider: str = "",
+    on_run_id=None,
+):
+    """Submit via POST /v1/runs and relay SSE events including approval."""
+    try:
+        url_runs = f"{base_url.rstrip('/')}/v1/runs"
+        headers = _gateway_run_headers(session_id, api_key)
+        message_content: Any = str(msg_text or "")
+        if attachments:
+            try:
+                from api.streaming import _build_native_multimodal_message
+
+                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=active_provider, active_model=(model or ""), requested_provider=active_provider, profile=getattr(session, "profile", None))
+            except Exception:
+                logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
+                message_content = str(msg_text or "")
+        from api.streaming import _strip_oob_blocks
+
+        instructions_parts = []
+        conversation_history = []
+        for entry in getattr(session, "context_messages", None) or []:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = entry.get("content")
+            if content is not None:
+                content = _strip_oob_blocks(content)
+                conversation_history.append({"role": role, "content": content})
+        for entry in prefill_messages or []:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role") or "").strip().lower()
+            content = entry.get("content")
+            if role == "system":
+                if isinstance(content, str) and content.strip():
+                    instructions_parts.append(content)
+                elif content is not None:
+                    instructions_parts.append(str(content))
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+            if content is not None:
+                content = _strip_oob_blocks(content)
             conversation_history.append({"role": role, "content": content})
-    for entry in prefill_messages or []:
-        if not isinstance(entry, dict):
-            continue
-        role = str(entry.get("role") or "").strip().lower()
-        content = entry.get("content")
-        if role == "system":
-            if isinstance(content, str) and content.strip():
-                instructions_parts.append(content)
-            elif content is not None:
-                instructions_parts.append(str(content))
-            continue
-        if role not in {"user", "assistant"}:
-            continue
-        if content is not None:
-            content = _strip_oob_blocks(content)
-        conversation_history.append({"role": role, "content": content})
-    run_input = message_content
-    if isinstance(run_input, list):
-        run_input = [{"role": "user", "content": run_input}]
-    run_body = {
-        "model": model or "default",
-        "input": run_input,
-        **body_extras,
-        "session_id": session_id,
-    }
-    if instructions_parts:
-        run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
-    if conversation_history:
-        run_body["conversation_history"] = conversation_history
-    req = urllib.request.Request(
-        url_runs,
-        data=json.dumps(run_body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    update_active_run(stream_id, phase="gateway-request")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        run_data = json.loads(resp.read(65536))
-    run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
-    if not run_id:
-        raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+        run_input = message_content
+        if isinstance(run_input, list):
+            run_input = [{"role": "user", "content": run_input}]
+        run_body = {
+            "model": _gateway_model_field(model) or "default",
+            "input": run_input,
+            **body_extras,
+            "session_id": session_id,
+        }
+        if instructions_parts:
+            run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
+        if conversation_history:
+            run_body["conversation_history"] = conversation_history
+        update_active_run(stream_id, phase="gateway-request")
+        # Persist the exact body first: a restart before the run id is saved replays this admission.
+        if on_run_id is not None:
+            on_run_id("", request=run_body)
+        run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id)
+    except Exception:
+        _finish_gateway_run_starting(stream_id)
+        raise
 
-    _STREAM_RUN_IDS[stream_id] = run_id
+    usage: dict = {}
+    _publish_gateway_run_id(stream_id, run_id)
+    if on_run_id is not None:
+        on_run_id(run_id)
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
     headers_sse = dict(headers)
     headers_sse["Accept"] = "text/event-stream"
     req_events = urllib.request.Request(url_events, headers=headers_sse, method="GET")
     final_text = ""
-    usage: dict = {}
     sse_event = "message"
     with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
         for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
@@ -469,10 +735,10 @@ def _run_gateway_runs_api_streaming(
                 continue
             payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
             if payload_event == "approval.request":
-                approval_data = _gateway_runs_approval_event(payload)
-                if approval_data:
-                    approval_data["run_id"] = run_id
-                    put_gateway_event("approval", approval_data)
+                _relay_gateway_run_approval(
+                    session_id, run_id, payload, base_url, api_key,
+                    put_gateway_event=put_gateway_event,
+                )
                 sse_event = "message"
                 continue
             if payload_event in {"tool.started", "tool.completed", "reasoning.available"}:
@@ -516,6 +782,12 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.completed":
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    run_id,
+                    reason="Gateway run completed before approval resolution",
+                )
                 if payload.get("error"):
                     raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
@@ -527,8 +799,20 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    run_id,
+                    reason="Gateway run failed before approval resolution",
+                )
                 raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
             if payload_event == "run.cancelled":
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    run_id,
+                    reason="Gateway run was cancelled before approval resolution",
+                )
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
@@ -546,6 +830,210 @@ def _run_gateway_runs_api_streaming(
     return final_text, usage
 
 
+def stop_gateway_run(run_id: str) -> bool:
+    """Request gateway interruption and report whether it was acknowledged."""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return False
+    base_url, api_key = gateway_run_endpoint(run_id)
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/v1/runs/{urllib.parse.quote(run_id, safe='')}/stop",
+        data=b"{}",
+        headers=headers,
+        method="POST",
+    )
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=10) as response:
+            final_url = str(getattr(response, "geturl", lambda: req.full_url)() or "")
+            status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+            return 200 <= status < 300 and final_url == req.full_url
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        logger.debug("Gateway stop failed for run %s", run_id, exc_info=True)
+        return False
+
+
+_GATEWAY_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+GATEWAY_REATTACH_POLL_INTERVAL = 2.0
+# Consecutive unreachable polls tolerated before the reattached turn is failed (~5 min at 2s).
+GATEWAY_REATTACH_MAX_POLL_FAILURES = 150
+_REATTACH_SCAN_HEAD_BYTES = 16 * 1024
+
+
+def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=None, **extra) -> None:
+    """Persist the run id (or, before admission, the exact request) so a restarted WebUI can reattach."""
+    try:
+        with _get_session_agent_lock(session_id):
+            session = get_session(session_id)
+            if not _stream_writeback_is_current(session, stream_id):
+                return
+            session.gateway_run = {"run_id": run_id, "stream_id": stream_id, **extra}
+            if not run_id:
+                session.gateway_run["request"] = request
+            session.save(touch_updated_at=False)
+    except Exception:
+        logger.warning("Failed to persist gateway run %s for session %s", run_id, session_id, exc_info=True)
+        if not run_id:
+            raise  # never admit a run a restart could not recover
+
+
+def _get_gateway_run_status(base_url: str, api_key: str, run_id: str) -> dict:
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/v1/runs/{urllib.parse.quote(run_id, safe='')}",
+        headers=headers,
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read(1024 * 1024) or b"{}")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _await_gateway_run_result(
+    session_id, stream_id, run_id, base_url, api_key,
+    *, put_gateway_event, cancel_event,
+):
+    """Poll a run started by a previous WebUI process; same return contract as _run_gateway_runs_api_streaming."""
+    from api.route_approvals import settle_gateway_pending_run
+
+    _publish_gateway_run_id(stream_id, run_id)
+    update_active_run(stream_id, phase="gateway-reattached")
+    surfaced_approval_ids: set[str] = set()
+    failures = 0
+    while True:
+        if cancel_event.is_set():
+            put_gateway_event("cancel", {"message": "Cancelled by user"})
+            return None, {}
+        try:
+            status = _get_gateway_run_status(base_url, api_key, run_id)
+            failures = 0
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            code = getattr(exc, "code", None)
+            if code == 404:
+                raise RuntimeError("Gateway no longer has this run; its result could not be recovered after the WebUI restart.") from exc
+            if code in (401, 403):
+                raise RuntimeError(f"Gateway rejected the WebUI credentials (HTTP {code}) while reattaching to a run after the restart.") from exc
+            failures += 1
+            if failures >= GATEWAY_REATTACH_MAX_POLL_FAILURES:
+                raise RuntimeError("Gateway became unreachable while waiting for a run that outlived the WebUI restart.") from exc
+            cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+            continue
+        state = str(status.get("status") or "").strip().lower()
+        approval = status.get("approval")
+        if state == "waiting_for_approval" and isinstance(approval, dict):
+            approval_key = str(approval.get("approval_id") or approval.get("id") or approval.get("timestamp") or "")
+            if approval_key not in surfaced_approval_ids:
+                surfaced_approval_ids.add(approval_key)
+                _relay_gateway_run_approval(
+                    session_id, run_id, approval, base_url, api_key, put_gateway_event=put_gateway_event,
+                )
+        if state in _GATEWAY_RUN_TERMINAL_STATUSES:
+            settle_gateway_pending_run(session_id, run_id, reason=f"Gateway run {state} before approval resolution")
+            if state == "cancelled":
+                put_gateway_event("cancel", {"message": "Cancelled by gateway"})
+                return None, {}
+            if state != "completed":
+                raise RuntimeError(str(status.get("error") or f"Gateway run {state}"))
+            output = str(status.get("output") or "")
+            if output and stream_id in STREAM_PARTIAL_TEXT:
+                STREAM_PARTIAL_TEXT[stream_id] = output
+            return output, {k: v for k, v in _gateway_stream_usage(status).items() if v}
+        cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+
+
+def resume_gateway_runs_after_restart() -> list[str]:
+    """Reattach pending turns whose gateway run outlived the previous WebUI process; never raises.
+
+    Call before serving so stale-pending repair does not mark these turns interrupted.
+    """
+    from api import models as _models
+
+    try:
+        candidates = _sidecars_with_active_stream(_models.SESSION_DIR)
+    except Exception:
+        logger.warning("gateway reattach: could not scan session sidecars", exc_info=True)
+        return []
+    resumed: list[str] = []
+    for sid in candidates:
+        try:
+            if _resume_gateway_run_for_session(_models.Session.load_metadata_only(sid)):
+                resumed.append(sid)
+        except Exception:
+            logger.warning("gateway reattach failed for session %s", sid, exc_info=True)
+    if resumed:
+        logger.info("Reattached %d gateway run(s) that outlived the previous WebUI process", len(resumed))
+    return resumed
+
+
+def _sidecars_with_active_stream(session_dir) -> list[str]:
+    """Ids of sidecars (not the index, which can lag a save) whose header shows an active stream."""
+    ids = []
+    for path in sorted(session_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            with path.open("rb") as fp:
+                head = fp.read(_REATTACH_SCAN_HEAD_BYTES)
+        except OSError:
+            continue
+        if b'"active_stream_id": null' not in head:
+            ids.append(path.stem)
+    return ids
+
+
+def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
+    """URL and key of the session's own profile, root included, never the process-active profile."""
+    from api import profiles as _profiles
+    from api.config import get_config_for_profile_home
+
+    home = _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
+    environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
+    environ.update(_profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home)))
+    return _gateway_base_url(get_config_for_profile_home(home), environ), _gateway_api_key(environ)
+
+
+def _resume_gateway_run_for_session(session) -> bool:
+    from api.config import create_stream_channel, register_session_writeback_owner, register_stream_owner
+
+    run = (session.gateway_run if session is not None else None) or {}
+    stream_id = str(run.get("stream_id") or "")
+    # A persisted run is the authority whatever the process default backend is.
+    if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
+        return False
+    sid = session.session_id
+    endpoint = _gateway_endpoint_for_profile(session.profile)
+    with STREAMS_LOCK:
+        if stream_id in STREAMS:
+            return False
+        STREAMS[stream_id] = create_stream_channel()
+    register_stream_owner(stream_id, sid)
+    register_session_writeback_owner(sid, stream_id)
+    _mark_gateway_run_starting(stream_id)
+    threading.Thread(
+        target=_run_gateway_chat_streaming,
+        args=(sid, session.pending_user_message or "", session.model, session.workspace,
+              stream_id, list(session.pending_attachments or [])),
+        kwargs={
+            "model_provider": session.model_provider,
+            "goal_related": bool(run.get("goal_related")),
+            "regeneration": bool(run.get("regeneration")),
+            "reattach_run": run,
+            "reattach_endpoint": endpoint,
+        },
+        name=f"gateway-reattach-{stream_id[:12]}",
+        daemon=True,
+    ).start()
+    return True
+
 def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
     from api.streaming import (
         _classify_provider_error,
@@ -553,6 +1041,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         _provider_error_payload,
         _session_payload_with_full_messages,
         _snapshot_and_append_partial_on_error,
+        _terminal_turn_duration,
     )
 
     with _get_session_agent_lock(session_id):
@@ -565,8 +1054,10 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification["type"],
             error_classification.get("hint", ""),
         )
+        turn_duration = _terminal_turn_duration(session)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
+        session.gateway_run = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
@@ -584,6 +1075,8 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             "timestamp": int(time.time()),
             "_error": True,
         }
+        if turn_duration is not None:
+            error_message["_turnDuration"] = turn_duration
         if error_payload.get("details"):
             error_message["provider_details"] = error_payload["details"]
         if not isinstance(session.messages, list):
@@ -592,15 +1085,33 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.workspace = str(workspace)
         session.model = model
         session.model_provider = model_provider
+        terminal_session_persisted = False
         try:
             session.save()
+            terminal_session_persisted = True
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
         error_payload["session"] = redact_session_data(
             _session_payload_with_full_messages(session, tool_calls=[])
         )
         error_payload["session_id"] = session.session_id
+        error_payload["terminal_session_persisted"] = terminal_session_persisted
+        if terminal_session_persisted:
+            error_payload["terminal_session_persisted_session_id"] = session.session_id
         return error_payload
+
+
+def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
+    """Keep the prompt and a cancel marker when the run ended cancelled and Stop did not already settle it."""
+    from api.streaming import _persist_cancelled_turn
+
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        if not _stream_writeback_is_current(session, stream_id):
+            return
+        _persist_cancelled_turn(session, message="Cancelled by gateway")
+        session.gateway_run = None
+        session.save()
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -609,8 +1120,13 @@ def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
 
 def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     if not _stream_writeback_is_current(session, stream_id):
+        # Cancel clears active_stream_id eagerly; still drop this stream's run record.
+        if session is not None and (session.gateway_run or {}).get("stream_id") == stream_id:
+            session.gateway_run = None
+            session.save(touch_updated_at=False)
         return
     session.active_stream_id = None
+    session.gateway_run = None
     session.pending_user_message = None
     session.pending_attachments = None
     session.pending_started_at = None
@@ -621,14 +1137,10 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
 def _cleanup_gateway_pending_mirror(session_id: str) -> None:
     try:
         from api.route_approvals import (
-            _approval_sse_notify_locked,
-            _lock as _approval_lock,
-            reconcile_gateway_pending_mirror_locked,
+            retire_gateway_pending_mirror,
         )
 
-        with _approval_lock:
-            head, total, _ = reconcile_gateway_pending_mirror_locked(session_id)
-            _approval_sse_notify_locked(session_id, head, total)
+        retire_gateway_pending_mirror(session_id)
     except Exception:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
@@ -643,6 +1155,9 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    regeneration=False,
+    reattach_run=None,
+    reattach_endpoint=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -652,11 +1167,17 @@ def _run_gateway_chat_streaming(
     the configured Gateway API server into those local events and persists the
     final user/assistant turn back into the WebUI session.
     """
-    q = STREAMS.get(stream_id)
+    q = peek_stream(stream_id)
     if q is None:
+        _finish_gateway_run_starting(stream_id, result="fallback")
+        _clear_gateway_run_starting(stream_id)
         # Cancelled before the worker started; release the owner entry the route
         # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
         unregister_stream_owner(stream_id)
+        # Also release the writeback-owner entry the route layer registered, so
+        # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
+        # path (the teardown finally below never runs when we early-return here).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
     register_active_run(
         stream_id,
@@ -681,6 +1202,7 @@ def _run_gateway_chat_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
     success_writeback_committed = False
+    runs_api_pending_marked = True
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
@@ -703,7 +1225,7 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to note gateway event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put gateway event to queue")
@@ -722,6 +1244,23 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
+        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        with _STREAM_RUN_STARTING_CONDITION:
+            _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
+        try:
+            from api.config import _main_model_request_overrides
+            _gw_overrides = _main_model_request_overrides(
+                cfg,
+                effective_model=model,
+                effective_provider=model_provider,
+            )
+        except Exception:
+            _gw_overrides = {}
+        _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
+        _use_runs_api = bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
+        if not _use_runs_api and runs_api_pending_marked:
+            _finish_gateway_run_starting(stream_id, result="fallback")
+            runs_api_pending_marked = False
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
@@ -760,19 +1299,6 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
             prefill_messages = []
-        base_url = _gateway_base_url(cfg)
-        api_key = _gateway_api_key()
-        try:
-            from api.config import _main_model_request_overrides
-            _gw_overrides = _main_model_request_overrides(
-                cfg,
-                effective_model=model,
-                effective_provider=model_provider,
-            )
-        except Exception:
-            _gw_overrides = {}
-        # Capability gate: use runs API when gateway advertises approval support.
-        _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
             if model_provider:
@@ -781,16 +1307,37 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+            record_run = lambda run_id, request=None: _record_gateway_run(
+                session_id, stream_id, run_id, request=request,
+                regeneration=bool(regeneration), goal_related=bool(goal_related),
+            )
             try:
-                final_text, usage = _run_gateway_runs_api_streaming(
-                    session_id, msg_text, model, workspace, stream_id,
-                    base_url, api_key, prefill_messages, body_extras,
-                    put_gateway_event=put_gateway_event,
-                    cancel_event=cancel_event,
-                    attachments=attachments,
-                    cfg=cfg,
-                    session=s,
-                )
+                if reattach_run:
+                    run_id = str(reattach_run.get("run_id") or "").strip()
+                    if not run_id:
+                        # Crashed between admission and saving the id: the same key returns the original run.
+                        run_id = _admit_gateway_run(
+                            f"{base_url.rstrip('/')}/v1/runs", _gateway_run_headers(session_id, api_key),
+                            reattach_run["request"], stream_id,
+                        )
+                        record_run(run_id)
+                    final_text, usage = _await_gateway_run_result(
+                        session_id, stream_id, run_id, base_url, api_key,
+                        put_gateway_event=put_gateway_event,
+                        cancel_event=cancel_event,
+                    )
+                else:
+                    final_text, usage = _run_gateway_runs_api_streaming(
+                        session_id, msg_text, model, workspace, stream_id,
+                        base_url, api_key, prefill_messages, body_extras,
+                        put_gateway_event=put_gateway_event,
+                        cancel_event=cancel_event,
+                        attachments=attachments,
+                        cfg=cfg,
+                        session=s,
+                        active_provider=(model_provider or ""),
+                        on_run_id=record_run,
+                    )
             except Exception as exc:
                 error_payload = _settle_gateway_terminal_error(
                     session_id,
@@ -805,6 +1352,7 @@ def _run_gateway_chat_streaming(
                 put_gateway_event("apperror", error_payload)
                 return
             if final_text is None:
+                _settle_gateway_cancelled_turn(session_id, stream_id)
                 return
         else:
             # Legacy gateway path: emit unsupported approval notice once per session,
@@ -841,12 +1389,12 @@ def _run_gateway_chat_streaming(
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg, active_provider=(model_provider or ""), active_model=(model or ""), requested_provider=(model_provider or ""), profile=getattr(s, "profile", None))
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
             body = {
-                "model": model or "default",
+                "model": _gateway_model_field(model) or "default",
                 "stream": True,
                 "messages": [*prefill_messages, {"role": "user", "content": message_content}],
             }
@@ -898,12 +1446,13 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
-                            put_gateway_event("approval", approval_data)
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror
-                                submit_gateway_pending_mirror(session_id, approval_data)
+                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                                approval_data = {**(head or approval_data), "pending_count": total}
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
+                            put_gateway_event("approval", approval_data)
                         else:
                             logger.debug("Ignoring malformed gateway approval payload")
                         sse_event = "message"
@@ -1001,18 +1550,33 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
-            user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
             pending_source = getattr(s, "pending_user_source", None) or "webui"
-            if pending_source != "webui":
-                user_msg["_source"] = pending_source
-            if attachments:
-                user_msg["attachments"] = list(attachments)
+            from api.streaming import (
+                _active_turn_authority,
+                _active_turn_token_matches,
+                _materialize_active_turn_user,
+            )
+
+            active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
+            user_msg = _materialize_active_turn_user(
+                active_turn_identity,
+                str(msg_text or ""),
+                pending_source,
+            )
+            user_msg["timestamp"] = float(
+                active_turn_identity.get("timestamp") or now
+            )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_messages = list(getattr(s, "messages", None) or [])
-            previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+            stored_context = getattr(s, "context_messages", None)
+            previous_context = list(
+                stored_context
+                if isinstance(stored_context, list) and (regeneration or stored_context)
+                else getattr(s, "messages", None) or []
+            )
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
@@ -1052,6 +1616,9 @@ def _run_gateway_chat_streaming(
                     s.context_messages,
                     str(msg_text or ""),
                     source=pending_source,
+                    verification_nudge_provenance={
+                        "active_turn_identity": active_turn_identity,
+                    },
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)
@@ -1064,7 +1631,16 @@ def _run_gateway_chat_streaming(
                         if latest_text == msg_norm:
                             display = display[:-1]
                 s.messages = display + [user_msg, assistant_msg]
+            if active_turn_identity.get("token"):
+                current_display_rows = [
+                    message
+                    for message in s.messages
+                    if _active_turn_token_matches(message, active_turn_identity)
+                ]
+                if len(current_display_rows) == 1:
+                    current_display_rows[0]["timestamp"] = user_msg["timestamp"]
             s.active_stream_id = None
+            s.gateway_run = None
             s.pending_user_message = None
             s.pending_attachments = None
             s.pending_started_at = None
@@ -1098,6 +1674,21 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
+            # #6366 re-gate: record the durable same-stream completion
+            # event in the crash-safe turn journal. The run journal's
+            # terminal state is only reached on its own ``stream_end``
+            # write path, so a Gateway run whose terminal write is lost
+            # would otherwise leave no completion evidence at all and
+            # stale-cancel recovery would re-append a duplicate
+            # recovered row after the valid final answer.
+            try:
+                append_turn_journal_event_for_stream(
+                    session_id,
+                    stream_id,
+                    {"event": "completed", "created_at": time.time()},
+                )
+            except Exception:
+                logger.debug("Failed to append completed turn journal event", exc_info=True)
             success_writeback_committed = True
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
@@ -1170,6 +1761,17 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
+        mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+        if mapped_run_id:
+            try:
+                from api.route_approvals import settle_gateway_pending_run
+                settle_gateway_pending_run(
+                    session_id,
+                    mapped_run_id,
+                    reason="Gateway run ended during teardown before approval resolution",
+                )
+            except Exception:
+                logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
@@ -1178,6 +1780,7 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
+            AGENT_INSTANCES.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
@@ -1185,5 +1788,15 @@ def _run_gateway_chat_streaming(
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
-        _STREAM_RUN_IDS.pop(stream_id, None)
+        if runs_api_pending_marked and gateway_run_id_pending(stream_id):
+            _finish_gateway_run_starting(stream_id)
+        _clear_gateway_run_starting(stream_id)
+        with _STREAM_RUN_STARTING_CONDITION:
+            _STREAM_ENDPOINTS.pop(stream_id, None)
+        unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
+        # Release the writeback-owner entry the route layer registered for this
+        # Gateway run so SESSION_WRITEBACK_OWNERS does not grow unbounded across
+        # the process lifetime (compare-and-clear: only clears if still owned by
+        # this stream, mirroring the local streaming teardown).
+        clear_session_writeback_owner_if_owned(session_id, stream_id)

@@ -9,6 +9,7 @@ import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+BOOT_JS = ROOT / "static" / "boot.js"
 WORKSPACE_JS = ROOT / "static" / "workspace.js"
 SESSIONS_JS = ROOT / "static" / "sessions.js"
 UI_JS = ROOT / "static" / "ui.js"
@@ -208,12 +209,15 @@ def test_api_has_default_timeout_and_per_call_override_contract():
 
 
 def test_update_flows_keep_explicit_longer_timeouts():
-    """Legitimately long update flows should not inherit the generic 30s guard."""
+    """Network-bound update checks need a single-attempt 300s latency budget."""
+    boot = _source(BOOT_JS)
     src = _source(UI_JS)
     panels = _source(PANELS_JS)
     # /api/updates/check builds its body in a _checkBody var (to optionally add
-    # an explicit channel), but must still carry the 60s timeout override.
-    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000})" in panels
+    # an explicit channel). Both boot and manual callers need enough time for
+    # the endpoint's bounded fetches; api() does not retry ordinary timeouts.
+    assert "api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000})" in boot
+    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
     # apply/force now build their body inline to optionally carry the offered
     # channel (Codex debounce-race fix), but MUST still carry the 120s override.
@@ -230,17 +234,16 @@ def test_session_message_loads_keep_explicit_longer_timeouts():
         "      {timeoutMs:120000}\n"
         "    )"
     ) in src
+    # _loadOlderMessages now picks between two strategies (tail-growth vs
+    # msg_before paging) via a useBeforePaging ternary, but both keep the long
+    # timeoutMs:120000. Assert each URL + timeout survives in the source.
     assert (
-        "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,\n"
-        "      {timeoutMs:120000}\n"
-        "    )"
+        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,\n"
+        "          {timeoutMs:120000}"
     ) in src
     assert (
-        "api(\n"
-        "        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,\n"
-        "        {timeoutMs:120000}\n"
-        "      )"
+        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,\n"
+        "          {timeoutMs:120000}"
     ) in src
 
 

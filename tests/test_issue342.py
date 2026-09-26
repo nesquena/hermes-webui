@@ -30,8 +30,11 @@ def test_autolink_regex_in_rendermd():
     # Locate the renderMd function body
     rendermd_start = content.find('function renderMd(raw){')
     assert rendermd_start != -1, "renderMd function not found in ui.js"
-    # Find the closing brace after renderMd (look for the autolink pattern within it)
-    rendermd_body = content[rendermd_start:rendermd_start + 15000]
+    # Find the closing brace after renderMd (look for the autolink pattern within it).
+    # Window sized generously: renderMd has grown over time and the autolink pass
+    # sits well past the first 15k chars now — use a 30k window so a few added lines
+    # near the top of renderMd don't push the pattern out of a too-tight slice.
+    rendermd_body = content[rendermd_start:rendermd_start + 30000]
     assert 'https?:\\/\\/' in rendermd_body, (
         "Autolink regex (https?:\\/\\/) not found inside renderMd() body."
     )
@@ -45,8 +48,8 @@ def test_autolink_uses_esc_for_xss_safety():
     # Find the autolink section (between the SAFE_TAGS pass and paragraph wrap)
     autolink_idx = content.find('// Autolink: convert plain URLs')
     assert autolink_idx != -1, "Autolink comment not found in ui.js"
-    # Extract the autolink block (next ~600 chars after the comment)
-    autolink_block = content[autolink_idx:autolink_idx + 600]
+    # Extract the autolink block (next ~1200 chars after the comment)
+    autolink_block = content[autolink_idx:autolink_idx + 1200]
     # esc() must be used on the visible link text to prevent XSS
     assert 'esc(clean)' in autolink_block, (
         "Autolink block should use esc(clean) for the link display text (XSS safety), "
@@ -105,7 +108,7 @@ def test_autolink_target_blank_and_rel():
     autolink_idx = content.find('// Autolink: convert plain URLs')
     assert autolink_idx != -1, "Autolink comment not found"
     # Use a larger window to account for the stash preamble added by the fix
-    autolink_block = content[autolink_idx:autolink_idx + 700]
+    autolink_block = content[autolink_idx:autolink_idx + 1200]
     assert 'target="_blank"' in autolink_block, (
         'Autolinked URLs should have target="_blank"'
     )

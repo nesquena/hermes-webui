@@ -12,7 +12,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import re
@@ -21,23 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-logger = logging.getLogger(__name__)
-
-
-def _windows_hide_flags() -> int:
-    """Win32 ``creationflags`` that hide a short-lived console child's window
-    (``CREATE_NO_WINDOW``) without detaching it, so ``capture_output`` still
-    works. Returns ``0`` on non-Windows — the ``subprocess`` default, a genuine
-    no-op. Mirrors the ``api/updates.py`` pattern; kept local so workspace-git
-    never takes a hard dependency on the optional ``hermes_cli`` package (a
-    standalone/agent-less WebUI must keep full git functionality). See #5692.
-    """
-    if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return 0
-
-
+from api.subprocess_utils import windows_hide_flags
 from api.workspace import rmtree_anchored, safe_resolve_ws, unlink_anchored
+
+logger = logging.getLogger(__name__)
 
 
 GIT_TIMEOUT = 5
@@ -263,7 +249,7 @@ def _run_git(
             text=True,
             timeout=timeout,
             env=run_env,
-            creationflags=_windows_hide_flags(),
+            creationflags=windows_hide_flags(),
         )
     except subprocess.TimeoutExpired as exc:
         raise GitWorkspaceError("Git command timed out", "timeout") from exc
@@ -306,7 +292,7 @@ def _config_names_for_scope(
         capture_output=True,
         timeout=GIT_TIMEOUT,
         env=env,
-        creationflags=_windows_hide_flags(),
+        creationflags=windows_hide_flags(),
     )
     if result.returncode not in {0, 1}:
         if ignore_unsupported:

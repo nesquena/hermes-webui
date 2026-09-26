@@ -268,8 +268,11 @@ def install_crash_visibility(
             sigusr1 = getattr(signal, "SIGUSR1", None)
             if sigusr1 is not None:
                 try:
+                    # A diagnostic signal must not inherit SIGUSR1's default
+                    # terminate action after the dump.  Chaining here made a
+                    # hang probe kill the server and trigger service restarts.
                     faulthandler.register(
-                        sigusr1, file=_FAULT_STREAM, all_threads=True, chain=True
+                        sigusr1, file=_FAULT_STREAM, all_threads=True, chain=False
                     )
                 except Exception:
                     pass

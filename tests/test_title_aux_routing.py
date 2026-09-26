@@ -13,18 +13,73 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
-_agent_stub.auxiliary_client = _aux_stub
+import pytest
+
+from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
+
+
+@pytest.fixture(autouse=True)
+def _install_auxiliary_client_modules():
+    """Scope the synthetic hermes-agent modules to each test (#6630)."""
+    with auxiliary_client_modules():
+        yield
 
 
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
-    return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+    return patch_tg_config(config_dict)
+
+
+class TestAuxiliaryClientModuleRestore(unittest.TestCase):
+    """Restoration properties the #6630 fix depends on.
+
+    These drive the helper directly. The fixture boundary itself is proved by
+    the cross-file run in the PR description: running this file before
+    tests/test_issue4685_post_compression_context_metering.py used to fail that
+    file's agent.context_compressor import and no longer does.
+    """
+
+    def test_prior_modules_restored_by_identity(self):
+        prior_agent = types.ModuleType("agent")
+        prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_agent.auxiliary_client = prior_aux
+        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+            with auxiliary_client_modules():
+                self.assertIsNot(sys.modules["agent"], prior_agent)
+                self.assertIsNot(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(sys.modules["agent"], prior_agent)
+            self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(prior_agent.auxiliary_client, prior_aux)
+
+    def test_absent_keys_removed(self):
+        with patch.dict(sys.modules):
+            sys.modules.pop("agent", None)
+            sys.modules.pop("agent.auxiliary_client", None)
+            with auxiliary_client_modules():
+                self.assertIn("agent", sys.modules)
+                self.assertIn("agent.auxiliary_client", sys.modules)
+            self.assertNotIn("agent", sys.modules)
+            self.assertNotIn("agent.auxiliary_client", sys.modules)
+
+    def test_prior_none_value_preserved(self):
+        """A present-but-None entry is not an absent entry."""
+        with patch.dict(sys.modules, {"agent": None, "agent.auxiliary_client": None}):
+            with auxiliary_client_modules():
+                self.assertIsNotNone(sys.modules["agent"])
+            self.assertIn("agent", sys.modules)
+            self.assertIsNone(sys.modules["agent"])
+            self.assertIsNone(sys.modules["agent.auxiliary_client"])
+
+    def test_restored_after_exception(self):
+        prior_agent = types.ModuleType("agent")
+        prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_agent.auxiliary_client = prior_aux
+        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                with auxiliary_client_modules():
+                    raise RuntimeError("boom")
+            self.assertIs(sys.modules["agent"], prior_agent)
+            self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
 
 
 class TestAuxTitleConfigured(unittest.TestCase):
@@ -786,10 +841,13 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
 
         self.assertEqual(captured.get('hermes_home'), 'profile-home')
         self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
-        self.assertEqual(Path(str(captured.get('skill_module_dir'))), Path('profile-home') / 'skills')
+        self.assertEqual(
+            Path(str(captured.get('skill_module_dir'))),
+            Path('profile-home') / 'skills',
+        )
         self.assertEqual(captured.get('restored_hermes_home'), 'default-home')
-        self.assertEqual(getattr(fake_skill_module, 'HERMES_HOME'), 'default-home')
-        self.assertEqual(getattr(fake_skill_module, 'SKILLS_DIR'), 'default-home/skills')
+        self.assertEqual(fake_skill_module.HERMES_HOME, 'default-home')
+        self.assertEqual(fake_skill_module.SKILLS_DIR, 'default-home/skills')
         self.assertEqual(mock_session.title, 'Profile Routed Title')
 
     def test_background_profile_env_routes_load_config_and_provider_credentials(self):
@@ -1022,6 +1080,197 @@ class TestAuxInvalidAuxTriggersAgentFallback(unittest.TestCase):
 
         # Agent route must NOT have been invoked
         mock_agent_title.assert_not_called()
+
+
+class TestAuxTitleConversationContext(unittest.TestCase):
+    """#7470: aux title-generation calls republish the session id as the Agent's
+    ambient conversation context so OpenCode relay targets get the same
+    x-opencode-session sticky key as the session's main turns."""
+
+    MOCK_RESP = types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(
+                message=types.SimpleNamespace(content='Weather Title'),
+                finish_reason='stop',
+            )
+        ]
+    )
+
+    def _portal_state(self):
+        from agent.portal_tags import _portal_state
+        return _portal_state
+
+    def _current_context(self):
+        from agent.portal_tags import get_conversation_context
+        return get_conversation_context()
+
+    def test_direct_call_publishes_and_restores_context_after_success(self):
+        from api.streaming import _generate_llm_session_title_via_aux
+
+        seen = {}
+
+        def fake_call_llm(**kwargs):
+            from agent.portal_tags import get_conversation_context
+            seen['context_during_call'] = get_conversation_context()
+            return self.MOCK_RESP
+
+        with _patch_tg_config({'provider': '', 'model': 'gpt-4o', 'base_url': ''}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                title, status, _raw = _generate_llm_session_title_via_aux(
+                    'What is the weather?', 'It is sunny.', conversation_id='sid-123',
+                )
+
+        self.assertEqual(title, 'Weather Title')
+        self.assertEqual(status, 'llm_aux')
+        # Context published before the aux call and visible inside call_llm.
+        self.assertEqual(seen['context_during_call'], 'sid-123')
+        state = self._portal_state()
+        self.assertEqual(state['set_calls'], ['sid-123'])
+        # Reset restored the pre-call value (None) in the finally block.
+        self.assertIsNone(self._current_context())
+        self.assertEqual(len(state['reset_calls']), 1)
+
+    def test_context_restored_after_exception_escapes_aux_call(self):
+        from api.streaming import _generate_llm_session_title_via_aux
+
+        with _patch_tg_config({'provider': '', 'model': 'gpt-4o', 'base_url': ''}):
+            with patch('api.streaming.generate_title_raw_via_aux', side_effect=RuntimeError('boom')):
+                with self.assertRaises(RuntimeError):
+                    _generate_llm_session_title_via_aux(
+                        'What is the weather?', 'It is sunny.', conversation_id='sid-456',
+                    )
+        state = self._portal_state()
+        self.assertEqual(state['set_calls'], ['sid-456'])
+        self.assertIsNone(self._current_context())
+        self.assertEqual(len(state['reset_calls']), 1)
+
+    def test_no_conversation_id_skips_context_publication(self):
+        from api.streaming import _generate_llm_session_title_via_aux
+
+        def fake_call_llm(**kwargs):
+            return self.MOCK_RESP
+
+        with _patch_tg_config({'provider': '', 'model': 'gpt-4o', 'base_url': ''}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                title, status, _raw = _generate_llm_session_title_via_aux(
+                    'What is the weather?', 'It is sunny.',
+                )
+
+        self.assertEqual(title, 'Weather Title')
+        state = self._portal_state()
+        self.assertEqual(state['set_calls'], [])
+        self.assertEqual(state['reset_calls'], [])
+
+    def test_opencode_target_agent_model_publishes_non_empty_session_context(self):
+        """use_agent_model=True through an OpenCode-style target still carries the key."""
+        from api.streaming import _generate_llm_session_title_via_aux
+
+        seen = {}
+        agent = types.SimpleNamespace(
+            provider='opencode', model='opencode-go', base_url='http://localhost:3456',
+        )
+
+        def fake_call_llm(**kwargs):
+            from agent.portal_tags import get_conversation_context
+            seen['context_during_call'] = get_conversation_context()
+            seen['provider'] = kwargs.get('provider')
+            seen['base_url'] = kwargs.get('base_url')
+            return self.MOCK_RESP
+
+        with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+            title, status, _raw = _generate_llm_session_title_via_aux(
+                'What is the weather?', 'It is sunny.',
+                agent=agent, use_agent_model=True, conversation_id='oc-sid',
+            )
+
+        self.assertEqual(title, 'Weather Title')
+        self.assertEqual(seen['context_during_call'], 'oc-sid')
+        self.assertEqual(seen['provider'], 'opencode')
+        self.assertEqual(seen['base_url'], 'http://localhost:3456')
+        self.assertIsNone(self._current_context())
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming.get_session')
+    @patch('api.streaming._generate_llm_session_title_for_agent')
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    def test_background_update_entry_passes_session_id(
+        self, mock_aux_title, mock_agent_title, mock_get_session, mock_configured,
+    ):
+        """_run_background_title_update forwards the session id as conversation id."""
+        from api.streaming import _run_background_title_update
+
+        mock_session = MagicMock()
+        mock_session.title = 'Untitled'
+        mock_session.llm_title_generated = False
+        mock_session.messages = [
+            {'role': 'user', 'content': 'Hello'},
+            {'role': 'assistant', 'content': 'Hi there'},
+        ]
+        mock_get_session.return_value = mock_session
+        mock_aux_title.return_value = ('Greeting', 'llm_aux', '')
+
+        _run_background_title_update(
+            session_id='entry-update-sid',
+            user_text='Hello',
+            assistant_text='Hi there',
+            placeholder_title='Untitled',
+            put_event=lambda _t, _d: None,
+            agent=MagicMock(),
+        )
+
+        self.assertEqual(mock_aux_title.call_args.kwargs.get('conversation_id'), 'entry-update-sid')
+        mock_agent_title.assert_not_called()
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming.get_session')
+    @patch('api.streaming._generate_llm_session_title_for_agent')
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    def test_background_refresh_entry_passes_session_id(
+        self, mock_aux_title, mock_agent_title, mock_get_session, mock_configured,
+    ):
+        """_run_background_title_refresh forwards the session id as conversation id."""
+        from api.streaming import _run_background_title_refresh
+
+        mock_session = MagicMock()
+        mock_session.title = 'Old Title'
+        mock_session.messages = [
+            {'role': 'user', 'content': 'Hello again'},
+            {'role': 'assistant', 'content': 'More context'},
+        ]
+        mock_get_session.return_value = mock_session
+        mock_aux_title.return_value = ('Newer Title', 'llm_aux', '')
+
+        _run_background_title_refresh(
+            session_id='entry-refresh-sid',
+            user_text='Hello again',
+            assistant_text='More context',
+            current_title='Old Title',
+            put_event=lambda _t, _d: None,
+            agent=MagicMock(),
+        )
+
+        self.assertEqual(mock_aux_title.call_args.kwargs.get('conversation_id'), 'entry-refresh-sid')
+        mock_agent_title.assert_not_called()
+
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    def test_sync_regenerate_entry_passes_session_id(self, mock_aux_title):
+        """generate_session_title_for_session forwards the session id (sync path)."""
+        from api.streaming import generate_session_title_for_session
+
+        mock_session = MagicMock()
+        mock_session.session_id = 'entry-sync-sid'
+        mock_session.title = 'Untitled'
+        mock_session.messages = [
+            {'role': 'user', 'content': 'Hello sync'},
+            {'role': 'assistant', 'content': 'Sync reply'},
+        ]
+        mock_aux_title.return_value = ('Sync Title', 'llm_aux', '')
+
+        title, status, _raw = generate_session_title_for_session(mock_session)
+
+        self.assertEqual(title, 'Sync Title')
+        self.assertEqual(status, 'llm_aux')
+        self.assertEqual(mock_aux_title.call_args.kwargs.get('conversation_id'), 'entry-sync-sid')
 
 
 if __name__ == '__main__':

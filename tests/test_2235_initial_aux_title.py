@@ -10,24 +10,29 @@ Covers:
   3. Refresh path parity — configured aux routing still applies to the
      adaptive title refresh path.
 """
-import sys
 import threading
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub agent.auxiliary_client so it is importable in the test environment
-# (the real package lives in hermes-agent, which is not installed here).
-_agent_stub = types.ModuleType('agent')
-_aux_stub = types.ModuleType('agent.auxiliary_client')
-sys.modules.setdefault('agent', _agent_stub)
-sys.modules.setdefault('agent.auxiliary_client', _aux_stub)
-_agent_stub.auxiliary_client = _aux_stub
+import pytest
+
+from tests._aux_client_helpers import auxiliary_client_modules, patch_tg_config
+
+
+@pytest.fixture(autouse=True)
+def _install_auxiliary_client_modules():
+    """Scope the synthetic hermes-agent modules to each test (#6630).
+
+    This file carried the same unscoped sys.modules.setdefault install as
+    test_title_aux_routing.py, so it leaked the stub the same way.
+    """
+    with auxiliary_client_modules():
+        yield
 
 
 def _patch_tg_config(config_dict):
     """Return a patch context manager that makes _get_auxiliary_task_config return config_dict."""
-    return patch('agent.auxiliary_client._get_auxiliary_task_config', return_value=config_dict, create=True)
+    return patch_tg_config(config_dict)
 
 
 def _make_provisional_session(user_text, assistant_text='Here is the answer.'):

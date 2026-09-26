@@ -25,6 +25,7 @@ let _currentCronDetail = null; // full cron job object
 let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _cronModelPickerTouched = false; // true once the user changes the model picker in the current form
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
@@ -353,6 +354,32 @@ function _panelFromCurrentMainView(){
 }
 
 function _syncMobileSidebarPanelFromMainView(){
+  const mainEl=document.querySelector('main.main');
+  // Extension panels are intentionally outside MAIN_VIEW_PANELS: the host must
+  // not try to lazy-load or own their main view. They do, however, publish the
+  // visible view as `showing-x-<token>` and install a matching sidebar
+  // `.panel-view[data-panel-token]`. The mobile drawer is reopened through this
+  // sync helper, so treating that state as Chat deactivated the extension's
+  // sidebar view every time the operator opened the hamburger or edge drawer.
+  // The frame remained behind the drawer, but its content had no reachable
+  // navigation state on the phone.
+  const extensionClass=mainEl&&Array.from(mainEl.classList)
+    .find(name=>name.startsWith('showing-x-'));
+  const extensionToken=extensionClass&&extensionClass.slice('showing-x-'.length);
+  if(extensionToken){
+    const extensionView=Array.from(document.querySelectorAll('.sidebar .panel-view'))
+      .find(view=>view.dataset.panelToken===extensionToken);
+    if(extensionView){
+      const extensionPanel=`x-${extensionToken}`;
+      document.querySelectorAll('[data-panel]').forEach(t=>t.classList.toggle('active',t.dataset.panel===extensionPanel));
+      document.querySelectorAll('.panel-view').forEach(p=>p.classList.remove('active'));
+      extensionView.classList.add('active');
+      // Do not put an extension token in _currentPanel: switchPanel owns that
+      // state and only accepts its native panel names. Returning the token keeps
+      // this helper truthful without corrupting the host state machine.
+      return extensionPanel;
+    }
+  }
   const panel=_panelFromCurrentMainView();
   if(!panel)return _currentPanel||'chat';
   const panelEl=$('panel'+panel.charAt(0).toUpperCase()+panel.slice(1));
@@ -395,6 +422,18 @@ async function switchPanel(name, opts = {}) {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
   _currentPanel = nextPanel;
+  // Mobile drawer visibility: a rail/tab click on a phone should surface the
+  // panel synchronously, NOT after the panel's async data load. If the re-open
+  // stayed at the bottom of this function, a form opened from inside the drawer
+  // (e.g. openWorkspaceCreate closing the drawer) would race the deferred
+  // re-open and the drawer would win, covering the main-view form.
+  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar) {
+      sidebar.classList.remove('mobile-session-page');
+      sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
+    }
+  }
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
   // Refresh aria-expanded on the newly-active rail button to mirror sidebar state.
@@ -426,13 +465,6 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
-  }
-  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
-    const sidebar = document.querySelector('.sidebar');
-    if (sidebar) {
-      sidebar.classList.remove('mobile-session-page');
-      sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
-    }
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
@@ -1186,7 +1218,7 @@ function _cronAgentPromptCardHtml(job){
   return `<div class="detail-card">
         <div class="detail-card-title detail-card-title-row">
           <span>${esc(t('cron_prompt_label') || 'Prompt')}</span>
-          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded('${esc(job.id)}')" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
+          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded(${jsArg(job.id)})" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
         </div>
         <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
       </div>`;
@@ -1335,11 +1367,11 @@ async function _loadCronDetailRuns(jobId, detailKey){
       const usageStrip = isScriptJob ? '' : _formatCronRunUsageStrip(run.usage);
       const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));
       const runToggleLabel = runExpanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
-      return `<div class="detail-run-item" id="${rid}">
-        <div class="detail-run-head" onclick="_loadRunContent('${esc(jobId)}','${esc(run.filename)}','${rid}')">
+      return `<div class="detail-run-item" id="${esc(rid)}">
+        <div class="detail-run-head" onclick="_loadRunContent(${jsArg(jobId)},${jsArg(run.filename)},${jsArg(rid)})">
           <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span>${usageStrip ? ` <span class="cron-run-usage-strip">${esc(usageStrip)}</span>` : ''}</span>
           <span class="detail-run-actions">
-            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded('${esc(jobId)}','${esc(run.filename)}','${rid}')" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
+            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded(${jsArg(jobId)},${jsArg(run.filename)},${jsArg(rid)})" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
             <span style="opacity:.6">▸</span>
           </span>
         </div>
@@ -1476,11 +1508,50 @@ function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);
 }
+function _cronScheduleForEdit(job){
+  // #7352: when the user opens an existing job for edit or duplicate, the
+  // editable field must hold the canonical Agent-parseable schedule, not
+  // the human-readable ``schedule_display`` ("once at ..."). The Agent
+  // parser at cron/jobs.py rejects the display form with ValueError and
+  // the resulting round-trip has been failing with HTTP 500 since the
+  // initial WebUI release.
+  if(!job) return '';
+  const sched = job.schedule;
+  // Only the "once at ..." label is unparseable; every other schedule_display
+  // form the Agent emits (`every monday 9am`, `every 30m`, ...) round-trips
+  // through parse_schedule() AND is what the user actually typed. Prefer it
+  // over the canonical `expr`, otherwise editing or duplicating a
+  // natural-language recurring job silently rewrites it to raw cron
+  // (`every monday 9am` -> `0 9 * * 1`) — the Agent rebuilds schedule_display
+  // from whatever we submit, so the rewrite sticks.
+  const display = job.schedule_display;
+  const displayIsParseable = Boolean(display) && !/^\s*once at\s+/i.test(display);
+  if(sched && typeof sched === 'object'){
+    // One-shot: schedule_display is purely presentation; run_at is what the
+    // parser accepts.
+    if(sched.kind === 'once' && sched.run_at) return sched.run_at;
+    if(displayIsParseable) return display;
+    // Recurring cron: the current Agent schema is ``expr``; some legacy
+    // payloads still expose ``expression`` — accept either.
+    if(sched.expr) return sched.expr;
+    if(sched.expression) return sched.expression;
+    if(sched.run_at) return sched.run_at;
+  }
+  // Final fallback: only use schedule_display if it isn't the "once at ..."
+  // presentation label (which the parser rejects). For any other text
+  // (e.g. interval/every-30m) the display form is also a valid input.
+  if(displayIsParseable){
+    return display;
+  }
+  return '';
+}
+
 function duplicateCurrentCron(){
   if (!_currentCronDetail) return;
   const job = _currentCronDetail;
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = true;
@@ -1498,7 +1569,7 @@ function duplicateCurrentCron(){
   }
   _renderCronForm({
     name: dupName,
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleForEdit(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
@@ -1537,6 +1608,7 @@ let _cronDeliveryOptionsCache=null;
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = false;
@@ -1545,17 +1617,22 @@ function openCronCreate(){
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
+  // Mobile: the cron form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openCronDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function openCronEdit(job){
   if (!job) return;
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = job.id;
   _cronMode = 'edit';
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
   _renderCronForm({
     name: job.name || '',
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleForEdit(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
@@ -1782,6 +1859,9 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
       sel.appendChild(opt);
     }
     sel.dataset.loaded = '1';
+    // Track deliberate picker changes so an untouched "Default" can keep a
+    // hidden provider-only pin on save (see _cronProviderForClear).
+    sel.addEventListener('change', () => { _cronModelPickerTouched = true; });
   } catch (e) {
     console.warn('Failed to load cron model picker:', e.message);
     // Load failed: dataset.loaded stays unset so saveCronForm omits model/provider
@@ -1854,15 +1934,29 @@ function cancelCronForm(){
   _clearCronDetail();
 }
 
-function _cronModelBareName(model, provider) {
+function _modelBareNameForProvider(model, provider) {
   // Strip @provider: prefix from a model value when provider is stored separately.
-  // The model dropdown may contain values like "@custom:9router:chat" (from
-  // _apply_provider_prefix) but cron jobs store model and provider separately,
-  // so the model should be just "chat".
   if (model && provider && model.startsWith('@' + provider + ':')) {
     return model.slice(('@' + provider + ':').length);
   }
   return model;
+}
+
+function _cronModelBareName(model, provider) {
+  // Cron jobs store model and provider separately, just like auxiliary slots.
+  return _modelBareNameForProvider(model, provider);
+}
+
+function _cronProviderForClear(prevDetail, pickerTouched) {
+  // Provider to submit when the picker shows "Default" (no model) on save.
+  // An explicit return to Default honors "Default = no overrides" (#4030) and
+  // clears the provider. An untouched picker must not: provider-only jobs
+  // (a pinned provider with no model) render as "Default" in the combined
+  // picker, so saving any other field would silently erase the pin the user
+  // never touched.
+  const prev = prevDetail || {};
+  if (pickerTouched) return null;
+  return (prev.model == null) ? prev.provider : null;
 }
 
 async function saveCronForm(){
@@ -1902,8 +1996,11 @@ async function saveCronForm(){
           updates.model = _cronModelBareName(modelState.model, modelState.model_provider) || null;
           updates.provider = modelState.model_provider || null;
         } else if (modelLoaded) {
+          // "Default" selected (no model). An untouched picker preserves a
+          // hidden provider-only pin; a deliberate return to Default clears
+          // it (#4030 "Default = no overrides").
           updates.model = null;
-          updates.provider = null;
+          updates.provider = _cronProviderForClear(_cronPreFormDetail, _cronModelPickerTouched);
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
@@ -2176,7 +2273,7 @@ function _kanbanRenderSidebar(columns){
   }
   list.innerHTML = tasks.map(task => {
     const meta = _kanbanTaskMeta(task);
-    return `<button class="kanban-list-item" onclick="loadKanbanTask('${esc(task.id)}')">
+    return `<button class="kanban-list-item" onclick="loadKanbanTask(${jsArg(task.id)})">
       <span class="kanban-list-status">${esc(_kanbanColumnLabel(task.status))}</span>
       <span class="kanban-list-title">${esc(_kanbanTaskTitle(task))}</span>
       ${meta.length ? `<span class="kanban-meta">${esc(meta.join(' · '))}</span>` : ''}
@@ -2394,10 +2491,9 @@ function _kanbanCardStalenessClass(task){
 }
 
 function _kanbanCardQuickActions(task){
-  const id = esc(task.id || '');
   const status = task.status || '';
-  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','done')">${esc(t('kanban_card_complete'))}</button>` : '';
-  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,'${id}','archived')">${esc(t('kanban_card_archive'))}</button>` : '';
+  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,${jsArg(task.id)},'done')">${esc(t('kanban_card_complete'))}</button>` : '';
+  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,${jsArg(task.id)},'archived')">${esc(t('kanban_card_archive'))}</button>` : '';
   return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${complete}${archive}</div>`;
 }
 
@@ -2480,7 +2576,7 @@ function _kanbanLaneNames(columns){
 
 function _kanbanRenderColumn(col){
   const tasks = col.tasks || [];
-  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, '${esc(col.name)}')">
+  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, ${jsArg(col.name)})">
       <div class="kanban-column-head">
         <span>${esc(_kanbanColumnLabel(col.name))}</span>
         <span class="kanban-count">${tasks.length}</span>
@@ -2526,6 +2622,7 @@ function _kanbanRenderBoard(){
     board.innerHTML = _kanbanEmptyBoardHtml();
     return;
   }
+  board.classList.toggle('kanban-board-consolidated', !_kanbanLanesByProfile);
   const columns = _kanbanVisibleTasks();
   const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
@@ -2547,7 +2644,7 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
-  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, ${jsArg(task.id)})" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, ${jsArg(task.id)})" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask(${jsArg(task.id)})}">
     <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
@@ -3056,14 +3153,6 @@ function _kanbanRunHtml(run){
   </div>`;
 }
 
-function _kanbanJsArg(s){
-  // Encode a value for safe interpolation inside an inline on* handler's JS
-  // string literal. JSON.stringify quotes/escapes for JS context; esc() then
-  // makes it safe inside the HTML attribute. Without this, a task id containing
-  // a quote breaks out of the handler (esc() alone is HTML-escaping, which the
-  // browser decodes BEFORE executing the inline handler). (#3797)
-  return esc(JSON.stringify(String(s == null ? '' : s)));
-}
 function _kanbanLinkableTaskOptions(excludeId){
   // Datalist of existing task ids (with title as the option label) so the
   // dependency field is a pick-from-real-tasks autocomplete rather than a blind
@@ -3088,7 +3177,7 @@ function _kanbanLinksHtml(links){
   const item = (id, isParent) => {
     const parentId = isParent ? id : taskId;
     const childId = isParent ? taskId : id;
-    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${_kanbanJsArg(parentId)},${_kanbanJsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
+    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${jsArg(parentId)},${jsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
   };
   const hasLinks = parents.length || children.length;
   return `<div class="kanban-detail-links-section">
@@ -3099,7 +3188,7 @@ function _kanbanLinksHtml(links){
     <div class="kanban-detail-links-controls">
       <input type="text" id="kanbanDependencyInput" class="kanban-detail-links-input" list="kanbanDependencyOptions" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_dependency_placeholder" placeholder="Task ID to link">
       <datalist id="kanbanDependencyOptions">${_kanbanLinkableTaskOptions(taskId)}</datalist>
-      <button class="btn secondary" onclick="addKanbanDependency(${_kanbanJsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
+      <button class="btn secondary" onclick="addKanbanDependency(${jsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
     </div>
   </div>`;
 }
@@ -3727,12 +3816,12 @@ function _kanbanRenderTaskDetail(data){
   // dashboard plugin's contract. UI users want to claim/promote a ready task
   // via the dispatcher Nudge button, not flip it to running by hand.
   const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
-    `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
-  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask('${esc(task.id)}')">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask('${esc(task.id)}')">${esc(t('kanban_unblock'))}</button>`;
+    `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
+  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
       <button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_back_to_board'))}</button>
       <div class="kanban-task-preview-title">${esc(title)}</div>
-      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
+      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit(${jsArg(task.id)})" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
     </div>
     <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
@@ -3746,7 +3835,7 @@ function _kanbanRenderTaskDetail(data){
     </div>
     <div class="kanban-comment-form">
       <textarea id="kanbanCommentInput" rows="2" placeholder="${esc(t('kanban_add_comment'))}"></textarea>
-      <button class="btn primary" onclick="addKanbanComment('${esc(task.id)}')">${esc(t('kanban_add_comment'))}</button>
+      <button class="btn primary" onclick="addKanbanComment(${jsArg(task.id)})">${esc(t('kanban_add_comment'))}</button>
     </div>`;
 }
 
@@ -3897,12 +3986,8 @@ async function loadKanbanBoards(){
     _kanbanSetSavedBoard('default');
   }
   _kanbanCurrentBoard = (active === 'default') ? null : active;
-  // The switcher is visible whenever ≥1 non-default board exists OR the
-  // current board is non-default. (If you only have 'default', a switcher
-  // adds clutter without value.)
-  const hasMultiple = boards.length > 1 || (active !== 'default');
-  switcher.hidden = !hasMultiple;
-  if (!hasMultiple) return;
+  // Keep the switcher visible because it is also the default-board settings path.
+  switcher.hidden = false;
   // Update the toggle label/icon
   const activeMeta = boards.find(b => b.slug === active) || {slug: active, name: active, icon: '', color: ''};
   const nameEl = document.getElementById('kanbanBoardSwitcherName');
@@ -3940,16 +4025,13 @@ function _renderKanbanBoardMenu(boards, current){
     const icon = b.icon ? esc(b.icon) : '';
     const safeColor = _kanbanSafeColor(b.color);
     const colorStyle = safeColor ? `color:${safeColor}` : '';
-    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
+    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard(${jsArg(b.slug)})">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
       <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
     </button>`;
   }).join('');
-  // Actions row — disable rename/archive when the only option is `default`
-  // (the default board's display metadata is editable but the slug isn't,
-  // and `default` cannot be archived).
-  const renameDisabled = current === 'default';
+  // The default board is editable but cannot be archived.
   const archiveDisabled = current === 'default';
   const actions = `
     <div class="kanban-board-switcher-divider" role="separator"></div>
@@ -3957,9 +4039,9 @@ function _renderKanbanBoardMenu(boards, current){
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       <span>${esc(t('kanban_new_board') || 'New board…')}</span>
     </button>
-    <button type="button" class="kanban-board-switcher-action" onclick="openKanbanRenameBoard()" ${renameDisabled ? 'disabled' : ''} data-i18n="kanban_rename_board">
+    <button type="button" class="kanban-board-switcher-action" onclick="openKanbanRenameBoard()" data-i18n="kanban_rename_board">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-      <span>${esc(t('kanban_rename_board') || 'Rename current board…')}</span>
+      <span>${esc(t('kanban_rename_board') || 'Board settings…')}</span>
     </button>
     <button type="button" class="kanban-board-switcher-action danger" onclick="archiveKanbanBoard()" ${archiveDisabled ? 'disabled' : ''} data-i18n="kanban_archive_board">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
@@ -4034,6 +4116,16 @@ async function switchKanbanBoard(slug){
 
 // ── Create / rename / archive board modals ──────────────────────────────────
 
+async function _loadKanbanBoardWorkdirOptions(){
+  await loadWorkspaceList();
+  const list = document.getElementById('kanbanBoardModalWorkdirs');
+  if (!list) return;
+  list.innerHTML = (_workspaceList || []).map(ws => {
+    const path = typeof ws === 'string' ? ws : ws && ws.path;
+    return path ? `<option value="${esc(path)}"></option>` : '';
+  }).join('');
+}
+
 function openKanbanCreateBoard(){
   const modal = document.getElementById('kanbanBoardModal');
   if (!modal) return;
@@ -4047,6 +4139,9 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalDesc').value = '';
   document.getElementById('kanbanBoardModalIcon').value = '';
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
+  document.getElementById('kanbanBoardModalDefaultWorkdir').value = '';
+  document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value = '';
+  _loadKanbanBoardWorkdirOptions();
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -4077,12 +4172,11 @@ function openKanbanRenameBoard(){
   const modal = document.getElementById('kanbanBoardModal');
   if (!modal) return;
   const current = _kanbanCurrentBoard || 'default';
-  if (current === 'default') return;  // default's slug is immutable
   const meta = (_kanbanBoardsList || []).find(b => b.slug === current);
   if (!meta) return;
   document.getElementById('kanbanBoardModalMode').value = 'rename';
   document.getElementById('kanbanBoardModalSlug').value = current;
-  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_rename_board') || 'Rename board';
+  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_board_settings') || 'Board settings';
   document.getElementById('kanbanBoardModalName').value = meta.name || '';
   document.getElementById('kanbanBoardModalSlugInput').value = current;
   document.getElementById('kanbanBoardModalSlugInput').disabled = true;  // slug is immutable
@@ -4091,6 +4185,10 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
   document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
+  const originalDefaultWorkdir = (meta.default_workdir || '').trim();
+  document.getElementById('kanbanBoardModalDefaultWorkdir').value = originalDefaultWorkdir;
+  document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value = originalDefaultWorkdir;
+  _loadKanbanBoardWorkdirOptions();
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -4125,6 +4223,8 @@ async function submitKanbanBoardModal(){
   const description = (document.getElementById('kanbanBoardModalDesc').value || '').trim();
   const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
   const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
+  const defaultWorkdir = (document.getElementById('kanbanBoardModalDefaultWorkdir').value || '').trim();
+  const originalDefaultWorkdir = (document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value || '').trim();
   const submitBtn = document.getElementById('kanbanBoardModalSubmit');
   if (!name) {
     errEl.textContent = t('kanban_board_name_required') || 'Name is required';
@@ -4137,9 +4237,11 @@ async function submitKanbanBoardModal(){
     }
     if (submitBtn) submitBtn.disabled = true;
     try {
+      const payload = {slug: slugInput, name, description, icon, color, switch: true};
+      if (defaultWorkdir) payload.default_workdir = defaultWorkdir;
       const res = await api('/api/kanban/boards', {
         method: 'POST',
-        body: JSON.stringify({slug: slugInput, name, description, icon, color, switch: true}),
+        body: JSON.stringify(payload),
       });
       closeKanbanBoardModal();
       // Switch to the new board and reload
@@ -4161,9 +4263,11 @@ async function submitKanbanBoardModal(){
     if (!slug) { errEl.textContent = 'Missing slug'; return; }
     if (submitBtn) submitBtn.disabled = true;
     try {
+      const payload = {name, description, icon, color};
+      if (defaultWorkdir !== originalDefaultWorkdir) payload.default_workdir = defaultWorkdir;
       await api('/api/kanban/boards/' + encodeURIComponent(slug), {
         method: 'PATCH',
-        body: JSON.stringify({name, description, icon, color}),
+        body: JSON.stringify(payload),
       });
       closeKanbanBoardModal();
       await loadKanbanBoards();  // refresh switcher label/icon
@@ -5089,6 +5193,10 @@ function openSkillCreate() {
   _editingSkillName = null;
   _skillMode = 'create';
   _renderSkillForm({ name: '', category: '', content: '', isEdit: false });
+  // Mobile: the new-skill form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openSkillDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _renderSkillForm({ name, category, content, isEdit }) {
@@ -5307,8 +5415,13 @@ function _renderExternalNotesSources() {
   const recall = data.automatic_recall_unchanged !== false
     ? `<div class="memory-detail-mtime">${esc(t('external_notes_auto_recall_hint'))}</div>`
     : '';
+  // Same withheld-runtime state as the MCP panel: sources still list, but their
+  // live status/tools are hidden until the profile's runtime scope is confirmed.
+  const scopeNotice = data.runtime_scope === 'unavailable'
+    ? `<div class="memory-detail-mtime">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+    : '';
   if (!sources.length) {
-    body.innerHTML = `<div class="main-view-content">${recall}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
   } else {
     const selected = sources.find(src => (src.name || '').toLowerCase() === (_notesSelectedSource || '').toLowerCase()) || sources[0];
     _notesSelectedSource = (selected && selected.name) || 'joplin';
@@ -5319,13 +5432,13 @@ function _renderExternalNotesSources() {
           <div class="notes-source-card-head notes-ai-recent-head"><strong>${li('bot', 14)}${esc(t('external_notes_recent_ai'))}</strong><span class="detail-badge">${esc(t('external_notes_auto'))}</span></div>
           <div class="notes-ai-recent-list">${recentAiNotes.map(note => {
             const updated = note.updated_time ? new Date(Number(note.updated_time)).toLocaleString() : '';
-            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote('${esc(note.source||'joplin')}','${esc(note.id||'')}')"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
+            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote(${jsArg(note.source||'joplin')},${jsArg(note.id||'')})"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
           }).join('')}</div>
         </section>`
       : '';
     const searchError = _notesSearchError ? `<div class="detail-form-error">${esc(_notesSearchError)}</div>` : '';
     const resultHtml = _notesSearchResults.length
-      ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote('${esc(note.source||_notesSelectedSource)}','${esc(note.id||'')}')"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
+      ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote(${jsArg(note.source||_notesSelectedSource)},${jsArg(note.id||'')})"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
       : `<div class="memory-empty">${esc(t('external_notes_search_empty'))}</div>`;
     const previewHtml = _notesPreviewNote
       ? `<section class="notes-source-card notes-preview-card"><div class="notes-source-card-head"><strong>${esc(_notesPreviewNote.title||'Untitled')}</strong><span class="detail-badge">${esc(_notesPreviewNote.source||_notesSelectedSource)}</span></div><div class="memory-content preview-md">${renderMd(_notesPreviewNote.body||'')}</div></section>`
@@ -5355,7 +5468,7 @@ function _renderExternalNotesSources() {
       ${searchError}
       ${resultHtml}
     </section>`;
-    body.innerHTML = `<div class="main-view-content">${recall}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
   }
   body.style.display = '';
   if (empty) empty.style.display = 'none';
@@ -5777,9 +5890,11 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   const sc=searchRow.querySelector('.ws-search-clear');
   dd.appendChild(searchRow);
 
-  // ── Workspace list ──────────────────────────────────────────────────────
-  // Sort alphabetically by name (case-insensitive) before rendering.
-  const sorted=[...workspaces].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  // Render in the server's stored order — the same order shown in the
+  // Workspaces settings panel (user-controlled via drag-and-drop reorder,
+  // with the default "Home" workspace first). No client-side re-sorting.
+  // Shallow copy so later in-place mutations can't touch the caller's array.
+  const sorted=[...workspaces];
   const listContainer=document.createElement('div');
   listContainer.className='ws-list-container';
   dd.appendChild(listContainer);
@@ -6137,6 +6252,10 @@ function openWorkspaceCreate(){
   _workspacePreFormDetail = _currentWorkspaceDetail ? { ..._currentWorkspaceDetail } : null;
   _workspaceMode = 'create';
   _renderWorkspaceForm({ name:'', path:'', isEdit:false });
+  // Mobile: the add-space form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openWorkspaceDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function editCurrentWorkspace(){
@@ -6400,6 +6519,10 @@ async function switchToWorkspace(path,name){
     : null;
   try{
     closeWsDropdown();
+    // Invalidate any older /api/list response before the explicit workspace
+    // mutation. Otherwise a delayed recovery response for this same session can
+    // overwrite the user's newer selection and reject this switch's fresh tree.
+    if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
@@ -7012,6 +7135,15 @@ async function switchToProfile(name) {
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
+    // #7509: the slash-skill caches hold the previous profile's disabled-filtered
+    // /api/skills payload, so drop them once the switch has actually succeeded —
+    // otherwise a skill that is enabled in the new profile stays hidden behind the
+    // old payload. Invalidating here (rather than before the POST) also kills any
+    // response still in flight, so the previous profile's reply can't repopulate
+    // the caches after this point (see invalidateSlashSkillCaches in commands.js).
+    if (typeof window !== 'undefined' && typeof window.invalidateSlashSkillCaches === 'function') {
+      window.invalidateSlashSkillCaches();
+    }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
@@ -7236,6 +7368,10 @@ function openProfileCreate(){
   _profilePreFormDetail = _currentProfileDetail ? { ..._currentProfileDetail } : null;
   _profileMode = 'create';
   _renderProfileForm();
+  // Mobile: the new-profile form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openWorkspaceDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _renderProfileForm(){
@@ -8408,6 +8544,7 @@ function _syncStructuredCodeLinesEnabled(){
 function _appearancePayloadFromUi(){
   const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
   const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+  const transparentEventTimestamps=$('settingsTransparentEventTimestamps');
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
@@ -8415,6 +8552,7 @@ function _appearancePayloadFromUi(){
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
+    transparent_stream_event_timestamps: transparentEventTimestamps ? transparentEventTimestamps.checked : true,
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
@@ -8443,7 +8581,20 @@ function _syncChatActivityDisplayModeControl(mode){
   });
   window._chatActivityDisplayMode=next;
   window._transparentStream=next==='transparent_stream';
+  if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);
   if(next==='hide_all_activity'&&typeof window._hideLiveActivityForFinalAnswerOnly==='function') window._hideLiveActivityForFinalAnswerOnly();
+}
+
+function _syncTransparentEventTimestampsControl(enabled, mode){
+  const next=enabled!==false;
+  const activeMode=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : (window._chatActivityDisplayMode||'compact_worklog');
+  const checkbox=$('settingsTransparentEventTimestamps');
+  if(checkbox){
+    checkbox.checked=next;
+    checkbox.disabled=activeMode!=='transparent_stream';
+    checkbox.style.opacity=activeMode==='transparent_stream'?'':'0.5';
+  }
+  window._transparentEventTimestamps=next;
 }
 
 function _pickChatActivityDisplayMode(mode){
@@ -8453,6 +8604,14 @@ function _pickChatActivityDisplayMode(mode){
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatActivityDisplayMode;
+
+function _pickTransparentEventTimestamps(enabled){
+  _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  _scheduleAppearanceAutosave();
+}
+if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
 
 function _setAppearanceAutosaveStatus(state){
   const el=$('settingsAppearanceAutosaveStatus');
@@ -8492,7 +8651,7 @@ function _scheduleAppearanceAutosave(){
 
 async function _autosaveAppearanceSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
@@ -8502,8 +8661,10 @@ async function _autosaveAppearanceSettings(payload){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
       if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
         const beforeMode=window._chatActivityDisplayMode;
+        const beforeTimestamps=window._transparentEventTimestamps!==false;
         _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
-        if(window._chatActivityDisplayMode!==beforeMode){
+        _syncTransparentEventTimestampsControl(saved.transparent_stream_event_timestamps, saved.chat_activity_display_mode);
+        if(window._chatActivityDisplayMode!==beforeMode||((window._transparentEventTimestamps!==false)!==beforeTimestamps)){
           if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
           if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
         }
@@ -8512,6 +8673,14 @@ async function _autosaveAppearanceSettings(payload){
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
+    // #6819: persist ONLY from an explicit boolean in the server response.
+    // A failed autosave (`saved` falsy) or a partial response without the key
+    // would otherwise write the synthesized default (ON) into the mirror,
+    // corrupting the value a later boot-failure fallback would restore
+    // (Greptile P1 review on #6856).
+    if(saved&&typeof saved.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function'){
+      _persistAutoScrollFollow(saved.auto_scroll_follow);
+    }
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
@@ -8616,6 +8785,8 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
+  if(hideEmptyStatePanelCb) payload.hide_empty_state_panel=hideEmptyStatePanelCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -8646,14 +8817,17 @@ function _preferencesPayloadFromUi(){
   if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
   const showWebhookCb=$('settingsShowWebhookSessions');
   if(showWebhookCb) payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked);
+  const showKanbanCb=$('settingsShowKanbanSessions');
+  if(showKanbanCb) payload.show_kanban_sessions=!!(showCliCb&&showCliCb.checked&&showKanbanCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
-  const updateChannelSel=$('settingsUpdateChannel');
-  if(updateChannelSel) payload.update_channel=updateChannelSel.value;
+  // update_channel is NOT included here — it has its own dedicated write path
+  // (_saveUpdateChannelFromSelector) so a stale tab's generic autosave cannot
+  // overwrite a newer channel selection made in another tab. (#6612)
   const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
   if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8706,9 +8880,42 @@ function _speechPreferencesPayloadFromUi(){
   return payload;
 }
 
-function _setPreferencesAutosaveStatus(state){
+// Keep same-page settings merges FIFO so one response cannot race the next read-modify-write.
+let _settingsPanelPostQueue=Promise.resolve();
+
+function _enqueueSettingsPost(options){
+  const requestOptions={...(options||{})};
+  if(typeof requestOptions.body==='string') requestOptions.body=String(requestOptions.body);
+  const run=_settingsPanelPostQueue.then(async()=>{
+    const saved=await api('/api/settings',requestOptions);
+    if(!saved||typeof saved!=='object'||Array.isArray(saved)){
+      throw new Error('Invalid settings response');
+    }
+    return saved;
+  });
+  _settingsPanelPostQueue=run.catch(()=>{});
+  return run;
+}
+
+// Ownership token for the shared preferences autosave status slot. Prevents
+// the channel writer from clearing or overwriting a 'failed'+Retry state the
+// generic preferences autosave set; that Retry button has exactly one call
+// site and becomes unreachable if another writer replaces the node.
+let _preferencesAutosaveStatusOwner=null;
+
+function _setPreferencesAutosaveStatus(state,owner){
+  owner=owner||'preferences';
   const el=$('settingsPreferencesAutosaveStatus');
   if(!el) return;
+  // Guard: if the slot shows 'failed' from a different writer, do not overwrite.
+  // The DOM class is the source of truth; an external clear would remove
+  // 'is-failed' and unblock writes without needing an extra variable.
+  if(_preferencesAutosaveStatusOwner&&
+     _preferencesAutosaveStatusOwner!==owner&&
+     el.classList.contains('is-failed')){
+    return;
+  }
+  _preferencesAutosaveStatusOwner=state?owner:null;
   el.className='settings-autosave-status';
   if(!state){
     el.textContent='';
@@ -8750,7 +8957,7 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8768,6 +8975,10 @@ async function _autosavePreferencesSettings(payload){
     if(payload&&payload.hide_empty_state_suggestions!==undefined){
       window._hideEmptyStateSuggestions=!!(saved&&saved.hide_empty_state_suggestions);
       if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+    }
+    if(payload&&payload.hide_empty_state_panel!==undefined){
+      window._hideEmptyStatePanel=!!(saved&&saved.hide_empty_state_panel);
+      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
     }
     if(payload&&payload.show_conversation_outline!==undefined){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
@@ -8831,6 +9042,57 @@ function _retryPreferencesAutosave(){
   const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
   _setPreferencesAutosaveStatus('saving');
   _autosavePreferencesSettings(payload);
+}
+
+let _channelSaveSeq=0;
+// Last server-confirmed update_channel value. Seeded at panel hydration so the
+// failure-revert path always has a known-good value. _confirmedUpdateChannel is
+// the only reliable "previous" value: by the time a change event fires the
+// browser has already applied the picked option to the <select>, so
+// channelSel.value inside the handler IS the new value, not the old one.
+let _confirmedUpdateChannel=null;
+
+async function _saveUpdateChannelFromSelector(channelSel){
+  // #6612: dedicated write path for update_channel so the generic preferences
+  // autosave payload never carries this field. A stale tab toggling an unrelated
+  // preference must not overwrite a newer channel selection from another tab.
+  if(!channelSel) return;
+  const val=channelSel.value==='experimental'?'experimental':'stable';
+  const seq=++_channelSaveSeq;
+  if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving','channel');
+  try{
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify({update_channel:val})});
+    const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))
+      ?saved.update_channel:val;
+    _confirmedUpdateChannel=confirmed;
+    // The queue makes the server state FIFO; the sequence guard protects only
+    // the selector and other response-driven UI from stale completions.
+    if(seq!==_channelSaveSeq) return;
+    channelSel.value=confirmed;
+    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved','channel');
+    // Run the update check and badge sync against the confirmed server value,
+    // not the optimistic pre-save value.
+    if(typeof checkUpdatesNow==='function'){
+      try{checkUpdatesNow(confirmed);}catch(_){}
+    }
+    if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(confirmed);
+  }catch(e){
+    console.warn('[settings] update_channel save failed',e);
+    // Revert selector and badge to the last server-confirmed value so both
+    // controls agree with what the server actually holds. Status clear and
+    // revert are both inside the seq guard so a superseded in-flight failure
+    // does not clear status that a newer write or the generic autosave owns.
+    if(seq===_channelSaveSeq){
+      const revertTo=_confirmedUpdateChannel||'stable';
+      channelSel.value=revertTo;
+      if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(revertTo);
+      // Do not call _setPreferencesAutosaveStatus('failed','channel'): its retry
+      // button replays _retryPreferencesAutosave(), which cannot contain
+      // update_channel (#6612). Clear the saving indicator instead; the selector
+      // snap-back is the user's signal.
+      if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus(null,'channel');
+    }
+  }
 }
 
 function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
@@ -8928,6 +9190,14 @@ async function loadSettingsPanel(){
     if(autoScrollFollowCb){
       autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
       window._autoScrollFollow=autoScrollFollowCb.checked;
+      // #6819/#6856: a successful settings GET is an authoritative resolve, so
+      // sync the global mirror too — otherwise an explicit OFF applied here
+      // leaves a stale ON mirror that a later boot-fetch failure would restore.
+      // Persist ONLY when the server explicitly sent a boolean (never persist a
+      // synthesized default from an absent field — matches the boot contract).
+      if(typeof settings.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function'){
+        _persistAutoScrollFollow(settings.auto_scroll_follow);
+      }
       autoScrollFollowCb.onchange=function(){
         window._autoScrollFollow=this.checked;
         _scheduleAppearanceAutosave();
@@ -8935,10 +9205,17 @@ async function loadSettingsPanel(){
     }
     const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
     const chatActivityModeSel=$('settingsChatActivityDisplayMode');
+    const transparentEventTimestampsCb=$('settingsTransparentEventTimestamps');
     if(chatActivityModeSel){
       _syncChatActivityDisplayModeControl(settings.chat_activity_display_mode);
+      _syncTransparentEventTimestampsControl(settings.transparent_stream_event_timestamps, settings.chat_activity_display_mode);
       chatActivityModeSel.addEventListener('change',()=>{
         _pickChatActivityDisplayMode(chatActivityModeSel.value);
+      },{once:false});
+    }
+    if(transparentEventTimestampsCb){
+      transparentEventTimestampsCb.addEventListener('change',()=>{
+        _pickTransparentEventTimestamps(transparentEventTimestampsCb.checked);
       },{once:false});
     }
     if(worklogDetailsExpandedCb){
@@ -9050,8 +9327,17 @@ async function loadSettingsPanel(){
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
+    // #7622 (round 3): the settings payload's `settings.language` is
+    // absent (None) for a fresh install, so an explicit non-empty
+    // value is the user's genuine saved choice.  The browser
+    // navigator hint is now read via the guarded
+    // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+    // a throwing `navigator` accessor can no longer abort settings
+    // hydration before model, provider, plugin and extension sections
+    // are populated.  The fallback ternary preserves the pre-#7622
+    // settings-modal behaviour when neither helper is in scope.
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
-      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
+      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
     if(typeof setLocale==='function'){
@@ -9167,6 +9453,17 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
+    const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
+    if(hideEmptyStatePanelCb){
+      hideEmptyStatePanelCb.checked=settings.hide_empty_state_panel===true;
+      window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
+      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
+      hideEmptyStatePanelCb.addEventListener('change',()=>{
+        window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
+        if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
     if(virtualizeTranscriptCb){
       // #4343: EXPERIMENTAL/opt-IN, default OFF. Honor a stored true only when
@@ -9255,6 +9552,13 @@ async function loadSettingsPanel(){
       showWebhookCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
       if(showCliCb){showCliCb.addEventListener('change',function(){showWebhookCb.disabled=!showCliCb.checked;},{once:false});}
     }
+    const showKanbanCb=$('settingsShowKanbanSessions');
+    if(showKanbanCb){
+      showKanbanCb.checked=!!settings.show_kanban_sessions;
+      showKanbanCb.disabled=showCliCb?!showCliCb.checked:true;
+      showKanbanCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){showKanbanCb.disabled=!showCliCb.checked;},{once:false});}
+    }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -9264,19 +9568,13 @@ async function loadSettingsPanel(){
     const updateChannelSel=$('settingsUpdateChannel');
     if(updateChannelSel){
       updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
+      _confirmedUpdateChannel=updateChannelSel.value; // #6612: seed revert baseline
       updateChannelSel.addEventListener('change',function(){
-        // Persist the channel, then invalidate the cached update check and
-        // re-check so the banner reflects the newly-selected channel. Changing
-        // the channel changes WHAT is offered, never WHAT is installed — the
-        // update banner still gates the actual apply behind "Update Now".
-        _schedulePreferencesAutosave();
-        if(typeof checkUpdatesNow==='function'){
-          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
-          // the debounced autosave PUT and answer for the previous channel.
-          const _picked=updateChannelSel.value;
-          setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
-        }
-        if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(updateChannelSel.value);
+        // #6612: use the dedicated channel writer so generic preference autosaves
+        // from a stale tab cannot overwrite a newer explicit channel selection.
+        // Update check, badge sync, and failure status are handled inside
+        // _saveUpdateChannelFromSelector after the POST is confirmed.
+        _saveUpdateChannelFromSelector(updateChannelSel);
       },{once:false});
     }
     const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
@@ -9551,31 +9849,31 @@ async function loadSettingsPanel(){
 // ── Extensions panel (browser-origin diagnostics + local enable controls) ──
 
 function _extensionStatusLabel(value){
-  return value ? 'Enabled' : 'Disabled';
+  return value ? t('plugins_enabled') : t('plugins_disabled');
 }
 
 function _extensionBooleanBadge(value){
   const cls=value?'extension-status-badge-on':'extension-status-badge-off';
-  return `<span class="extension-status-badge ${cls}">${value?'true':'false'}</span>`;
+  return `<span class="extension-status-badge ${cls}">${value?t('ext_status_true'):t('ext_status_false')}</span>`;
 }
 
 function _extensionAssetList(urls){
   if(!Array.isArray(urls)||urls.length===0){
-    return '<div class="extension-url-empty">None</div>';
+    return '<div class="extension-url-empty">'+t('ext_none')+'</div>';
   }
   return '<ul class="extension-url-list">'+urls.map(url=>`<li><code>${esc(url)}</code></li>`).join('')+'</ul>';
 }
 
 function _extensionWarningList(warnings){
   if(!Array.isArray(warnings)||warnings.length===0){
-    return '<div class="extension-url-empty">No warnings.</div>';
+    return '<div class="extension-url-empty">'+t('ext_no_warnings')+'</div>';
   }
   return '<ul class="extension-warning-list">'+warnings.map(item=>{
     const rawCode=(item&&item.code)||'unknown_warning';
     const code=esc(rawCode);
     const source=esc((item&&item.source)||'unknown');
     const hint=rawCode==='extension_state_unknown_ids'
-      ? '<span>Some saved disabled-extension overrides no longer match the current manifest; re-added extensions with the same id may stay disabled.</span>'
+      ? '<span>'+t('ext_state_unknown_ids_hint')+'</span>'
       : '';
     return `<li><code>${code}</code><span>${source}</span>${hint}</li>`;
   }).join('')+'</ul>';
@@ -9661,11 +9959,22 @@ function _extensionSettingsControls(entry){
   </div>`;
 }
 
-function _extensionInstalledList(extensions,extensionDirConfigured){
+function _extensionConfigureButton(entry,surface){
+  if(surface!=='installed'||!(entry&&entry.effective_enabled)) return '';
+  const id=(entry&&entry.id)||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._configureStateForExtension!=='function') return '';
+  const state=runtime._configureStateForExtension(id);
+  if(!state||!state.available) return '';
+  const pending=state.pending===true;
+  return `<button class="sm-btn extension-configure-btn" type="button" data-extension-configure-id="${esc(id)}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''}>${pending?'Opening…':'Configure'}</button>`;
+}
+
+function _extensionInstalledList(extensions,extensionDirConfigured,surface){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
-    if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
-    return '<div class="extension-url-empty">No manifest extensions are installed in the configured bundle.</div>';
+    if(!extensionDirConfigured) return '<div class="extension-url-empty">'+t('settings_extensions_no_dir')+'</div>';
+    return '<div class="extension-url-empty">'+t('settings_extensions_installed_empty')+'</div>';
   }
   return `<div class="extension-installed-list">${list.map(entry=>{
     const id=(entry&&entry.id)||'';
@@ -9678,6 +9987,7 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
     const note=canToggle
       ? 'Toggles the WebUI-managed override for the next app load.'
       : 'Manifest-disabled entries cannot be enabled from WebUI.';
+    const configureButton=_extensionConfigureButton(entry,surface);
     return `<div class="extension-installed-row" data-extension-id="${esc(id)}">
       <div class="extension-installed-main">
         <div class="extension-installed-title-row">
@@ -9687,7 +9997,10 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
         <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
         ${_extensionSettingsControls(entry)}
       </div>
-      <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      <div class="extension-installed-actions">
+        ${configureButton}
+        <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      </div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -9781,6 +10094,13 @@ function _extensionSidecarCard(sidecars){
     const proxyConsentRequired=proxy.consent_required===true;
     const proxyOriginChanged=proxy.origin_changed===true;
     const proxyPath=(proxy&&proxy.path)||'';
+    // token-v1 posture: 'local_unprotected' = WebUI auth is off, so proxy consent
+    // is grantable by any unauthenticated local caller. Warn the operator to
+    // enable authentication before wiring up a sidecar (design §9.1).
+    const proxyUnprotected=proxy.posture==='local_unprotected';
+    const proxyWarning=proxyUnprotected
+      ?`<div class="extension-sidecar-warning">⚠ WebUI authentication is off. This sidecar's proxy consent can be granted by any local process. Set a password in Settings → Password before using sidecar extensions.</div>`
+      :'';
     const proxyStatus=proxyConsented
       ?'consented'
       :(proxyOriginChanged
@@ -9798,22 +10118,23 @@ function _extensionSidecarCard(sidecars){
       </div>
       <div class="extension-sidecar-meta">${esc(meta)}</div>
       <div class="extension-sidecar-fields">
-        <div><span>Origin</span><code>${esc(origin)}</code></div>
-        <div><span>Health path</span><code>${esc(healthPath)}</code></div>
-        <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
-        <div><span>Proxy</span><code>${esc(proxyStatus)}</code></div>
-        <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
+        <div><span>${esc(t('ext_sidecar_origin'))}</span><code>${esc(origin)}</code></div>
+        <div><span>${esc(t('ext_sidecar_health_path'))}</span><code>${esc(healthPath)}</code></div>
+        <div><span>${esc(t('ext_sidecar_health_url'))}</span><code>${esc(healthUrl)}</code></div>
+        <div><span>${esc(t('ext_sidecar_proxy'))}</span><code>${esc(proxyStatus)}</code></div>
+        <div><span>${esc(t('ext_sidecar_proxy_path'))}</span><code>${esc(proxyPath)}</code></div>
       </div>
       <div class="extension-sidecar-actions">${proxyButton}</div>
+      ${proxyWarning}
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
-  }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
+  }).join('')}</div>`:'<div class="extension-url-empty">'+t('ext_sidecars_none')+'</div>';
   return `
     <div class="provider-card extension-sidecars-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Loopback sidecars</div>
-          <div class="provider-card-meta">Declared local companions; health is checked directly from this browser with WebUI credentials omitted.</div>
+          <div class="provider-card-name">${esc(t('ext_sidecars_title'))}</div>
+            <div class="provider-card-meta">${esc(t('ext_sidecars_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
@@ -9887,6 +10208,7 @@ function _renderExtensionsPanel(data,seq){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   _extensionsStatusData=data||null;
+  if(_extensionsGalleryData) _extensionsGalleryData.statusData=data||null;
   _configureExtensionSettingsFromStatus(data);
   if(copyBtn) copyBtn.disabled=!data;
   const manifest=(data&&data.manifest)||{};
@@ -9905,52 +10227,52 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-status-card ${statusClass}">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Extension runtime</div>
-          <div class="provider-card-meta">Status from /api/extensions/status; toggles persist a local override for installed manifest entries.</div>
+          <div class="provider-card-name">${esc(t('settings_extensions_runtime_title'))}</div>
+          <div class="provider-card-meta">${esc(t('settings_extensions_runtime_status_from'))}</div>
         </div>
         <span class="provider-card-badge ${data&&data.enabled?'':'plugin-card-badge-disabled'}">${_extensionStatusLabel(!!(data&&data.enabled))}</span>
       </div>
       <div class="provider-card-body extension-card-body">
         <div class="extension-summary-grid">
-          <div><span>Extension dir configured</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
-          <div><span>Extension dir valid</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
-          <div><span>Manifest configured</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
-          <div><span>Manifest loaded</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
-          <div><span>Manifest status</span><code>${esc(manifest.status||'unknown')}</code></div>
-          <div><span>Manifest entries inspected</span><code>${Number(manifest.entry_count)||0}</code></div>
-          <div><span>Manifest script count</span><code>${Number(manifest.script_count)||0}</code></div>
-          <div><span>Manifest stylesheet count</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
-          <div><span>Manifest sidecar count</span><code>${Number(manifest.sidecar_count)||0}</code></div>
-          <div><span>Final script count</span><code>${scriptCount}</code></div>
-          <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
-          <div><span>Loopback sidecar count</span><code>${sidecarCount}</code></div>
-          <div><span>Installed manifest extensions</span><code>${manifestExtensionCount}</code></div>
-          <div><span>User-disabled extensions</span><code>${userDisabledCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_extension_dir_configured'))}</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
+          <div><span>${esc(t('settings_extensions_diag_extension_dir_valid'))}</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_configured'))}</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_loaded'))}</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_status'))}</span><code>${esc(manifest.status||'unknown')}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_entries'))}</span><code>${Number(manifest.entry_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_scripts'))}</span><code>${Number(manifest.script_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_stylesheets'))}</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_sidecars'))}</span><code>${Number(manifest.sidecar_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_final_scripts'))}</span><code>${scriptCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_final_stylesheets'))}</span><code>${styleCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_loopback_sidecars'))}</span><code>${sidecarCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_installed_extensions'))}</span><code>${manifestExtensionCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_user_disabled'))}</span><code>${userDisabledCount}</code></div>
         </div>
       </div>
     </div>
     <div class="provider-card extension-installed-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Installed manifest extensions</div>
-          <div class="provider-card-meta">Enable or disable already-present local extensions. Reload WebUI to apply injected asset changes to this browser tab.</div>
+          <div class="provider-card-name">${esc(t('settings_extensions_installed_section_title'))}</div>
+          <div class="provider-card-meta">${esc(t('settings_extensions_installed_section_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))}
+        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured),'diagnostics')}
       </div>
     </div>
     <div class="provider-card extension-assets-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Final public asset URLs</div>
-          <div class="provider-card-meta">Same-origin URLs that may be injected into the app shell.</div>
+          <div class="provider-card-name">${esc(t('ext_assets_title'))}</div>
+          <div class="provider-card-meta">${esc(t('ext_assets_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        <div class="provider-card-label">Scripts</div>
+        <div class="provider-card-label">${esc(t('ext_assets_scripts'))}</div>
         ${_extensionAssetList(scripts)}
-        <div class="provider-card-label extension-section-label">Stylesheets</div>
+        <div class="provider-card-label extension-section-label">${esc(t('ext_assets_styles'))}</div>
         ${_extensionAssetList(styles)}
       </div>
     </div>
@@ -9958,8 +10280,8 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-warnings-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Sanitized warnings</div>
-          <div class="provider-card-meta">Codes and coarse sources only; paths and rejected values are not shown.</div>
+          <div class="provider-card-name">${esc(t('ext_warnings_title'))}</div>
+          <div class="provider-card-meta">${esc(t('ext_warnings_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
@@ -9971,6 +10293,37 @@ function _renderExtensionsPanel(data,seq){
   _bindExtensionSidecarProxyButtons(target);
   _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
+}
+
+function _bindExtensionConfigureButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionConfigure(btn));
+  });
+}
+
+function _syncExtensionConfigureButtonState(id){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._configureStateForExtension!=='function') return;
+  const state=runtime._configureStateForExtension(id);
+  document.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    if(!btn.dataset||btn.dataset.extensionConfigureId!==id) return;
+    const pending=!!(state&&state.available&&state.pending);
+    btn.disabled=pending;
+    btn.setAttribute('aria-busy',pending?'true':'false');
+    btn.textContent=pending?'Opening…':'Configure';
+  });
+}
+
+function handleExtensionConfigure(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionConfigureId||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._invokeConfigure!=='function') return;
+  runtime._invokeConfigure(id,{
+    opener:btn,
+    onError:()=>showToast('Extension configuration failed.',4200,'error'),
+  });
 }
 
 function _bindExtensionToggleButtons(root){
@@ -10134,6 +10487,21 @@ function switchExtensionsTab(tab){
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
 }
 
+function _handleExtensionConfigureChange(change){
+  if(!change||!change.id) return;
+  if(change.reason==='pending'){
+    _syncExtensionConfigureButtonState(change.id);
+    return;
+  }
+  if(_extensionsGalleryData&&_extensionsGalleryData.statusData){
+    _renderInstalledExtensionsSurface(_extensionsGalleryData.statusData);
+  }
+}
+
+if(window.HermesExtensionSettings&&typeof window.HermesExtensionSettings._onConfigureChange==='function'){
+  window.HermesExtensionSettings._onConfigureChange(_handleExtensionConfigureChange);
+}
+
 function _extensionSafeHttpUrl(value){
   if(!value) return '';
   const raw=String(value).trim();
@@ -10289,6 +10657,19 @@ function _extensionPostInstallNote(entry,isInstalled){
   </div>`;
 }
 
+function _renderInstalledExtensionsSurface(statusData){
+  const installedEl=$('extensionsInstalled');
+  if(!installedEl) return;
+  installedEl.innerHTML=_extensionInstalledList(
+    statusData&&statusData.extensions,
+    !!(statusData&&statusData.extension_dir_configured),
+    'installed'
+  );
+  _bindExtensionToggleButtons(installedEl);
+  _bindExtensionSettingsButtons(installedEl);
+  _bindExtensionConfigureButtons(installedEl);
+}
+
 async function loadExtensionsGallery(){
   _extensionsGalleryLoaded=true;
   const galleryEl=$('extensionsGallery');
@@ -10312,7 +10693,6 @@ async function loadExtensionsGallery(){
 
 function _renderExtensionsGallery(entries,statusData){
   const galleryEl=$('extensionsGallery');
-  const installedEl=$('extensionsInstalled');
   _configureExtensionSettingsFromStatus(statusData);
   const installedIds=new Set();
   if(statusData&&statusData.gallery_installed){
@@ -10323,11 +10703,7 @@ function _renderExtensionsGallery(entries,statusData){
   }
   if(!Array.isArray(entries)||entries.length===0){
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
-    if(installedEl){
-      installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-      _bindExtensionToggleButtons(installedEl);
-      _bindExtensionSettingsButtons(installedEl);
-    }
+    _renderInstalledExtensionsSurface(statusData);
     return;
   }
   const galleryCards=[];
@@ -10371,11 +10747,7 @@ function _renderExtensionsGallery(entries,statusData){
     galleryCards.push(card);
   }
   if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
-  if(installedEl){
-    installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-    _bindExtensionToggleButtons(installedEl);
-    _bindExtensionSettingsButtons(installedEl);
-  }
+  _renderInstalledExtensionsSurface(statusData);
   _bindExtensionGalleryButtons(entries);
 }
 
@@ -10455,7 +10827,7 @@ async function handlePluginEnableToggle(pluginKey, checked){
   try{
     const body={dashboard_plugins:{}};
     body.dashboard_plugins[pluginKey]=!!checked;
-    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     loadPluginsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
@@ -11070,7 +11442,7 @@ function _attachBudgetControls(wrap,history,card,paceNum){
 
   async function _saveBudget(value){
     try{
-      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      await _enqueueSettingsPost({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
       const existing=card.querySelector('.provider-cost-chart-wrap');
       if(existing) existing.remove();
       renderProviderCostChart(card);
@@ -11687,7 +12059,7 @@ function _updateAuthDisabledWarning(authStatus){
 
 async function _setAuthDisabledAck(checked){
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
+    await _enqueueSettingsPost({method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
     try{
       const authStatus=await api('/api/auth/status');
       _updateAuthWarningBadge(authStatus);
@@ -11743,7 +12115,7 @@ async function loadPasskeys(){
     }
     const creds=(data&&data.credentials)||[];
     if(!creds.length){list.textContent='No passkeys registered.';return;}
-    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey('${esc(c.id)}')">Remove</button></div>`).join('');
+    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey(${jsArg(c.id)})">Remove</button></div>`).join('');
   }catch(e){list.textContent='Failed to load passkeys: '+e.message;}
 }
 
@@ -11794,6 +12166,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
+  _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -11806,7 +12179,13 @@ function _applySavedSettingsUi(saved, body, opts){
     ? _persistDefaultMessageMode(body.default_message_mode||body.busy_input_mode)
     : (body.default_message_mode||body.busy_input_mode||'steer');
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
-  window._autoScrollFollow=body.auto_scroll_follow!==false;
+  // #6819: only override auto-follow when the body actually carries the key.
+  // A partial settings body without it must not silently re-enable follow
+  // (`undefined !== false` evaluates true — the old clobber).
+  if(Object.prototype.hasOwnProperty.call(body,'auto_scroll_follow')){
+    window._autoScrollFollow=body.auto_scroll_follow!==false;
+    if(typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(window._autoScrollFollow);
+  }
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
   window._projectQuickCreate=!!body.project_quick_create_buttons;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
@@ -11893,7 +12272,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -12019,11 +12398,22 @@ function _buildAuxProviderOptions(sel,providers,currentProvider){
  autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
  if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
  sel.appendChild(autoOpt);
+ let matched=currentProvider==='auto'||!currentProvider;
  for(const p of providers){
   const opt=document.createElement('option');
   opt.value=p.slug;opt.textContent=p.name;
-  if(p.slug===currentProvider) opt.selected=true;
+  if(p.slug===currentProvider){opt.selected=true;matched=true;}
   sel.appendChild(opt);
+ }
+ // The configured provider can be absent from the /api/models catalog (e.g. its
+ // group exposes no models). Keep it selectable: with no matching option the
+ // select falls back to its first entry ('auto') and the next Apply would
+ // persist that, silently discarding the configured value.
+ if(!matched&&currentProvider){
+  const configuredOpt=document.createElement('option');
+  configuredOpt.value=currentProvider;configuredOpt.textContent=currentProvider+' (configured)';
+  configuredOpt.selected=true;
+  sel.appendChild(configuredOpt);
  }
 }
 
@@ -12032,17 +12422,35 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  const emptyOpt=document.createElement('option');
  emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
  sel.appendChild(emptyOpt);
+ const canonicalCurrent=_modelBareNameForProvider(currentModel,provider)||'';
  if(!provider||provider==='auto'){
-  sel.value=currentModel||'';
-  return;
+  sel.value=canonicalCurrent;
+  return canonicalCurrent;
  }
  // Find matching provider in cached list
  const pData=providers.find(p=>p.slug===provider);
+ // A provider kept in the list only because its models endpoint failed would
+ // otherwise render as a silent, empty model select. Echo the same hint the
+ // main picker shows instead of implying "no models to choose from". (#7521)
+ if(pData&&pData.modelsEndpointError){
+  const errOpt=document.createElement('option');
+  errOpt.value='';errOpt.disabled=true;
+  errOpt.dataset.modelsEndpointError='1';
+  errOpt.textContent='\u26a0 '+(pData.modelsEndpointError.message||'Models endpoint could not be reached for this provider.');
+  sel.appendChild(errOpt);
+ }
+ const modelValues=new Set();
  if(pData&&pData.models){
-  for(const mId of pData.models){
+  for(const modelEntry of pData.models){
+   const routeId=typeof modelEntry==='string'?modelEntry:String(modelEntry?.id||'');
+   const mId=_modelBareNameForProvider(routeId,provider)||'';
+   if(!mId||modelValues.has(mId)) continue;
+   modelValues.add(mId);
+   const routeLabel=typeof modelEntry==='string'?'':String(modelEntry?.label||'');
+   const modelLabel=_modelBareNameForProvider(routeLabel,provider)||mId;
    const opt=document.createElement('option');
-   opt.value=mId;opt.textContent=mId;
-   if(mId===currentModel) opt.selected=true;
+   opt.value=mId;opt.textContent=modelLabel;
+   if(mId===canonicalCurrent) opt.selected=true;
    sel.appendChild(opt);
   }
  }
@@ -12051,12 +12459,13 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
  sel.appendChild(customOpt);
  // If currentModel not in list and not empty, add it as a custom option
- if(currentModel&&!pData?.models?.includes(currentModel)){
+ if(canonicalCurrent&&!modelValues.has(canonicalCurrent)){
   const existingOpt=document.createElement('option');
-  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.value=canonicalCurrent;existingOpt.textContent=canonicalCurrent+' (configured)';
   existingOpt.selected=true;
   sel.insertBefore(existingOpt,customOpt);
  }
+ return canonicalCurrent;
 }
 
 function _onAuxProviderChange(taskKey,providers){
@@ -12074,13 +12483,16 @@ async function _onAuxModelChange(taskKey){
  if(modelSel.value==='__custom__'){
   const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
   if(customModel&&customModel.trim()){
+   const provider=$('aux-prov-'+taskKey)?.value||'';
+   const enteredModel=customModel.trim();
+   const canonicalModel=_modelBareNameForProvider(enteredModel,provider)||enteredModel;
    // Insert custom model option before the __custom__ option
    const opt=document.createElement('option');
-   opt.value=customModel.trim();opt.textContent=customModel.trim();
+   opt.value=canonicalModel;opt.textContent=canonicalModel;
    // Remove __custom__ selection
    const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
    if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
-   modelSel.value=customModel.trim();
+   modelSel.value=canonicalModel;
   }else{
    modelSel.value='';
   }
@@ -12170,7 +12582,7 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
    _auxAdvancedInputHtml('auxAdvancedBaseUrl',t('settings_aux_advanced_base_url')||'Base URL',_auxAdvancedValue(cfg,'base_url'),t('settings_aux_advanced_base_url_desc')||'Optional provider endpoint override.','text','inputmode="url"')+
    serviceTierField+
    timingFields+
-   `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(t('settings_aux_advanced_extra_body')||'Extra body JSON')}</span><textarea id="auxAdvancedExtraBody" rows="6" style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:var(--mono,monospace)">${esc(extraBody)}</textarea><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(t('settings_aux_advanced_extra_body_desc')||'Optional JSON object merged into the model request body.')}</span></label>`+
+    `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(t('settings_aux_advanced_extra_body')||'Extra body JSON')}</span><textarea id="auxAdvancedExtraBody" rows="6" style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:var(--font-mono)">${esc(extraBody)}</textarea><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(t('settings_aux_advanced_extra_body_desc')||'Optional JSON object merged into the model request body.')}</span></label>`+
    _auxAdvancedInputHtml('auxAdvancedApiKey',t('settings_aux_advanced_api_key')||'API key override','',apiKeyHint,'text','autocomplete="one-time-code" inputmode="text" readonly onfocus="this.removeAttribute(&quot;readonly&quot;)"',';-webkit-text-security:disc')+
    `<label style="display:${cfg&&cfg.api_key_set?'flex':'none'};align-items:center;gap:8px;font-size:12px;color:var(--text)"><input id="auxAdvancedApiKeyClear" type="checkbox" style="width:15px;height:15px;accent-color:var(--accent)"><span>${esc(t('settings_aux_advanced_api_key_clear')||'Clear existing API key override')}</span></label>`;
  }
@@ -12270,6 +12682,22 @@ function _bindMainAdvancedOptionsButton(){
  btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
 }
 
+// Build the auxiliary picker provider list from /api/models groups.
+// A named custom provider whose /v1/models probe failed still reaches the UI as
+// a group with an empty ``models`` list plus ``models_endpoint_error``
+// (api/config.py). Zero-model groups used to be filtered out here, which made
+// the provider vanish from every auxiliary select even though the main model
+// picker renders that same group together with its unreachable-endpoint hint. (#7521)
+function _auxProvidersFromModelGroups(groups){
+ const list=Array.isArray(groups)?groups:[];
+ return list.filter(g=>g&&g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0)||g.models_endpoint_error)).map(g=>({
+  slug:g.provider_id||g.provider,
+  name:g.provider,
+  modelsEndpointError:g.models_endpoint_error||null,
+  models:[...(g.models||[]),...(g.extra_models||[])].map(m=>({id:m.id,label:m.label||m.id})),
+ }));
+}
+
 async function _loadAuxiliaryModels(){
  const container=$('auxModelsContainer');
  if(!container) return;
@@ -12284,11 +12712,7 @@ async function _loadAuxiliaryModels(){
   // Build provider list from /api/models groups
   // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
   const groups=(modelsData&&modelsData.groups)||[];
-  _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
-   slug:g.provider_id||g.provider,
-   name:g.provider,
-   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
-  }));
+  _auxProviders=_auxProvidersFromModelGroups(groups);
   if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
    _mainAdvancedConfig=auxData.main||{};
   }else{
@@ -12302,6 +12726,7 @@ async function _loadAuxiliaryModels(){
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
+  let needsCanonicalSave=false;
   for(const task of _auxTasks){
    const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
@@ -12325,7 +12750,8 @@ async function _loadAuxiliaryModels(){
    const modelSel=document.createElement('select');
    modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
-   _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   const canonicalModel=_buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   if(canonicalModel!==cfg.model) needsCanonicalSave=true;
    modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
@@ -12342,9 +12768,9 @@ async function _loadAuxiliaryModels(){
 
    container.appendChild(row);
   }
-  // Hide apply button (no changes yet)
+  // Matching legacy @provider:model values can be repaired with one explicit Apply.
   const applyBtn=$('btnApplyAuxModels');
-  if(applyBtn) applyBtn.style.display='none';
+  if(applyBtn) applyBtn.style.display=needsCanonicalSave?'':'none';
 
   // Reset button
   const resetBtn=$('btnResetAuxModels');
@@ -12389,7 +12815,13 @@ async function _applyAuxModels(){
     saved++;
    }catch(e){
     console.warn('[settings] failed to save aux task',task.task,e);
-    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
+    // Surface the server's actionable message (e.g. an ambiguous custom-provider
+    // slug collision: rename one provider so its slug is unique) instead of a
+    // generic failure, and abort the loop so the dirty selection is retained for
+    // the user to fix and retry — the reload that would clear it is skipped.
+    const _msg=(e&&e.message)?e.message:'';
+    const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
+    if(typeof showToast==='function') showToast(_msg?(_base+': '+_msg):_base,6000,'error');
     return;
    }
   }
@@ -12415,6 +12847,7 @@ async function saveSettings(andClose){
   const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
+  const showKanbanSessions=!!($('settingsShowKanbanSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -12438,6 +12871,7 @@ async function saveSettings(andClose){
     ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity'))
     ? ($('settingsChatActivityDisplayMode')||{}).value
     : 'compact_worklog';
+  body.transparent_stream_event_timestamps=(($('settingsTransparentEventTimestamps')||{}).checked)!==false;
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
@@ -12470,11 +12904,11 @@ async function saveSettings(andClose){
   // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_webhook_sessions=showCliSessions&&showWebhookSessions;
+  body.show_kanban_sessions=showCliSessions&&showKanbanSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
-  body.update_channel=($('settingsUpdateChannel')||{}).value==='experimental'?'experimental':'stable';
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
@@ -12498,14 +12932,20 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-          await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
-          body.default_model=model;
-          body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        body.default_model=model;
+        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){
-          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
         }
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
@@ -12528,15 +12968,21 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
-      }catch(_modelErr){
-        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
-      }
+        }catch(_modelErr){
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
+        }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
@@ -12565,7 +13011,7 @@ async function goPasswordless(){
   const payload={_passwordless:true};
   if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     showToast('Password removed. Passkey sign-in remains enabled.');
     _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
     _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
@@ -12595,7 +13041,7 @@ async function disableAuth(){
   const payload={_clear_password:true};
   if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     showToast(t('auth_disabled'));
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';
@@ -12793,7 +13239,12 @@ function loadMcpServers(){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
-    list.innerHTML=r.servers.map(s=>{
+    // Live status is withheld while the profile's runtime scope cannot be confirmed
+    // (e.g. a chat turn on this profile is running); say so instead of "not connected".
+    const scopeNotice=r.runtime_scope==='unavailable'
+      ?`<div class="mcp-runtime-notice" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+      :'';
+    list.innerHTML=scopeNotice+r.servers.map(s=>{
       const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
       const transportBadge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
@@ -12950,7 +13401,7 @@ function loadMcpTools(){
 let _gatewayActionInFlight=false;
 function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
-  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction('${esc(action)}')" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
+  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
 function _gatewayActionControls(r){
   const actions=(r&&r.running)?['stop','restart']:['start'];
@@ -13043,10 +13494,10 @@ async function _loadCheckpoints(workspace){
             </div>
           </div>
           <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
-            <button class="panel-head-btn" title="${esc(t('checkpoint_view_diff'))}" onclick="event.stopPropagation();_viewCheckpointDiff('${esc(workspace)}','${esc(ck.id)}')">
+            <button class="panel-head-btn" title="${esc(t('checkpoint_view_diff'))}" onclick="event.stopPropagation();_viewCheckpointDiff(${jsArg(workspace)},${jsArg(ck.id)})">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             </button>
-            <button class="panel-head-btn" title="${esc(t('checkpoint_restore'))}" onclick="event.stopPropagation();_restoreCheckpoint('${esc(workspace)}','${esc(ck.id)}','${esc(msg.replace(/'/g,"\\'"))}')">
+            <button class="panel-head-btn" title="${esc(t('checkpoint_restore'))}" onclick="event.stopPropagation();_restoreCheckpoint(${jsArg(workspace)},${jsArg(ck.id)},${jsArg(msg)})">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
             </button>
           </div>

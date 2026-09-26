@@ -48,7 +48,19 @@ def _install_fake_hermes_cli(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_cache():
-    """Invalidate the TTL model cache around each test."""
+    """Invalidate the TTL model cache around each test AND restore config.cfg.
+
+    ``_setup_config`` calls ``config.reload_config()`` against a temp config.yaml,
+    which repopulates the shared ``config.cfg`` with this file's provider/model
+    config and never resets it. Under cross-file ordering a sibling test (e.g.
+    test_model_resolver) then inherits a leaked ``providers`` block that injects
+    an unexpected provider group and flakes its assertions. Snapshot + restore
+    ``config.cfg`` (a shallow dict copy — cheap) so the leak can't escape this
+    file. We deliberately do NOT touch ``_cfg_cache`` / ``_yaml_file_cache``
+    (restoring those globals destabilizes unrelated state-db reconciliation
+    tests in the same shard).
+    """
+    _saved_cfg = dict(config.cfg)
     try:
         config.invalidate_models_cache()
     except Exception:
@@ -56,6 +68,12 @@ def _isolate_cache():
     yield
     try:
         config.invalidate_models_cache()
+    except Exception:
+        pass
+    try:
+        if isinstance(config.cfg, dict):
+            config.cfg.clear()
+            config.cfg.update(_saved_cfg)
     except Exception:
         pass
 

@@ -1,0 +1,116 @@
+name: Docs CI
+
+# Lightweight checks for documentation changes. Intentionally MINIMAL (Nathan,
+# 2026-07-18): NOT a Markdown style linter — no line length, heading levels, list
+# markers, or cosmetic rules. It runs only two things, and only when docs change:
+#   1. critical_markdown_check.py — flags ONLY a rendering break (a link whose
+#      destination token is split across a newline, or an unclosed inline link).
+#   2. lychee link check — flags broken/dead links (informational, non-blocking).
+#
+# Runs on docs paths only; does NOT gate code PRs. This job is NOT a required
+# status check — it's an informational quality gate; promote it via the ruleset
+# later if desired.
+#
+# SECURITY: changed filenames on a fork PR are UNTRUSTED. They are never
+# interpolated into `run:` source via ${{ }} (which Bash would re-evaluate,
+# executing $(...) in a crafted filename). The file list is passed through an
+# `env:` variable and referenced as "$DOC_FILES", and lychee is handed a FIXED
+# glob rather than an attacker-controlled explicit list.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '**/*.md'
+      - '**/*.markdown'
+      - '**/*.rst'
+      - 'docs/**'
+      - 'CHANGELOG*'
+      - '**/README*'
+  push:
+    branches: [master]
+    paths:
+      - '**/*.md'
+      - '**/*.markdown'
+      - '**/*.rst'
+      - 'docs/**'
+      - 'CHANGELOG*'
+      - '**/README*'
+
+# Read-only; no secrets needed. Fork PRs already get a read-only token, but pin it.
+permissions:
+  contents: read
+
+jobs:
+  docs-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve changed doc files (NUL-safe, untrusted names)
+        id: docs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          # Compute the changed markdown/doc files and write them to a file, ONE PER
+          # LINE. We never echo untrusted names into another shell; downstream steps
+          # read this file. Fall back to all tracked docs if the diff can't compute.
+          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
+            RANGE="$BASE_SHA...$HEAD_SHA"
+          else
+            RANGE="${{ github.event.before }}...${{ github.sha }}"
+          fi
+          : > doc_files.txt
+          if CHANGED="$(git diff --name-only --no-renames --diff-filter=ACMR "$RANGE" 2>/dev/null)"; then
+            printf '%s\n' "$CHANGED" | grep -Ei '\.(md|markdown|rst)$' > doc_files.txt || true
+          fi
+          if [ ! -s doc_files.txt ]; then
+            git ls-files '*.md' '*.markdown' '*.rst' > doc_files.txt 2>/dev/null || true
+          fi
+          # Keep only files that still exist (skip deletions), preserving exact names.
+          : > doc_files_existing.txt
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] && printf '%s\n' "$f" >> doc_files_existing.txt
+          done < doc_files.txt
+          mv doc_files_existing.txt doc_files.txt
+          echo "Doc files to check:"; cat doc_files.txt
+          echo "count=$(wc -l < doc_files.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Critical Markdown check (rendering-breaks only, not style)
+        if: steps.docs.outputs.count != '0'
+        run: |
+          set -uo pipefail
+          # Read the NUL-safe-ish file list (one path per line) into an array. Names
+          # are passed as ARGUMENTS to python, never evaluated as shell.
+          mapfile -t FILES < doc_files.txt
+          if [ "${#FILES[@]}" -eq 0 ]; then echo "No doc files."; exit 0; fi
+          python3 scripts/critical_markdown_check.py "${FILES[@]}"
+
+      # Broken-link check. Handed a FIXED glob (not the attacker-controlled list) so
+      # no untrusted filename ever reaches lychee's `eval`. Over-checking docs is
+      # harmless. Informational only: continue-on-error keeps it from blocking.
+      - name: Broken-link check (lychee)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress
+            --max-concurrency 4
+            --accept 200,206,301,302,303,307,308,401,403,429
+            --timeout 20
+            --max-retries 2
+            "**/*.md"
+            "**/*.markdown"
+            "**/*.rst"
+          fail: true
+        continue-on-error: true

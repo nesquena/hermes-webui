@@ -173,7 +173,7 @@ class TestLoadHtmlInlineFunction:
     def test_fallback_on_error(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 2000]
+        body = ui[idx:idx + 2600]  # snapshot-stamped derived links (+snapQuery) grew the function
         assert 'html_error' in body, 'Must show error fallback on failure'
 
     def test_uses_srcdoc_attribute(self):
@@ -197,9 +197,16 @@ class TestLoadHtmlInlineFunction:
         body = ui[idx:idx + 1200]
         assert 'const mediaSessionId=' in body
         assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
-        assert 'fetch(mediaUrl)' in body
+        assert "fetch(mediaUrl, {cache:'no-store'})" in body, (
+            "loadHtmlInline must fetch with cache:'no-store' to bypass "
+            "browser cache for stale HTML preview (got body without no-store)"
+        )
         assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
-        assert "const openUrl=publicMediaUrl+'&inline=1';" in body
+        assert "const openUrl=publicMediaUrl+'&inline=1'+snapQuery;" in body, (
+            "HTML 'open full page' / fallback links must carry the message's "
+            "snapshot digest (snapQuery) so they open the frozen bytes, not the "
+            "current live file"
+        )
 
     def test_pdf_fetch_url_includes_session_id_for_session_media_artifacts(self):
         ui = _read_js('ui.js')
@@ -209,7 +216,11 @@ class TestLoadHtmlInlineFunction:
         assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
         assert 'fetch(mediaUrl)' in body
         assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
-        assert "const dlUrl=publicMediaUrl+'&download=1';" in body
+        assert "const dlUrl=publicMediaUrl+'&download=1'+snapQuery;" in body, (
+            "PDF download/fallback links must carry the message's snapshot "
+            "digest (snapQuery) so they download the frozen bytes, not the "
+            "current live file"
+        )
 
 
 # ── requestAnimationFrame integration ──────────────────────────────────────

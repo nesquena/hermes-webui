@@ -1,0 +1,32 @@
+{
+  "source": "https://github.com/nesquena/hermes-webui/issues/6612",
+  "symptom": "A stale WebUI tab overwrites a newer update-channel selection when the user changes any unrelated preference.",
+  "sequence": [
+    "Select Experimental and leave Tab A open; its settingsUpdateChannel control holds 'experimental'.",
+    "In Tab B, select Stable and let that save complete.",
+    "Without refreshing Tab A, toggle any unrelated preference there, such as TPS display or sidebar density.",
+    "Tab A's generic Preferences autosave posts its full stale payload to /api/settings.",
+    "save_settings() accepts the explicit allowed enum value, so the server silently switches back to Experimental."
+  ],
+  "stale_autosave_payload": {
+    "update_channel": "experimental",
+    "show_tps": true
+  },
+  "expected_persisted_channel_after_stale_autosave": "stable",
+  "explicit_channel_payloads": [
+    { "update_channel": "stable" },
+    { "update_channel": "experimental" }
+  ],
+  "normalization_cases": [
+    { "input": { "update_channel": "nightly" }, "expected": "experimental", "note": "invalid enum value is ignored; persisted value unchanged" },
+    { "input": { "update_channel": "" }, "expected": "experimental", "note": "empty string is not a valid enum value; persisted value unchanged" },
+    { "input": {}, "expected": "experimental", "note": "absent key leaves persisted value unchanged" }
+  ],
+  "acceptance_criteria": [
+    "Tab A may hold a stale channel value while Tab B changes the persisted channel.",
+    "Changing an unrelated preference in Tab A does not alter the persisted channel.",
+    "An explicit channel change still persists and immediately drives channel-scoped check/apply state.",
+    "A regression test exercises the two-client stale-value sequence.",
+    "Unknown/invalid/missing channel values leave the persisted channel unchanged."
+  ]
+}

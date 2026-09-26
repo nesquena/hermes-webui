@@ -94,7 +94,7 @@ def test_save_settings_password_change_preflights_current_password_before_api():
     body = match.group(1)
     assert "currentPwField=$('settingsCurrentPassword')" in body
     assert "showToast(t('current_password_required'))" in body
-    assert body.index("showToast(t('current_password_required'))") < body.index("api('/api/settings'")
+    assert body.index("showToast(t('current_password_required'))") < body.index("_enqueueSettingsPost(")
 
 
 def test_disable_auth_typed_confirm_locales_show_literal_phrase():

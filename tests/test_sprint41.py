@@ -10,6 +10,7 @@ Covers:
 import pathlib
 import re
 import unittest
+from types import SimpleNamespace
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
@@ -222,6 +223,278 @@ class TestIssue495TitleStreaming(unittest.TestCase):
             _is_provisional_title(current, messages),
             "Whitespace-normalized provisional titles should still be recognized",
         )
+
+    def test_structured_workspace_prefixed_provisional_title_is_eligible(self):
+        """The persisted multimodal first turn remains eligible for auto-title."""
+        from api.streaming import (
+            _background_title_generation_inputs,
+            _is_provisional_title,
+            title_from,
+        )
+
+        visible_text = (
+            "[Workspace::v1: user-authored]\n"
+            "Describe uploads naturally.\n\n"
+            "Attached files are mentioned in ordinary prose."
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "[Workspace::v1: /internal]\n"
+                            f"{visible_text}\n\n"
+                            "[Attached files: /attachments/uploads.png]"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,workflow"},
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "Here is the completed workflow."},
+        ]
+        session = SimpleNamespace(
+            title=title_from([{"role": "user", "content": visible_text}], ""),
+            messages=messages,
+            llm_title_generated=False,
+        )
+
+        self.assertEqual(session.title, visible_text[:64])
+        self.assertTrue(_is_provisional_title(session.title, session.messages))
+        title_inputs = _background_title_generation_inputs(session)
+        expected_user_text = " ".join(visible_text.split())
+        self.assertEqual(title_inputs, (expected_user_text, "Here is the completed workflow."))
+        user_text, _ = title_inputs
+        self.assertIn("Attached files are mentioned in ordinary prose.", user_text)
+        self.assertNotIn("[Attached files: /attachments/uploads.png]", user_text)
+        for forbidden in ("/internal",):
+            self.assertNotIn(forbidden, user_text)
+
+    def test_structured_title_input_skips_empty_and_image_only_users(self):
+        """The first title-bearing user row wins over empty/image-only rows."""
+        from api.streaming import (
+            _background_title_generation_inputs,
+            _is_provisional_title,
+        )
+
+        visible_text = (
+            "Describe the three-step workflow with enough detail to exercise title truncation "
+            "after skipping empty image-only rows."
+        )
+        long_workspace = "/workspace/" + ("long-title-sentinel-" * 4)
+        messages = [
+            {"role": "user", "content": None},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,empty"}}
+                ],
+            },
+            {
+                "role": "user",
+                "content": (
+                    "[Workspace::v1: /internal-only-title-metadata]\n\n"
+                    "[Attached files: /attachments/internal-only.png]"
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "[Workspace::v1: /internal-only-title-part]\n\n"
+                            "[Attached files: /attachments/internal-only-part.png]"
+                        ),
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"[Workspace::v1: {long_workspace}]\n{visible_text}\n\n"
+                            "[Attached files: /attachments/workflow.png]"
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,workflow"}},
+                ],
+            },
+            {"role": "assistant", "content": "The workflow is complete."},
+        ]
+        session = SimpleNamespace(
+            title=visible_text[:64], messages=messages, llm_title_generated=False
+        )
+
+        self.assertGreater(len(long_workspace), 64)
+        self.assertTrue(_is_provisional_title(session.title, session.messages))
+        self.assertEqual(
+            _background_title_generation_inputs(session),
+            (visible_text, "The workflow is complete."),
+        )
+
+    def test_input_text_title_snippet_remains_background_eligible(self):
+        """Mixed structured input_text content remains a title input."""
+        from api.streaming import (
+            _background_title_generation_inputs,
+            _first_exchange_snippets,
+            _is_provisional_title,
+        )
+
+        visible_text = "Describe the input-text workflow."
+        assistant_text = "The workflow is complete."
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": visible_text}],
+            },
+            {"role": "assistant", "content": assistant_text},
+        ]
+        session = SimpleNamespace(
+            title="Untitled", messages=messages, llm_title_generated=False
+        )
+
+        self.assertEqual(
+            _first_exchange_snippets(messages),
+            (visible_text, assistant_text),
+        )
+        self.assertEqual(
+            _background_title_generation_inputs(session),
+            (visible_text, assistant_text),
+        )
+        self.assertFalse(
+            _is_provisional_title(
+                "Alias text",
+                [{"role": "user", "content": [{"type": "text", "input_text": "Alias text"}]}],
+            )
+        )
+
+    def test_later_structured_text_part_remains_literal(self):
+        """Only the leading structured text part is metadata-normalized."""
+        from api.streaming import (
+            _background_title_generation_inputs,
+            _is_provisional_title,
+            title_from,
+        )
+
+        first_text = "Describe the literal multi-part request."
+        later_text = (
+            "[Workspace::v1: /literal-user-text] must remain literal user content.\n\n"
+            "[Attached files: literal.txt]"
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "[Workspace::v1: /workspace/example]\n"
+                            f"{first_text}\n\n"
+                            "[Attached files: /attachments/workflow.png]"
+                        ),
+                    },
+                    {"type": "text", "text": later_text},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,literal"}},
+                ],
+            },
+            {"role": "assistant", "content": "The literal content is preserved."},
+        ]
+        sanitized_title_text = f"{first_text} {later_text}"
+        expected_title_input = " ".join(sanitized_title_text.split())
+        session = SimpleNamespace(
+            title=title_from([{"role": "user", "content": sanitized_title_text}], ""),
+            messages=messages,
+            llm_title_generated=False,
+        )
+
+        self.assertTrue(_is_provisional_title(session.title, session.messages))
+        title_inputs = _background_title_generation_inputs(session)
+        self.assertEqual(
+            title_inputs,
+            (expected_title_input, "The literal content is preserved."),
+        )
+        user_text, _ = title_inputs
+        for forbidden in ("/workspace/example", "/attachments/workflow.png"):
+            self.assertNotIn(forbidden, user_text)
+        self.assertIn(" ".join(later_text.split()), user_text)
+        self.assertIn("[Attached files: literal.txt]", user_text)
+
+    def test_latest_structured_title_input_is_sanitized(self):
+        """Latest title-refresh input strips workspace and attachment metadata."""
+        from api.streaming import _latest_exchange_snippets
+
+        visible_text = "Summarize the latest workflow."
+        assistant_text = "Here is the refreshed summary."
+        messages = [
+            {"role": "user", "content": "Earlier request."},
+            {"role": "assistant", "content": "Earlier answer."},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "[Workspace::v1: /workspace/latest]\n"
+                            f"{visible_text}\n\n"
+                            "[Attached files: /attachments/latest.png]"
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64:latest"}},
+                ],
+            },
+            {"role": "assistant", "content": assistant_text},
+        ]
+
+        user_text, returned_assistant_text = _latest_exchange_snippets(messages)
+
+        self.assertEqual(user_text, visible_text)
+        self.assertEqual(returned_assistant_text, assistant_text)
+        self.assertNotIn("/workspace/latest", user_text)
+        self.assertNotIn("/attachments/latest.png", user_text)
+
+        metadata_only_messages = [
+            {"role": "user", "content": "Earlier request."},
+            {"role": "assistant", "content": "Earlier answer."},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "[Workspace::v1: /workspace/latest]\n\n"
+                            "[Attached files: /attachments/latest.png]"
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64:latest"}},
+                ],
+            },
+            {"role": "assistant", "content": "Latest answer."},
+        ]
+        self.assertEqual(_latest_exchange_snippets(metadata_only_messages), ("", ""))
+
+    def test_literal_legacy_workspace_text_is_preserved_in_title_inputs(self):
+        """Legacy workspace text remains user content rather than metadata."""
+        from api.streaming import (
+            _background_title_generation_inputs,
+            _is_provisional_title,
+            title_from,
+        )
+
+        messages = [
+            {"role": "user", "content": "[Workspace: /literal-user-text]\nExplain this literal prefix."},
+            {"role": "assistant", "content": "The legacy prefix is literal."},
+        ]
+        session = SimpleNamespace(
+            title=title_from(messages, ""),
+            messages=messages,
+            llm_title_generated=False,
+        )
+
+        self.assertTrue(_is_provisional_title(session.title, session.messages))
+        user_text, _ = _background_title_generation_inputs(session)
+        self.assertIn("[Workspace: /literal-user-text]", user_text)
 
     def test_title_snippet_keeps_tool_call_with_substantive_text(self):
         """An assistant row with tool_calls AND a substantive answer text

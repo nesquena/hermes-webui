@@ -374,8 +374,8 @@ class TestIssue1436SourceMarkers:
         # The session load path can call a helper, but the lazy import must
         # remain in routes.py so WebUI still works with older/missing agent
         # bundles by swallowing metadata-resolution failures.
-        start = src.find('if parsed.path == "/api/session":')
-        end = src.find('if parsed.path == "/api/projects":', start)
+        start = src.find('def _handle_session_get')
+        end = src.find('def handle_get(', start)
         block = src[start:end]
         assert "_resolve_context_length_for_session_model" in block, (
             "GET /api/session load-path block must resolve model context "
@@ -391,8 +391,8 @@ class TestIssue1436SourceMarkers:
         src = ROUTES.read_text(encoding="utf-8")
         # Find the load-path block (between "if parsed.path == \"/api/session\":"
         # and the next `if parsed.path` after it).
-        start = src.find('if parsed.path == "/api/session":')
-        end = src.find('if parsed.path == "/api/projects":', start)
+        start = src.find('def _handle_session_get')
+        end = src.find('def handle_get(', start)
         block = src[start:end]
         assert "#1436" in block, (
             "GET /api/session load-path block must reference #1436 in a comment"

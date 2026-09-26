@@ -59,6 +59,41 @@ proposes. It is routed in `api/routes.py` and implemented by
 is a global invalidation signal, not a per-session lifecycle stream. The proposed
 `GET /api/sessions/{session_id}/events` is per-session and path-distinct.
 
+### Hidden-tab observation and recovery (implemented client behavior)
+
+The browser closes its persistent per-session SSE while hidden and uses
+`_startHiddenActiveStreamPoll()` in `static/messages.js` to poll
+`GET /api/session/status?session_id=...` immediately and then every six seconds,
+subject to browser timer throttling. An active stream can be attached through
+the existing replay path; successful attachment stops the poll.
+
+HTTP `404` is ambiguous: older profile-visibility guards and the legacy
+unknown-profile path can return it for a live session. Current master returns
+`409 session_profile_mismatch` for a known foreign profile; that response
+remains retryable when another tab changes the browser-wide profile cookie.
+A single `404` therefore keeps polling and retains the hidden-resume owner.
+After three consecutive `404` responses, the poll pauses to bound repeated
+missing-session requests, but retains that owner so returning to the visible
+tab can reopen SSE. Any other response or network error resets this budget;
+a newly started poll also starts with a fresh budget.
+
+HTTP `410` is terminal: it stops the interval and clears the matching
+hidden-resume session ID. Returning to the visible tab then does not reopen
+SSE through that owner. Responses and queued ticks belong to one poll timer,
+not merely a session ID: they cannot stop or attach a replacement poll, even
+when the replacement observes the same session. The budget counts responses
+received by the current poll. Cleanup affects browser observation state only;
+it does not delete a session or cancel an agent run.
+
+Successful idle responses with no `active_stream_id`, network failures, and
+other non-success HTTP responses (including `401`, `403`, `429`, and `5xx`)
+remain retryable. Visibility return normally restores per-session SSE when a
+resume owner still exists, including after repeated `404` responses. Only a
+terminal `410` removes that automatic recovery path. A profile restored before
+the three-miss limit can recover through the next hidden poll; after the limit,
+recovery waits for visibility return or explicit session loading. Behavior coverage lives in
+`tests/test_hidden_tab_server_initiated_turn.py`.
+
 ### Heartbeat
 
 `_SSE_HEARTBEAT_INTERVAL_SECONDS = 5` (defined in `api/routes.py`) is the current
@@ -142,6 +177,11 @@ gate rather than inventing values without source support.
 
 ## Event taxonomy (Phase 1 draft)
 
+> **Semantic names below are aspirational for the per-session endpoint.** Live
+> `/api/chat/stream` wire names are listed in **Authoritative emitted events**
+> immediately after this table — use those when writing clients against current
+> source.
+
 | event_type | Source | Description |
 |---|---|---|
 | `chat_delta` | run journal / live stream | Token or chunk from an assistant reply. |
@@ -154,8 +194,71 @@ gate rather than inventing values without source support.
 | `session_snapshot` | server fallback | Current session projection; emitted when replay is unavailable. |
 | `heartbeat` | server | Keepalive emitted on the `_SSE_HEARTBEAT_INTERVAL_SECONDS` cadence. |
 
-The event-type table is a draft. The final table must be confirmed during
-maintainer review before implementation.
+## Authoritative emitted events (`/api/chat/stream`)
+
+These are the **real wire `event:` names** emitted by `api/streaming.py` today
+(24 names). Clients and docs must use this table — not the semantic draft above —
+when integrating with the live chat SSE relay.
+
+| Wire name | Role |
+|---|---|
+| `token` | Assistant text delta |
+| `reasoning` | Model reasoning / thinking delta |
+| `tool` | Tool call started |
+| `tool_complete` | Tool call finished (result or error) |
+| `interim_assistant` | Mid-turn assistant prose (pre-final) |
+| `approval` | Destructive-command approval prompt |
+| `clarify` | Structured clarification prompt |
+| `compressing` | Context compression started |
+| `compressed` | Context compression finished |
+| `title` | Session title update (often after `done`) |
+| `title_status` | Title generation status / skip reason |
+| `warning` | Non-fatal provider/fallback warning |
+| `runtime_model` | Local Agent serving identity observed at output or successful completion |
+| `apperror` | Terminal application error (no trailing `stream_end`) |
+| `cancel` | Run cancelled |
+| `done` | Turn finalized (session payload); title/`stream_end` may follow |
+| `stream_end` | SSE fence — close the client EventSource |
+| `metering` | Best-effort live token/cost metering snapshot; not journal-replayed |
+| `context_status` | Context window / usage status |
+| `goal` | Goal / plan card update |
+| `goal_continue` | Goal continuation signal |
+| `pending_steer_leftover` | Leftover steer text after interrupt |
+| `state_saved` | Durable state write acknowledgment |
+| `todo_state` | Todo / checklist panel update |
+
+Relay close set (stop draining the live queue): `stream_end`, `cancel`,
+`apperror`, and legacy `error` — see `api.run_journal.SSE_RELAY_CLOSE_EVENTS`.
+`done` is **not** a relay-close event because `title` and `stream_end` follow it.
+
+The semantic taxonomy table remains a draft for the proposed per-session
+endpoint vocabulary and must be confirmed during maintainer review before that
+endpoint claims parity.
+
+### Observed local runtime model
+
+The local worker emits `runtime_model` with
+`{session_id, stream_id, model, provider?, fallback_active, phase}`. The IDs
+refer to the original run-journal owner even if compression rotates the Agent's
+session. `phase="observed_output"` means the Agent's own model was read at a
+nonempty token/reasoning callback or after successful completion (including a
+non-streaming reply or credential self-heal). It does not promise that a turn
+which emitted partial output will finish successfully. Missing Agent model
+sends no observation; the configured selection is not used as serving proof.
+`fallback_active` is true only when the Agent explicitly reports its fallback
+flag. Consecutive identical observations are deduplicated within the turn.
+
+Fallback lifecycle warnings invalidate older serving evidence and reset the
+deduplication; status text alone never establishes the replacement model. A
+fresh observation after the warning reestablishes it, including when a buffered
+success notice arrives after output. Durable replay retains the event IDs.
+The journal summary and HTTP `runtime_journal_snapshot.runtime_model` project
+the latest valid observation from the same session/stream event window, or null
+if a warning or malformed latest observation invalidated it. No previous run's
+footer or selected route fills an unknown current run. This is a local-worker
+producer; gateway attribution and frontend presentation are separate concerns
+(see #6272 and #7181). `route_observed` remains reserved for route-only data,
+not successful output.
 
 ## Cursor and resume semantics
 
@@ -185,6 +288,31 @@ not a reliable replay source because it holds only recent in-memory state.
 A future implementation must replay from the run journal via the existing
 `_replay_run_journal()` path (in `api/routes.py`) and fall back to the
 snapshot mechanism when journal entries are unavailable for a given cursor.
+
+### Live-only metering (implemented replay behavior)
+
+`metering` is best-effort live telemetry, not durable recovery content.
+`RunJournalWriter.append_sse_event()` returns `None` for metering without
+writing a row or allocating a sequence number. Other journaled events retain
+contiguous sequence numbers. Local-agent and gateway producers carry an
+explicit per-frame event ID, including `None`, through `StreamChannel`;
+an unjournaled metering frame emits no new SSE `id:` and must not borrow the
+previous frame's journal ID. The last-ID fallback is limited to legacy
+two-element queue entries.
+
+Existing journals are not rewritten. Direct readers (`read_run_events()` and
+`read_session_run_events()`) retain legacy metering rows for cursor validation
+and gap/coverage checks. Both run-level and per-session journal replay emitters
+apply `journal_replay_visible()` to omit those rows from reconnect delivery.
+Consequently, replayed legacy event IDs can have gaps where metering was
+filtered; clients must not infer missing durable content from those gaps.
+Metering missed while disconnected is not recovered from the journal; fresh
+live updates remain available. This exception does not remove token, reasoning,
+tool, or terminal events from durable replay.
+
+Coverage: `tests/test_run_journal.py`, `tests/test_run_journal_routes.py`,
+`tests/test_issue4812_session_sse_stream.py`, and
+`tests/test_stage364_opus_live_sse_event_id.py`.
 
 ## Snapshot fallback
 

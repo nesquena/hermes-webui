@@ -1,16 +1,32 @@
 """
 Hermes Web UI -- HTTP helper functions.
 """
+import base64 as _base64
+import binascii as _binascii
 import functools
 import json as _json
 import logging
 import os
 import re as _re
 import ssl
+import sys
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
+    "api_content",
+    "_row_id",
+    "_state_db_row_id",
+    "_db_row_id",
+    "state_db_row_id",
+    "_active_turn_token",
+    "_active_turn_user",
+    "_fork_child_turn",
+    "_webui_trusted_agent_input_text",
+    "_webui_unmatched_native_image_mirror",
+})
 
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
@@ -188,6 +204,248 @@ def _security_headers(handler):
     )
 
 
+def arm_connection_close(handler) -> None:
+    """Mark the connection dead BEFORE a reject-before-read response is written.
+
+    A rejection that answers without consuming the request body leaves those
+    bytes queued in ``rfile``; reusing the connection makes the next HTTP/1.1
+    request parse mid-body (the classic ``{}GET ... -> 501``). Arming must
+    happen before the response is flushed so ``advertise_connection_close()``
+    can serialize it into the response headers.
+
+    Best-effort: handler stubs and read-only doubles may reject the attribute,
+    and a failure here must never turn a 4xx into a 500.
+    """
+    try:
+        handler.close_connection = True
+    except Exception:
+        pass
+
+
+# What ``unsupported_transfer_encoding()`` reports for a header that declares no
+# coding at all (``Transfer-Encoding:``). A placeholder rather than the raw '' so
+# the return value is never a falsy non-``None`` — callers test ``is not None``,
+# and an empty string would also render as a hole in the rejection message.
+_BLANK_TRANSFER_CODING = '(blank)'
+
+# The only whitespace a field value may be padded with: RFC 9110 OWS is SP/HTAB
+# and nothing else. ``str.strip()`` would also erase U+00A0 and U+0085 -- both
+# reachable over the wire, because request lines decode as latin-1 -- and
+# ``Content-Length: \xa00`` would then read back as a genuine ``0`` while its
+# payload sat unread on the socket. Padding a value with a character the grammar
+# does not allow makes it unreadable, not zero.
+_FIELD_VALUE_OWS = ' \t'
+
+
+def _framing_header_values(handler, name: str) -> list[str]:
+    """Every value the wire carried for one framing header, tolerating stubs.
+
+    ALL values, not just the first: ``Message.get()`` returns only the first
+    occurrence, so a request carrying ``Content-Length: 0`` followed by
+    ``Content-Length: 42`` reads back as length zero. Its 42 body bytes are then
+    never consumed and get parsed as the next request line -- the same poisoning
+    this module exists to prevent, reached by duplicating a header rather than by
+    omitting one. Conflicting framing is only visible if every value is.
+
+    A real handler carries an ``email.message.Message`` (case-insensitive
+    ``get_all()``, like the wire); the suite's ``SimpleNamespace(headers={...})``
+    doubles are plain dicts, which are not, so fall back to a case-insensitive
+    scan for those. A missing or odd ``headers`` must never raise: every caller
+    is on a rejection path where an exception becomes a spurious 500.
+    """
+    headers = getattr(handler, 'headers', None)
+    if headers is None:
+        return []
+    try:
+        get_all = getattr(headers, 'get_all', None)
+        if callable(get_all):
+            values = get_all(name)
+            return [] if values is None else [str(v) for v in values if v is not None]
+        if isinstance(headers, dict):
+            lowered = name.lower()
+            return [
+                str(v) for k, v in headers.items()
+                if str(k).lower() == lowered and v is not None
+            ]
+        value = headers.get(name)
+        return [] if value is None else [str(value)]
+    except Exception:
+        return []
+
+
+def _declared_content_lengths(handler) -> set[int] | None:
+    """Distinct declared ``Content-Length`` values, or ``None`` if any is unreadable.
+
+    ``None`` means the framing cannot be trusted at all (a value that will not
+    parse); an empty set means no length was declared.
+
+    A BLANK or whitespace-only value is unreadable, NOT absent. ``Content-Length:``
+    with payload bytes behind it declares a body whose size the header refuses to
+    state; skipping the empty value reported "no length declared", so the
+    rejection kept the connection alive and those bytes were parsed as the next
+    request line (403 then ``400 Bad request syntax ('{...}GET /api/... HTTP/1.1')``).
+    Absence is something only the wire can say, and ``_framing_header_values()``
+    already reports a header the request never carried as no value at all -- so
+    anything that *is* here and does not parse has to be treated as pending bytes,
+    exactly like ``banana`` or two lengths that disagree. Note ``Message`` collapses
+    ``Content-Length:`` and ``Content-Length:   `` to the same ``''``.
+
+    "Parses" means RFC 9110's ``Content-Length = 1*DIGIT``: an unsigned run of
+    ASCII digits, nothing else. ``int()`` is far more generous than the grammar --
+    it accepts a leading sign, PEP 515 underscores and non-ASCII digits -- and
+    every such spelling of ZERO used to read back as an honest ``0`` and take the
+    keep-alive branch below with its payload still queued: ``Content-Length: +0``
+    (also ``-0``, ``0_0``, ``+00``, ``\\xa00``) answered 403 with no
+    ``Connection: close``, then ``400 Bad request syntax ('{...}GET /api/...')``
+    -- the same trace as a blank value. A sign is only invisible on a NON-zero
+    value, where the wrong parse happens to close anyway. Anything the grammar
+    rejects is unreadable framing, which means a body may be pending.
+
+    The ``int()`` guard stays even though ``isdigit()`` has already vetted every
+    character: a digit run longer than ``sys.get_int_max_str_digits()`` (4300)
+    raises ``ValueError`` too, and this runs on rejection paths where an
+    exception becomes a spurious 500.
+    """
+    parsed: set[int] = set()
+    for raw in _framing_header_values(handler, 'Content-Length'):
+        # RFC 9110 §5.3: a list-valued field may arrive as repeated lines OR as
+        # one comma-combined line, and the two spellings mean the same thing.
+        # So "0, 0" is the same bodyless request as two "Content-Length: 0"
+        # headers and must keep its keep-alive; only a DISAGREEING list (caught
+        # below by len(parsed) > 1) is unframeable. Without the split the comma
+        # fails isdigit() and every agreeing list over-closed a healthy socket.
+        for member in raw.split(','):
+            stripped = member.strip(_FIELD_VALUE_OWS)
+            if not (stripped.isascii() and stripped.isdigit()):
+                return None
+            try:
+                parsed.add(int(stripped))
+            except ValueError:
+                return None
+    return parsed
+
+
+def unreadable_content_length(handler) -> bool:
+    """True when ``Content-Length`` cannot be trusted to frame the body.
+
+    Either a value that will not parse (``banana``, ``0x5``, or a BLANK one), or
+    two or more values that disagree. None of them can tell a reader how many
+    bytes to drain, so such a request can only be rejected -- with the connection
+    armed for close, since bytes may still be queued behind it.
+    """
+    parsed = _declared_content_lengths(handler)
+    return parsed is None or len(parsed) > 1
+
+
+def request_declares_body(handler) -> bool:
+    """True when the request's framing declares a body that is still queued.
+
+    Keyed on the wire, not on the method: ``Transfer-Encoding`` present (chunked
+    framing hides the length until the terminating chunk is read) or
+    ``Content-Length`` present and non-zero. The method proves nothing in either
+    direction -- a GET may carry a declared body and a POST/PUT/DELETE may carry
+    none -- and a static per-method flag therefore both misses body-bearing
+    "read" requests (whose unread bytes poison the next pooled request) and
+    kills healthy keep-alive on body-less writes.
+
+    A blank, unparseable or self-contradicting ``Content-Length`` counts as a
+    declared body, as does ANY ``Transfer-Encoding`` -- ``identity`` and a blank
+    value included: a value we cannot interpret does not prove the body's absence,
+    and the safe assumption for connection reuse is that bytes are pending. Only
+    framing that positively says "no body" -- no framing header at all, or every
+    declared length agreeing on zero -- keeps the connection alive.
+    """
+    if unsupported_transfer_encoding(handler) is not None:
+        return True
+    parsed = _declared_content_lengths(handler)
+    if parsed is None:
+        return True
+    return any(length != 0 for length in parsed)
+
+
+def unsupported_transfer_encoding(handler) -> str | None:
+    """Return the transfer coding this server cannot decode, or ``None``.
+
+    EVERY present value counts, with no exemption for any coding.
+    ``BaseHTTPRequestHandler`` decodes none of them: it hands every reader a raw
+    ``rfile``, so a chunked body reads back as its literal chunk framing while a
+    ``Content-Length``-based reader sees length 0 and consumes nothing at all.
+    RFC 9112 section 6.3 says the same thing normatively -- a request whose final
+    transfer coding is not ``chunked`` has a body length the recipient cannot
+    determine, so it must be refused and the connection closed. Such a request
+    can therefore only be rejected, and only with the connection armed for close,
+    because its payload bytes are still queued on the socket.
+
+    ``identity`` used to be exempt as a coding that "frames nothing". It is not:
+    it names no framing either, and RFC 7230 removed it from the transfer codings
+    altogether. A sidecar rejection then answered 403 with keep-alive and the
+    payload was parsed as the next request line
+    (``400 Bad request syntax ('{...}GET /api/health/agent HTTP/1.1')``), and all
+    four upload handlers fell through to a length-0 read, answered 400 "No file
+    field in request" and left the multipart bytes on the socket
+    (``400 Bad request syntax ('--x')``). Nothing legitimate is lost: no client
+    sends a transfer coding this server could have honoured.
+
+    A header present but EMPTY (``Transfer-Encoding:``) is reported through
+    ``_BLANK_TRANSFER_CODING`` rather than as ``''``, so callers testing
+    ``is not None`` and the 411 message both read right. Only an ABSENT header
+    yields no values at all -- absence is something only the wire can say.
+
+    The first value is enough precisely because no value is acceptable; it is
+    reported as-is (SP/HTAB trimmed, the one padding RFC 9110 allows) purely so
+    the rejection message names what arrived.
+    """
+    values = _framing_header_values(handler, 'Transfer-Encoding')
+    if not values:
+        return None
+    return values[0].strip(_FIELD_VALUE_OWS) or _BLANK_TRANSFER_CODING
+
+
+def arm_connection_close_if_body_pending(handler) -> bool:
+    """Arm close for a reject-before-read, but only if a body was really declared.
+
+    Returns whether the connection was armed. Use this instead of
+    ``arm_connection_close()`` wherever the rejection can also fire on a request
+    with no body: closing then would drop a pooled client's healthy connection
+    for no framing reason.
+    """
+    if not request_declares_body(handler):
+        return False
+    arm_connection_close(handler)
+    return True
+
+
+def advertise_connection_close(handler) -> None:
+    """Serialize ``close_connection`` into exactly one ``Connection: close`` header.
+
+    ``BaseHTTPRequestHandler`` tracks ``close_connection`` internally but never
+    writes it to the wire, so a server-side close is invisible to the client: a
+    pooled client reuses the socket and fails with BrokenPipeError instead of
+    opening a fresh connection. Call this from ``end_headers()``, before the
+    header buffer is flushed.
+
+    Dedup is derived from the pending header buffer rather than a private flag,
+    because the SSE endpoints send their own ``Connection: close`` (and
+    ``send_header`` itself flips ``close_connection`` when they do) — keying off
+    a flag we set ourselves would emit the header twice on every stream.
+
+    Both attribute reads are defensive: partially-built handler stubs in the
+    test suite carry neither ``close_connection`` nor ``_headers_buffer``, and
+    header emission must not depend on their presence. The buffer is also
+    type-checked before it is scanned -- a stub whose ``_headers_buffer`` is a
+    truthy non-iterable (a bare ``Mock``) would otherwise raise ``TypeError``
+    from inside ``end_headers()``, which ``_handle_write`` would swallow into a
+    spurious 500.
+    """
+    if not getattr(handler, 'close_connection', False):
+        return
+    buffered = getattr(handler, '_headers_buffer', None)
+    for raw in buffered if isinstance(buffered, (list, tuple)) else ():
+        if raw[:11].lower() == b'connection:':
+            return
+    handler.send_header('Connection', 'close')
+
+
 def flush_pending_auth_cookies(handler) -> None:
     pending = getattr(handler, '_pending_set_cookies', None)
     if not pending:
@@ -341,6 +599,13 @@ def _build_redact_fn():
         r"""(Authorization:\s*(?:Bearer|Bot)\s+)([^\s'",\]\)]+)""",
         _re.IGNORECASE,
     )
+    # A rejected image data URI can place a syntactically valid AWS key at an
+    # arbitrary base64 alignment, immediately after another base64 character.
+    # The general credential regex uses token boundaries to avoid rewriting
+    # prose identifiers; this defense-in-depth pass ensures the fail-closed
+    # image path still removes the maintainer's embedded-suffix attack even
+    # when hermes-agent is unavailable and the local fallback owns redaction.
+    _EMBEDDED_AWS_ACCESS_KEY_RE = _re.compile(r"AKIA[A-Z0-9]{16}")
     _ENV_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
         r"\s*=\s*(['\"]?)(\S+)\2"
@@ -408,6 +673,7 @@ def _build_redact_fn():
         if not isinstance(text, str) or not text:
             return text
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
+        text = _EMBEDDED_AWS_ACCESS_KEY_RE.sub(lambda m: _mask(m.group(0)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
@@ -450,6 +716,22 @@ _redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
 # Cap per-entry size so a handful of giant tool-output dumps can't evict the
 # thousands of small recurring strings that actually benefit, or balloon RSS.
 _REDACT_CACHE_MAX_TEXT_LEN = 16384
+
+# Strings above that threshold deliberately stay UNCACHED and re-run the full
+# redactor on every request, even though they dominate the recurring cost of a
+# large session (measured: 59 large strings, 29 unique, 1.68s per request on a
+# real 22MB session). Memoizing them by input text alone is not safe:
+# ``agent.redact.register_redaction_patterns()`` lets a plugin extend the
+# secret matcher at runtime, and the installed registry exposes neither a
+# policy generation the cache key could include nor a hook that could clear
+# it. A large blob primed before such a registration would keep being served
+# with the newly-registered secret intact through session, SSE and
+# public-share projections. Until the agent registry exposes a generation,
+# large strings fail closed.
+#
+# tests/test_redact_large_string_cache.py pins this against the real agent
+# registry: prime a large string, register a pattern, the next response must
+# be redacted.
 
 
 def _redact_fn_cached(text):
@@ -538,7 +820,37 @@ _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
 
-def _might_contain_sensitive_text(text: str) -> bool:
+# The prefilter runs on every string of every API response — ~74k strings /
+# ~19MB on a real large session — and cProfile showed it costing 2.98s of the
+# 3.7s redaction pass once the redactor's own caches are warm. The work is
+# pure and deterministic (fixed marker tuples, fixed patterns), so identical
+# text always yields the same verdict and is safe to memoize without
+# invalidation, exactly like `_redact_fn_cached` above.
+#
+# Note on what was NOT done: replacing the 71 `in` scans with one compiled
+# alternation looks like the obvious fix, but measured 38% SLOWER on the real
+# payload (2.60s vs 1.88s). CPython's substring search is already a tuned
+# C-level algorithm, and a large regex alternation has to try each branch at
+# each position. Memoizing the verdict avoids the scan entirely instead.
+#
+# Bounds: the cache retains the raw text as its key, so what matters for RSS
+# is the object's byte size, not its character count -- a 16k-character
+# string of 4-byte code points is ~64 KiB, and 8192 of them would pin ~512 MiB
+# for the process lifetime. Each entry is therefore gated on
+# ``sys.getsizeof(text)`` (O(1), counts the actual allocation, width-aware),
+# and the entry count is capped, which gives a hard ceiling on retained key
+# bytes of _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+# (16 MiB) plus lru_cache's fixed per-entry link overhead. Values are the two
+# bool singletons and cost nothing. Strings above the byte gate -- clean or
+# sensitive -- simply run the scan uncached and are never retained.
+_SENSITIVE_PREFILTER_CACHE_SIZE = 8192
+_SENSITIVE_PREFILTER_MAX_ENTRY_BYTES = 2048
+_SENSITIVE_PREFILTER_MAX_RETAINED_KEY_BYTES = (
+    _SENSITIVE_PREFILTER_CACHE_SIZE * _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES
+)
+
+
+def _might_contain_sensitive_text_uncached(text: str) -> bool:
     """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
@@ -554,6 +866,25 @@ def _might_contain_sensitive_text(text: str) -> bool:
     if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
         return True
     return False
+
+
+_might_contain_sensitive_text_lru = functools.lru_cache(
+    maxsize=_SENSITIVE_PREFILTER_CACHE_SIZE
+)(_might_contain_sensitive_text_uncached)
+
+
+def _might_contain_sensitive_text(text: str) -> bool:
+    """Memoized wrapper around the prefilter.
+
+    Falls back to the uncached scan for non-strings and for any string whose
+    object size exceeds the per-entry byte gate, so the cache can never be
+    poisoned by an unhashable value and its retained bytes stay hard-bounded.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    if sys.getsizeof(text) > _SENSITIVE_PREFILTER_MAX_ENTRY_BYTES:
+        return _might_contain_sensitive_text_uncached(text)
+    return _might_contain_sensitive_text_lru(text)
 
 
 def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
@@ -576,50 +907,748 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
     return _redact_fn_cached(text)
 
 
+_RASTER_IMAGE_DATA_URI_PREFIXES = (
+    ("data:image/png;base64,", "png"),
+    ("data:image/jpeg;base64,", "jpeg"),
+    ("data:image/jpg;base64,", "jpeg"),
+    ("data:image/gif;base64,", "gif"),
+    ("data:image/webp;base64,", "webp"),
+    ("data:image/bmp;base64,", "bmp"),
+)
+
+
+def _is_native_raster_data_uri(text: str) -> bool:
+    """Return whether *text* is one complete, canonical raster data URI.
+
+    Native image content is opaque binary, not text that the credential regexes
+    can safely rewrite. The exemption is a credential-boundary decision, so a
+    matching header or magic prefix is not enough: decode the entire canonical
+    base64 payload and require the image format to terminate exactly at the end
+    of the decoded bytes. Any malformed, ambiguous, or trailing content falls
+    through to normal text redaction.
+    """
+    if not isinstance(text, str):
+        return False
+    image_kind = None
+    payload_start = 0
+    for prefix, candidate_kind in _RASTER_IMAGE_DATA_URI_PREFIXES:
+        # URI schemes and MIME type tokens are case-insensitive. Only normalize
+        # this short header slice — never the multi-megabyte base64 payload.
+        if text[:len(prefix)].lower() == prefix:
+            image_kind = candidate_kind
+            payload_start = len(prefix)
+            break
+    if image_kind is None:
+        return False
+
+    payload = text[payload_start:]
+    if not payload:
+        return False
+    try:
+        raw = _base64.b64decode(payload, validate=True)
+    except (_binascii.Error, ValueError):
+        return False
+    # validate=True rejects foreign characters and misplaced padding; this
+    # round-trip also rejects non-canonical pad bits and missing/extra padding.
+    if _base64.b64encode(raw).decode("ascii") != payload:
+        return False
+
+    if image_kind == "png":
+        return _is_complete_png(raw)
+    if image_kind == "jpeg":
+        return _is_complete_jpeg(raw)
+    if image_kind == "gif":
+        return _is_complete_gif(raw)
+    if image_kind == "webp":
+        return _is_complete_webp(raw)
+    if image_kind == "bmp":
+        return _is_complete_bmp(raw)
+    return False
+
+
+def _is_complete_png(raw: bytes) -> bool:
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    pos = 8
+    chunk_index = 0
+    saw_idat = False
+    while pos < len(raw):
+        if pos + 12 > len(raw):
+            return False
+        length = int.from_bytes(raw[pos:pos + 4], "big")
+        chunk_type = raw[pos + 4:pos + 8]
+        data_start = pos + 8
+        data_end = data_start + length
+        chunk_end = data_end + 4
+        if chunk_end > len(raw):
+            return False
+        if not all((65 <= value <= 90) or (97 <= value <= 122) for value in chunk_type):
+            return False
+        if not 65 <= chunk_type[2] <= 90:  # PNG reserved bit must be zero.
+            return False
+        expected_crc = int.from_bytes(raw[data_end:chunk_end], "big")
+        actual_crc = _binascii.crc32(chunk_type + raw[data_start:data_end]) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            return False
+
+        if chunk_index == 0:
+            if chunk_type != b"IHDR" or length != 13:
+                return False
+            width = int.from_bytes(raw[data_start:data_start + 4], "big")
+            height = int.from_bytes(raw[data_start + 4:data_start + 8], "big")
+            bit_depth = raw[data_start + 8]
+            color_type = raw[data_start + 9]
+            valid_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                not width
+                or not height
+                or bit_depth not in valid_depths.get(color_type, set())
+                or raw[data_start + 10] != 0
+                or raw[data_start + 11] != 0
+                or raw[data_start + 12] not in {0, 1}
+            ):
+                return False
+        elif chunk_type == b"IHDR":
+            return False
+
+        if chunk_type == b"IDAT":
+            saw_idat = True
+        if chunk_type == b"IEND":
+            return length == 0 and saw_idat and chunk_end == len(raw)
+        pos = chunk_end
+        chunk_index += 1
+    return False
+
+
+_JPEG_SOF_MARKERS = {
+    0xC0, 0xC1, 0xC2, 0xC3,
+    0xC5, 0xC6, 0xC7,
+    0xC9, 0xCA, 0xCB,
+    0xCD, 0xCE, 0xCF,
+}
+
+
+def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
+    """Read an MP Index TIFF inside APP2; offsets are relative to its header.
+
+    Only the declared JPEG extents are trusted, not a decoder's willingness to
+    ignore trailing bytes. The caller checks contiguous coverage and each JPEG.
+    """
+    if len(data) < 8 or data[:4] not in {b"II\x2a\x00", b"MM\x00\x2a"}:
+        return None
+    order = "little" if data[:2] == b"II" else "big"
+
+    def uint(pos: int, size: int = 4) -> int:
+        return int.from_bytes(data[pos:pos + size], order)
+
+    ifd = uint(4)
+    if ifd < 8 or ifd + 2 > len(data):
+        return None
+    count = uint(ifd, 2)
+    table_end = ifd + 2 + 12 * count
+    if table_end + 4 > len(data):
+        return None
+    tags = {}
+    for pos in range(ifd + 2, table_end, 12):
+        tag = uint(pos, 2)
+        if tag in tags:
+            return None
+        tags[tag] = (uint(pos + 2, 2), uint(pos + 4), uint(pos + 8))
+    if tags.get(0xB001, ())[:2] != (4, 1):
+        return None
+    images = tags[0xB001][2]
+    entry = tags.get(0xB002)
+    if not entry or images < 2 or entry[:2] != (7, 16 * images):
+        return None
+    offset = entry[2]
+    if offset < table_end + 4 or offset + 16 * images > len(data):
+        return None
+    ranges = []
+    for index in range(images):
+        pos = offset + index * 16
+        attributes, size, relative = uint(pos), uint(pos + 4), uint(pos + 8)
+        if attributes & 0x07000000 or size < 4 or (index == 0 and relative != 0):
+            return None
+        start = 0 if index == 0 else base + relative
+        ranges.append((start, start + size))
+    return ranges
+
+
+def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
+    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
+        return False
+    pos = 2
+    saw_sof = False
+    saw_scan = False
+    mpf_ranges = None
+    while pos < len(raw):
+        marker_start = pos
+        if raw[pos] != 0xFF:
+            return False
+        while pos < len(raw) and raw[pos] == 0xFF:
+            pos += 1
+        if pos >= len(raw):
+            return False
+        marker = raw[pos]
+        pos += 1
+        if marker == 0xD9:
+            if not saw_sof or not saw_scan:
+                return False
+            if mpf_ranges is None:
+                return pos == len(raw)
+            if mpf_ranges[0] != (0, pos):
+                return False
+            # No gaps, overlaps, undeclared pictures or post-EOI payloads.
+            for start, end in mpf_ranges[1:]:
+                if start != pos or end > len(raw):
+                    return False
+                if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
+                    return False
+                pos = end
+            return pos == len(raw)
+        if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
+            return False
+        if pos + 2 > len(raw):
+            return False
+        segment_length = int.from_bytes(raw[pos:pos + 2], "big")
+        if segment_length < 2:
+            return False
+        segment_end = pos + segment_length
+        if segment_end > len(raw):
+            return False
+        if _allow_mpf and marker == 0xE2 and raw[pos + 2:pos + 6] == b"MPF\x00":
+            if mpf_ranges is not None:
+                return False
+            mpf_ranges = _mpf_image_ranges(raw[pos + 6:segment_end], pos + 6)
+            if mpf_ranges is None:
+                return False
+        if marker in _JPEG_SOF_MARKERS:
+            if segment_length < 8:
+                return False
+            saw_sof = True
+        if marker != 0xDA:
+            pos = segment_end
+            continue
+
+        saw_scan = True
+        pos = segment_end
+        while pos < len(raw):
+            if raw[pos] != 0xFF:
+                pos += 1
+                continue
+            marker_start = pos
+            while pos < len(raw) and raw[pos] == 0xFF:
+                pos += 1
+            if pos >= len(raw):
+                return False
+            scan_marker = raw[pos]
+            if scan_marker == 0x00 or 0xD0 <= scan_marker <= 0xD7:
+                pos += 1
+                continue
+            pos = marker_start
+            break
+        else:
+            return False
+    return False
+
+
+def _gif_subblocks_end(raw: bytes, pos: int) -> int | None:
+    while pos < len(raw):
+        size = raw[pos]
+        pos += 1
+        if size == 0:
+            return pos
+        if pos + size > len(raw):
+            return None
+        pos += size
+    return None
+
+
+def _is_complete_gif(raw: bytes) -> bool:
+    if len(raw) < 14 or not raw.startswith((b"GIF87a", b"GIF89a")):
+        return False
+    width = int.from_bytes(raw[6:8], "little")
+    height = int.from_bytes(raw[8:10], "little")
+    if not width or not height:
+        return False
+    packed = raw[10]
+    pos = 13
+    if packed & 0x80:
+        pos += 3 * (1 << ((packed & 0x07) + 1))
+    if pos > len(raw):
+        return False
+    saw_image = False
+    while pos < len(raw):
+        introducer = raw[pos]
+        pos += 1
+        if introducer == 0x3B:
+            return saw_image and pos == len(raw)
+        if introducer == 0x21:
+            if pos >= len(raw):
+                return False
+            pos += 1  # extension label
+            end = _gif_subblocks_end(raw, pos)
+            if end is None:
+                return False
+            pos = end
+            continue
+        if introducer != 0x2C or pos + 9 > len(raw):
+            return False
+        image_width = int.from_bytes(raw[pos + 4:pos + 6], "little")
+        image_height = int.from_bytes(raw[pos + 6:pos + 8], "little")
+        image_packed = raw[pos + 8]
+        if not image_width or not image_height:
+            return False
+        pos += 9
+        if image_packed & 0x80:
+            pos += 3 * (1 << ((image_packed & 0x07) + 1))
+        if pos >= len(raw):
+            return False
+        lzw_minimum_code_size = raw[pos]
+        if not 2 <= lzw_minimum_code_size <= 11:
+            return False
+        pos += 1
+        end = _gif_subblocks_end(raw, pos)
+        if end is None:
+            return False
+        pos = end
+        saw_image = True
+    return False
+
+
+def _is_webp_image_chunk(chunk_type: bytes, data: bytes) -> bool:
+    if chunk_type == b"VP8 ":
+        if len(data) < 10 or data[3:6] != b"\x9d\x01\x2a":
+            return False
+        width = int.from_bytes(data[6:8], "little") & 0x3FFF
+        height = int.from_bytes(data[8:10], "little") & 0x3FFF
+        return bool(width and height)
+    if chunk_type == b"VP8L":
+        # The three high bits of the fifth byte are the version number. The
+        # current lossless bitstream defines only version zero.
+        return len(data) >= 5 and data[0] == 0x2F and not data[4] & 0xE0
+    return False
+
+
+def _is_complete_webp_frame(data: bytes) -> bool:
+    """Validate the nested chunks in one extended-WebP animation frame."""
+    if len(data) < 16 or data[15] & 0xFC:
+        return False
+    pos = 16
+    saw_image = False
+    while pos < len(data):
+        if pos + 8 > len(data):
+            return False
+        chunk_type = data[pos:pos + 4]
+        chunk_size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        data_start = pos + 8
+        data_end = data_start + chunk_size
+        chunk_end = data_end + (chunk_size & 1)
+        if chunk_end > len(data):
+            return False
+        chunk_data = data[data_start:data_end]
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if saw_image or not _is_webp_image_chunk(chunk_type, chunk_data):
+                return False
+            saw_image = True
+        elif chunk_type != b"ALPH":
+            return False
+        pos = chunk_end
+    return saw_image and pos == len(data)
+
+
+def _is_complete_webp(raw: bytes) -> bool:
+    if (
+        len(raw) < 20
+        or raw[:4] != b"RIFF"
+        or raw[8:12] != b"WEBP"
+        or int.from_bytes(raw[4:8], "little") + 8 != len(raw)
+    ):
+        return False
+    pos = 12
+    saw_image = False
+    while pos < len(raw):
+        if pos + 8 > len(raw):
+            return False
+        chunk_type = raw[pos:pos + 4]
+        chunk_size = int.from_bytes(raw[pos + 4:pos + 8], "little")
+        data_start = pos + 8
+        data_end = data_start + chunk_size
+        chunk_end = data_end + (chunk_size & 1)
+        if chunk_end > len(raw):
+            return False
+        data = raw[data_start:data_end]
+        if chunk_type in {b"VP8 ", b"VP8L"}:
+            if saw_image or not _is_webp_image_chunk(chunk_type, data):
+                return False
+            saw_image = True
+        elif chunk_type == b"VP8X":
+            if len(data) != 10 or data[0] & 0x81 or any(data[1:4]):
+                return False
+        elif chunk_type == b"ANMF":
+            if not _is_complete_webp_frame(data):
+                return False
+            saw_image = True
+        pos = chunk_end
+    return saw_image and pos == len(raw)
+
+
+def _is_complete_bmp(raw: bytes) -> bool:
+    if len(raw) < 26 or raw[:2] != b"BM":
+        return False
+    if int.from_bytes(raw[2:6], "little") != len(raw):
+        return False
+    pixel_offset = int.from_bytes(raw[10:14], "little")
+    dib_size = int.from_bytes(raw[14:18], "little")
+    if dib_size == 12:
+        width = int.from_bytes(raw[18:20], "little")
+        height = int.from_bytes(raw[20:22], "little")
+        planes = int.from_bytes(raw[22:24], "little")
+        bits_per_pixel = int.from_bytes(raw[24:26], "little")
+    elif dib_size >= 40 and 14 + dib_size <= len(raw):
+        width = int.from_bytes(raw[18:22], "little", signed=True)
+        height = int.from_bytes(raw[22:26], "little", signed=True)
+        planes = int.from_bytes(raw[26:28], "little")
+        bits_per_pixel = int.from_bytes(raw[28:30], "little")
+    else:
+        return False
+    return (
+        bool(width)
+        and bool(height)
+        and planes == 1
+        and bits_per_pixel in {1, 2, 4, 8, 16, 24, 32}
+        and 14 + dib_size <= pixel_offset < len(raw)
+    )
+
+
 def _redact_value(v, *, _enabled: bool | None = None):
     """Recursively redact credentials from strings, dicts, and lists.
 
     ``_enabled`` is threaded through so a single response-level redact pass
     only reads settings.json once. (Opus pre-release perf fix.)
+
+    Containers are rebuilt only when a descendant actually changed. The
+    overwhelming majority of a transcript carries no credential marker, so the
+    previous unconditional dict/list comprehension deep-copied the entire
+    payload — tens of MB per response — to reproduce an identical structure.
+    That copy is pure CPU under the GIL (allocation and refcounting never
+    release it), which serialized concurrent tab loads on a threaded server.
+
+    Returning the original object when nothing changed is safe because callers
+    treat redacted output as read-only: ``_public_message_projection`` builds a
+    fresh ``item`` dict per message, and ``redact_session_data`` builds a fresh
+    ``result``. Nothing mutates a value returned from here in place, so sharing
+    an unmodified subtree cannot leak a later mutation back into session state.
+    The redacting path is unchanged: as soon as one string is masked, every
+    container on the path to it is rebuilt and the caller's original is left
+    untouched.
     """
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {k: _redact_value(val, _enabled=_enabled) for k, val in v.items()}
+        out = None
+        for key, value in v.items():
+            redacted = _redact_value(value, _enabled=_enabled)
+            if redacted is value:
+                continue
+            if out is None:
+                out = dict(v)
+            out[key] = redacted
+        return v if out is None else out
     if isinstance(v, list):
-        return [_redact_value(item, _enabled=_enabled) for item in v]
+        out = None
+        for index, item in enumerate(v):
+            redacted = _redact_value(item, _enabled=_enabled)
+            if redacted is item:
+                continue
+            if out is None:
+                out = list(v)
+            out[index] = redacted
+        return v if out is None else out
     return v
 
 
-def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials from message content, tool data, and session sidecars.
+def _redact_message_content_part(part, *, _enabled: bool):
+    """Redact one canonical ``messages[*].content[*]`` part.
 
-    Applies to: messages[], tool_calls[], todo_state, runtime_journal_snapshot,
-    and title.
-    The underlying session file is not modified; redaction is response-layer only.
-
-    Reads the ``api_redact_enabled`` setting ONCE for the entire response and
-    threads it through to avoid hundreds of settings.json reads per session
-    payload (a 50-message session has hundreds of nested strings). When the
-    setting is disabled this is also a fast path: the recursion still walks
-    but every string returns early.
+    The raster exemption exists only at this authoritative schema position.
+    Image-shaped dictionaries in metadata, tools, todos, journals, or arbitrary
+    nested values remain on the normal fail-closed redaction path.
     """
+    if not _enabled or not (
+        isinstance(part, dict)
+        and part.get("type") == "image_url"
+        and isinstance(part.get("image_url"), dict)
+    ):
+        return _redact_value(part, _enabled=_enabled)
+    result = {}
+    for key, value in part.items():
+        if key != "image_url":
+            result[key] = _redact_value(value, _enabled=_enabled)
+            continue
+        result[key] = {
+            image_key: image_value
+            if image_key == "url" and _is_native_raster_data_uri(image_value)
+            else _redact_value(image_value, _enabled=_enabled)
+            for image_key, image_value in value.items()
+        }
+    return result
+
+
+def _scrub_alias_record(record):
+    """Copy one schema record while removing private replay aliases.
+
+    This deliberately copies only one record level.  Values such as a tool's
+    ``args`` or a function's opaque ``arguments`` are business payloads, not
+    nested WebUI records, so parsing or recursively walking them would corrupt
+    valid user data.
+    """
+    if not isinstance(record, dict):
+        return _copy_json_value(record)
+    return {
+        key: _copy_json_value(value)
+        for key, value in record.items()
+        if key not in _PUBLIC_MESSAGE_INTERNAL_FIELDS
+    }
+
+
+def _scrub_content_part(part):
+    """Scrub one canonical ``messages[*].content[*]`` part."""
+    return _scrub_alias_record(part)
+
+
+def _scrub_function_record(function):
+    """Scrub a tool-call function envelope without parsing arguments."""
+    return _scrub_alias_record(function)
+
+
+def _scrub_tool_call_record(tool_call):
+    """Scrub one canonical tool-call record and its function envelope."""
+    result = _scrub_alias_record(tool_call)
+    if not isinstance(tool_call, dict):
+        return result
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        result["function"] = _scrub_function_record(function)
+    return result
+
+
+def _scrub_message_record(message, *, preserve_api_content: bool = False):
+    """Scrub one message record along its authoritative nested schema paths."""
+    if not isinstance(message, dict):
+        return _copy_json_value(message)
+    result = _scrub_alias_record(message)
+    if preserve_api_content and isinstance(message.get("api_content"), str) and message.get("api_content"):
+        result["api_content"] = message["api_content"]
+    content = message.get("content")
+    if isinstance(content, list):
+        result["content"] = [_scrub_content_part(part) for part in content]
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        result["tool_calls"] = [_scrub_tool_call_record(call) for call in tool_calls]
+    return result
+
+
+def _scrub_message_records(messages, *, preserve_api_content: bool = False):
+    if not isinstance(messages, list):
+        return _copy_json_value(messages)
+    return [
+        _scrub_message_record(message, preserve_api_content=preserve_api_content)
+        for message in messages
+    ]
+
+
+def _scrub_tool_call_records(tool_calls):
+    if not isinstance(tool_calls, list):
+        return _copy_json_value(tool_calls)
+    return [_scrub_tool_call_record(call) for call in tool_calls]
+
+
+def _scrub_runtime_journal_snapshot(snapshot):
+    """Scrub only the snapshot's real message/tool-call arrays.
+
+    A live tool's ``args`` dictionary is intentionally opaque.  In particular,
+    ``tool_calls[].args.messages[]`` is ordinary business input even though the
+    field name happens to be ``messages``; it is not a transcript container.
+    """
+    if not isinstance(snapshot, dict):
+        return _copy_json_value(snapshot)
+    result = _copy_json_value(snapshot)
+    if isinstance(snapshot.get("messages"), list):
+        result["messages"] = _scrub_message_records(snapshot["messages"])
+    if isinstance(snapshot.get("tool_calls"), list):
+        result["tool_calls"] = _scrub_tool_call_records(snapshot["tool_calls"])
+    return result
+
+
+def scrub_internal_replay_fields(
+    value,
+    *,
+    preserve_message_api_content: bool = False,
+    message_records: bool | None = None,
+):
+    """Copy runtime data and scrub aliases at authoritative schema positions.
+
+    ``message_records`` selects the shape of a bare list (messages versus
+    session-level tool calls).  A session-shaped dictionary follows only its
+    named ``messages``, ``context_messages``, ``tool_calls``, and
+    ``runtime_journal_snapshot`` fields.  No generic key-name recursion is
+    performed, so arbitrary nested tool arguments remain byte-for-byte intact.
+    The Agent boundary may retain a message record's trusted ``api_content``;
+    public/import boundaries use the default, stripping it everywhere.
+    """
+    if isinstance(value, list):
+        if message_records is False:
+            return _scrub_tool_call_records(value)
+        return _scrub_message_records(
+            value,
+            preserve_api_content=preserve_message_api_content,
+        )
+    if not isinstance(value, dict):
+        return _copy_json_value(value)
+    result = _copy_json_value(value)
+    for key, child in value.items():
+        if key in {"messages", "context_messages"} and isinstance(child, list):
+            result[key] = _scrub_message_records(
+                child,
+                preserve_api_content=preserve_message_api_content,
+            )
+        elif key == "tool_calls" and isinstance(child, list):
+            result[key] = _scrub_tool_call_records(child)
+        elif key == "runtime_journal_snapshot" and isinstance(child, dict):
+            result[key] = _scrub_runtime_journal_snapshot(child)
+    return result
+
+
+def _public_message_projection(message, *, _enabled: bool, _active_turn_token=None):
+    """Return one public transcript message without internal replay fields."""
+    is_active = (
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and _active_turn_token is not None
+        and message.get("_active_turn_token") == _active_turn_token
+    )
+    message = scrub_internal_replay_fields([message], message_records=True)[0]
+    if not isinstance(message, dict):
+        return _redact_value(message, _enabled=_enabled)
+    item = {}
+    allow_native_image = message.get("role") == "user"
+    for key, value in message.items():
+        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:
+            continue
+        if allow_native_image and key == "content" and isinstance(value, list):
+            item[key] = [
+                _redact_message_content_part(part, _enabled=_enabled)
+                for part in value
+            ]
+        else:
+            item[key] = _redact_value(value, _enabled=_enabled)
+    if is_active:
+        item["_active_turn_user"] = True
+    return item
+
+
+def _redact_messages(messages, *, _enabled: bool, _active_turn_token=None):
+    if not isinstance(messages, list):
+        return _redact_value(messages, _enabled=_enabled)
+    return [
+        _public_message_projection(
+            message,
+            _enabled=_enabled,
+            _active_turn_token=_active_turn_token,
+        )
+        for message in messages
+    ]
+
+
+def _redact_tool_calls(tool_calls, *, _enabled: bool):
+    scrubbed = scrub_internal_replay_fields(tool_calls, message_records=False)
+    return _redact_value(scrubbed, _enabled=_enabled)
+
+
+def _redact_nested_message_containers(value, *, _enabled: bool):
+    """Redact only the runtime snapshot's authoritative message arrays."""
+    scrubbed = scrub_internal_replay_fields(value)
+    if not isinstance(scrubbed, dict):
+        return _redact_value(scrubbed, _enabled=_enabled)
+    result = {}
+    for key, child in scrubbed.items():
+        if key in {"messages", "context_messages"} and isinstance(child, list):
+            result[key] = _redact_messages(child, _enabled=_enabled)
+        elif key == "tool_calls" and isinstance(child, list):
+            result[key] = _redact_tool_calls(child, _enabled=_enabled)
+        elif key == "runtime_journal_snapshot" and isinstance(child, dict):
+            result[key] = _redact_nested_message_containers(child, _enabled=_enabled)
+        else:
+            result[key] = _redact_value(child, _enabled=_enabled)
+    return result
+
+
+def public_session_projection(session_dict: dict) -> dict:
+    """Return a public session payload with redaction and alias stripping.
+
+    Callers use this for every response/export/SSE session payload.  It never
+    mutates the in-memory session or the caller's dictionary.
+    """
+    return redact_session_data(session_dict)
+
+
+def strip_public_internal_fields(value, *, message_records: bool = False):
+    """Deep-copy imported records through the shared schema scrubber.
+
+    JSON import uses this before constructing or saving a ``Session``.  The
+    Five replay aliases belong to a message/content-part/tool-call/function
+    record itself; matching names inside user content or tool arguments are
+    ordinary JSON and must be preserved.  This is intentionally independent of
+    the credential-redaction setting: caller-supplied provider sidecars must
+    never become durable WebUI session state.
+    """
+    return scrub_internal_replay_fields(value, message_records=message_records)
+
+
+def _copy_json_value(value):
+    """Deep-copy JSON-shaped data without applying message-field filtering."""
+    if isinstance(value, dict):
+        return {key: _copy_json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_copy_json_value(child) for child in value]
+    return value
+
+
+def redact_session_data(session_dict: dict) -> dict:
+    """Redact credentials in the public session response without mutation."""
     from api.config import load_settings
     _enabled = bool(load_settings().get("api_redact_enabled", True))
-    result = dict(session_dict)
-    if isinstance(result.get('title'), str):
-        result['title'] = _redact_text(result['title'], _enabled=_enabled)
-    if 'messages' in result:
-        result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
-    if 'tool_calls' in result:
-        result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
-    if 'todo_state' in result:
-        result['todo_state'] = _redact_value(result['todo_state'], _enabled=_enabled)
-    if 'runtime_journal_snapshot' in result:
-        result['runtime_journal_snapshot'] = _redact_value(
-            result['runtime_journal_snapshot'],
-            _enabled=_enabled,
-        )
+    if not isinstance(session_dict, dict):
+        return {}
+    result = {}
+    from api.process_event_utils import build_active_turn_token
+    _active_turn_token = build_active_turn_token(session_dict.get("active_stream_id"), session_dict.get("pending_started_at"))
+    for key, value in session_dict.items():
+        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:
+            continue
+        if key == 'title' and isinstance(value, str):
+            result[key] = _redact_text(value, _enabled=_enabled)
+        elif key in {'messages', 'context_messages'}:
+            result[key] = _redact_messages(value, _enabled=_enabled, _active_turn_token=_active_turn_token)
+        elif key == 'tool_calls' and isinstance(value, list):
+            result[key] = _redact_tool_calls(value, _enabled=_enabled)
+        elif key in {'todo_state', 'runtime_journal_snapshot'}:
+            result[key] = _redact_nested_message_containers(value, _enabled=_enabled)
+        else:
+            # Operational fields (workspace path, ids, config, timestamps, etc.)
+            # are NOT credential-masked: a valid workspace path may legitimately
+            # contain a credential-shaped component, and masking it would corrupt
+            # the authoritative value the client echoes back on the next send.
+            # Deep-copy them through unchanged (only transcript-bearing fields
+            # above carry free-form user/model text worth redacting).
+            result[key] = _copy_json_value(value)
     return result
 
 
@@ -647,10 +1676,18 @@ def read_body(handler) -> dict:
             pass
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
-    try:
-        return _json.loads(raw)
-    except Exception:
+    # A body-optional endpoint (e.g. DELETE /api/mcp/servers/{name}) may send a
+    # whitespace-only body; treat it like an empty body ({}) rather than a 400,
+    # matching the pre-#7336 lenient behavior for that shape (see gate finding).
+    if not raw.strip():
         return {}
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        raise ValueError('Invalid JSON body') from None
+    if not isinstance(parsed, dict):
+        raise ValueError('JSON body must be an object')
+    return parsed
 
 
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────

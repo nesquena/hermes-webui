@@ -386,6 +386,7 @@ function selectModelFromDropdown() {}
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
@@ -735,6 +736,7 @@ function selectModelFromDropdown() {}
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
@@ -947,6 +949,7 @@ function selectModelFromDropdown() {}
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));
@@ -1305,6 +1308,7 @@ function selectModelFromDropdown() {}
 for (const name of [
   '_readModelOverflowData',
   '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
   'renderModelDropdown',
 ]) {
   eval(extractFunc(name));

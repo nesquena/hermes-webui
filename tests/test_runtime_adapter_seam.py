@@ -325,7 +325,7 @@ def test_approval_respond_does_not_fallback_to_oldest_when_explicit_id_is_stale(
     helper_body = src[helper_idx:src.index("def _handle_approval_respond", helper_idx)]
 
     assert "A stale explicit id must not accidentally approve" in helper_body
-    assert "if found_target or not approval_id:" in helper_body
+    assert "if not pending and not approval_id:" in helper_body
     stale_branch = helper_body[helper_body.index("else:", helper_body.index("for i, entry")):helper_body.index("else:\n                pending = queue.pop(0)")]
     assert "pending = None" in stale_branch
     assert "queue.pop(0)" not in stale_branch

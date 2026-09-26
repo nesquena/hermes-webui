@@ -98,3 +98,54 @@ class TestThinkingPreambleStripping:
         assert not _looks_invalid_generated_title("Python import debugging"), (
             "Real titles must still pass the invalid-title guard"
         )
+
+    def test_looks_invalid_generated_title_rejects_trivial_echo(self):
+        """Trivial echo rejection applies to NEW titles only, not existing titles."""
+        from api.streaming import _is_bad_new_title, _looks_invalid_generated_title
+        assert _is_bad_new_title("pong")
+        assert _is_bad_new_title("Yes!")
+        assert _is_bad_new_title("Done")
+        assert _is_bad_new_title("Cool")
+        # Existing-title validity must accept short conversational titles so
+        # every subsequent turn does not re-fire the title LLM.
+        assert not _looks_invalid_generated_title("pong")
+        assert not _looks_invalid_generated_title("Done")
+        assert not _looks_invalid_generated_title("Cool")
+        assert not _looks_invalid_generated_title("Repo Metrics Overview")
+
+    def test_snippet_extraction_skips_tool_preamble_echo(self):
+        """First/latest exchange helpers skip tool rows whose content is echo/CoT."""
+        from api.streaming import _first_exchange_snippets, _latest_exchange_snippets
+
+        messages = [
+            {"role": "user", "content": "ping"},
+            {
+                "role": "assistant",
+                "content": "Let me check my memory first.",
+                "tool_calls": [{"id": "1", "function": {"name": "memory"}}],
+            },
+            {
+                "role": "assistant",
+                "content": "pong",
+                "tool_calls": [{"id": "2", "function": {"name": "echo"}}],
+            },
+            {"role": "assistant", "content": "Repo metrics look healthy overall."},
+        ]
+        u, a = _first_exchange_snippets(messages)
+        assert u == "ping"
+        assert "healthy" in a.lower()
+        assert "pong" not in a.lower()
+        assert "let me" not in a.lower()
+
+        latest = [
+            {"role": "user", "content": "status?"},
+            {
+                "role": "assistant",
+                "content": "Done",
+                "tool_calls": [{"id": "9", "function": {"name": "status"}}],
+            },
+            {"role": "assistant", "content": "All services green."},
+        ]
+        u2, a2 = _latest_exchange_snippets(latest)
+        assert u2 == "status?"
+        assert "green" in a2.lower()

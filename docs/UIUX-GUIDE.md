@@ -96,16 +96,25 @@ unless the code and tests prove it is implemented.
 
 ## Typography and content
 
-Use split typography intentionally:
+Use three explicit font tokens:
 
-- assistant prose uses the same system sans stack as the rest of the UI by
-  default (`--font-ui` in `static/style.css`),
-- editorial serif assistant prose is historical/proposal or skin-scoped only;
-  do not reintroduce a global assistant serif without explicit design approval
-  plus code and test evidence,
-- user bubbles and functional UI also use the system sans stack unless a scoped
-  skin intentionally overrides typography,
-- monospace is for code, file paths, commands, tool names, and compact metadata.
+- `--font-ui`: shell chrome, controls, composer, labels, and ordinary UI text
+- `--font-conversation`: user/assistant message prose; by default this is
+  `var(--font-ui)` in `static/style.css`
+- `--font-mono`: code, file paths, command lines, tool payloads, technical logs,
+  and terminal output
+
+Use semantic tokens for typography. Keep prose on `--font-conversation` by
+default so it tracks `--font-ui` whenever a skin intentionally retunes UI type.
+Override `--font-conversation` only for a skin that intentionally wants a
+distinct prose face.
+Conversation prose must remain the system sans by default. Do not introduce a
+global conversation serif through the `--font-conversation` token or
+selector-level overrides without explicit design approval plus code and test
+evidence; keep distinct editorial prose typography explicitly opt-in or
+skin-scoped.
+Avoid hard-coding selector-level font stacks when a token already carries the
+intent.
 
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
@@ -136,6 +145,33 @@ The composer is the command surface. Keep it legible, stable, and focused:
 When adding a control, consider where users will find it on both wide desktop and
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
+
+### Composer sizing
+
+The composer grows with its content up to a 200px cap. Where the browser supports
+`field-sizing: content` (the stylesheet sets it on `textarea#msg`, with
+`field-sizing: fixed` while the placeholder shows) CSS owns that; everywhere else
+the JavaScript fallback (`autoResize()` in `static/messages.js`) measures, and it
+runs on every keystroke - so treat it as a hot path and keep these invariants when
+touching it (regression coverage:
+`tests/test_long_session_composer_typing_latency.py`, which derives every
+dimension from `static/style.css`, and
+`tests/test_issue5514_composer_grow_scroll_pin.py`):
+
+- A single-row append that already fits its box skips the height round trip. That
+  round trip reads `scrollHeight`, which forces a synchronous layout of the whole
+  document, so its cost grows with the rendered transcript - this is the
+  long-session typing-lag class. Do not remove the skip.
+- The skip's ceiling is the textarea's natural ONE-ROW height (`line-height` +
+  vertical padding + borders) or the CSS `min-height`, whichever is larger.
+  Compare against that natural row, never against `min-height` alone: the natural
+  row follows the appearance font size (44px at the 16px default, 48px at
+  `data-font-size=large`, 51px at `xlarge`), while `min-height` stays 44px, so a
+  min-height-only ceiling silently disables the skip for the larger sizes.
+- Everything else still fully remeasures: an oversized composer, a replacement, a
+  shrink, a multi-line append, and session/draft restore.
+- Non-pixel computed values (a percentage, `calc()`, `auto`) fail closed to the
+  full resize rather than enabling the skip from a bogus pixel parse.
 
 ## Responsive behavior
 
