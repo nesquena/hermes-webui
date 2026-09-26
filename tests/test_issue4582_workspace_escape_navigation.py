@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 import shutil
 import subprocess
 import urllib.error
@@ -413,10 +412,10 @@ const apiFns = runner(S, showConfirmDialog, api, showToast, t, URLSearchParams);
 
     def test_open_in_browser_reuses_workspace_route_helper(self):
         ws_src = _read_workspace_js()
-        match = re.search(
-            r"function openInBrowser\(\)\{\s*if\(!_previewCurrentPath\|\|!S\.session\) return;\s*const url=(.*?);\s*window\.open\(url,'_blank','noopener'\);\s*\}",
-            ws_src,
-            re.DOTALL,
-        )
-        assert match, "openInBrowser helper not found"
-        assert "_workspaceRouteForPath(_previewCurrentPath, 'raw', {inline:true})" in match.group(1)
+        start = ws_src.find("function openInBrowser(){")
+        end = ws_src.find("\n}", start)
+        assert start >= 0 and end >= 0, "openInBrowser helper not found"
+        helper = ws_src[start:end]
+        assert "_workspaceRouteForPath(_previewCurrentPath, 'raw'," in helper
+        assert "owner:_previewOwner" in helper
+        assert "_previewPreserveArtifactPath" in helper

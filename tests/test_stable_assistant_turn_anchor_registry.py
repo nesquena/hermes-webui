@@ -829,9 +829,15 @@ def test_side_effect_owner_survives_scene_settlement_and_reload():
     settled_scene = hydrated[1]["_anchor_activity_scene"]
 
     assert settled_scene["artifacts"] == scene["artifacts"]
-    assert settled_scene["artifacts"][0]["payload"] == {
+    artifact_payload = settled_scene["artifacts"][0]["payload"]
+    assert artifact_payload == {
         "kind": "workspace_file",
         "path": "answer.txt",
+        "session_id": "sid-1",
+        "workspace_root": "",
+        "tool_name": "",
+        "tool_call_id": "",
+        "owner": {"session_id": "sid-1", "workspace_root": ""},
     }
     assert settled_scene["side_effects"] == scene["side_effects"]
     assert settled_scene["side_effects"][0]["source_event_type"] == "state_saved"
@@ -852,6 +858,7 @@ def test_side_effect_only_scene_is_persisted_without_creating_a_worklog():
 const activeSid='sid-owned-outcome';
 const streamId='stream-owned-outcome';
 const _anchorRegistry={{}};
+const S={{session:{{session_id:activeSid,workspace:'/workspace'}}}};
 let persisted=0;
 function _anchorSceneHasOwnedOutcomes(scene){{{has_owned_outcomes}}}
 function _anchorSceneHasWorklogWorthyRows(){{ return false; }}
@@ -865,8 +872,9 @@ function _projectLiveAnchorActivityScene(){{
   }};
 }}
 function _completeSettledAnchorSceneForTurn(messages,index,scene){{ return scene; }}
+function _settleTurnArtifactSceneForSession(scene){{ return scene; }}
 function _persistSettledAnchorScene(){{ persisted+=1; }}
-function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null){{{attach_scene}}}
+function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null,settlementSession=null){{{attach_scene}}}
 const messages=[{{role:'assistant',content:'final answer'}}];
 const renderedWorklog=_attachProjectedAnchorSceneToLastAssistant(messages);
 console.log(JSON.stringify({{
@@ -1503,7 +1511,10 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     assert "_applyToAnchor('done',{...d" not in done_body
     assert "_flushReasoningToAnchor();" in done_body
     assert "_scheduleAnchorRegistryCleanup();" in done_body
-    assert "_attachProjectedAnchorSceneToLastAssistant(S.messages);" in done_body
+    assert (
+        "_attachProjectedAnchorSceneToLastAssistant(S.messages, null, null, completedSession);"
+        in done_body
+    )
     attach_body = _function_body(src, "_attachProjectedAnchorSceneToLastAssistant")
     assert "lastAsst._anchor_stream_id=streamId" in attach_body
     assert "lastAsst._anchor_activity_scene=scene" in attach_body

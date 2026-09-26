@@ -25,6 +25,9 @@ from tests.test_anchor_fallback_ownership import (
 
 
 _REAL_FUNCTIONS = (
+    "_messagesHaveTurnArtifacts",
+    "_sessionHtmlCacheEligible",
+    "_anchorSceneSceneHasWorklogWorthyRows",
     "_transparentStreamOrderedParts",
     "_legacySettledFallbackHasToolMetadata",
     "_isContextCompactionText",
