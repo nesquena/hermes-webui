@@ -74,6 +74,20 @@ individually valid rows can reach disk out of order and the session replay
 reader must reject them as noncontiguous. This does not change caller-supplied
 sequence semantics, cross-process ownership, or failed-write recovery.
 
+## Persistent-state side-effect replay
+
+A live `state_saved` event records a server-observed memory or skill write. It is
+non-visual Anchor ownership metadata: it belongs in `activity_scene_v1.side_effects`,
+not in Compact Worklog activity rows, and reconnect replay must not re-trigger
+the live toast or repeat the underlying write.
+
+The run journal is the durable recovery source. Snapshot reconstruction accepts
+only the producer's bounded memory/skill payload shapes and exact journal
+session/run/event identity, strips unrelated payload fields, and caps the
+retained side effects before exposing them to browser recovery. Unknown,
+foreign, malformed, or over-budget rows fail closed. Artifact recovery remains
+a separate contract; this rule does not create a generic outcome-event channel.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

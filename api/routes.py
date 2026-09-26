@@ -3475,6 +3475,96 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
+_RUN_JOURNAL_STATE_SAVED_MAX_EVENTS = 16
+_RUN_JOURNAL_STATE_SAVED_MAX_BYTES = 16 * 1024
+_RUN_JOURNAL_STATE_SAVED_MAX_NAME_BYTES = 512
+
+
+def _run_journal_state_saved_side_effect(
+    event: dict,
+    *,
+    session_id: str,
+    stream_id: str,
+    run_id: str,
+) -> tuple[dict, int] | None:
+    """Return one bounded, canonical state_saved side-effect envelope.
+
+    This is intentionally narrower than a generic outcome replayer: WebUI
+    currently emits only memory-save and skill create/update notifications.
+    Arbitrary payload fields are never restored into the Anchor scene.
+    """
+    if not isinstance(event, dict):
+        return None
+    seq = event.get("seq")
+    if type(seq) is not int or seq <= 0:
+        return None
+    if str(event.get("session_id") or "") != session_id:
+        return None
+    event_run_id, malformed_run_id = _run_journal_envelope_run_id_result(event)
+    if malformed_run_id or event_run_id != run_id:
+        return None
+    event_id = str(event.get("event_id") or "").strip()
+    parsed_run_id, parsed_seq = _shared_parse_run_journal_event_id(event_id)
+    if parsed_run_id != run_id or parsed_seq != seq:
+        return None
+
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("session_id") or "") != session_id:
+        return None
+    kind = str(payload.get("kind") or "").strip().lower()
+    action = str(payload.get("action") or "").strip().lower()
+    if kind == "memory":
+        if action != "saved":
+            return None
+        canonical_payload = {
+            "session_id": session_id,
+            "kind": "memory",
+            "action": "saved",
+        }
+    elif kind == "skill":
+        if action not in {"created", "updated"}:
+            return None
+        name = payload.get("name")
+        if not isinstance(name, str):
+            return None
+        name = name.strip()
+        if (
+            not name
+            or len(name.encode("utf-8")) > _RUN_JOURNAL_STATE_SAVED_MAX_NAME_BYTES
+        ):
+            return None
+        canonical_payload = {
+            "session_id": session_id,
+            "kind": "skill",
+            "action": action,
+            "name": name,
+        }
+    else:
+        return None
+
+    side_effect = {
+        "source_event_type": "state_saved",
+        "event_id": event_id,
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "seq": seq,
+        "payload": canonical_payload,
+    }
+    encoded_bytes = len(
+        json.dumps(
+            side_effect,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    if encoded_bytes > _RUN_JOURNAL_STATE_SAVED_MAX_BYTES:
+        return None
+    return side_effect, encoded_bytes
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3543,6 +3633,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    side_effects: list[dict] = []
+    side_effect_event_ids: set[str] = set()
+    side_effect_bytes = 0
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3655,6 +3748,26 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             # their per-row work while preserving the last_ts watermark they
             # carry.
             last_ts = event.get("created_at", last_ts)
+            continue
+        if event_name == "state_saved":
+            canonical = _run_journal_state_saved_side_effect(
+                event,
+                session_id=session_id,
+                stream_id=stream_id,
+                run_id=run_id,
+            )
+            if canonical is not None:
+                side_effect, encoded_bytes = canonical
+                event_id = side_effect["event_id"]
+                if (
+                    event_id not in side_effect_event_ids
+                    and len(side_effects) < _RUN_JOURNAL_STATE_SAVED_MAX_EVENTS
+                    and side_effect_bytes + encoded_bytes
+                    <= _RUN_JOURNAL_STATE_SAVED_MAX_BYTES
+                ):
+                    side_effects.append(side_effect)
+                    side_effect_event_ids.add(event_id)
+                    side_effect_bytes += encoded_bytes
             continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
@@ -4088,6 +4201,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "side_effects": side_effects,
         },
     }
 
