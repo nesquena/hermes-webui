@@ -225,6 +225,10 @@ function _saveComposerDraft(sid, text, files) {
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
+    // The first nonempty draft claims the New Chat candidate. Session creation
+    // deliberately does not (#7824): an empty background tab — e.g. opened by
+    // middle-clicking "+" — must not displace the tab whose draft "+" returns to.
+    if (S.session && S.session.session_id === sid) _rememberNewChatDraftSession(S.session);
   }
   _draftSaveTimer = setTimeout(() => {
     api('/api/session/draft', {
@@ -1929,7 +1933,14 @@ function _setNewSessionPending(pending){
   for (let i=0;i<ids.length;i++){
     const btn=$(ids[i]);
     if(!btn) continue;
-    btn.disabled=!!pending;
+    if(btn.tagName==='A'){
+      // A link has no native disabled property. Keep its pending behavior in
+      // sync with the titlebar button while creation is in flight.
+      btn.setAttribute('aria-disabled',pending?'true':'false');
+      btn.tabIndex=pending?-1:0;
+    }else{
+      btn.disabled=!!pending;
+    }
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
   const statusEl=$('composerStatus');
@@ -2059,7 +2070,6 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
-    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);

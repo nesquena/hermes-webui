@@ -2081,7 +2081,22 @@ function _currentSessionIsReusableEmptyChat(){
 }
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
-$('btnNewChat').onclick=async()=>{
+function _blockPendingNewChatLink(e){
+  // Returning false from an onauxclick property handler cancels the native
+  // middle-click action, even if preventDefault() was never called.
+  if(e.currentTarget.getAttribute('aria-disabled')!=='true') return;
+  e.preventDefault();
+  return true;
+}
+$('btnNewChat').onauxclick=_blockPendingNewChatLink;
+$('btnNewChat').oncontextmenu=_blockPendingNewChatLink;
+$('btnNewChat').onclick=async(e)=>{
+  if(_blockPendingNewChatLink(e)) return;
+  // Native link gestures (middle/Ctrl/Meta/Shift click) open the one-shot
+  // new-chat URL in another tab/window; an ordinary click keeps the existing
+  // in-page draft/empty-session behavior instead of navigating away.
+  if(e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey) return;
+  e.preventDefault();
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
   // sidebar list (#1171).

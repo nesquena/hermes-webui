@@ -12,7 +12,7 @@ BOOT_JS = ROOT.joinpath("static", "boot.js").read_text(encoding="utf-8")
 
 
 def _btn_new_chat_handler() -> str:
-    start = BOOT_JS.find("$('btnNewChat').onclick=async()=>{")
+    start = BOOT_JS.find("$('btnNewChat').onclick=async(e)=>{")
     end = BOOT_JS.find("$('btnDownload').onclick", start)
     assert start != -1 and end != -1, "btnNewChat handler block not found"
     return BOOT_JS[start:end]
@@ -27,17 +27,38 @@ def _load_session_clear_block() -> str:
     return SESSIONS_JS[start:clear_end]
 
 
-def test_new_session_remembers_regular_empty_session_id():
+def test_new_chat_candidate_claims_on_first_draft_not_at_creation():
+    """#7824 review: an empty background launch must not claim the candidate.
+
+    The draft-candidate registration moved from session creation to the first
+    nonempty draft observation, so the pointer means "a session with a draft"
+    and merely creating an empty session (e.g. a background tab opened by
+    middle-clicking +) leaves the current owner untouched.
+    """
     start = SESSIONS_JS.find("async function newSession(")
     end = SESSIONS_JS.find("async function loadSession(", start)
     assert start != -1 and end != -1, "newSession block not found"
     body = SESSIONS_JS[start:end]
-    assign_idx = body.find("S.session=data.session")
-    remember_idx = body.find("_rememberNewChatDraftSession(S.session)")
-    assert assign_idx != -1, "newSession must assign S.session from the POST response"
-    assert remember_idx > assign_idx, "newSession must remember the created empty session id"
-    assert "if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);" in body, (
-        "worktree-backed new sessions must not become New Chat draft candidates"
+    assert "S.session=data.session" in body, "newSession must assign S.session from the POST response"
+    assert "_rememberNewChatDraftSession(" not in body, (
+        "newSession must not claim the New Chat draft candidate; an empty "
+        "background tab would otherwise displace the tab that owns the draft"
+    )
+
+    save_start = SESSIONS_JS.find("function _saveComposerDraft(")
+    save_end = SESSIONS_JS.find("function _composerDraftHasPayload", save_start)
+    assert save_start != -1 and save_end != -1, "_saveComposerDraft block not found"
+    save_body = SESSIONS_JS[save_start:save_end]
+    payload_idx = save_body.find("_composerDraftHasPayload(normalizedText, normalizedFiles)")
+    claim_idx = save_body.find("_rememberNewChatDraftSession(S.session)")
+    timer_idx = save_body.find("_draftSaveTimer = setTimeout")
+    assert payload_idx != -1, "draft save must still detect a nonempty payload"
+    assert claim_idx != -1, "the first nonempty draft must claim the New Chat candidate"
+    assert payload_idx < claim_idx < timer_idx, (
+        "the claim must be synchronous for a nonempty draft, before the debounced save"
+    )
+    assert "S.session.session_id === sid" in save_body, (
+        "only the session the composer belongs to may claim the candidate"
     )
 
 
