@@ -511,11 +511,19 @@ class TestSendBusyBranchDispatch:
         parse_src = _source_between(
             COMMANDS_JS, "function parseCommand(", "\nconst DESKTOP_COMPANION"
         )
-        commands_src = _source_between(COMMANDS_JS, "const COMMANDS=[", "\n];")
+        commands_src = _source_between(COMMANDS_JS, "const COMMANDS=[", ";\n")
+        assert commands_src.startswith("const COMMANDS=["), commands_src[:60]
+        assert commands_src.rstrip().endswith("]"), commands_src[-60:]
         stubs = "\n".join(
             "function %s(){}" % n
             for n in sorted(set(re.findall(r"fn:(\w+)", commands_src)))
         )
+
+        # `await` is a syntax error in code handed to eval(), so the shipped
+        # intercept is wrapped in an async arrow: it then sits lexically inside
+        # an async function, and its early `return` still skips the
+        # fall-through marker that follows it.
+        wrapped_src = "async () => {\n%s\nglobalThis.__fellThrough = true;\n}" % intercept_src
 
         script = textwrap.dedent(
             f"""
@@ -525,8 +533,9 @@ class TestSendBusyBranchDispatch:
             const PARSE_SRC = {json.dumps(parse_src)};
             const COMMANDS_SRC = {json.dumps(commands_src)};
             const INTERCEPT_SRC = {json.dumps(intercept_src)};
+            const WRAPPED_SRC = {json.dumps(wrapped_src)};
 
-            const realCommands = eval(COMMANDS_SRC.replace('const COMMANDS=', '(') + ')');
+            const realCommands = eval(COMMANDS_SRC.replace('const COMMANDS=', ''));
             const handlerFor = {{}};
             for (const c of realCommands) handlerFor[c.name] = c.fn.name;
             assert.strictEqual(handlerFor['btw'], 'cmdBtw', '/btw must stay wired to cmdBtw');
@@ -537,7 +546,7 @@ class TestSendBusyBranchDispatch:
               const input = {{value: text}};
               let composerClears = 0;
               let autoResizes = 0;
-              let fellThrough = false;
+              globalThis.__fellThrough = false;
               const composer = {{}};
               Object.defineProperty(composer, 'value', {{
                 get(){{return input.value;}},
@@ -551,16 +560,12 @@ class TestSendBusyBranchDispatch:
                 ...c,
                 fn: async (args) => {{calls.push({{name: c.name, args}});}},
               }}));
-              async function runIntercept(){{
-                eval(INTERCEPT_SRC);
-                fellThrough = true;
-              }}
-              await runIntercept();
+              await eval('(' + WRAPPED_SRC + ')()');
               return {{
                 calls: calls,
                 composerClears: composerClears,
                 autoResizes: autoResizes,
-                fellThrough: fellThrough,
+                fellThrough: globalThis.__fellThrough === true,
                 value: input.value,
               }};
             }}
