@@ -74,6 +74,34 @@ individually valid rows can reach disk out of order and the session replay
 reader must reject them as noncontiguous. This does not change caller-supplied
 sequence semantics, cross-process ownership, or failed-write recovery.
 
+
+## Cancelled journal-only restart recovery
+
+When Stop has no in-memory assistant partial to persist, the cancellation marker
+may carry a bounded exact-stream run-journal recovery hook. The hook does not
+continue or replay provider execution; it only makes already-emitted durable
+prose, display reasoning, and tool activity recoverable after process loss.
+
+The worker registry remains authoritative while the cancelling worker is known
+live. Registry absence in the same process is not sufficient because stale-run
+reclamation can remove bookkeeping before a wedged worker physically exits.
+The marker therefore records its creating process instance: the same process may
+consume a nonempty hook only after that journal is explicitly terminal, while a
+new process instance may recover a nonterminal durable tail because the old
+writer cannot survive the interpreter restart.
+
+Recovery is owned by the marker's exact stream and exact active-turn token.
+Stop stamps that token onto the owning display user row and the exact matching
+provider-context user row before the hook becomes durable. Rows reconstructed
+after a restart are placed before that cancellation marker and before any
+persisted successor turn. Provider-context projection is inserted only after a
+unique matching token; compression that removed the owner fails closed for
+provider context while visible transcript recovery may still succeed. Display
+ordinals, content, timestamps, or tool equality are not cross-layer ownership
+evidence. The hook is retired only in the same successful session save that
+commits the recovered projection; a failed save restores the in-memory hook for
+a later retry.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

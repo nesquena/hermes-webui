@@ -2855,6 +2855,7 @@ def _find_existing_assistant_for_journal_content(
     session,
     content: str,
     *,
+    min_index: int | None = None,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
 ) -> int | None:
@@ -2862,9 +2863,10 @@ def _find_existing_assistant_for_journal_content(
     if not candidate:
         return None
     messages = session.messages or []
-    stop = len(messages) if max_index is None else min(len(messages), max_index)
+    start = 0 if min_index is None else max(0, min(len(messages), min_index))
+    stop = len(messages) if max_index is None else max(start, min(len(messages), max_index))
     substring_match = None
-    for idx in range(stop):
+    for idx in range(start, stop):
         if excluded_indexes and idx in excluded_indexes:
             continue
         message = messages[idx]
@@ -2888,6 +2890,9 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    tool_id: str | None = None,
+    min_assistant_idx: int | None = None,
+    max_assistant_idx: int | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
@@ -2909,6 +2914,7 @@ def _journal_tool_already_present(
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
     candidate_stream = str(stream_id) if stream_id else None
+    candidate_tool_id = str(tool_id or '').strip() or None
     for tool_call in session.tool_calls or []:
         if not isinstance(tool_call, dict):
             continue
@@ -2919,13 +2925,30 @@ def _journal_tool_already_present(
         )
         if existing_preview != candidate_preview:
             continue
+        if candidate_tool_id is not None:
+            existing_tool_id = str(
+                tool_call.get('tid') or tool_call.get('tool_call_id') or ''
+            ).strip()
+            if existing_tool_id and existing_tool_id != candidate_tool_id:
+                continue
         if candidate_stream is not None:
             existing_stream = tool_call.get('_recovered_stream_id')
             # A tool card explicitly tagged with a recovered_stream_id that
             # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live or carried
-            # over from the core transcript) still match.
-            if existing_stream and str(existing_stream) != candidate_stream:
+            # it pre-empt this retry. An exact tagged retry remains globally
+            # eligible for idempotence even if later transcript edits moved
+            # its owner outside the original positional window.
+            if existing_stream:
+                if str(existing_stream) != candidate_stream:
+                    continue
+                return True
+        if min_assistant_idx is not None or max_assistant_idx is not None:
+            owner_idx = tool_call.get('assistant_msg_idx')
+            if type(owner_idx) is not int:
+                continue
+            if min_assistant_idx is not None and owner_idx < min_assistant_idx:
+                continue
+            if max_assistant_idx is not None and owner_idx >= max_assistant_idx:
                 continue
         return True
     return False
@@ -3265,6 +3288,10 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    dedupe_min_index: int | None = None,
+    dedupe_max_index: int | None = None,
+    mark_partial: bool = False,
+    append_context: bool = True,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -3343,6 +3370,8 @@ def _append_journaled_partial_output(
         return True
 
     def append_context_projection(message: dict) -> None:
+        if not append_context:
+            return
         context_projection = dict(message)
         context_projection.pop('reasoning', None)
         _append_recovered_turn_to_context(session, context_projection)
@@ -3372,7 +3401,12 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
-                    max_index=initial_message_count,
+                    min_index=dedupe_min_index,
+                    max_index=(
+                        initial_message_count
+                        if dedupe_max_index is None
+                        else min(initial_message_count, dedupe_max_index)
+                    ),
                     excluded_indexes=search_excluded,
                 )
                 if candidate_idx is None:
@@ -3392,7 +3426,17 @@ def _append_journaled_partial_output(
                         appended_any = True
                 return existing_idx
         if dedupe_existing and reasoning and not content:
-            for existing_idx in range(initial_message_count):
+            reasoning_start = (
+                0
+                if dedupe_min_index is None
+                else max(0, min(initial_message_count, dedupe_min_index))
+            )
+            reasoning_stop = (
+                initial_message_count
+                if dedupe_max_index is None
+                else max(reasoning_start, min(initial_message_count, dedupe_max_index))
+            )
+            for existing_idx in range(reasoning_start, reasoning_stop):
                 if existing_idx in claimed_existing_assistant_indexes:
                     continue
                 existing_message = session.messages[existing_idx]
@@ -3417,6 +3461,8 @@ def _append_journaled_partial_output(
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
         }
+        if mark_partial:
+            recovered_assistant['_partial'] = True
         attach_display_reasoning(recovered_assistant, reasoning)
         session.messages.append(recovered_assistant)
         append_context_projection(recovered_assistant)
@@ -3458,13 +3504,16 @@ def _append_journaled_partial_output(
             ):
                 current_assistant_idx = _existing_idx
                 return _existing_idx
-        session.messages.append({
+        recovered_anchor = {
             'role': 'assistant',
             'content': '',
             'timestamp': int(created_at or time.time()),
             '_recovered_from_run_journal': True,
             '_recovered_stream_id': stream_id,
-        })
+        }
+        if mark_partial:
+            recovered_anchor['_partial'] = True
+        session.messages.append(recovered_anchor)
         current_assistant_idx = len(session.messages) - 1
         appended_any = True
         return current_assistant_idx
@@ -3511,8 +3560,17 @@ def _append_journaled_partial_output(
                 anchor_idx = ensure_assistant_anchor(created_at)
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            tool_id = str(
+                payload.get('tid') or payload.get('tool_call_id') or ''
+            ).strip()
             if dedupe_existing and _journal_tool_already_present(
-                session, name, preview, stream_id=stream_id,
+                session,
+                name,
+                preview,
+                stream_id=stream_id,
+                tool_id=tool_id or None,
+                min_assistant_idx=dedupe_min_index,
+                max_assistant_idx=dedupe_max_index,
             ):
                 current_assistant_idx = anchor_idx
                 continue
@@ -3520,7 +3578,10 @@ def _append_journaled_partial_output(
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
-                'tid': f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}",
+                'tid': (
+                    tool_id
+                    or f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}"
+                ),
                 'assistant_msg_idx': anchor_idx,
                 'args': _truncate_journal_tool_args(payload.get('args') or {}),
                 'done': False,
@@ -3532,18 +3593,25 @@ def _append_journaled_partial_output(
             continue
         if event_name == 'tool_complete':
             name = str(payload.get('name') or '')
+            completion_tool_id = str(
+                payload.get('tid') or payload.get('tool_call_id') or ''
+            ).strip()
             for tool_call in reversed(recovered_tool_calls):
                 if tool_call.get('done'):
                     continue
-                if not name or tool_call.get('name') == name:
-                    tool_call['done'] = True
-                    if payload.get('preview'):
-                        tool_call['preview'] = str(payload.get('preview') or '')
-                        tool_call['snippet'] = str(payload.get('preview') or '')
-                    if payload.get('duration') is not None:
-                        tool_call['duration'] = payload.get('duration')
-                    tool_call['is_error'] = bool(payload.get('is_error', False))
-                    break
+                if completion_tool_id:
+                    if str(tool_call.get('tid') or '') != completion_tool_id:
+                        continue
+                elif name and tool_call.get('name') != name:
+                    continue
+                tool_call['done'] = True
+                if payload.get('preview'):
+                    tool_call['preview'] = str(payload.get('preview') or '')
+                    tool_call['snippet'] = str(payload.get('preview') or '')
+                if payload.get('duration') is not None:
+                    tool_call['duration'] = payload.get('duration')
+                tool_call['is_error'] = bool(payload.get('is_error', False))
+                break
             continue
         if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
             flush_assistant()
@@ -3587,6 +3655,12 @@ def _append_journaled_partial_output(
 #     so users do not see "reload to retry" prompts forever.
 _JOURNAL_RETRY_MAX_ATTEMPTS = 12
 _JOURNAL_RETRY_GIVEUP_SECONDS = 24 * 3600
+# Persisted cancel-recovery hooks record the process instance that created
+# them. ACTIVE_RUNS can be reaped while a wedged worker still exists, so
+# registry absence alone is not proof that a same-process journal can no
+# longer receive writes. A fresh process gets a fresh token; that is positive
+# evidence the old writer cannot still be running in this interpreter.
+_JOURNAL_RECOVERY_PROCESS_TOKEN = uuid.uuid4().hex
 _JOURNAL_RETRY_LOCKS: dict[str, threading.Lock] = {}
 _JOURNAL_RETRY_LOCKS_GUARD = threading.Lock()
 
@@ -3623,12 +3697,153 @@ def _build_recovery_marker_with_retry_hook(
     return marker
 
 
-def _session_has_pending_journal_retry(session) -> bool:
-    """Cheap short-circuit: scan from the tail until the most recent normal
-    assistant turn. Any `_pending_journal_recovery` flag found before then
-    means a retry is queued.
-    """
+def _is_cancel_journal_retry_marker(message: dict) -> bool:
+    """Return True for a durable journal-only Stop recovery marker."""
+    return (
+        isinstance(message, dict)
+        and message.get('_pending_journal_recovery') is True
+        and message.get('_journal_retry_kind') == 'cancelled'
+    )
+
+
+def _cancel_journal_retry_owner_index(session, marker_idx: int, marker: dict) -> int | None:
+    """Resolve the exact token-bearing user row owned by a cancel hook."""
     messages = getattr(session, 'messages', None) or []
+    owner_token = str(marker.get('_journal_retry_owner_token') or '').strip()
+    if not owner_token:
+        return None
+    matches = [
+        index
+        for index, row in enumerate(messages[:marker_idx])
+        if (
+            isinstance(row, dict)
+            and row.get('role') == 'user'
+            and str(row.get('_active_turn_token') or '').strip() == owner_token
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> None:
+    """Move only this cancelled stream's recovered rows before its marker."""
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list) or not (0 <= marker_idx < len(messages)):
+        return
+    marker = messages[marker_idx]
+    before = list(messages)
+    recovered = [
+        row
+        for index, row in enumerate(before)
+        if index > marker_idx
+        and isinstance(row, dict)
+        and row.get('_recovered_from_run_journal') is True
+        and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+    ]
+    if not recovered:
+        return
+    recovered_ids = {id(row) for row in recovered}
+    remaining = [row for row in before if id(row) not in recovered_ids]
+    try:
+        marker_position = next(index for index, row in enumerate(remaining) if row is marker)
+    except StopIteration:
+        return
+    session.messages = (
+        remaining[:marker_position]
+        + recovered
+        + [marker]
+        + remaining[marker_position + 1:]
+    )
+
+    new_index_by_row = {id(row): index for index, row in enumerate(session.messages)}
+    for tool_call in getattr(session, 'tool_calls', None) or []:
+        if not isinstance(tool_call, dict):
+            continue
+        old_index = tool_call.get('assistant_msg_idx')
+        if type(old_index) is not int or not (0 <= old_index < len(before)):
+            continue
+        owner = before[old_index]
+        new_index = new_index_by_row.get(id(owner))
+        if new_index is not None:
+            tool_call['assistant_msg_idx'] = new_index
+
+
+def _rehome_cancel_journal_context(
+    session,
+    *,
+    owner_token: str,
+    stream_id: str,
+) -> None:
+    """Project exact recovered rows after the token-owned context user only."""
+    context = getattr(session, 'context_messages', None)
+    messages = getattr(session, 'messages', None)
+    if not isinstance(context, list) or not isinstance(messages, list):
+        return
+
+    # Cancel recovery deliberately bypasses the generic text-deduping context
+    # helper. An earlier or successor assistant is allowed to emit identical
+    # text; only the exact recovered stream owns these rows.
+    recovered = []
+    for row in messages:
+        if not (
+            isinstance(row, dict)
+            and row.get('_recovered_from_run_journal') is True
+            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+        ):
+            continue
+        projected = _recovered_model_context_projection(row)
+        if projected is not None:
+            recovered.append(projected)
+
+    remaining = [
+        row
+        for row in context
+        if not (
+            isinstance(row, dict)
+            and row.get('_recovered_from_run_journal') is True
+            and str(row.get('_recovered_stream_id') or '') == str(stream_id)
+        )
+    ]
+    if not recovered:
+        session.context_messages = remaining
+        return
+
+    owner_token = str(owner_token or '').strip()
+    if not owner_token:
+        session.context_messages = remaining
+        return
+    owner_positions = [
+        index
+        for index, row in enumerate(remaining)
+        if (
+            isinstance(row, dict)
+            and row.get('role') == 'user'
+            and str(row.get('_active_turn_token') or '').strip() == owner_token
+        )
+    ]
+    if len(owner_positions) != 1:
+        # Compression may legitimately remove the exact provider-context owner.
+        # Visible transcript recovery remains valid, but old assistant output
+        # must never be guessed onto a successor user turn.
+        session.context_messages = remaining
+        return
+    owner_position = owner_positions[0]
+
+    insert_at = len(remaining)
+    for index in range(owner_position + 1, len(remaining)):
+        if isinstance(remaining[index], dict) and remaining[index].get('role') == 'user':
+            insert_at = index
+            break
+    session.context_messages = remaining[:insert_at] + recovered + remaining[insert_at:]
+
+
+def _session_has_pending_journal_retry(session) -> bool:
+    """Return True when a durable interrupted/cancelled journal hook is pending."""
+    messages = getattr(session, 'messages', None) or []
+    # A cancelled-stream hook remains authoritative even if a successor turn is
+    # already persisted after it. The exact stream id on the marker prevents a
+    # successor from becoming the recovery source.
+    if any(_is_cancel_journal_retry_marker(msg) for msg in messages):
+        return True
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
@@ -3646,6 +3861,9 @@ def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_journal_retry_stream_id', None)
     marker.pop('_journal_retry_attempts', None)
     marker.pop('_journal_retry_first_seen_ts', None)
+    marker.pop('_journal_retry_kind', None)
+    marker.pop('_journal_retry_owner_token', None)
+    marker.pop('_journal_retry_process_token', None)
 
 
 def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
@@ -3716,35 +3934,176 @@ def _retry_journal_recovery_in_place(
 ) -> bool:
     """Re-attempt run-journal recovery for the most recent pending marker.
 
-    Returns True if journal output or a specific terminal error resolved the marker.
-    Never raises — caller is best-effort.
+    Interrupted-response hooks keep their existing bounded retry behavior.
+    Journal-only cancellation hooks are exact-stream capabilities: they remain
+    discoverable across successor turns, wait until the old runtime owner is
+    gone, and splice recovered rows back before their cancellation marker.
     """
+    def snapshot_cancel_projection():
+        return (
+            copy.deepcopy(getattr(session, 'messages', None) or []),
+            copy.deepcopy(getattr(session, 'context_messages', None) or []),
+            copy.deepcopy(getattr(session, 'tool_calls', None) or []),
+            getattr(session, 'updated_at', None),
+        )
+
+    def restore_cancel_projection(snapshot) -> None:
+        (
+            session.messages,
+            session.context_messages,
+            session.tool_calls,
+            session.updated_at,
+        ) = snapshot
+
+    def save_cancel_projection(snapshot, reason: str) -> bool:
+        try:
+            session.save(touch_updated_at=False)
+            return True
+        except Exception:
+            restore_cancel_projection(snapshot)
+            logger.debug(
+                "save() failed while %s for cancelled session %s",
+                reason,
+                getattr(session, 'session_id', '?'),
+                exc_info=True,
+            )
+            return False
+
     try:
         messages = session.messages or []
-        for idx in range(len(messages) - 1, -1, -1):
-            msg = messages[idx]
-            if not isinstance(msg, dict):
-                continue
-            if msg.get('role') == 'assistant' and not msg.get('_error') \
-                    and not msg.get('_pending_journal_recovery'):
-                # Walked past the pending marker without finding it.
+        cancel_candidates = [
+            (index, message)
+            for index, message in enumerate(messages)
+            if _is_cancel_journal_retry_marker(message)
+        ]
+        if cancel_candidates:
+            # Multiple cancelled turns may remain pending in one transcript.
+            # A newer hook that is still owned by a live worker (or by a
+            # same-process nonterminal journal) must not starve an older hook
+            # whose exact stream is already safe to recover.
+            active_stream_ids = _active_stream_ids()
+            idx = None
+            msg = None
+            for candidate_idx, candidate in reversed(cancel_candidates):
+                candidate_stream_id = str(
+                    candidate.get('_journal_retry_stream_id') or ''
+                ).strip()
+                candidate_process_token = str(
+                    candidate.get('_journal_retry_process_token') or ''
+                ).strip()
+                candidate_owner_token = str(
+                    candidate.get('_journal_retry_owner_token') or ''
+                ).strip()
+                if (
+                    not candidate_stream_id
+                    or not candidate_process_token
+                    or not candidate_owner_token
+                ):
+                    continue
+                if candidate_stream_id in active_stream_ids:
+                    continue
+                if candidate_process_token == _JOURNAL_RECOVERY_PROCESS_TOKEN:
+                    try:
+                        from api.run_journal import latest_run_summary
+
+                        if not latest_run_summary(
+                            session.session_id, candidate_stream_id
+                        ).get('terminal'):
+                            continue
+                    except Exception:
+                        continue
+                idx, msg = candidate_idx, candidate
+                break
+            if msg is None:
                 return False
-            if not (
-                msg.get('type') == 'interrupted'
-                and msg.get('_pending_journal_recovery')
-            ):
-                continue
-            stream_id = msg.get('_journal_retry_stream_id')
-            first_seen = msg.get('_journal_retry_first_seen_ts') or 0
-            attempts = int(msg.get('_journal_retry_attempts') or 0)
-            now = time.time()
-            give_up = (
-                attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS
-                or (
-                    first_seen
-                    and now - float(first_seen) > _JOURNAL_RETRY_GIVEUP_SECONDS
-                )
+            cancel_hook = True
+        else:
+            idx = None
+            msg = None
+            cancel_hook = False
+            for candidate_idx in range(len(messages) - 1, -1, -1):
+                candidate = messages[candidate_idx]
+                if not isinstance(candidate, dict):
+                    continue
+                if candidate.get('role') == 'assistant' and not candidate.get('_error') \
+                        and not candidate.get('_pending_journal_recovery'):
+                    # Walked past the pending marker without finding it.
+                    return False
+                if (
+                    candidate.get('type') == 'interrupted'
+                    and candidate.get('_pending_journal_recovery')
+                ):
+                    idx, msg = candidate_idx, candidate
+                    break
+            if msg is None:
+                return False
+
+        assert isinstance(idx, int) and isinstance(msg, dict)
+        stream_id = msg.get('_journal_retry_stream_id')
+        first_seen = msg.get('_journal_retry_first_seen_ts') or 0
+        attempts = int(msg.get('_journal_retry_attempts') or 0)
+        now = time.time()
+        give_up = (
+            attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS
+            or (
+                first_seen
+                and now - float(first_seen) > _JOURNAL_RETRY_GIVEUP_SECONDS
             )
+        )
+
+        if cancel_hook:
+            if not stream_id:
+                # A cancellation hook without its exact run identity cannot
+                # safely select a journal. Keep it intact rather than guessing.
+                return False
+            if str(stream_id) in _active_stream_ids():
+                # Stop detaches the browser stream before the worker finishes.
+                # The durable hook belongs to restart/read-side recovery only
+                # after that old runtime owner has disappeared.
+                return False
+            marker_process_token = str(
+                msg.get('_journal_retry_process_token') or ''
+            ).strip()
+            owner_token = str(msg.get('_journal_retry_owner_token') or '').strip()
+            if not marker_process_token or not owner_token:
+                # Unknown process ownership is not permission to consume an
+                # exact cancellation hook.
+                return False
+            if marker_process_token == _JOURNAL_RECOVERY_PROCESS_TOKEN:
+                # ACTIVE_RUNS has a bounded stale reaper, so its absence inside
+                # the same process does not prove a wedged worker is gone. Only
+                # an explicit terminal journal row closes that same-process
+                # ambiguity. A real restart changes the process token and can
+                # recover a nonterminal durable tail because the old writer
+                # cannot survive into the new interpreter.
+                try:
+                    from api.run_journal import latest_run_summary
+
+                    if not latest_run_summary(
+                        session.session_id, str(stream_id)
+                    ).get('terminal'):
+                        return False
+                except Exception:
+                    return False
+            cancel_snapshot = snapshot_cancel_projection()
+            if give_up:
+                _strip_journal_retry_meta(msg)
+                save_cancel_projection(cancel_snapshot, "retiring expired cancel journal hook")
+                return False
+            owner_index = _cancel_journal_retry_owner_index(session, idx, msg)
+            if owner_index is None:
+                return False
+            recovered_output = _append_journaled_partial_output(
+                session,
+                stream_id,
+                dedupe_existing=True,
+                dedupe_min_index=owner_index + 1,
+                dedupe_max_index=idx,
+                mark_partial=True,
+                append_context=False,
+            )
+            terminal_error_recovered = False
+        else:
             if not stream_id:
                 # No stream id to retry against; demote immediately.
                 msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
@@ -3777,7 +4136,24 @@ def _retry_journal_recovery_in_place(
                     dedupe_existing=True,
                 )
             )
-            if recovered_output or terminal_error_recovered:
+
+        if recovered_output or terminal_error_recovered:
+            if cancel_hook:
+                _rehome_cancel_journal_rows(session, idx, str(stream_id))
+                _rehome_cancel_journal_context(
+                    session,
+                    owner_token=owner_token,
+                    stream_id=str(stream_id),
+                )
+                # Keep the user-visible cancellation wording. Only the durable
+                # recovery capability is retired by this commit.
+                _strip_journal_retry_meta(msg)
+                if not save_cancel_projection(
+                    cancel_snapshot,
+                    "applying cancelled journal recovery",
+                ):
+                    return False
+            else:
                 if not terminal_error_recovered:
                     msg['content'] = _INTERRUPTED_RECOVERED_WORDING
                     _strip_journal_retry_meta(msg)
@@ -3800,40 +4176,50 @@ def _retry_journal_recovery_in_place(
                         getattr(session, 'session_id', '?'),
                         exc_info=True,
                     )
-                logger.info(
-                    "Session %s: lazy journal-recovery applied stream %s "
-                    "after %d attempts",
-                    getattr(session, 'session_id', '?'),
-                    stream_id,
-                    attempts,
-                )
-                return True
-            if (
-                preserve_arriving_budget
-                and _journal_is_still_arriving(session, stream_id)
-            ):
-                logger.debug(
-                    "Session %s: journal for stream %s still arriving; "
-                    "preserving retry budget",
-                    getattr(session, 'session_id', '?'),
-                    stream_id,
-                )
-                return False
-            next_attempts = attempts + 1
+            logger.info(
+                "Session %s: lazy journal-recovery applied stream %s "
+                "after %d attempts",
+                getattr(session, 'session_id', '?'),
+                stream_id,
+                attempts,
+            )
+            return True
+
+        if (
+            preserve_arriving_budget
+            and _journal_is_still_arriving(session, stream_id)
+        ):
+            logger.debug(
+                "Session %s: journal for stream %s still arriving; "
+                "preserving retry budget",
+                getattr(session, 'session_id', '?'),
+                stream_id,
+            )
+            return False
+
+        next_attempts = attempts + 1
+        if cancel_hook:
+            cancel_snapshot = snapshot_cancel_projection()
             if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
-                msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
                 _strip_journal_retry_meta(msg)
             else:
                 msg['_journal_retry_attempts'] = next_attempts
-            try:
-                session.save(touch_updated_at=False)
-            except Exception:
-                logger.debug(
-                    "save() failed while updating retry counter for session %s",
-                    getattr(session, 'session_id', '?'),
-                    exc_info=True,
-                )
+            save_cancel_projection(cancel_snapshot, "updating cancel journal retry counter")
             return False
+
+        if next_attempts >= _JOURNAL_RETRY_MAX_ATTEMPTS:
+            msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+            _strip_journal_retry_meta(msg)
+        else:
+            msg['_journal_retry_attempts'] = next_attempts
+        try:
+            session.save(touch_updated_at=False)
+        except Exception:
+            logger.debug(
+                "save() failed while updating retry counter for session %s",
+                getattr(session, 'session_id', '?'),
+                exc_info=True,
+            )
         return False
     except Exception:
         logger.exception(

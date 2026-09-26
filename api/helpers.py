@@ -24,6 +24,13 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_active_turn_token",
     "_active_turn_user",
     "_fork_child_turn",
+    "_pending_journal_recovery",
+    "_journal_retry_stream_id",
+    "_journal_retry_attempts",
+    "_journal_retry_first_seen_ts",
+    "_journal_retry_kind",
+    "_journal_retry_owner_token",
+    "_journal_retry_process_token",
     "_webui_trusted_agent_input_text",
     "_webui_unmatched_native_image_mirror",
 })
