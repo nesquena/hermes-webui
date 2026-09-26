@@ -109,6 +109,16 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+`tests/browser_smoke_overlay.py` is a behavior-level sibling of the smoke above:
+it drives the mobile workspace/artifact slide-over in headless Chromium and
+asserts the dismiss scrim appears at phone width, that a real pointer click on
+the scrim closes the panel, and that the scrim stays hidden at desktop width.
+Same CI job (`.github/workflows/browser-smoke.yml`) and local run:
+
+```bash
+python tests/browser_smoke_overlay.py
+```
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic

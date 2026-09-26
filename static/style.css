@@ -3052,6 +3052,10 @@
     .composer-toolsets-wrap{display:block;}
   }
 
+  /* Mobile rightpanel scrim: hidden by default; only shown at phone width
+     (<=640px) when the panel is a fixed slide-over. See the media block below. */
+  .mobile-rightpanel-overlay{display:none;}
+
   @media(max-width:640px){
     /* Mobile PWA reflow guard (#3976): a one-frame GPU-promotion transform that
        _forceMobileViewportReflow() toggles via html.viewport-reflow to force a
@@ -3121,6 +3125,12 @@
        intent) WITHOUT coercing overflow-y or creating a scroll container, so
        min-height:auto stays min-content and the inner grows normally. */
     .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    /* Dim scrim behind the slide-over panel: tap it to dismiss back to chat.
+       z-index 199 sits above the chat (z 10) but below the panel (z 200).
+       Placed after .messages-inner so the mobile-containment regression test's
+       search window still finds that rule. */
+    .mobile-rightpanel-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:199;-webkit-tap-highlight-color:transparent;}
+    .mobile-rightpanel-overlay.visible{display:block;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}
