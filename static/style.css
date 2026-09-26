@@ -5799,8 +5799,11 @@ main.main > #mainPlugin{display:none;}
 .project-picker-item{padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer;color:var(--muted);transition:all .1s;display:flex;align-items:center;gap:6px;}
 .project-picker-item:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-picker-item.active{color:var(--blue);}
-.project-picker-create{color:var(--blue);opacity:.7;border-top:1px solid var(--border2);margin-top:2px;padding-top:6px;}
-.project-picker-create:hover{opacity:1;background:var(--accent-bg);}
+/* Pinned to the bottom edge so "+ New project" stays reachable when a long project list scrolls inside
+   the capped picker. Opaque background (no element opacity) so rows don't show through while pinned;
+   the dimmed label is a color-mix instead of opacity:.7. Identical in the non-scrolling case. */
+.project-picker-create{color:color-mix(in srgb,var(--blue) 70%,var(--sidebar));border-top:1px solid var(--border2);margin-top:2px;padding-top:6px;position:sticky;bottom:-4px;background:var(--sidebar);}
+.project-picker-create:hover{color:var(--blue);background:linear-gradient(var(--accent-bg),var(--accent-bg)),var(--sidebar);}
 /* Lives as a flex sibling in .session-title-row (between title and time);
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}

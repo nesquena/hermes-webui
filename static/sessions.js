@@ -4994,6 +4994,17 @@ function closeSessionActionMenu({restoreFocus=false}={}){
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
   if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
+  // Drain a sidebar repaint the project picker deferred while this menu was
+  // blocking renders (picker dismissed by opening another row's ⋮ menu). Next
+  // tick, so a menu action that opens the picker re-arms the guard first.
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+    setTimeout(()=>{
+      if(!_sessionListRepaintDeferredByPicker||_sessionActionMenu) return;
+      if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null) return;
+      _sessionListRepaintDeferredByPicker=false;
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    },0);
+  }
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -6091,7 +6102,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // NEVER skip when recovering from a skeleton or error-banner DOM state: those
   // are rendered outside the signature path, so an identical-signature match
   // would leave the skeleton/error on screen instead of the real list. (Codex #5467)
-  const _canRenderNow = !_renamingSid && !_sessionActionMenu;
+  const _canRenderNow = !_renamingSid && !_sessionActionMenu && !(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null);
   const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
   if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
@@ -8330,6 +8341,10 @@ function renderSessionListFromCache(){
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
   if(_sessionActionMenu) return;
+  // Same for the "Move to project" picker opened from that menu: rebuilding the
+  // rows removes its anchor, and the picker closes itself when its row goes away.
+  // Remember the skipped repaint so closing the picker replays it.
+  if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null){ if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=true; return; }
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -9863,8 +9878,19 @@ async function deleteSession(sid, beforeDelete=null){
 
 const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
 
+// Teardown hook for the currently mounted project picker (see
+// _showProjectPicker). Kept at module scope so opening a second picker — and
+// any later viewport change — can retire the previous one's listeners instead
+// of leaking a handler that repositions a detached element.
+let _projectPickerTeardown=null;
+// Set when a sidebar repaint was skipped because the project picker was open, so the
+// picker's teardown can replay it (same contract as the ⋮ menu guard, minus the lost repaint).
+let _sessionListRepaintDeferredByPicker=false;
+
 function _showProjectPicker(session, anchorEl){
-  // Close any existing picker
+  // Close any existing picker. Its teardown, not just element removal, has to
+  // run so no resize/click listener outlives the element it was bound for.
+  if(_projectPickerTeardown){const stale=_projectPickerTeardown;_projectPickerTeardown=null;stale();}
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');
   picker.className='project-picker';
@@ -9873,8 +9899,7 @@ function _showProjectPicker(session, anchorEl){
   none.className='project-picker-item'+(!session.project_id?' active':'');
   none.textContent='No project';
   none.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
+    teardown();
     try {
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
       // Sidebar rows are shallow copies of _allSessions entries (see
@@ -9919,8 +9944,7 @@ function _showProjectPicker(session, anchorEl){
     name.textContent=p.name;
     item.appendChild(name);
     item.onclick=async()=>{
-      picker.remove();
-      document.removeEventListener('click',close);
+      teardown();
       try{
         await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
         // See #2551 — write to _allSessions, not the shallow sidebar copy.
@@ -9937,8 +9961,7 @@ function _showProjectPicker(session, anchorEl){
   createItem.className='project-picker-item project-picker-create';
   createItem.textContent='+ New project';
   createItem.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
+    teardown();
     const name=await showPromptDialog({
       message:t('project_name_prompt'),
       confirmLabel:t('create'),
@@ -9967,26 +9990,165 @@ function _showProjectPicker(session, anchorEl){
   // Append to body and position using getBoundingClientRect so it isn't clipped
   // by overflow:hidden on .session-item ancestors
   document.body.appendChild(picker);
-  const rect=anchorEl.getBoundingClientRect();
   picker.style.position='fixed';
   picker.style.zIndex='999';
-  // Prefer opening below; flip above if too close to bottom of viewport
-  const spaceBelow=window.innerHeight-rect.bottom;
-  if(spaceBelow<160&&rect.top>160){
-    picker.style.bottom=(window.innerHeight-rect.top+4)+'px';
+  picker.style.right='auto';
+  const margin=8;
+  const gap=4;
+  const visualViewport=window.visualViewport;
+  const scrollContainer=anchorEl?.closest('.session-list');
+  let repositionFrame=null;
+  let closeTimer=null;
+  let anchorObserver=null;
+
+  // Fixed coordinates and getBoundingClientRect use the layout viewport. The
+  // visible part can be smaller AND offset (keyboard, browser chrome, zoom).
+  const viewportBounds=()=>{
+    const top=visualViewport?visualViewport.offsetTop:0;
+    const left=visualViewport?visualViewport.offsetLeft:0;
+    return {
+      top,left,
+      bottom:top+(visualViewport?visualViewport.height:window.innerHeight),
+      right:left+(visualViewport?visualViewport.width:window.innerWidth),
+    };
+  };
+  const _anchorGone=(rect,bounds)=>{
+    if(!anchorEl||anchorEl.isConnected===false) return true;
+    if(!rect||!rect.width||!rect.height) return true;
+    const clip=scrollContainer?scrollContainer.getBoundingClientRect():bounds;
+    const top=Math.max(bounds.top,clip.top);
+    const bottom=Math.min(bounds.bottom,clip.bottom);
+    const left=Math.max(bounds.left,clip.left);
+    const right=Math.min(bounds.right,clip.right);
+    return bottom<=top||right<=left||rect.bottom<=top||rect.top>=bottom||rect.right<=left||rect.left>=right;
+  };
+
+  // Idempotent placement: remeasure both the anchor and the rendered picker on
+  // every call, so the picker keeps owning its row while the user resizes the
+  // window, opens the on-screen keyboard, or collapses the URL bar.
+  const positionPicker=()=>{
+    const bounds=viewportBounds();
+    const rect=anchorEl?.getBoundingClientRect();
+    if(_anchorGone(rect,bounds)){teardown();return;}
+    // Apply the horizontal cap BEFORE measuring height, since narrow menus
+    // can wrap. Override the CSS minimum as well when zoom leaves <160px.
+    const availableWidth=Math.max(0,bounds.right-bounds.left-margin*2);
+    if(!availableWidth){teardown();return;}
+    picker.style.minWidth=Math.min(160,availableWidth)+'px';
+    picker.style.maxWidth=Math.min(220,availableWidth)+'px';
+    // Measure the rendered picker instead of guessing its height. A fixed
+    // threshold fails as soon as the user has enough projects to make the menu
+    // taller, and a cap left over from the previous viewport would keep a
+    // desktop clamp on a phone-sized screen.
+    picker.style.maxHeight='';
+    picker.style.overflowY='';
+    const pickerH=picker.offsetHeight||0;
+    const belowTop=Math.max(bounds.top+margin,rect.bottom+gap);
+    const aboveBottom=Math.min(bounds.bottom-margin,rect.top-gap);
+    const spaceBelow=Math.max(0,bounds.bottom-margin-belowTop);
+    const spaceAbove=Math.max(0,aboveBottom-bounds.top-margin);
     picker.style.top='auto';
-  }else{
-    picker.style.top=(rect.bottom+4)+'px';
     picker.style.bottom='auto';
+    if(pickerH<=spaceBelow){
+      // Preferred placement: directly below the session action button.
+      picker.style.top=belowTop+'px';
+    }else if(pickerH<=spaceAbove){
+      // Keep above-positioned pickers bottom-anchored so they stay attached to
+      // the row they belong to.
+      picker.style.bottom=(window.innerHeight-aboveBottom)+'px';
+    }else{
+      // Neither side fits the natural height. Use the roomier side and keep
+      // every project reachable by scrolling inside the picker.
+      const openAbove=spaceAbove>spaceBelow;
+      const available=openAbove?spaceAbove:spaceBelow;
+      if(!available){teardown();return;}
+      picker.style.maxHeight=available+'px';
+      picker.style.overflowY='auto';
+      picker.style.top=(openAbove?bounds.top+margin:belowTop)+'px';
+    }
+    // Align right edge of picker with right edge of button; keep within viewport
+    const pickerW=picker.offsetWidth;
+    const left=Math.max(bounds.left+margin,Math.min(rect.right-pickerW,bounds.right-margin-pickerW));
+    picker.style.left=left+'px';
+  };
+
+  // visualViewport resize/scroll fire on mobile when the on-screen keyboard or
+  // the URL bar changes the usable height; window resize covers desktop and
+  // orientation changes. Coalesce with rAF so a burst of events costs one
+  // reposition per frame.
+  const onViewportChange=()=>{
+    if(repositionFrame!==null) return;
+    repositionFrame=requestAnimationFrame(()=>{
+      repositionFrame=null;
+      if(picker.isConnected===false){teardown();return;}
+      positionPicker();
+    });
+  };
+  // Element scroll does not bubble. Capture it from the session list and any
+  // other ancestor that moves the anchor, but ignore the picker's own scroll.
+  const onScroll=(e)=>{
+    if(e.target===document||e.target?.contains?.(anchorEl)) onViewportChange();
+  };
+  const onOutsideClick=(e)=>{
+    if(!picker.contains(e.target)&&e.target!==anchorEl) teardown();
+  };
+  // Single exit path: item selection, outside click, replacement by a newer
+  // picker and an unmounted anchor all run this, so no listener outlives the
+  // element it was bound for.
+  const teardown=()=>{
+    if(_projectPickerTeardown===teardown) _projectPickerTeardown=null;
+    if(repositionFrame!==null){cancelAnimationFrame(repositionFrame);repositionFrame=null;}
+    if(closeTimer!==null){clearTimeout(closeTimer);closeTimer=null;}
+    if(anchorObserver){anchorObserver.disconnect();anchorObserver=null;}
+    window.removeEventListener('resize',onViewportChange);
+    if(visualViewport){
+      visualViewport.removeEventListener('resize',onViewportChange);
+      visualViewport.removeEventListener('scroll',onViewportChange);
+    }
+    document.removeEventListener('scroll',onScroll,true);
+    document.removeEventListener('click',onOutsideClick);
+    picker.remove();
+    // Replay a sidebar repaint that was skipped while this picker was open, once
+    // no other picker has taken over (next tick, after any selection handler has
+    // written its cache update). typeof-guarded so the function stays
+    // self-contained for the extracted-function Node harness.
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+      setTimeout(()=>{
+        // A replacement picker opened in the meantime inherits the deferral and
+        // replays it when it closes; keep the flag set until someone replays it.
+        // The ⋮ action menu blocks renders too, so if one is open now (e.g. the
+        // picker was dismissed by opening another row's menu), leave the flag
+        // for closeSessionActionMenu() to drain.
+        if(_projectPickerTeardown!==null||!_sessionListRepaintDeferredByPicker) return;
+        if(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu) return;
+        _sessionListRepaintDeferredByPicker=false;
+        if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      },0);
+    }
+  };
+  window.addEventListener('resize',onViewportChange);
+  if(visualViewport){
+    visualViewport.addEventListener('resize',onViewportChange);
+    visualViewport.addEventListener('scroll',onViewportChange);
   }
-  // Align right edge of picker with right edge of button; keep within viewport
-  const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
-  let left=rect.right-pickerW;
-  if(left<8) left=8;
-  picker.style.left=left+'px';
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+  document.addEventListener('scroll',onScroll,true);
+  // A sidebar render can remove the row without any viewport event. Observe
+  // only child-list mutations while this picker is open, and avoid layout
+  // reads for unrelated transcript updates.
+  anchorObserver=new MutationObserver(()=>{
+    if(!anchorEl?.isConnected||!picker.isConnected) teardown();
+  });
+  anchorObserver.observe(document.body,{childList:true,subtree:true});
+  _projectPickerTeardown=teardown;
+  positionPicker();
+  // Registered on the next tick so the click that opened the picker cannot close
+  // it; skip if the picker was already retired by then.
+  if(_projectPickerTeardown===teardown){
+    closeTimer=setTimeout(()=>{
+      closeTimer=null;
+      if(_projectPickerTeardown===teardown) document.addEventListener('click',onOutsideClick);
+    },0);
+  }
 }
 
 // Resize a .project-create-input to fit its current value (or placeholder).
