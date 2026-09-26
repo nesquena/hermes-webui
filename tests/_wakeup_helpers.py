@@ -12,6 +12,30 @@ import sys
 import threading
 import types
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def live_wakeup_origin(monkeypatch):
+    """Legacy routing tests use synthetic but verified live WebUI origins.
+
+    Import this fixture only in suites exercising event delivery with fake
+    session IDs; lineage-authority tests use the real resolver independently.
+    """
+    from api import compression_continuation, routes
+
+    monkeypatch.setattr(
+        routes, "_get_or_materialize_session",
+        lambda sid, **kwargs: types.SimpleNamespace(
+            session_id=sid, profile="default", pre_compression_snapshot=False,
+        ),
+    )
+    monkeypatch.setattr(
+        compression_continuation,
+        "durable_compression_continuation",
+        lambda session: (False, None),
+    )
+
 
 class FakeProcessRegistry:
     """Minimal stand-in for ``tools.process_registry.process_registry``.
