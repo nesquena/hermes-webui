@@ -38,6 +38,19 @@ the fingerprint captured at publish time.
 The over-budget stale fallback (`_load_stale_models_cache_from_disk`) tolerates a stale
 `_webui_version` but never a source-fingerprint mismatch: such a snapshot is a wrong catalog.
 
+## Codex catalog and routing
+
+The static `openai-codex` model list is a degraded fallback, not an account
+entitlement list. Account-aware live discovery and visible entries in the local
+Codex catalog can add models absent from that fallback. Generic Agent-core
+seeding skips `openai-codex` so it cannot reintroduce retired or account-specific
+IDs into the static list; it still enriches other providers.
+
+Codex selections are qualified as `@openai-codex:<model>` before the
+same-provider bare-ID shortcut. This keeps a live-discovered Codex model routed
+to Codex even if another configured provider advertises the same ID. The
+separate OpenAI API catalog does not determine Codex subscription availability.
+
 ## Invariant: deny-lists are one-directional
 
 - Both volatile-key sets are deny-lists, never allow-lists. They may remove only

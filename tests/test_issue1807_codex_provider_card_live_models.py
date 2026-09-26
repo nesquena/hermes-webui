@@ -36,8 +36,8 @@ def _configure_codex(monkeypatch, tmp_path):
     })
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
     # Isolate the Codex local model cache so the dev machine's real
-    # ~/.codex/models_cache.json (which may include account-specific entries
-    # like gpt-5.3-codex-spark) doesn't leak into these tests. Stage-314
+    # ~/.codex/models_cache.json (which may include account-specific entries)
+    # doesn't leak into these tests. Stage-314
     # added _read_visible_codex_cache_model_ids() merging via PR #1827, so
     # CODEX_HOME isolation is now load-bearing for these v0.51.19 tests.
     codex_home = tmp_path / "no-codex"
@@ -83,7 +83,8 @@ def test_codex_provider_card_keeps_static_fallback_when_live_catalog_empty(monke
 
     codex = _codex_provider()
     ids = [m["id"] for m in codex["models"]]
+    expected_ids = [m["id"] for m in config._PROVIDER_MODELS["openai-codex"]]
 
-    assert "gpt-5.5-mini" in ids
-    assert "codex-mini-latest" in ids
-    assert codex["models_total"] == len(ids)
+    assert ids == expected_ids
+    assert "gpt-5.3-codex-spark" not in ids
+    assert codex["models_total"] == len(expected_ids)
