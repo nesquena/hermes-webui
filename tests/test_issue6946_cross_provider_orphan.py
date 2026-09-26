@@ -298,26 +298,29 @@ elements['auxAdvancedApiKey'] = {value: 'sk-or-v1-test'};
 elements['auxAdvancedApiKeyClear'] = {checked: false};
 elements['auxAdvancedServiceTier'] = {value: 'auto'};
 
-_openAuxAdvancedOptions('__main__', {provider: 'openrouter', model: 'openrouter/@preset/blue'});
-elements['auxAdvancedSave'].onclick();
+(async () => {
+  _openAuxAdvancedOptions('__main__', {provider: 'openrouter', model: 'openrouter/@preset/blue'});
+  await elements['auxAdvancedSave'].onclick();
 
-// Case 2: Auxiliary mode
-elements['aux-prov-title'] = {value: 'anthropic'};
-elements['aux-model-title'] = {value: 'claude-3-5-haiku-20241022'};
-elements['auxAdvancedBaseUrl'] = {value: '', focus: () => {}};
-elements['auxAdvancedExtraBody'] = {value: ''};
-elements['auxAdvancedApiKey'] = {value: ''};
-elements['auxAdvancedApiKeyClear'] = {checked: false};
-elements['auxAdvancedTimeout'] = {value: '30'};
-elements['auxAdvancedDownloadTimeout'] = {value: '60'};
-elements['auxAdvancedMaxConcurrency'] = {value: '2'};
+  // Case 2: Auxiliary mode
+  elements['aux-prov-title'] = {value: 'anthropic'};
+  elements['aux-model-title'] = {value: 'claude-3-5-haiku-20241022'};
+  elements['auxAdvancedBaseUrl'] = {value: '', focus: () => {}};
+  elements['auxAdvancedExtraBody'] = {value: ''};
+  elements['auxAdvancedApiKey'] = {value: ''};
+  elements['auxAdvancedApiKeyClear'] = {checked: false};
+  elements['auxAdvancedTimeout'] = {value: '30'};
+  elements['auxAdvancedDownloadTimeout'] = {value: '60'};
+  elements['auxAdvancedMaxConcurrency'] = {value: '2'};
 
-_openAuxAdvancedOptions('title', {provider: 'anthropic', model: 'claude-3-5-haiku-20241022'});
-elements['auxAdvancedSave'].onclick();
+  _openAuxAdvancedOptions('title', {provider: 'anthropic', model: 'claude-3-5-haiku-20241022'});
+  await elements['auxAdvancedSave'].onclick();
 
-setTimeout(() => {
   process.stdout.write(JSON.stringify(apiCalls));
-}, 50);
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
 """,
         encoding="utf-8",
     )
@@ -388,27 +391,51 @@ def test_behavioral_save_settings_payload_branches(tmp_path):
         + r"""
 let postedSettings = [];
 let defaultModelCalls = [];
+let recordedToasts = [];
+let appliedSavedSettingsUiCalls = [];
+let updateCurrentPasswordVisibilityCalls = 0;
+let renderSettingsAuthStatusCalls = [];
+let updateAuthWarningBadgeCalls = [];
+let resetSettingsPanelStateCalls = 0;
 
 globalThis._enqueueSettingsPost = async (opts) => {
   postedSettings.push(JSON.parse(opts.body));
-  return {ok: true};
+  return {ok: true, password_auth_enabled: !!globalThis._settingsPasswordAuthEnabled};
 };
 globalThis.api = async (url, opts) => {
   if (url === '/api/default-model') {
     defaultModelCalls.push(JSON.parse(opts.body));
+  } else if (url === '/api/auth/status') {
+    return {authenticated: true, password_auth_enabled: !!globalThis._settingsPasswordAuthEnabled};
   }
   return {ok: true};
 };
 globalThis.window = globalThis;
 globalThis.t = k => k;
-globalThis.showToast = () => {};
+globalThis.showToast = (msg, duration, type) => {
+  recordedToasts.push({msg: String(msg), duration, type});
+};
 globalThis.localStorage = {getItem: () => null, setItem: () => {}};
 globalThis._speechPreferencesPayloadFromUi = () => ({});
 globalThis._structuredCodeViewFromUi = () => ({});
 globalThis._composerControlVisibilityPayload = () => ({});
 globalThis._getComposerControlOrder = () => [];
+globalThis._applySavedSettingsUi = (saved, body, opts) => {
+  appliedSavedSettingsUiCalls.push({saved, body, opts});
+};
+globalThis._updateCurrentPasswordVisibility = () => {
+  updateCurrentPasswordVisibilityCalls++;
+};
+globalThis._renderSettingsAuthStatus = (status) => {
+  renderSettingsAuthStatusCalls.push(status);
+};
+globalThis._updateAuthWarningBadge = (status) => {
+  updateAuthWarningBadgeCalls.push(status);
+};
 globalThis._updateAuthDisabledWarning = () => {};
-globalThis._resetSettingsPanelState = () => {};
+globalThis._resetSettingsPanelState = () => {
+  resetSettingsPanelStateCalls++;
+};
 globalThis._hideSettingsPanel = () => {};
 
 const elements = {};
@@ -437,11 +464,19 @@ async function runTests() {
   globalThis._settingsHermesDefaultModelOnOpen = 'claude-3-sonnet';
   globalThis._settingsHermesDefaultModelProviderOnOpen = 'anthropic';
   elements['settingsPassword'] = {value: ''};
+  elements['settingsCurrentPassword'] = {value: ''};
+  globalThis._settingsPasswordAuthEnabled = false;
   postedSettings = [];
   defaultModelCalls = [];
+  recordedToasts = [];
+  appliedSavedSettingsUiCalls = [];
+  resetSettingsPanelStateCalls = 0;
   await saveSettings(false);
   const branch1Settings = postedSettings[0];
   const branch1DefaultModel = defaultModelCalls[0];
+  const branch1Toasts = recordedToasts.slice();
+  const branch1AppliedUi = appliedSavedSettingsUiCalls.length > 0;
+  const branch1ResetPanel = resetSettingsPanelStateCalls > 0;
 
   // --- Branch 2: Password set, model changed ---
   elements['settingsPassword'] = {value: 'my-super-secret-pw'};
@@ -449,30 +484,58 @@ async function runTests() {
   globalThis._settingsPasswordAuthEnabled = false;
   postedSettings = [];
   defaultModelCalls = [];
+  recordedToasts = [];
+  appliedSavedSettingsUiCalls = [];
+  updateCurrentPasswordVisibilityCalls = 0;
+  renderSettingsAuthStatusCalls = [];
+  resetSettingsPanelStateCalls = 0;
   await saveSettings(false);
   const branch2Settings = postedSettings[0];
   const branch2DefaultModel = defaultModelCalls[0];
+  const branch2Toasts = recordedToasts.slice();
+  const branch2AppliedUi = appliedSavedSettingsUiCalls.length > 0;
+  const branch2UpdatePwVis = updateCurrentPasswordVisibilityCalls > 0;
+  const branch2RenderAuth = renderSettingsAuthStatusCalls.length > 0;
+  const branch2ResetPanel = resetSettingsPanelStateCalls > 0;
 
   // --- Branch 3: Unchanged baseline no-op ---
   globalThis._settingsHermesDefaultModelOnOpen = '@preset/blue';
   globalThis._settingsHermesDefaultModelProviderOnOpen = 'openrouter';
   elements['settingsPassword'] = {value: ''};
+  elements['settingsCurrentPassword'] = {value: ''};
   postedSettings = [];
   defaultModelCalls = [];
+  recordedToasts = [];
+  appliedSavedSettingsUiCalls = [];
+  resetSettingsPanelStateCalls = 0;
   await saveSettings(false);
   const branch3DefaultModelCallsCount = defaultModelCalls.length;
+  const branch3Toasts = recordedToasts.slice();
+  const branch3AppliedUi = appliedSavedSettingsUiCalls.length > 0;
+  const branch3ResetPanel = resetSettingsPanelStateCalls > 0;
 
   process.stdout.write(JSON.stringify({
     branch1: {
       has_set_password: Object.prototype.hasOwnProperty.call(branch1Settings, '_set_password'),
       default_model_call: branch1DefaultModel,
+      toasts: branch1Toasts,
+      applied_ui: branch1AppliedUi,
+      reset_panel: branch1ResetPanel,
     },
     branch2: {
       set_password: branch2Settings._set_password,
       default_model_call: branch2DefaultModel,
+      toasts: branch2Toasts,
+      applied_ui: branch2AppliedUi,
+      update_pw_vis: branch2UpdatePwVis,
+      render_auth: branch2RenderAuth,
+      reset_panel: branch2ResetPanel,
     },
     branch3: {
       default_model_calls_count: branch3DefaultModelCallsCount,
+      toasts: branch3Toasts,
+      applied_ui: branch3AppliedUi,
+      reset_panel: branch3ResetPanel,
     }
   }));
 }
@@ -485,20 +548,32 @@ runTests();
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
 
-    # Branch 1: no password, default-model called with canonical captured pair
+    # Branch 1: no password, default-model called with canonical captured pair, successful completion
     assert out["branch1"]["has_set_password"] is False
     assert out["branch1"]["default_model_call"] == {
         "model": "@preset/blue",
         "provider": "openrouter",
     }
+    assert not any("settings_save_failed" in t["msg"] for t in out["branch1"]["toasts"])
+    assert any("settings_saved" in t["msg"] for t in out["branch1"]["toasts"])
+    assert out["branch1"]["applied_ui"] is True
+    assert out["branch1"]["reset_panel"] is True
 
-    # Branch 2: password set, default-model called
+    # Branch 2: password set, default-model called, auth & visibility updated, successful completion
     assert out["branch2"]["set_password"] == "my-super-secret-pw"
     assert out["branch2"]["default_model_call"] == {
         "model": "@preset/blue",
         "provider": "openrouter",
     }
+    assert not any("settings_save_failed" in t["msg"] for t in out["branch2"]["toasts"])
+    assert any("settings_saved_pw" in t["msg"] for t in out["branch2"]["toasts"])
+    assert out["branch2"]["applied_ui"] is True
+    assert out["branch2"]["update_pw_vis"] is True
+    assert out["branch2"]["render_auth"] is True
+    assert out["branch2"]["reset_panel"] is True
 
-    # Branch 3: unchanged baseline, /api/default-model NOT called
+    # Branch 3: unchanged baseline, /api/default-model NOT called, no errors
     assert out["branch3"]["default_model_calls_count"] == 0
-
+    assert not any("settings_save_failed" in t["msg"] for t in out["branch3"]["toasts"])
+    assert out["branch3"]["applied_ui"] is True
+    assert out["branch3"]["reset_panel"] is True
