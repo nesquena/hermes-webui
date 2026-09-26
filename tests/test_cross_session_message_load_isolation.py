@@ -107,13 +107,20 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
     assert "const _loadGeneration = ++_loadSessionGeneration" in body, (
         "loadSession() must increment and capture per-call generation"
     )
-    assert "const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration" in body
+    norm = _normalise_ws(body)
+    assert (
+        "if(_loadingSessionId!==sid||_loadSessionGeneration!==_loadGeneration)returnfalse;"
+        in norm
+    ), "loadSession() must reject a superseded destination/generation token"
+    assert "if(foregroundSid!==_loadForegroundSid)" in norm, (
+        "loadSession() must also reject a response after non-load navigation "
+        "replaces the foreground pane"
+    )
     assert "loadGeneration:_loadGeneration" in body, (
         "loadSession() must thread generation into _ensureMessagesLoaded()"
     )
     # Guard each await/catch branch so stale continuation cannot mutate shared pane state.
     # Two calls exist in this function: INFLIGHT and idle branches.
-    norm = _normalise_ws(body)
     assert norm.count("if(!_isCurrentLoad())") >= 6, (
         "loadSession() should check ownership in multiple await/catch paths, "
         "including stale _ensureMessagesLoaded catch branches"

@@ -2292,7 +2292,19 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  let _loadForegroundSid = currentSid;
+  const _isCurrentLoad = () => {
+    if(_loadingSessionId !== sid || _loadSessionGeneration !== _loadGeneration) return false;
+    const foregroundSid=S.session ? S.session.session_id : null;
+    if(foregroundSid !== _loadForegroundSid){
+      // A non-load navigation (notably New Chat) replaced the pane while this
+      // request was awaiting. Release our marker so the stale load cannot later
+      // replace that pane or close its foreground chat stream.
+      _loadingSessionId=null;
+      return false;
+    }
+    return true;
+  };
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -2541,6 +2553,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  _loadForegroundSid=S.session ? S.session.session_id : null;
   closeOtherLiveStreams(sid);
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();

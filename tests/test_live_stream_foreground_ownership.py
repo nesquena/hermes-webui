@@ -348,3 +348,97 @@ def test_late_registration_during_load_window_uses_navigation_target(browser, ba
         assert result["liveKeys"] == [], result
     finally:
         page.close()
+
+
+def test_stale_session_load_cannot_close_new_chat_stream(browser, base_url):
+    """A pending load must not replace a New Chat or close its live stream.
+
+    Session B's metadata can arrive after the user has created session C and
+    sent its first turn. The load no longer owns the foreground at that point,
+    so it must leave C selected and its chat EventSource open.
+    """
+    page = browser.new_page(
+        viewport={"width": 1024, "height": 720},
+        bypass_csp=True,
+    )
+    try:
+        page.goto(base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true && "
+            "typeof attachLiveStream === 'function' && typeof loadSession === 'function' && "
+            "typeof newSession === 'function'",
+            timeout=15_000,
+        )
+        result = page.evaluate(
+            """
+            async () => {
+              class FakeEventSource {
+                static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+                static instances = [];
+                constructor(url) {
+                  this.url = String(url);
+                  this.readyState = FakeEventSource.OPEN;
+                  FakeEventSource.instances.push(this);
+                }
+                addEventListener() {}
+                close() { this.readyState = FakeEventSource.CLOSED; }
+              }
+              window.EventSource = FakeEventSource;
+              for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              let releaseMetadata;
+              let metadataRequested;
+              const metadata = new Promise(resolve => { releaseMetadata = resolve; });
+              const requested = new Promise(resolve => { metadataRequested = resolve; });
+              const originalApi = window.api;
+              window.api = async (path, opts) => {
+                const p = String(path);
+                if (p.includes('/api/session?session_id=session-b')) {
+                  metadataRequested();
+                  await metadata;
+                  return {session:{session_id:'session-b', title:'B', messages:[],
+                                   tool_calls:[], active_stream_id:null}};
+                }
+                if (p.includes('/api/session/new')) {
+                  return {session:{session_id:'session-c', title:'Untitled', messages:[],
+                                   workspace:'', model:'', active_stream_id:null}};
+                }
+                if (p.includes('/api/chat/stream/status')) return {active:true};
+                return originalApi(path, opts);
+              };
+              try {
+                S.session = {session_id:'session-a', pending_started_at:1};
+                S.messages = [];
+                S.activeStreamId = null;
+                const loadPromise = loadSession('session-b');
+                await requested;
+                await newSession(false, {worktree:false});
+                S.activeStreamId = 'stream-c';
+                attachLiveStream('session-c', 'stream-c', []);
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const sourceC = FakeEventSource.instances.find(s => s.url.includes('stream-c'));
+                releaseMetadata();
+                await loadPromise;
+                return {
+                  sourceCOpened:!!sourceC,
+                  sourceCOpen:!!sourceC && sourceC.readyState === FakeEventSource.OPEN,
+                  selectedSid:S.session && S.session.session_id,
+                  activeStreamId:S.activeStreamId,
+                  loadingSessionId:_loadingSessionId,
+                  liveKeys:Object.keys(LIVE_STREAMS).sort(),
+                };
+              } finally {
+                window.api = originalApi;
+                _loadingSessionId = null;
+                for (const sid of Object.keys(LIVE_STREAMS)) closeLiveStream(sid);
+              }
+            }
+            """
+        )
+        assert result["sourceCOpened"] is True, result
+        assert result["sourceCOpen"] is True, result
+        assert result["selectedSid"] == "session-c", result
+        assert result["activeStreamId"] == "stream-c", result
+        assert result["loadingSessionId"] is None, result
+        assert result["liveKeys"] == ["session-c"], result
+    finally:
+        page.close()
