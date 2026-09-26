@@ -9145,6 +9145,75 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
             return ""
 
+        def _active_endpoint_probe_identity() -> tuple[str, str]:
+            """Resolve the ``(provider key, effective api key)`` the active
+            endpoint probe will use.
+
+            Hoisted out of the active-endpoint block so the named
+            ``custom_providers`` loop can resolve the probe's FULL identity
+            (URL + provider + credentials) *before* it decides whether to
+            defer its own probe (#7481 re-gate).  The single-flight guard must
+            never reuse a result fetched with someone else's credentials.
+            """
+            if not cfg_base_url:
+                return "", ""
+            base = cfg_base_url.strip()
+            configured_provider = _configured_provider_for_base_url(base)
+            provider = configured_provider or "custom"
+            provider_from_config = bool(configured_provider)
+            parsed = urlparse(base if "://" in base else f"http://{base}")
+            host = (parsed.netloc or parsed.path).lower()
+
+            if parsed.hostname and not provider_from_config:
+                try:
+                    import ipaddress
+
+                    addr = ipaddress.ip_address(parsed.hostname)
+                    if addr.is_private or addr.is_loopback or addr.is_link_local:
+                        if "ollama" in host or "127.0.0.1" in host or "localhost" in host:
+                            provider = "ollama"
+                        elif "lmstudio" in host or "lm-studio" in host:
+                            provider = "lmstudio"
+                        else:
+                            # Unknown loopback/private endpoint: route through
+                            # the generic ``custom`` provider so the agent's
+                            # auxiliary client (compression, vision, web
+                            # extraction) takes the OpenAI-compat custom path
+                            # with ``no-key-required`` semantics. Writing
+                            # ``provider: local`` here used to break
+                            # compression mid-conversation because ``local``
+                            # is not a registered provider in
+                            # ``hermes_cli.auth.PROVIDER_REGISTRY`` — see #1384.
+                            provider = "custom"
+                except ValueError:
+                    pass
+
+            key = ""
+            if isinstance(model_cfg, dict):
+                key = (model_cfg.get("api_key") or "").strip()
+            if not key:
+                providers_cfg = cfg.get("providers", {})
+                if isinstance(providers_cfg, dict):
+                    for provider_key in filter(None, [active_provider, "custom"]):
+                        provider_cfg = providers_cfg.get(provider_key, {})
+                        if isinstance(provider_cfg, dict):
+                            key = (provider_cfg.get("api_key") or "").strip()
+                            if key:
+                                break
+            if not key:
+                for env_key in (
+                    "HERMES_API_KEY",
+                    "HERMES_OPENAI_API_KEY",
+                    "OPENAI_API_KEY",
+                    "LOCAL_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "API_KEY",
+                ):
+                    key = (all_env.get(env_key) or _thread_local_env_value(env_key) or "").strip()
+                    if key:
+                        break
+            return provider, key
+
         def _models_endpoint_for_base_url(base_url: str) -> str:
             base = str(base_url or "").strip().rstrip("/")
             if base.endswith("/v1"):
@@ -9272,92 +9341,45 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
                 return [], error
 
-        # 4. Fetch models from custom endpoint if base_url is configured
+        # 4. Fetch models from custom endpoints.
+        # CRITICAL ORDERING (#7481): probe named custom_providers FIRST,
+        # THEN the active endpoint (model.base_url).  During a cold catalog
+        # rebuild the active endpoint is probed serially; if it is unreachable
+        # (very common for local/LAN endpoints like LM Studio or Ollama on
+        # another host), its full connect timeout (CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+        # consumes the entire rebuild budget, starving every custom provider
+        # that IS reachable.  By probing named custom_providers first we
+        # ensure they get their live /v1/models data populated within the
+        # budget even when the active endpoint is unreachable.
+        #
+        # SINGLE-FLIGHT GUARD: when a named custom provider resolves to the
+        # SAME endpoint as the active model — same base URL, same provider
+        # identity, same effective credentials — probe once and populate both
+        # the named group AND auto_detected_models_by_provider from that one
+        # result.  Without this, both blocks probe the same URL, doubling
+        # latency and potentially exceeding the rebuild budget on cold loads
+        # (#7481 review).  Anything less than a full identity match keeps its
+        # own probe, because the active result was fetched with the active
+        # credentials, not that provider's (#7481 re-gate).
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
-        if cfg_base_url:
-            base_url = cfg_base_url.strip()
-            configured_provider = _configured_provider_for_base_url(base_url)
-            provider = configured_provider or "custom"
-            provider_from_config = bool(configured_provider)
-            parsed = urlparse(base_url if "://" in base_url else f"http://{base_url}")
-            host = (parsed.netloc or parsed.path).lower()
 
-            if parsed.hostname and not provider_from_config:
-                try:
-                    import ipaddress
-
-                    addr = ipaddress.ip_address(parsed.hostname)
-                    if addr.is_private or addr.is_loopback or addr.is_link_local:
-                        if "ollama" in host or "127.0.0.1" in host or "localhost" in host:
-                            provider = "ollama"
-                        elif "lmstudio" in host or "lm-studio" in host:
-                            provider = "lmstudio"
-                        else:
-                            # Unknown loopback/private endpoint: route through
-                            # the generic ``custom`` provider so the agent's
-                            # auxiliary client (compression, vision, web
-                            # extraction) takes the OpenAI-compat custom path
-                            # with ``no-key-required`` semantics. Writing
-                            # ``provider: local`` here used to break
-                            # compression mid-conversation because ``local``
-                            # is not a registered provider in
-                            # ``hermes_cli.auth.PROVIDER_REGISTRY`` — see #1384.
-                            provider = "custom"
-                except ValueError:
-                    pass
-
-            api_key = ""
-            if isinstance(model_cfg, dict):
-                api_key = (model_cfg.get("api_key") or "").strip()
-            if not api_key:
-                providers_cfg = cfg.get("providers", {})
-                if isinstance(providers_cfg, dict):
-                    for provider_key in filter(None, [active_provider, "custom"]):
-                        provider_cfg = providers_cfg.get(provider_key, {})
-                        if isinstance(provider_cfg, dict):
-                            api_key = (provider_cfg.get("api_key") or "").strip()
-                            if api_key:
-                                break
-            if not api_key:
-                api_key_vars = (
-                    "HERMES_API_KEY",
-                    "HERMES_OPENAI_API_KEY",
-                    "OPENAI_API_KEY",
-                    "LOCAL_API_KEY",
-                    "OPENROUTER_API_KEY",
-                    "API_KEY",
-                )
-                for key in api_key_vars:
-                    api_key = (all_env.get(key) or _thread_local_env_value(key) or "").strip()
-                    if api_key:
-                        break
-
-            _trusted_custom_bases: list[object] = [cfg_base_url]
-            _custom_providers_for_trust = cfg.get("custom_providers", [])
-            if isinstance(_custom_providers_for_trust, list):
-                _trusted_custom_bases.extend(
-                    _cp.get("base_url")
-                    for _cp in _custom_providers_for_trust
-                    if isinstance(_cp, dict) and _cp.get("base_url")
-                )
-            _active_endpoint_models, _active_endpoint_error = _read_custom_endpoint_models(
-                base_url,
-                provider,
-                api_key=api_key,
-                trusted_base_urls=tuple(_trusted_custom_bases),
-            )
-            for auto_model in _active_endpoint_models:
-                auto_detected_models.append(auto_model)
-                provider_key = provider.lower()
-                auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
-                detected_providers.add(provider_key)
+        # Pre-resolve the active endpoint's FULL identity — normalized base
+        # URL, provider key AND effective credentials — before the named loop
+        # (#7481 re-gate).  The single-flight deferral may only reuse the
+        # active probe when all three match: matching on the URL alone let a
+        # same-URL provider with its own key inherit a result (or an error)
+        # produced with someone else's credentials.
+        _norm_active_base_url = _normalize_base_url_for_match(cfg_base_url) if cfg_base_url else ""
+        _active_probe_provider, _active_probe_api_key = _active_endpoint_probe_identity()
+        _deferred_overlap_slugs: set[str] = set()  # slugs skipped by single-flight guard
+        _self_probed_slugs: set[str] = set()  # slugs that probed with their own key
 
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
+        _seen_custom_ids: set[str] = set()
         if isinstance(_custom_providers_cfg, list):
-            _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
@@ -9404,6 +9426,22 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     )
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
+                    _shares_active_url = bool(
+                        _norm_active_base_url
+                        and _normalize_base_url_for_match(_cp_base_url) == _norm_active_base_url
+                    )
+                    # SINGLE-FLIGHT GUARD (#7481 re-gate): reuse the active
+                    # probe only when the URL, the provider identity AND the
+                    # effective credentials all match.  A named provider that
+                    # merely shares the URL (same gateway, different team key)
+                    # must be probed with ITS OWN key — otherwise it inherits
+                    # the active probe's models or a false 401.
+                    _is_active_endpoint_overlap = bool(
+                        _shares_active_url
+                        and _slug
+                        and _slug == str(_active_probe_provider or "").lower()
+                        and _cp_api_key == _active_probe_api_key
+                    )
                     if _cp_has_configured_models:
                         # Skip the live /v1/models probe when an allowlist
                         # exists — the curated list wins and probe failures
@@ -9413,6 +9451,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # populated (cheap to keep).
                         if _live_models is None:
                             _live_models = []
+                    elif _is_active_endpoint_overlap:
+                        # Single-flight: this named provider's base_url IS the
+                        # active endpoint, resolved to the same provider with
+                        # the same credentials.  Skip the probe here; the
+                        # active-endpoint block below probes once and files the
+                        # result under this slug.  Deferred population below
+                        # folds it into the named group.
+                        _deferred_overlap_slugs.add(_slug)
+                        _live_models = None  # sentinel: will be filled later
                     elif _live_models is None:
                         _live_models, _live_error = _read_custom_endpoint_models(
                             _cp_base_url,
@@ -9420,10 +9467,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             api_key=_cp_api_key,
                             trusted_base_urls=(_cp_base_url,),
                         )
+                        _self_probed_slugs.add(_slug)
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
                         detected_providers.add(_slug)
-                    for _live_model in _live_models:
+                    for _live_model in (_live_models or []):
                         _live_id = str(_live_model.get("id") or "").strip()
                         if not _live_id:
                             continue
@@ -9464,6 +9512,75 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         else:
                             auto_detected_models.append({"id": _cp_model, "label": _cp_label})
                             detected_providers.add("custom")
+
+        # NOW probe the active endpoint (model.base_url) AFTER named custom
+        # providers have been populated.  If this endpoint is unreachable the
+        # full connect timeout is spent here, but it no longer starves the
+        # named custom providers above (#7481).
+        if cfg_base_url:
+            base_url = cfg_base_url.strip()
+            # Provider key and credentials were resolved BEFORE the named loop
+            # (``_active_endpoint_probe_identity``) so the single-flight guard
+            # above compares the exact identity this probe will use.
+            provider = _active_probe_provider or "custom"
+            api_key = _active_probe_api_key
+
+            _trusted_custom_bases: list[object] = [cfg_base_url]
+            _custom_providers_for_trust = cfg.get("custom_providers", [])
+            if isinstance(_custom_providers_for_trust, list):
+                _trusted_custom_bases.extend(
+                    _cp.get("base_url")
+                    for _cp in _custom_providers_for_trust
+                    if isinstance(_cp, dict) and _cp.get("base_url")
+                )
+            _active_endpoint_models, _active_endpoint_error = _read_custom_endpoint_models(
+                base_url,
+                provider,
+                api_key=api_key,
+                trusted_base_urls=tuple(_trusted_custom_bases),
+            )
+            for auto_model in _active_endpoint_models:
+                auto_detected_models.append(auto_model)
+                provider_key = provider.lower()
+                auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
+                detected_providers.add(provider_key)
+            # Propagate the active endpoint error to the named group that the
+            # probe actually belongs to (the single-flight deferral only fires
+            # when URL + provider identity + credentials all match, so a
+            # same-URL provider with its own key is never handed someone
+            # else's 401 — #7481 re-gate).
+            if _active_endpoint_error:
+                for _slug in _deferred_overlap_slugs:
+                    _named_custom_errors[_slug] = _active_endpoint_error
+
+        # Deferred population (#7481 re-gate): fold the active probe's live
+        # models into the named group that shares its identity — even when that
+        # group already carries configured entries (a singular ``model`` or a
+        # metadata ``models`` allowlist), which previously suppressed the live
+        # models entirely.  Groups that already probed with their own
+        # credentials keep exactly their own result.  Deduplicated by id
+        # against the configured entries collected above.
+        for _slug, (_nc_display, _nc_models) in _named_custom_groups.items():
+            if _slug in _self_probed_slugs:
+                continue
+            _deferred_live_models = auto_detected_models_by_provider.get(_slug)
+            if not _deferred_live_models:
+                continue
+            for _m in _deferred_live_models:
+                _live_id = str(_m.get("id") or "").strip()
+                if not _live_id:
+                    continue
+                _dedup_key = f"{_slug}:{_live_id}"
+                if _dedup_key in _seen_custom_ids:
+                    continue
+                _seen_custom_ids.add(_dedup_key)
+                _cp_option_id = _live_id
+                if active_provider != _slug and not _cp_option_id.startswith("@"):
+                    _cp_option_id = f"@{_slug}:{_cp_option_id}"
+                _nc_models.append(
+                    {"id": _cp_option_id, "label": _m.get("label") or _get_label_for_model(_live_id, [])}
+                )
+                detected_providers.add(_slug)
 
         _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
         if active_provider and active_provider != "custom" and not _has_custom_providers:
