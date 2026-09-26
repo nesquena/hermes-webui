@@ -152,16 +152,55 @@ LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
 # strict Anchor projection must fail instead of claiming the legacy transcript.
 HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
   python tests/browser_historical_transcript_hydration.py
+
+# Negative classification check: a hard-reload final-text prerequisite failure
+# must not emit the drop-anchor-persistence expected-failure marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=fail-reload-final-text \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative classification check: a Worklog expansion failure after the reloaded
+# Anchor group exists must not emit the drop-anchor-persistence marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=throw-reloaded-worklog-expand \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative classification check: an unrelated Worklog timeout after the reloaded
+# Anchor group exists must emit neither classification marker.
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+LIFECYCLE_NEGATIVE_BITE=timeout-reloaded-worklog-expand \
+  python tests/browser_conversation_lifecycle.py
+
+# Negative discriminator checks: page closure and server death at the final-text
+# and missing-Anchor-group boundaries must emit neither classification marker.
+for bite in \
+  close-reload-final-text \
+  server-death-reload-final-text \
+  close-reloaded-anchor-group \
+  server-death-reloaded-anchor-group; do
+  LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+  LIFECYCLE_NEGATIVE_BITE="$bite" \
+    python tests/browser_conversation_lifecycle.py
+done
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow keeps the existing
-proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`)
-non-blocking while the public matrix expands. The Chromium
-`reconnect-scene-redraw` row does **not** allow failures: it exercises the real
-`loadSession` reconnect path and fails the workflow on a regression. Required
-merge checks remain a maintainer-controlled repository setting.
-The maintainer's private QA harness remains broader; later public slices will
-add cancellation, compression, and recovery coverage.
+The dedicated `Conversation lifecycle (informational)` workflow preserves the
+current normal, terminal-error and historical-hydration rows, plus the strict
+Chromium `reconnect-scene-redraw` row. The normal row also exercises settlement
+frames and missing-terminal recovery. Mutation, negative-classification and
+health-guard-knockout canaries test whether failures are identified for the right
+reason, rather than accepting any nonzero exit as proof.
+
+`Lifecycle proof summary` requires current-run, current-attempt raw step results
+from all four rows and successful mutation canaries. A missing, skipped, cancelled
+or failed proof is not success, even if job-level `continue-on-error` would soften
+its result. Failed-attempt reruns need **Re-run all jobs** so the summary has a
+complete same-attempt certificate; it does not silently reuse an older row.
+
+Required merge checks remain a maintainer-controlled repository setting; this PR
+does not modify them. The original informational rows retain their job policy and
+the reconnect row still forbids `continue-on-error`. Workflow failures are visible
+through the independent summary, not hidden by those job policies.
 
 ### Active-session reconnect redraw gate
 
