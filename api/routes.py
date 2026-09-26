@@ -13337,6 +13337,174 @@ def _render_index_shell_base() -> str:
     return base
 
 
+# #7310 — generation-keyed single-flight for GET /api/session.
+#
+# A reconnect storm fans out N identical session reloads at the same instant
+# (one refetch per dropped socket, plus one per live stream). Each of them
+# re-read state.db, re-merge, re-compact(), re-run the regeneration authority
+# and re-redact the same window. That work is CPU-bound under the GIL, so the
+# burst costs N times a single read and the request threads stack up faster
+# than they drain — the multi-second /api/session stall reported in #7310.
+#
+# Coalescing contract (from #7310): only identical *public* projections may
+# share a result. The key below therefore carries everything the payload is
+# derived from — profile, pagination/window, truncation, active-stream
+# ownership and the CLI metadata merged into it — plus the on-disk generation
+# of every other input: the child sidecar stat signature and the session-scoped
+# state.db revision, the compression-snapshot parent sidecars that the lineage
+# stitch folds into the transcript, the run journal that supplies
+# ``runtime_journal``/``runtime_journal_snapshot``, and settings.json, which
+# drives redaction. Equal keys mean both requests observed the same bytes when
+# they arrived, so a follower receives exactly the snapshot it would have built
+# itself; nothing is reused after the in-flight window closes, and only the
+# finished redacted payload is ever published (never an unredacted
+# intermediate).
+_SESSION_GET_FLIGHTS: dict = {}
+_SESSION_GET_FLIGHT_LOCK = threading.Lock()
+# Longest a follower waits on its leader before building the projection
+# itself, so one wedged leader can never park N request threads on an event
+# nobody will set.
+_SESSION_GET_FLIGHT_WAIT_SECONDS = 30.0
+
+
+def _session_get_lineage_token(session, sidecar_sig):
+    """Stat generation of every sidecar stitched into this session's transcript.
+
+    ``_webui_sidecar_lineage_messages_for_display`` walks compression-snapshot
+    parents and their messages reach the payload, so a flight may only be
+    shared while those parents are provably unchanged. The lineage display
+    cache already records the child signature plus every parent path and its
+    stat, which keeps this stat-only instead of re-parsing parent transcripts on
+    every reload. Returns ``None`` whenever the generation cannot be proven —
+    no coalescing rather than a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    if not str(getattr(session, "parent_session_id", "") or "").strip():
+        # No parent link: nothing outside this sidecar can be stitched in.
+        return ()
+    sid = str(getattr(session, "session_id", "") or "")
+    with _lineage_display_cache_lock:
+        entry = _lineage_display_cache.get(sid)
+        recorded_self = entry.get("self_sig") if entry else None
+        recorded_parents = entry.get("parent_sigs") if entry else None
+        provenance_complete = bool(entry and entry.get("provenance_complete"))
+    if (
+        not provenance_complete
+        or recorded_self != sidecar_sig
+        or recorded_parents is None
+    ):
+        # No verified record of the chain (cold or already stale): the lineage
+        # walk has not proven which parents contribute, so refuse to share.
+        return None
+    live = []
+    for parent_path, recorded_sig in recorded_parents:
+        current = _sidecar_stat_signature(Path(parent_path))
+        if current is None or current != recorded_sig:
+            return None
+        live.append((str(parent_path), current))
+    return tuple(live)
+
+
+def _session_get_flight_key(session, profile, cli_meta, query_shape):
+    """Return the identity of one identical concurrent GET /api/session read.
+
+    ``None`` disables coalescing for the request: every component must resolve
+    exactly, otherwise two requests that are not provably the same public
+    projection would share a result (#7310).
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    sidecar_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if sidecar_sig is None:
+        return None
+    state_sig = _state_db_session_signature(sid, profile)
+    if state_sig is None:
+        return None
+    if cli_meta:
+        # CLI/messaging sessions merge this index metadata straight into the
+        # payload, so it is part of the projection's identity as well.
+        try:
+            cli_sig = json.dumps(cli_meta, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return None
+    else:
+        cli_sig = ""
+    lineage_token = _session_get_lineage_token(session, sidecar_sig)
+    if lineage_token is None:
+        return None
+    active_stream_id = str(getattr(session, "active_stream_id", "") or "")
+    journal_fp = session_journal_fingerprint(sid, session_dir=SESSION_DIR)
+    if active_stream_id and journal_fp == (0, 0.0, 0):
+        # The payload reads this run's journal, but its file is not under this
+        # session's journal directory — a fingerprint this cheap cannot see it,
+        # so refuse to share rather than assume it is frozen.
+        return None
+    try:
+        _settings_stat = SETTINGS_FILE.stat()
+        settings_sig = (_settings_stat.st_mtime_ns, _settings_stat.st_size)
+    except OSError:
+        # No settings.json at all: redaction runs on pure defaults, which is
+        # one well-defined generation.
+        settings_sig = ()
+    return (
+        sid,
+        profile,
+        query_shape,
+        sidecar_sig,
+        state_sig,
+        cli_sig,
+        lineage_token,
+        journal_fp,
+        settings_sig,
+        getattr(session, "active_stream_id", None),
+        bool(getattr(session, "pending_user_message", None)),
+        getattr(session, "truncation_watermark", None),
+        getattr(session, "truncation_boundary", None),
+    )
+
+
+def _claim_session_get_flight(key):
+    """Elect one leader per identical in-flight read.
+
+    Returns ``(is_leader, flight)``. A follower waits on ``flight`` instead of
+    rebuilding the same projection; the leader owns the registry entry until
+    ``_finish_session_get_flight`` releases it.
+    """
+    with _SESSION_GET_FLIGHT_LOCK:
+        flight = _SESSION_GET_FLIGHTS.get(key)
+        if flight is not None:
+            return False, flight
+        flight = {
+            "key": key,
+            "owner": threading.get_ident(),
+            "event": threading.Event(),
+            "payload": None,
+        }
+        _SESSION_GET_FLIGHTS[key] = flight
+        return True, flight
+
+
+def _finish_session_get_flight(flight) -> None:
+    """Release one flight: drop its entry and wake every waiter.
+
+    Ownership-checked so a follower that timed out and fell through to its own
+    computation can never evict a later leader's entry, and idempotent so the
+    publish step and the handler's ``finally`` may both call it. The payload
+    left on the flight is what waiters receive: ``None`` when the leader never
+    finished, which sends them down the normal path instead of hanging.
+    """
+    if flight is None:
+        return
+    with _SESSION_GET_FLIGHT_LOCK:
+        if _SESSION_GET_FLIGHTS.get(flight["key"]) is flight:
+            _SESSION_GET_FLIGHTS.pop(flight["key"], None)
+    flight["event"].set()
+
+
 def _handle_session_get(handler, parsed) -> bool:
     """GET /api/session — full session payload (messages, tool calls, lineage...). Extracted verbatim from handle_get; every early-return path calls _diag.finish() (see the tier2c note inside)."""
     import time as _time
@@ -13395,6 +13563,10 @@ def _handle_session_get(handler, parsed) -> bool:
     # the flag no longer changes the server-side pagination semantics.
     _expand_renderable = query.get("expand_renderable", [None])[0]
     expand_renderable = str(_expand_renderable).strip() in ("1", "true", "True")
+    # #7310: declared before the try so the finally clause below can always
+    # release whatever flight this request ends up owning (None unless it
+    # claims leadership further down).
+    _session_get_flight = None
     try:
         _t1 = _time.monotonic()
         if _diag: _diag.stage("t1_after_get_session_check")
@@ -13432,6 +13604,47 @@ def _handle_session_get(handler, parsed) -> bool:
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
         _display_state_db_signature = None
+        # #7310: identical concurrent reloads share one projection instead of
+        # each rebuilding the same window. The key is built from what THIS
+        # request observed (query shape, profile, stream ownership, sidecar and
+        # state.db generation), so a follower is handed the snapshot it would
+        # have built itself. A leader that fails leaves `payload` as None, so
+        # waiters fall through to the normal path rather than wait forever.
+        _session_get_query_shape = (
+            load_messages,
+            msg_limit,
+            msg_before,
+            expand_renderable,
+            resolve_model,
+            is_messaging_session,
+        )
+        _session_get_key = _session_get_flight_key(
+            s,
+            _session_profile,
+            cli_meta,
+            _session_get_query_shape,
+        )
+        if _session_get_key is not None:
+            _session_get_leader, _session_get_claim = _claim_session_get_flight(
+                _session_get_key
+            )
+            if _session_get_leader:
+                _session_get_flight = _session_get_claim
+            else:
+                # Followers never own an entry: `_session_get_flight` stays
+                # None so the finally below cannot release someone else's.
+                _shared_payload = None
+                if _session_get_claim["owner"] != threading.get_ident():
+                    # Never wait on a flight this thread owns — that would be
+                    # a self-deadlock if anything below re-entered this
+                    # handler for the same key.
+                    if _session_get_claim["event"].wait(
+                        _SESSION_GET_FLIGHT_WAIT_SECONDS
+                    ):
+                        _shared_payload = _session_get_claim["payload"]
+                if _shared_payload is not None:
+                    if _diag: _diag.finish()
+                    return j(handler, _shared_payload)
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -13830,7 +14043,14 @@ def _handle_session_get(handler, parsed) -> bool:
         redact = redact_session_data(raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
-        resp = j(handler, {"session": redact})
+        _session_get_payload = {"session": redact}
+        if _session_get_flight is not None:
+            # Publish the finished *redacted* projection and drop the entry in
+            # the same breath: waiters may start writing immediately, and no
+            # later read can ever reuse this payload (#7310).
+            _session_get_flight["payload"] = _session_get_payload
+            _finish_session_get_flight(_session_get_flight)
+        resp = j(handler, _session_get_payload)
         _t6 = _time.monotonic()
         if _diag: _diag.stage("t6_after_json_write")
         _total_ms = (_t6 - _t0) * 1000
@@ -13952,6 +14172,12 @@ def _handle_session_get(handler, parsed) -> bool:
         attach_todo_state(sess, msgs)
         sess = _merge_cli_sidebar_metadata(sess, cli_meta)
         return j(handler, {"session": public_session_projection(sess)})
+    finally:
+        # #7310: release on every exit path — success, foreign-session
+        # KeyError, and any unexpected error. A leaked entry would park every
+        # later identical read on an event nobody sets; a follower never owns
+        # an entry, so this is a no-op for it.
+        _finish_session_get_flight(_session_get_flight)
 
 
 def handle_get(handler, parsed) -> bool:
