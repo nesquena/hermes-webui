@@ -141,36 +141,32 @@ def test_cron_history_clamps_offset_and_limit():
 
 
 def test_run_agent_streaming_uses_session_enabled_toolsets():
-    """The per-session toolset override (#493) was non-functional in PR #1402:
-    `Session.load_metadata_only()` returns a Session INSTANCE, but the code
-    called `.get('enabled_toolsets')` on it. AttributeError was swallowed by
-    the surrounding `except Exception`, so the user's toolset chip silently
-    no-op'd every time. Pin the source-level invariant so this exact regression
-    can't return."""
+    """Per-session toolsets must come from the shared Session under _agent_lock.
+
+    Older code re-read Session.load_metadata_only() outside the lock. That was
+    functionally correct after the v0.50.257 getattr fix, but still racy with a
+    concurrent toolset mutation. Pin the stronger invariant instead.
+    """
     src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 
-    # The bug shape that must NOT come back: dict-style access on the result.
-    # Negative-pattern guard (prevents revert).
     bad_pattern = "_session_meta.get('enabled_toolsets')"
-    assert bad_pattern not in src, (
-        f"streaming.py contains {bad_pattern!r} — Session.load_metadata_only() "
-        f"returns a Session INSTANCE, not a dict, so .get() raises AttributeError. "
-        f"The bare `except Exception:` swallows the failure silently and the "
-        f"per-session toolset override is non-functional. Use getattr() instead. "
-        f"(Opus pre-release advisor caught this in v0.50.257.)"
-    )
-
+    assert bad_pattern not in src
     bad_pattern2 = "_session_meta['enabled_toolsets']"
-    assert bad_pattern2 not in src, (
-        f"streaming.py contains {bad_pattern2!r} — same bug shape. "
-        f"Session.load_metadata_only() returns an instance, not a dict."
-    )
+    assert bad_pattern2 not in src
+    assert "Session.load_metadata_only(session_id)" not in src
 
-    # Positive pattern: getattr() must be used.
-    assert "getattr(_session_meta, 'enabled_toolsets'" in src, (
-        "streaming.py must use getattr(_session_meta, 'enabled_toolsets', None) "
-        "since load_metadata_only returns a Session instance."
+    run_start = src.index("def _run_agent_streaming(")
+    run_end = src.index("\ndef ", run_start + 1)
+    run_src = src[run_start:run_end]
+    lock_start = run_src.index("with _agent_lock:")
+    snapshot = run_src.index(
+        '_session_toolsets_override = getattr(s, "enabled_toolsets", None)',
+        lock_start,
     )
+    lock_end = run_src.index("# TD1: set thread-local env context", lock_start)
+    assert lock_start < snapshot < lock_end
+    assert "if _session_toolsets_override:" in run_src
+    assert "_toolsets = _session_toolsets_override" in run_src
 
 
 def test_session_load_metadata_only_returns_instance_not_dict():

@@ -10392,6 +10392,14 @@ def _run_agent_streaming(
                 _last_persisted_provider = provider_context
                 _turn_owns_persisted_model = True
 
+            # Snapshot the per-session toolset override under the same mutation
+            # lock used by /api/session/toolsets. Once this worker has registered
+            # in ACTIVE_RUNS, toolset mutation is fail-closed until teardown, so
+            # this snapshot cannot race a successful override commit.
+            _session_toolsets_override = getattr(s, "enabled_toolsets", None)
+            if _session_toolsets_override is not None:
+                _session_toolsets_override = list(_session_toolsets_override)
+
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
@@ -11358,24 +11366,13 @@ def _run_agent_streaming(
             from api.config import _resolve_cli_toolsets
             _toolsets = _resolve_cli_toolsets(_cfg)
 
-            # Per-session toolset override (#493): if the session has
-            # enabled_toolsets set, use that instead of the global config.
-            try:
-                from api.models import Session, SESSION_DIR
-                _session_path = SESSION_DIR / f"{session_id}.json"
-                if _session_path.exists():
-                    _session_meta = Session.load_metadata_only(session_id)
-                    # load_metadata_only returns a Session INSTANCE, not a dict.
-                    # The previous .get('enabled_toolsets') raised AttributeError
-                    # which was swallowed by the bare except below — the entire
-                    # per-session toolset override silently no-op'd. Use
-                    # getattr() to read the attribute correctly.
-                    # (Opus pre-release advisor finding for v0.50.257.)
-                    _override = getattr(_session_meta, 'enabled_toolsets', None) if _session_meta else None
-                    if _override:
-                        _toolsets = _override
-            except Exception as _ts_err:
-                print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
+            # Per-session toolset override (#493): use the shared Session
+            # snapshot captured under _agent_lock above. Do not re-read the
+            # sidecar here outside the lock; that check-then-use race allowed an
+            # old worker to construct an Agent from stale tools while a concurrent
+            # toolset mutation reported success (#7530).
+            if _session_toolsets_override:
+                _toolsets = _session_toolsets_override
 
             # Fallback model chain from profile config (e.g. for rate-limit or
             # provider recovery). Match Hermes CLI/gateway semantics:

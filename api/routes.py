@@ -15434,6 +15434,13 @@ def _validate_session_toolsets_shape(toolsets):
     return toolsets
 
 
+def _session_toolsets_semantic_identity(toolsets):
+    """Return order/duplicate-insensitive identity while preserving None vs []."""
+    if toolsets is None:
+        return None
+    return frozenset(toolsets)
+
+
 def _resolve_new_session_workspace(body, visible_prev_session_id, profile=None):
     """Resolve a new-session workspace, recovering only verified inheritance."""
     candidate = body.get("workspace")
@@ -16394,14 +16401,97 @@ def handle_post(handler, parsed) -> bool:
             toolsets = _validate_session_toolsets_shape(toolsets)
         except ValueError as e:
             return bad(handler, str(e), status=400)
-        try:
-            s = get_session(sid)
-        except KeyError:
-            return bad(handler, "Session not found", 404)
+        outcome = "changed"
+        response_toolsets = None
+        index_refresh_error = None
+
         with _get_session_agent_lock(sid):
-            s.enabled_toolsets = toolsets
-            s.save()
-        return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
+            # Resolve the canonical live session only after acquiring the
+            # per-SID mutation lock. get_session() can cold-load a sidecar and
+            # publish it into SESSIONS, so even an apparent pre-lock existence
+            # check would race a same-SID delete and could resurrect the cache.
+            if sid in _load_webui_deleted_session_tombstone():
+                outcome = "missing"
+                s = None
+            else:
+                try:
+                    s = get_session(sid)
+                except KeyError:
+                    outcome = "missing"
+                    s = None
+
+            # Compute lock-local admission/mutation only. HTTP response helpers
+            # are intentionally called after the lock is released.
+            if outcome == "missing":
+                pass
+            elif (
+                _session_toolsets_semantic_identity(s.enabled_toolsets)
+                == _session_toolsets_semantic_identity(toolsets)
+            ):
+                outcome = "unchanged"
+                response_toolsets = s.enabled_toolsets
+            elif (
+                _active_stream_blocks_chat_start(
+                    s, getattr(s, "active_stream_id", None)
+                )
+                or _active_run_stream_for_session_fail_closed(sid)
+            ):
+                outcome = "busy"
+            else:
+                # Invalidate Hermes' persisted Agent cache pins before making the
+                # new WebUI toolset override durable. This keeps failures fail-closed:
+                # the old toolset remains authoritative until both invalidations
+                # have completed successfully.
+                from hermes_state import SessionDB
+
+                _state_db = SessionDB(_active_state_db_path())
+                try:
+                    _state_db.update_system_prompt(sid, None)
+                    _state_db.update_session_tool_names(sid, None)
+                finally:
+                    _state_db.close()
+
+                # The sidecar replacement is the transaction commit boundary.
+                previous_toolsets = s.enabled_toolsets
+                previous_updated_at = s.updated_at
+                s.enabled_toolsets = toolsets
+                try:
+                    s.save(skip_index=True)
+                except Exception:
+                    s.enabled_toolsets = previous_toolsets
+                    s.updated_at = previous_updated_at
+                    raise
+
+                response_toolsets = s.enabled_toolsets
+
+                # Keep index publication in the same per-session critical section.
+                # Otherwise a same-SID delete can prune/unlink first and this older
+                # request can republish stale compact metadata after deletion.
+                # Index failure is still repairable metadata and never rolls back
+                # the already committed sidecar.
+                try:
+                    _write_session_index(updates=[s])
+                except Exception as exc:
+                    index_refresh_error = exc
+
+        if outcome == "missing":
+            return bad(handler, "Session not found", 404)
+
+        if index_refresh_error is not None:
+            logger.warning(
+                "Toolset change for session %s committed, but session index refresh failed: %s",
+                sid,
+                index_refresh_error,
+            )
+
+        if outcome == "busy":
+            return bad(
+                handler,
+                "Cannot change session toolsets during an active turn",
+                409,
+            )
+
+        return j(handler, {"ok": True, "enabled_toolsets": response_toolsets})
 
     if parsed.path == "/api/session/draft":
         # GET ?session_id=X  → return current draft
@@ -23759,6 +23849,38 @@ def _start_regeneration_stream_locked(
     if model_provider:
         response["effective_model_provider"] = model_provider
     return response
+
+
+def _active_run_stream_for_session_fail_closed(session_id: str | None) -> str | None:
+    """Return any ACTIVE_RUNS worker for toolset mutation admission.
+
+    Unlike _active_run_stream_for_session(), this guard never age-prunes or
+    treats a missing STREAMS entry as proof of worker death. Toolset changes
+    invalidate durable Agent pins, so admitting one while any old worker can
+    still write those pins would recreate #7530. Registry read failures also
+    fail closed.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        from api import config as _live_config
+
+        with _live_config.ACTIVE_RUNS_LOCK:
+            for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
+                run_sid = str((raw or {}).get("session_id") or "").strip()
+                if run_sid != sid:
+                    continue
+                stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
+                return stream_id or "<active-run>"
+    except Exception:
+        logger.warning(
+            "Failed to verify ACTIVE_RUNS for toolset change on session %s; refusing mutation",
+            sid,
+            exc_info=True,
+        )
+        return "<active-run-check-failed>"
+    return None
 
 
 def _active_run_stream_for_session(session_id: str | None) -> str | None:
