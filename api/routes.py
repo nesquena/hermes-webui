@@ -17724,7 +17724,32 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
+                # #7549: the active-profile lookup above found nothing, but the
+                # all-profiles sidebar shows this session — retry the CLI
+                # metadata lookup across every profile before declaring 404.
+                cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+            if not cli_meta:
                 return bad(handler, "Session not found", 404)
+            # #7549: the session exists in another profile's store. Mirror the
+            # detail-load endpoint's cross-profile contract (#7710) instead of
+            # a bare 404: a KNOWN other profile gets 409 with its name so the
+            # client can offer a profile switch, while unknown/legacy
+            # None-profile rows keep the 404 self-heal firing.
+            _arch_profile = cli_meta.get("profile") or None
+            if not _arch_profile:
+                # #7826: a profile-less metadata row must stay on the bare-404
+                # path. Materializing it into whichever profile happens to be
+                # active would silently re-parent a foreign session — the 404
+                # keeps the browser's stale-URL self-heal firing instead.
+                return bad(handler, "Session not found", 404)
+            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+                j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": _arch_profile,
+                }, status=409)
+                return None
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
@@ -17735,7 +17760,6 @@ def handle_post(handler, parsed) -> bool:
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
-                _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
                     title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),

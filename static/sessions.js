@@ -4888,6 +4888,16 @@ function _renderBatchActionBar(){
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
+    // #7826: batch archive must not silently mix profiles — the archive
+    // handler resolves ownership against the active profile, and a mixed
+    // selection would 409 or re-parent sessions into the wrong store.
+    // Reject the batch up front and let the user archive per profile.
+    const profiles=[...new Set([...sessionsById.values()].map(s=>s&&s.profile).filter(Boolean))];
+    if(profiles.length>1){
+      showToast(t('session_batch_archive_mixed_profiles'),3500);
+      exitSessionSelectMode();
+      return;
+    }
     const ok=await showConfirmDialog({
       message:wtCount?t('session_batch_archive_worktree_confirm',ids.length,wtCount):t('session_batch_archive_confirm',ids.length),
       confirmLabel:t('session_batch_archive'),
@@ -5424,7 +5434,7 @@ function _playSessionActionMenuEntrance(menu){
   menu.classList.add('open-animated');
 }
 
-async function _archiveSession(session, archived=true, beforeListRender=null){
+async function _archiveSession(session, archived=true, beforeListRender=null, _retried=false){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
@@ -5442,7 +5452,30 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
     renderSessionListFromCache();
     void renderSessionList();
     return true;
-  }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
+  }catch(err){
+    // #7826: the all-profiles sidebar can offer archives for sessions owned
+    // by another profile. The server answers those with the structured
+    // session_profile_mismatch envelope — switch to the owning profile and
+    // retry exactly once, guarded against infinite recursion.
+    const profileMismatch=_sessionProfileMismatchFromError(err);
+    if(profileMismatch && profileMismatch.profile && !_retried){
+      if(renderHold) await renderHold.catch(()=>{});
+      try{
+        if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile to archive this session…`,2200);
+        await _switchProfileForSessionLoad(profileMismatch.profile);
+        const target=_sessionSnapshotById(session.session_id)||session;
+        return _archiveSession(target,archived,null,true);
+      }catch(switchErr){
+        _pendingSessionReflowPositions=null;
+        showToast(t('session_archive_failed')+switchErr.message);
+        return false;
+      }
+    }
+    if(renderHold) await renderHold.catch(()=>{});
+    _pendingSessionReflowPositions=null;
+    showToast(t('session_archive_failed')+err.message);
+    return false;
+  }
 }
 
 function _openSessionActionMenu(session, anchorEl){
