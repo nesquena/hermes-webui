@@ -1,9 +1,13 @@
-const _AGENT_COMMAND_ALIASES = {
-  'reload_mcp': 'reload-mcp',
-  'reload_skills': 'reload-skills',
-  'codex_runtime': 'codex-runtime',
-  'credits': 'credits'
-};
+// _AGENT_COMMANDS_RUN_ON_WEBUI gates the send() intercept. The set holds
+// both the canonical registry names AND the underscore alias forms so
+// typing `/reload_mcp` (an alias) still matches when the agent metadata
+// cache is empty and getAgentCommandMetadata() can't canonicalize the
+// input. Canonical names also let the success path match metadata-loaded
+// commands. Mirrors _WEBUI_DISPATCHABLE_AGENT_COMMANDS in commands.js for
+// the backend-exec family (moa/sessions/resume/pet are WebUI-native and
+// dispatched elsewhere in send()). The formerly dead underscore-alias
+// map at the top of this file was removed; its alias membership now
+// lives in the set below (#7675 follow-up #4).
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
   'reload-mcp','reload-skills','codex-runtime','credits',
   'reload_mcp','reload_skills','codex_runtime','credits'
@@ -1565,6 +1569,29 @@ async function send(){
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+      // Non-dispatchable registry commands (e.g. /agents) must not leak as
+      // plain text to the model. Route them through the CLI-only explainer
+      // so the boundary is self-explaining (#7675 follow-up #3).
+      //
+      // The predicate must be the dispatchability check itself, NOT "absent
+      // from _AGENT_COMMANDS_RUN_ON_WEBUI": that set holds only the
+      // backend-exec family, so WebUI-native commands (moa/sessions/
+      // resume/pet) are intentionally absent and would be swallowed here
+      // before their own native handlers below (e.g. /moa at the native
+      // MoA branch). _isWebuiDispatchableAgentCommand() answers the real
+      // question: does send() dispatch this command (backend exec, plugin
+      // transport, or a native branch)? Any remaining command is CLI-only
+      // and gets the explainer (#7683).
+      if(_agentCmd && typeof _isWebuiDispatchableAgentCommand==='function'
+        ? !_isWebuiDispatchableAgentCommand(_agentCmd)
+        : (_agentCmd.category!=='Plugin'
+           && !_AGENT_COMMANDS_RUN_ON_WEBUI.has(String(_agentCmd.name||'').toLowerCase()))){
         if(!S.session){await newSession();await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});

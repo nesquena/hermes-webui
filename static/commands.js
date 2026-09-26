@@ -9,32 +9,35 @@ const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
 const COMMANDS=[
   // noEcho:true = action-only commands that don't produce a chat response.
   // Commands without noEcho get a user message echoed to the chat (#840).
+  // arg convention: '<required>' for required, '[optional]' for optional,
+  // omit when the command takes no argument. normalizeArgHint() enforces
+  // the same convention for registry-derived rows (#7675 follow-up #2).
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear,     noEcho:true},
   {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
-  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'<model_name>', subArgs:'models', noEcho:true},
+  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'<name>',           noEcho:true},
   {name:'terminal',  desc:t('cmd_terminal'),             fn:cmdTerminal,                        noEcho:true},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
-  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
-  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
-  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
+  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'<name>',  noEcho:true},
+  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'<name>', subArgs:'personalities'},
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'<query>'},
+  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'<skill-name>', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
-  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
-  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
-  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
+  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'<message>', noEcho:true},
+  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'<message>', noEcho:true},
+  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'<message>', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
-  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
-  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
+  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'<question>', noEcho:true},
+  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'<prompt>',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'<show|hide|none|minimal|low|medium|high|xhigh|max>', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -204,6 +207,20 @@ function executeCommand(text){
 // Plugin-category commands are always dispatchable via the plugin exec
 // transport. #6951.
 
+// Normalize an argument hint to one of three shapes: undefined (no hint),
+// '[<optional>]', or '<required>'. Bare hints are wrapped in angle brackets
+// so every autocomplete row renders with the same convention. Previously
+// builtin rows used bare strings or `[optional]` while registry rows used
+// `<required>`, which read as inconsistent in the same dropdown
+// (#7675 follow-up #2).
+function normalizeArgHint(hint){
+  const text=String(hint||'').trim();
+  if(!text) return undefined;
+  if(/^\[.*\]$/.test(text)) return text;
+  if(/^<.*>$/.test(text)) return text;
+  return `<${text}>`;
+}
+
 function _isWebuiDispatchableAgentCommand(cmd){
   const name=String(cmd&&cmd.name||'').trim().toLowerCase();
   if(_WEBUI_DISPATCHABLE_AGENT_COMMANDS.has(name))return true;
@@ -222,11 +239,15 @@ function getMatchingCommands(prefix){
     matches.push({
       name,
       desc:spec.desc,
-      arg:'name',
+      arg:normalizeArgHint('name'),
       source:'subarg-command',
     });
     seen.add(name);
   }
+  // /pet is dispatched by handlePetSlashCommand, but its argument hint comes
+  // from the agent metadata like any other registry command. We still need a
+  // row so the dropdown surfaces an arg hint when the user types `/pet` and
+  // the metadata cache is populated (#7675 follow-up #1).
   if('pet'.startsWith(q)&&!seen.has('pet')){
     const petMeta=Array.isArray(_agentCommandCache)
       ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
@@ -234,6 +255,7 @@ function getMatchingCommands(prefix){
     matches.push({
       name:'pet',
       desc:String((petMeta&&petMeta.description)||'Desktop Companion command').trim()||'Desktop Companion command',
+      arg:normalizeArgHint(petMeta&&petMeta.args_hint),
       source:'agent',
     });
     seen.add('pet');
@@ -250,7 +272,9 @@ function getMatchingCommands(prefix){
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
       // Surface the registry's argument hint on the autocomplete row (#6951).
-      arg:String(cmd&&cmd.args_hint||'').trim()||undefined,
+      // normalizeArgHint wraps bare hints in angle brackets so the row renders
+      // with the same convention as builtin rows (#7675 follow-up #2).
+      arg:normalizeArgHint(cmd&&cmd.args_hint),
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
@@ -620,7 +644,10 @@ function _compressionAnchorMessageKey(m){
 
 function cmdHelp(){
   const lines=COMMANDS.map(c=>{
-    const usage=c.arg ? (String(c.arg).startsWith('[') ? ` ${c.arg}` : ` <${c.arg}>`) : '';
+    // The table already stores bracketed hints ('<required>' / '[optional]')
+    // after #7675 follow-up #2, so render it verbatim with one leading
+    // space -- adding another pair here produced `<<model_name>>` (#7683).
+    const usage=c.arg ? ` ${normalizeArgHint(c.arg)}` : '';
     return `  /${c.name}${usage} — ${c.desc}`;
   });
   const msg={role:'assistant',content:t('available_commands')+'\n'+lines.join('\n')};
