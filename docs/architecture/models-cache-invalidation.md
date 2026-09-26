@@ -104,12 +104,48 @@ never inherits the old catalog.
    described in the PR body. Release-note wording belongs in the PR body, not in
    `CHANGELOG.md`, which release commits own.
 
+## Client-side model picker hydration and live cache contract (`static/boot.js`, `static/ui.js`)
+
+This section documents the client-side lifecycle and caching invariants for the
+model picker:
+
+1. **Hydration lifecycle and refetch on open:**
+   - On boot, `_startBootModelDropdown()` starts the initial `/api/models`
+     hydration. `window._modelDropdownReady` holds the in-flight promise.
+   - Concurrent opens join the pending hydration promise to deduplicate initial
+     requests.
+   - Once settled, `_modelCatalogHydrationSettled` becomes `true`. Subsequent opens
+     of the model picker drop the settled promise and trigger a fresh
+     `/api/models` fetch via `_ensureModelDropdownReady()`. This allows models
+     added after boot (overflow models, new custom providers) to be discovered
+     without requiring a hard page refresh (#7227).
+
+2. **Input preservation on refetch:**
+   - Because the picker opens immediately before the async refetch settles,
+     `renderModelDropdown()` captures the user's current search input, custom model
+     text, and focus before rebuilding options.
+   - Upon completion, the search query and custom input are restored and the
+     search filter is reapplied, preventing typed text from vanishing during
+     background catalog updates.
+
+3. **Profile isolation and generation invalidation:**
+   - Live models returned by `/api/models/live` are cached strictly using the
+     composite profile key `${profile}::${provider}` (`_liveModelCache`). No
+     un-scoped provider fallback is permitted across profile boundaries.
+   - When switching profiles (`static/panels.js`), the model request generation
+     `_modelDropdownRequestSeq` is bumped immediately. Delayed responses from an
+     earlier profile are discarded, preventing cross-profile model/provider
+     overwrite.
+   - Hydration failures guard clearing: a rejected hydration clears
+     `window._modelDropdownReady` only if the failing promise is still the
+     active one, preserving newer in-flight hydrations installed after profile
+     switches.
+
 ## Tests
 
-`tests/test_issue7540_codex_catalog_fingerprint.py` covers both invariant groups:
-timestamp-only churn keeps the fingerprint identical (and a session visit after a
-Codex refresh needs no live rebuild), while genuine changes — a new model, a
-visibility change, any catalog field, any unknown field — still invalidate.
+- `tests/test_issue7540_codex_catalog_fingerprint.py` covers server cache invariants.
+- `tests/test_issue7227_picker_catalog_refetch.py` covers the client-side
+  hydration lifecycle, profile generation invalidation, and input preservation.
 
 `tests/test_profile_switch_models_disk_cache.py` covers the switch: the disk
 snapshot survives it and is served without a live rebuild, each source-axis
@@ -118,4 +154,5 @@ edit still deletes the snapshot.
 
 ## References
 
-Issues/PRs: #2443, #7540, #7556, #7558. RCAs: `t_d127953d`, `t_16551f61`.
+Issues/PRs: #2443, #7227, #7399, #7540, #7556, #7558. RCAs: `t_d127953d`, `t_16551f61`.
+

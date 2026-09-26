@@ -3619,13 +3619,66 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   return partial||null;
 }
 
+function _renderOpenDropdownPreservingInput(dd, renderFn){
+  if(!dd || typeof renderFn !== 'function') return;
+  const existingSearch = dd.querySelector('.model-search-input');
+  const existingCustom = dd.querySelector('.model-custom-input');
+  const prevSearch = existingSearch ? existingSearch.value : '';
+  const prevCustom = existingCustom ? existingCustom.value : '';
+  const searchHadFocus = existingSearch && (typeof document !== 'undefined') && document.activeElement === existingSearch;
+  const customHadFocus = existingCustom && (typeof document !== 'undefined') && document.activeElement === existingCustom;
+  let searchSelStart = null, searchSelEnd = null;
+  if(searchHadFocus && typeof existingSearch.selectionStart === 'number'){
+    searchSelStart = existingSearch.selectionStart;
+    searchSelEnd = existingSearch.selectionEnd;
+  }
+  let customSelStart = null, customSelEnd = null;
+  if(customHadFocus && typeof existingCustom.selectionStart === 'number'){
+    customSelStart = existingCustom.selectionStart;
+    customSelEnd = existingCustom.selectionEnd;
+  }
+
+  renderFn();
+
+  const newCustom = dd.querySelector('.model-custom-input');
+  if(newCustom && prevCustom){
+    newCustom.value = prevCustom;
+  }
+  const newSearch = dd.querySelector('.model-search-input');
+  if(newSearch && prevSearch){
+    newSearch.value = prevSearch;
+    if(newSearch._listeners && newSearch._listeners.input){
+      newSearch._listeners.input();
+    }else if(typeof Event === 'function'){
+      newSearch.dispatchEvent(new Event('input'));
+    }
+  }
+  if(searchHadFocus && newSearch){
+    try{
+      newSearch.focus();
+      if(searchSelStart !== null && typeof newSearch.setSelectionRange === 'function'){
+        newSearch.setSelectionRange(searchSelStart, searchSelEnd);
+      }
+    }catch(_){}
+  }else if(customHadFocus && newCustom){
+    try{
+      newCustom.focus();
+      if(customSelStart !== null && typeof newCustom.setSelectionRange === 'function'){
+        newCustom.setSelectionRange(customSelStart, customSelEnd);
+      }
+    }catch(_){}
+  }
+}
+
 // Set the model picker to the best match for modelId.
 // Returns the resolved value that was actually set, or null if nothing matched.
 function _refreshOpenModelDropdown(){
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
-    renderModelDropdown();
-    if(typeof _positionModelDropdown==='function') _positionModelDropdown();
+    _renderOpenDropdownPreservingInput(dd,()=>{
+      renderModelDropdown();
+      if(typeof _positionModelDropdown==='function') _positionModelDropdown();
+    });
   }
   const sdd=$('settingsModelDropdown');
   if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
@@ -3633,14 +3686,16 @@ function _refreshOpenModelDropdown(){
     // resolves) must not re-grab search focus on touch — same coarse-pointer rule
     // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
     const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
-    renderModelDropdown({
-      dropdownId:'settingsModelDropdown',
-      selectId:'settingsModel',
-      forceOpenKey:'settingsModel',
-      closeDropdown:closeSettingsModelDropdown,
-      selectModel:selectSettingsModelFromDropdown,
-      scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
+    _renderOpenDropdownPreservingInput(sdd,()=>{
+      renderModelDropdown({
+        dropdownId:'settingsModelDropdown',
+        selectId:'settingsModel',
+        forceOpenKey:'settingsModel',
+        closeDropdown:closeSettingsModelDropdown,
+        selectModel:selectSettingsModelFromDropdown,
+        scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
+        autoFocusSearch:!_coarsePointer,
+      });
     });
   }
 }
@@ -3736,6 +3791,12 @@ function _persistSessionModelCorrection(model, provider, opts){
 let _modelDropdownRequestSeq=0;
 let _modelCatalogFallbackRetried=false;
 
+function bumpModelDropdownRequestSeq(){
+  if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
+  return ++_modelDropdownRequestSeq;
+}
+if(typeof window!=='undefined') window.bumpModelDropdownRequestSeq=bumpModelDropdownRequestSeq;
+
 function _applySessionModelFallback(sel){
   if(!sel) return null;
   const configuredDefault=String(window._defaultModel||'').trim();
@@ -3762,12 +3823,14 @@ async function populateModelDropdown(opts={}){
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
   if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
   const requestSeq=++_modelDropdownRequestSeq;
+  const requestedProfile=(typeof S!=='undefined'&&S.activeProfile)?S.activeProfile:null;
   try{
     const modelsUrl=new URL('api/models',document.baseURI||location.href);
     const requestedFreshness=opts&&opts.freshness?String(opts.freshness):'';
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(requestedProfile!==null&&typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==requestedProfile) return;
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
       if(customRedirectIfUnauth(_modelsRes)) return;
@@ -3775,6 +3838,7 @@ async function populateModelDropdown(opts={}){
     // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(requestedProfile!==null&&typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==requestedProfile) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
@@ -3876,12 +3940,14 @@ async function populateModelDropdown(opts={}){
     if(typeof syncModelChip==='function') syncModelChip();
     const dd=$('composerModelDropdown');
     if(dd&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
-      renderModelDropdown();
-      _positionModelDropdown();
+      _renderOpenDropdownPreservingInput(dd,()=>{
+        renderModelDropdown();
+        _positionModelDropdown();
+      });
     }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
-    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq, requestedProfile);
     if(willRetry){
       _modelCatalogFallbackRetried=true;
       populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
@@ -3900,6 +3966,7 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+const _liveModelInFlight=new Map();
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -4000,37 +4067,59 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, requestedProfile=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-  // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
+  const currentProfile=requestedProfile!==null
+    ? requestedProfile
+    : ((typeof S!=='undefined'&&S.activeProfile)?S.activeProfile:'default');
+  const cacheKey=`${currentProfile}::${provider}`;
+
+  const cached=_liveModelCache[cacheKey];
+  if(cached){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    if(typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==currentProfile) return;
+    const added=_addLiveModelsToSelect(provider,cached,sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
-  _liveModelFetchPending.add(provider);
-  try{
-    const url=new URL('api/models/live',document.baseURI||location.href);
-    url.searchParams.set('provider',provider);
-    const _liveRes=await fetch(url.href,{credentials:'include'});
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    if(_redirectIfUnauth(_liveRes)) return;
-    const data=await _liveRes.json();
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,data.models,sel);
-    if(added>0){
-      if(typeof syncModelChip==='function') syncModelChip();
-      console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
-    }
-  }catch(e){
-    console.debug('[hermes] Live model fetch failed for',provider,e.message);
-  }finally{
-    _liveModelFetchPending.delete(provider);
+
+  let inFlightPromise=_liveModelInFlight.get(cacheKey);
+  if(!inFlightPromise){
+    _liveModelFetchPending.add(provider);
+    inFlightPromise=(async()=>{
+      try{
+        const url=new URL('api/models/live',document.baseURI||location.href);
+        url.searchParams.set('provider',provider);
+        const _liveRes=await fetch(url.href,{credentials:'include'});
+        if(_redirectIfUnauth(_liveRes)) return null;
+        const data=await _liveRes.json();
+        if(!data.models||!data.models.length) return null;
+        _liveModelCache[cacheKey]=data.models;
+        return data.models;
+      }catch(e){
+        console.debug('[hermes] Live model fetch failed for',provider,e.message);
+        return null;
+      }finally{
+        _liveModelInFlight.delete(cacheKey);
+        let hasOther=false;
+        for(const k of _liveModelInFlight.keys()){
+          if(k.endsWith(`::${provider}`)){ hasOther=true; break; }
+        }
+        if(!hasOther) _liveModelFetchPending.delete(provider);
+      }
+    })();
+    _liveModelInFlight.set(cacheKey,inFlightPromise);
+  }
+
+  const models=await inFlightPromise;
+  if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  if(typeof S!=='undefined'&&S.activeProfile&&S.activeProfile!==currentProfile) return;
+  if(!models||!models.length) return;
+  const added=_addLiveModelsToSelect(provider,models,sel);
+  if(added>0){
+    if(typeof syncModelChip==='function') syncModelChip();
+    console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
   }
 }
 
