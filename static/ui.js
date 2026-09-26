@@ -3087,6 +3087,17 @@ window.addEventListener('visibilitychange',()=>{
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
+// Authoritative provider ids the server reported in /api/models group metadata,
+// lowercased and used as a lookup set. _customModelFromQualifiedId prefers the
+// longest match here over the shape grammar so a `custom:<host>:<port>` endpoint
+// slug and a named `custom:<slug>` provider are never confused (#6657).
+// populateModelDropdown() is the only writer, but it is NOT the only source of
+// optgroups: _addLiveModelsToSelect() creates a `(live)` optgroup for a provider
+// it never registers here. That stays consistent only because the same loop
+// writes `_dynamicModelLabels[mid]` for every live option, and getModelLabel()
+// short-circuits on that map before it ever consults the grammar — so a live
+// model never reaches the id-shape fallback that would need this set.
+let _dynamicProviderIds={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
@@ -3834,10 +3845,14 @@ async function populateModelDropdown(opts={}){
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
+    _dynamicProviderIds={};
     for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
-      if(g.provider_id) og.dataset.provider=g.provider_id;
+      if(g.provider_id){
+        og.dataset.provider=g.provider_id;
+        _dynamicProviderIds[String(g.provider_id).toLowerCase()]=true;
+      }
       if(g.models_endpoint_error){
         const errorKey=g.provider_id||g.provider||'';
         og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
@@ -7595,6 +7610,135 @@ function _stripDottedModelPrefix(bare){
   if (i === 0) return value;
   return segs.slice(i).join('.').replace(/:\d+$/, '');
 }
+
+// Python's whitespace set, spelled out once. JS is NOT a drop-in replacement
+// here: JS's \s and String.trim() both include U+FEFF and both omit the C0
+// separators \x1C-\x1F and \x85, so delegating to each language's own idea of
+// "whitespace" is itself a source of grammar drift — Python called the host
+// "a<U+FEFF>b" an authority and JS did not. One class covers the edge trim AND the
+// interior reject because Python's re \s and str.strip() sets are identical over
+// every code point (verified 0..0x10FFFF). #6657.
+const _PY_WS_CLASS='\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+// Mirror of str.strip() on the slug rest.
+const _CUSTOM_SLUG_TRIM_RE=new RegExp('^['+_PY_WS_CLASS+']+|['+_PY_WS_CLASS+']+$','g');
+// Mirror of api/config.py:_CUSTOM_ENDPOINT_HOST_REJECT_RE — characters a URL
+// authority host can never contain.
+const _CUSTOM_SLUG_HOST_REJECT_RE=new RegExp('['+_PY_WS_CLASS+':/?#@\\[\\]]');
+
+function _customSlugIsEndpointAuthority(rest){
+  // Mirror of api/config.py:_custom_slug_rest_is_endpoint_authority — THE
+  // grammar for the endpoint-derived half of a custom provider slug, not a
+  // name-shape heuristic. An endpoint authority slug (host:port) must never be
+  // split as a model tag: @custom:localhost:1234:qwen3 has model "qwen3", not
+  // "1234:qwen3".
+  //   port -> 1-5 ASCII digits, 1..65535
+  //   host -> any nonempty token with no character a URL authority host cannot
+  //           hold, and not starting with '-' or '.' nor ending with '-'. A
+  //           TRAILING dot is accepted (a root-anchored FQDN is legal and the
+  //           producer can emit it). Covers single-label Docker/LAN names
+  //           ("llm", from base_url http://llm:8080/v1), dotted DNS names,
+  //           IPv4 literals and "localhost" alike. Requiring an IP/dot/localhost
+  //           rejected the producer's own single-label output (#6657).
+  //   host -> OR a bracketed literal whose contents are a real IPv6 address
+  //           ("[::1]", "[fe80::1%eth0]"). Brackets alone are NOT enough:
+  //           "[dead:beef]" and "[not-ipv6]" are rejected on both sides, so the
+  //           label and the resolved route cannot disagree (#6657).
+  // IPv6 (explicit contract): an UNBRACKETED IPv6 authority is rejected —
+  // "::1:11434" is irreducibly ambiguous (valid address on its own, or address
+  // + port). The backend emits the bracketed spelling for IPv6 hosts.
+  rest=String(rest||'').replace(_CUSTOM_SLUG_TRIM_RE,'');  // == str(rest or "").strip()
+  if(!rest.includes(':')) return false;
+  const idx=rest.lastIndexOf(':');
+  const host=rest.slice(0,idx), portS=rest.slice(idx+1);
+  if(!host) return false;
+  if(!/^[0-9]{1,5}$/.test(portS)) return false;
+  const portN=parseInt(portS,10);
+  if(!(portN>=1 && portN<=65535)) return false;
+  if(host.startsWith('[') && host.endsWith(']')){
+    // Mirrors ipaddress.ip_address(inner).version == 6 on the backend: 8 hextets
+    // of 1-4 hex digits, at most one '::' elision standing for >=1 all-zero
+    // hextets, and an optional dotted-quad IPv4 tail worth 2 hextets.
+    const isIPv6=(text)=>{
+      if(!text.includes(':')) return false;
+      const elide=text.indexOf('::');
+      if(elide!==text.lastIndexOf('::')) return false;
+      const head=elide<0?text:text.slice(0,elide);
+      const tail=elide<0?'':text.slice(elide+2);
+      const headG=head?head.split(':'):[];
+      const tailG=tail?tail.split(':'):[];
+      const groups=headG.concat(tailG);
+      if(!groups.length) return elide===0;  // "::" is all zeros
+      // A dotted quad is legal only as the LAST textual piece of the address, so
+      // it lives in head only when there is no elision: "::ffff:1.2.3.4" and
+      // "1:2:3:4:5:6:1.2.3.4" are addresses, "1.2.3.4::" is not.
+      const quadSlot=(elide<0||tailG.length)?groups.length-1:-1;
+      let count=0;
+      for(let i=0;i<groups.length;i++){
+        if(i===quadSlot && groups[i].includes('.')){
+          // IPv4 tail: worth 2 hextets, so it only fits where 2 still remain.
+          const quad=groups[i].split('.');
+          if(quad.length!==4) return false;
+          if(!quad.every(o=>/^(0|[1-9][0-9]{0,2})$/.test(o) && Number(o)<=255)) return false;
+          count+=2;
+          continue;
+        }
+        if(!/^[0-9A-Fa-f]{1,4}$/.test(groups[i])) return false;
+        count+=1;
+      }
+      // Without an elision every hextet is spelled out; with one, it must stand
+      // for at least one hextet.
+      return elide<0?count===8:count<=7;
+    };
+    return isIPv6(host.slice(1,-1).split('%')[0]);
+  }
+  if(_CUSTOM_SLUG_HOST_REJECT_RE.test(host)) return false;
+  return !(host.startsWith('-') || host.endsWith('-') || host.startsWith('.'));
+}
+
+function _customModelFromQualifiedId(rawId){
+  // Shared qualified-ID grammar — mirror of api/config.py:
+  // _parse_provider_qualified_model_id (see its docstring for the grammar).
+  // The provider segment may itself contain colons (host:port endpoints) and
+  // the model segment may too (":free" tags), so a blind first/last-colon split
+  // misparses both.
+  const rest=rawId.slice('@custom:'.length);
+  if(!rest.includes(':')){
+    // Legacy "<slug>/<model>" form (no provider colon).
+    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
+    return rest||rawId;
+  }
+  const inner='custom:'+rest;
+  // 1. Authoritative: longest provider_id prefix the server actually told us
+  // about via /api/models group metadata. Config beats shape, so a purely
+  // numeric model id under a named provider (@custom:gw:8080:free) still
+  // resolves to "8080:free" when the server reports provider_id "custom:gw".
+  // cut>=2 skips the bare `custom` root: it prefixes EVERY id here, so matching
+  // it would hand the whole slug back as the label. Only a slug that names
+  // something (custom:gw, custom:llm:8080) disambiguates.
+  const segs=inner.split(':');
+  for(let cut=segs.length-1;cut>=2;cut--){
+    const prefix=segs.slice(0,cut).join(':');
+    const tail=segs.slice(cut).join(':');
+    if(tail && _dynamicProviderIds[prefix.toLowerCase()]) return tail;
+  }
+  // 2. Otherwise the shape grammar.
+  const lastColon=inner.lastIndexOf(':');
+  let providerHint=inner.slice(0,lastColon);
+  let bare=inner.slice(lastColon+1);
+  if(providerHint.startsWith('custom:') && providerHint.split(':').length-1>=2){
+    const slugRest=providerHint.slice('custom:'.length);
+    if(!_customSlugIsEndpointAuthority(slugRest)){
+      // Not an endpoint authority: the extra segment belongs to the model
+      // (e.g. @custom:my-key:some-model:free -> model "some-model:free").
+      const extraColon=providerHint.lastIndexOf(':');
+      const extra=providerHint.slice(extraColon+1);
+      providerHint=providerHint.slice(0,extraColon);
+      bare=extra+':'+bare;
+    }
+  }
+  return bare||rawId;
+}
+
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
@@ -7618,30 +7762,15 @@ function getModelLabel(modelId){
   //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
   //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
-    const rest=rawId.slice('@custom:'.length);
-    const sep=rest.indexOf(':');
-    if(sep<0) return rest||rawId;
-    // A provider slug is a config key or a host:port authority — it never
-    // contains a `/`. A slash-bearing first segment is therefore the model
-    // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
-    // must render the whole remainder, not just `397b`), mirroring the
-    // `/`-means-routable rule api/config.py applies when building ids.
-    if(rest.slice(0,sep).includes('/')) return rest||rawId;
-    let model=rest.slice(sep+1);
-    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
-    // to the provider segment, mirroring the host:port slug check in
-    // api/config.py, so it is consumed before the model label starts.
-    const portMatch=/^(\d{1,5}):/.exec(model);
-    if(portMatch){
-      const port=Number(portMatch[1]);
-      if(port>=1&&port<=65535){
-        const host=rest.slice(0,sep).toLowerCase();
-        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
-          model=model.slice(portMatch[0].length);
-        }
-      }
-    }
-    return model||rawId;
+    // The shared qualified-ID grammar (mirror of api/config.py:
+    // _parse_provider_qualified_model_id) answers every shape here — named
+    // providers, endpoint authorities (single-label Docker/LAN hosts like
+    // `llm:8080`, dotted DNS, IPv4, bracketed IPv6), colon-bearing model tags
+    // and the authoritative provider-id prefixes from /api/models — so the
+    // inline host-shape check upstream's #6884 era parser used (which rejected
+    // short hostnames and unbracketed-ambiguous IPv6) is replaced by it. One
+    // grammar for label and route: they can no longer disagree (#6657).
+    return _customModelFromQualifiedId(rawId);
   }
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
