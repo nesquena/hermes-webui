@@ -13522,15 +13522,31 @@ def _handle_session_get(handler, parsed) -> bool:
         _t3 = _time.monotonic()
         if _diag: _diag.stage("t3_after_model_resolve")
         if load_messages:
-            if is_messaging_session and cli_messages:
-                # Recovery/aggregate sidecars can intentionally contain a
-                # longer visible conversation than the single state.db
-                # segment for this messaging session id. Prefer the longer
-                # sidecar so repaired WebUI history is not hidden behind the
-                # canonical per-segment transcript. When both sources carry
-                # different slices of the same stitched conversation, merge
-                # them chronologically and dedupe exact repeats.
-                _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+            # A /clear-stamped session with no sidecar rows is intentionally
+            # empty. State-db rows can be an older append-only transcript, and
+            # merging them here would resurrect cleared history on the first
+            # refresh. Once a new turn starts the sidecar is non-empty, so its
+            # normal reconciliation path remains available.
+            _cleared_empty_session = bool(
+                getattr(s, "clear_generation", None)
+                and not getattr(s, "messages", None)
+            )
+            if _cleared_empty_session and not is_messaging_session:
+                _all_msgs = []
+            elif is_messaging_session and cli_messages:
+                # A cleared messaging sidecar must still show the authoritative
+                # state-db transcript. Do not merge its pre-clear sidecar rows.
+                if _cleared_empty_session:
+                    _all_msgs = cli_messages
+                else:
+                    # Recovery/aggregate sidecars can intentionally contain a
+                    # longer visible conversation than the single state.db
+                    # segment for this messaging session id. Prefer the longer
+                    # sidecar so repaired WebUI history is not hidden behind the
+                    # canonical per-segment transcript. When both sources carry
+                    # different slices of the same stitched conversation, merge
+                    # them chronologically and dedupe exact repeats.
+                    _all_msgs = _merged_session_messages_for_display(s, cli_messages)
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
@@ -16517,6 +16533,21 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
+            # A delayed metadata update can have loaded a session immediately
+            # before /clear. Preserve a durable clear stamped by the other
+            # request instead of writing that stale transcript back on save.
+            try:
+                persisted = json.loads(s.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                persisted = {}
+            persisted_clear_generation = persisted.get("clear_generation")
+            if persisted_clear_generation and persisted_clear_generation != getattr(s, "clear_generation", None):
+                s.messages = []
+                s.context_messages = []
+                s.tool_calls = []
+                s.truncation_watermark = persisted.get("truncation_watermark")
+                s.truncation_boundary = persisted.get("truncation_boundary")
+                s.clear_generation = persisted_clear_generation
             if "model" in body or "model_provider" in body:
                 model, provider = _session_model_state_from_request(
                     body.get("model", s.model),
@@ -16702,11 +16733,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         if _session_is_subagent_view_only(body["session_id"]):
             return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        sid = body["session_id"]
         try:
-            s = get_session(body["session_id"])
+            s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        sid = body["session_id"]
         with _get_session_agent_lock(sid):
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
@@ -16750,7 +16781,11 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
-            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
+            # Preserve a previous clear marker on an idempotent repeat clear.
+            # Boot uses this durable marker to distinguish a deliberately empty
+            # session from a never-started scratch session.
+            if had_sidecar_messages:
+                s.clear_generation = uuid.uuid4().hex
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
