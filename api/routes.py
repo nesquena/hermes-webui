@@ -30389,21 +30389,47 @@ def _handle_mcp_servers_list(handler):
     })
 
 
+def _load_mcp_config_for_write(config_path: Path) -> dict:
+    """Load a private raw mapping; unknown existing data must never be overwritten.
+
+    Read-only loaders tolerate malformed YAML and expand environment references.
+    A config edit must do neither: preserve placeholders and let read/parse errors
+    abort before the atomic save. Caller owns _cfg_lock for the whole transaction.
+    """
+    import yaml
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    loaded = yaml.safe_load(raw)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError("MCP config must be a YAML mapping")
+    return loaded
+
+
 def _handle_mcp_server_delete(handler, name):
-    """Delete an MCP server by name."""
+    """Delete an MCP server by name without mutating the shared runtime config."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    del servers[name]
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    error = None
+    with _cfg_lock:
+        config_path = _get_config_path()
+        cfg = _load_mcp_config_for_write(config_path)
+        servers = cfg.get("mcp_servers", {})
+        servers = dict(servers) if isinstance(servers, dict) else {}
+        if name not in servers:
+            error = (f"MCP server '{name}' not found", 404)
+        else:
+            del servers[name]
+            cfg["mcp_servers"] = servers
+            _save_yaml_config_file(config_path, cfg)
+    if error is not None:
+        return bad(handler, *error)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -30417,17 +30443,23 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    if not isinstance(servers[name], dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
-    servers[name]["enabled"] = enabled
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    error = None
+    with _cfg_lock:
+        config_path = _get_config_path()
+        cfg = _load_mcp_config_for_write(config_path)
+        servers = cfg.get("mcp_servers", {})
+        servers = dict(servers) if isinstance(servers, dict) else {}
+        if name not in servers:
+            error = (f"MCP server '{name}' not found", 404)
+        elif not isinstance(servers[name], dict):
+            error = (f"MCP server '{name}' has invalid config", 400)
+        else:
+            # Valid YAML aliases may share this mapping with another server.
+            servers[name] = {**servers[name], "enabled": enabled}
+            cfg["mcp_servers"] = servers
+            _save_yaml_config_file(config_path, cfg)
+    if error is not None:
+        return bad(handler, *error)
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -30453,37 +30485,37 @@ def _strip_masked_values(submitted, existing):
 
 
 def _handle_mcp_server_update(handler, name, body):
-    """Add or update an MCP server."""
+    """Add or update an MCP server through a pinned raw-file transaction."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    # Validate: must have url (http) or command (stdio)
-    server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
-    if body.get("url"):
-        server_cfg["url"] = body["url"].strip()
-        if body.get("headers"):
-            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
-    elif body.get("command"):
-        server_cfg["command"] = body["command"].strip()
-        if body.get("args"):
-            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
-        if body.get("env"):
-            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
-    else:
+    if not body.get("url") and not body.get("command"):
         return bad(handler, "url or command is required")
-    if body.get("timeout") is not None:
-        try:
-            server_cfg["timeout"] = int(body["timeout"])
-        except (ValueError, TypeError):
-            pass
-    servers[name] = server_cfg
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    server_cfg = {}
+    with _cfg_lock:
+        config_path = _get_config_path()
+        cfg = _load_mcp_config_for_write(config_path)
+        servers = cfg.get("mcp_servers", {})
+        servers = dict(servers) if isinstance(servers, dict) else {}
+        existing_cfg = servers.get(name, {})
+        if body.get("url"):
+            server_cfg["url"] = body["url"].strip()
+            if body.get("headers"):
+                server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
+        else:
+            server_cfg["command"] = body["command"].strip()
+            if body.get("args"):
+                server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+            if body.get("env"):
+                server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
+        if body.get("timeout") is not None:
+            try:
+                server_cfg["timeout"] = int(body["timeout"])
+            except (ValueError, TypeError):
+                pass
+        servers[name] = server_cfg
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(config_path, cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
