@@ -391,7 +391,10 @@ function switchWorkspacePanelTab(tab){
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
   const todosPanel = $('workspaceTodosPanel');
   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
-  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+  if(_workspacePanelActiveTab === 'artifacts'){
+    _artifactHistory=null;
+    renderSessionArtifacts();
+  }
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
 }
 
@@ -517,7 +520,7 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
-function collectSessionArtifacts(){
+function collectSessionArtifacts(messages=S.messages, toolCalls=S.toolCalls){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
@@ -527,12 +530,12 @@ function collectSessionArtifacts(){
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
-  for(const tc of (S.toolCalls || [])){
+  for(const tc of (toolCalls || [])){
     for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const msg of (S.messages || [])){
+  for(const msg of (messages || [])){
     if(!msg) continue;
     const text = msg.content || msg.text || msg.message || '';
     // Text-mined diff/patch fences (existing path).
@@ -565,18 +568,53 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
+// Keep only compact artifact paths, never the full transcript. Loading is
+// explicit (Artifacts tab), single-flight and fenced to its pane/profile.
+let _artifactHistory=null;
+function _loadArtifactHistory(){
+  if(typeof _sessionSnapshotOwner!=='function' || !S.session) return null;
+  if(_artifactHistory && !_artifactHistory.owner.isCurrent()) _artifactHistory=null;
+  if(!S.session._messages_truncated) return null;
+  if(_artifactHistory || _workspacePanelActiveTab!=='artifacts') return _artifactHistory;
+  const state={owner:_sessionSnapshotOwner(), status:'loading', items:[]};
+  _artifactHistory=state;
+  _readFullSessionSnapshot(state.owner).then(snapshot=>{
+    if(_artifactHistory!==state || !state.owner.isCurrent() || !snapshot) return;
+    state.items=collectSessionArtifacts(snapshot.session.messages,snapshot.session.tool_calls);
+    state.status='ready';
+    renderSessionArtifacts();
+  }).catch(()=>{
+    if(_artifactHistory!==state || !state.owner.isCurrent()) return;
+    state.status='error';
+    renderSessionArtifacts();
+  });
+  return state;
+}
+
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');
   const count = $('workspaceArtifactsCount');
   if(!root) return;
+  const history = _loadArtifactHistory();
   const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
+  const seen = new Set(items.map(a=>a.path));
+  for(const item of history?.items || []){
+    if(!seen.has(item.path)){items.push(item);seen.add(item.path);}
+  }
+  const incomplete = !!S.session?._messages_truncated && history?.status!=='ready';
+  if(count) count.textContent = String(items.length) + (incomplete ? '…' : '');
+  const notice = incomplete ? `<div class="workspace-artifact-empty">${esc(history?.status==='error'?'Could not load complete session history.':t('loading'))}${history?.status==='error'?` <button type="button" data-artifacts-retry>${esc(t('steer_recovery_retry'))}</button>`:''}</div>` : '';
+  const bindRetry = ()=>{
+    const retry=root.querySelector('[data-artifacts-retry]');
+    if(retry) retry.onclick=()=>{_artifactHistory=null;renderSessionArtifacts();};
+  };
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
     return;
   }
   if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+    root.innerHTML = notice || '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+    bindRetry();
     return;
   }
   // Strip workspace prefix for display so long absolute paths don't clutter the list.
@@ -597,7 +635,7 @@ function renderSessionArtifacts(){
       tail: directory.slice(parentSlash + 1),
     };
   };
-  root.innerHTML = items.map(item => {
+  root.innerHTML = notice + items.map(item => {
     const path = displayPath(item.path);
     const parts = splitArtifactDisplayPath(path);
     const directory = (parts.head || parts.tail)
@@ -607,11 +645,13 @@ function renderSessionArtifacts(){
     const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
     return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
   }).join('');
+  bindRetry();
 }
 
 function projectSessionArtifactsForOwner(sessionId){
   if(!sessionId||!S.session||S.session.session_id!==sessionId) return false;
   if(typeof _isSessionCurrentPane!=='function'||!_isSessionCurrentPane(sessionId)) return false;
+  _artifactHistory=null;
   renderSessionArtifacts();
   return true;
 }
