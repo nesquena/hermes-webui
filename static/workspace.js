@@ -1063,7 +1063,7 @@ function cancelEditMode(){
 }
 
 // Map file extensions to Prism.js language identifiers.
-// Prism autoloader fetches missing language components from CDN on demand.
+// Prism autoloader loads missing language components from static/vendor/prismjs/.
 const _PRISM_LANG_MAP={
   js:'javascript',mjs:'javascript',jsx:'jsx',ts:'typescript',tsx:'tsx',
   py:'python',pyw:'python',pyi:'python',
