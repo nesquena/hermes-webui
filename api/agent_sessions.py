@@ -380,6 +380,17 @@ def is_cli_session_row_visible(row: dict) -> bool:
     if not _looks_like_default_cli_title(row):
         return True
 
+    # An UNKNOWN turn count must not be read as a known zero here. When the
+    # state.db schema has no `role` column on the messages table, #7681 finding 2
+    # keeps `actual_user_message_count` NULL ("unknown", not a confident wrong
+    # number), so such a row can never clear this untitled threshold. Hiding it
+    # would silently drop a real session from the sidebar because an old
+    # schema lacks a column — an unseen data loss. Surface it instead.
+    if row.get("actual_user_message_count") is None and row.get(
+        "user_message_count"
+    ) is None and not row.get("messages"):
+        return True
+
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
