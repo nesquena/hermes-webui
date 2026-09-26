@@ -35,7 +35,7 @@ def test_root_boot_distinguishes_url_session_from_localstorage_saved_session():
         "root `/` policy can differ from explicit `/session/<sid>` reload"
     )
     compact = block.replace(" ", "")
-    assert "constsaved=urlSession||savedLocal" in compact, (
+    assert "constsaved=(S._ambiguousSessionUrlIntent||profileIntentInvalid)?null:(urlSession||savedLocal);" in compact, (
         "boot should still prefer explicit URL sessions over saved localStorage sessions"
     )
 

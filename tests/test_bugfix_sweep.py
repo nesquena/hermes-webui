@@ -148,8 +148,18 @@ def test_cross_profile_session_deep_links_switch_profile_instead_of_self_healing
     assert '"code": "session_profile_mismatch"' in routes
     assert 'if method == "GET" and path == "/api/session":' in routes
     assert "function _sessionProfileMismatchFromError" in sessions
-    assert "_switchProfileForSessionLoad(profileMismatch.profile)" in sessions
-    assert "skipProfileResolve:true" in sessions
+    retry = "return _navigationResult(await _openSessionReference(sid,profileMismatch.profile,{"
+    assert retry in sessions, (
+        "a profile-mismatch response must retry navigation through the shared "
+        "session-reference flow instead of self-healing the URL"
+    )
+    reference_start = sessions.index("async function _openSessionReference(")
+    reference_end = sessions.index("\nasync function loadSession(", reference_start)
+    reference = sessions[reference_start:reference_end]
+    switch_at = reference.find("await switchToProfile(targetProfile,profileSwitchOptions)")
+    load_at = reference.find("loadSession(parsed.sid")
+    assert switch_at != -1 and load_at > switch_at
+    assert "skipProfileResolve:true" in reference
 
 
 def test_service_worker_precaches_same_origin_vendor_shell_assets():

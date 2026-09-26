@@ -40,18 +40,23 @@ class TestPWAAuthRedirect:
     def test_workspace_js_401_before_throw(self):
         """The 401 redirect must come before any error throw."""
         src = _workspace_js()
-        idx_401 = src.find("res.status===401")
+        api_start = src.find("async function api(")
+        assert api_start != -1, "api() function not found in workspace.js"
+        api_end = src.find("\nasync function ", api_start + 1)
+        api_src = src[api_start:api_end if api_end != -1 else None]
+        response_error = api_src.find("if(!res.ok)")
+        idx_401 = api_src.find("res.status===401", response_error)
         # api() may throw via `throw new Error(...)` or via the structured
         # `const err=new Error(...); ... throw err;` pattern that attaches HTTP
         # context for callers. Either is fine — what matters is the 401 redirect
         # short-circuits before the generic throw.
-        idx_throw = src.find("throw new Error")
+        idx_throw = api_src.find("const err=new Error(message)", idx_401)
         if idx_throw == -1:
-            idx_throw = src.find("throw err")
+            idx_throw = api_src.find("throw err", idx_401)
         assert idx_401 != -1, "401 guard not found in workspace.js"
         assert idx_throw != -1, "no error throw found in workspace.js"
         assert idx_401 < idx_throw, \
-            "401 redirect must appear before the generic throw in workspace.js"
+            "401 redirect must appear before the generic API error throw"
 
     def test_ui_js_has_redirect_helper(self):
         """ui.js must define _redirectIfUnauth helper."""

@@ -23,13 +23,20 @@ def test_popstate_handler_guards_busy_state():
     prevent.
     """
     src = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
-    popstate_idx = src.find("addEventListener('popstate'")
-    assert popstate_idx != -1, "popstate handler missing from sessions.js"
-    # Look at the next ~600 chars of the handler body.
-    body = src[popstate_idx : popstate_idx + 600]
-    assert "S.busy" in body, (
-        "popstate handler must check S.busy before calling loadSession() — "
+    listener_idx = src.find("addEventListener('popstate'")
+    assert listener_idx != -1, "popstate handler missing from sessions.js"
+    assert "_handleSessionPopstate()" in src[listener_idx:listener_idx + 120], (
+        "popstate listener must delegate navigation handling"
+    )
+    body_idx = src.find("async function _handleSessionPopstate()")
+    body_end = src.find("\nasync function removeWorktree", body_idx)
+    assert body_idx != -1 and body_end > body_idx, "popstate navigation helper not found"
+    body = src[body_idx:body_end]
+    busy_guard = body.find("if(S.busy&&currentSid!==sid)")
+    navigate = body.find("return _openSessionReference(sid,")
+    assert busy_guard != -1 and navigate > busy_guard, (
+        "popstate navigation must check S.busy before switching sessions — "
         "otherwise mid-stream users lose their turn when they hit browser Back. "
         "Mirror the same guard the cross-tab storage handler had."
     )
-    assert "loadSession" in body, "popstate handler must call loadSession when allowed"
+    assert "_openSessionReference(sid," in body, "popstate handler must open the requested reference when allowed"

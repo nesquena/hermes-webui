@@ -364,9 +364,12 @@ def test_no_early_closemobilesidebar_before_sidebar_open():
 
 
 def test_cross_profile_retry_carries_preload_notified():
-    """Cross-profile retry must pass _preloadNotified:true so the pre-hook
-    doesn't re-fire after destructive side-effects already ran."""
+    """A mismatch retry must use the shared reference path, which marks the
+    eventual load as already pre-notified after profile switching."""
     body = _extract_block(SESSIONS_JS, "async function loadSession(sid)")
-    idx_profile = body.index("skipProfileResolve:true")
-    profile_branch = body[idx_profile:idx_profile + 200]
-    assert "_preloadNotified:true" in profile_branch
+    assert "_openSessionReference(sid,profileMismatch.profile" in body
+    reference = _extract_block(SESSIONS_JS, "async function _openSessionReference(")
+    load_at = reference.index("loadSession(parsed.sid")
+    load_options = reference[load_at:load_at + 500]
+    assert "skipProfileResolve:true" in load_options
+    assert "_preloadNotified:true" in load_options
