@@ -43,6 +43,7 @@ from api.agent_runtime import (
 )
 from api.agent_sessions import (
     MESSAGING_SOURCES,
+    _is_continuation_session,
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
@@ -10815,7 +10816,6 @@ from api.models import (
     _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
-    _has_compression_continuation,
     prune_session_from_index,
     agent_session_rows_existing,
     agent_session_zero_message_sids,
@@ -17722,6 +17722,87 @@ def handle_post(handler, parsed) -> bool:
             state_db_path = _active_state_db_path()
             request_profile = _get_active_profile_name()
 
+            def _local_lineage_row(payload):
+                source = payload.get("raw_source") or payload.get("source_tag")
+                is_snapshot = bool(payload.get("pre_compression_snapshot"))
+                return {
+                    "id": payload.get("session_id"),
+                    "parent_session_id": payload.get("parent_session_id"),
+                    "end_reason": payload.get("end_reason") or ("compression" if is_snapshot else None),
+                    "started_at": payload.get("started_at", payload.get("created_at")),
+                    "ended_at": payload.get("ended_at", payload.get("updated_at") if is_snapshot else None),
+                    "source": source,
+                    "session_source": payload.get("session_source"),
+                    "model_config": payload.get("model_config"),
+                }
+
+            def _explicit_independent_child(row, parent_id):
+                if str(row.get("session_source") or "").strip().lower() == "fork":
+                    return True
+                raw_config = row.get("model_config")
+                if isinstance(raw_config, str):
+                    try:
+                        raw_config = json.loads(raw_config)
+                    except (TypeError, ValueError):
+                        raw_config = {}
+                config = raw_config if isinstance(raw_config, dict) else {}
+                return (
+                    config.get("_branched_from") == parent_id
+                    or config.get("_delegate_from") == parent_id
+                )
+
+            def _has_ambiguous_local_continuation(local_session):
+                session_dir = local_session.path.parent
+                try:
+                    target_payload = json.loads(local_session.path.read_bytes())
+                except (OSError, ValueError, TypeError):
+                    return True
+                if not isinstance(target_payload, dict):
+                    return True
+                target = _local_lineage_row(target_payload)
+                if target_payload.get("pre_compression_snapshot"):
+                    return True
+
+                parent_id = target.get("parent_session_id")
+                if parent_id:
+                    if not is_safe_session_id(str(parent_id)):
+                        return True
+                    parent_path = session_dir / f"{parent_id}.json"
+                    try:
+                        parent_payload = json.loads(parent_path.read_bytes())
+                    except FileNotFoundError:
+                        # Fork/branch/delegate provenance is self-authenticating;
+                        # an untyped parent link without its parent remains
+                        # indistinguishable from a missing compression segment.
+                        if not _explicit_independent_child(target, parent_id):
+                            return True
+                    except (OSError, ValueError, TypeError):
+                        return True
+                    else:
+                        if not isinstance(parent_payload, dict):
+                            return True
+                        if _is_continuation_session(
+                            _local_lineage_row(parent_payload),
+                            target,
+                        ):
+                            return True
+
+                for child_path in session_dir.glob("*.json"):
+                    if child_path.name.startswith("_") or child_path == local_session.path:
+                        continue
+                    try:
+                        child_payload = json.loads(child_path.read_bytes())
+                    except (OSError, ValueError, TypeError):
+                        continue
+                    if not isinstance(child_payload, dict):
+                        continue
+                    child = _local_lineage_row(child_payload)
+                    if child.get("parent_session_id") != sid:
+                        continue
+                    if _is_continuation_session(target, child):
+                        return True
+                return False
+
             def resolve_archive_scope():
                 resolution = read_session_lineage_ids(
                     state_db_path,
@@ -17732,24 +17813,19 @@ def handle_post(handler, parsed) -> bool:
                     return list(resolution.session_ids)
                 if resolution.reason == "profile_mismatch":
                     raise KeyError(sid)
-                session = _get_or_materialize_session(sid, persist=False)
                 # The singleton compatibility path is only for a durable local
                 # sidecar, never for an in-memory CLI/state.db materialization.
-                local_session = Session.load(sid)
-                if local_session is None:
+                session = Session.load(sid)
+                if session is None:
                     raise KeyError(sid)
-                session = local_session
+                if getattr(session, "read_only", False):
+                    raise PermissionError("read-only imported session")
                 if not _session_visible_to_active_profile(
                     getattr(session, "profile", None),
                     handler,
                 ):
                     raise KeyError(sid)
-                has_local_ancestry = bool(
-                    getattr(session, "pre_compression_snapshot", False)
-                    or getattr(session, "parent_session_id", None)
-                    or _has_compression_continuation(session)
-                )
-                if has_local_ancestry:
+                if _has_ambiguous_local_continuation(session):
                     raise RuntimeError("Session lineage authority is incomplete")
                 return [sid]
 
@@ -17762,44 +17838,55 @@ def handle_post(handler, parsed) -> bool:
             except RuntimeError as exc:
                 return bad(handler, str(exc), 409)
             archived = bool(body.get("archived", True))
-            # Hold every target lock in a stable order, then resolve again under
-            # those locks.  If compression added or moved a segment between the
-            # first resolution and lock acquisition, retry instead of mutating a
-            # stale set.  The bounded retry also avoids deadlocking by trying to
-            # acquire a newly discovered lock while holding the old set.
+            # Hold every target lock in a stable order, then resolve, materialize,
+            # and publish while owning the cross-process store authority. The
+            # store lock is same-thread reentrant, so the batch commit can retain
+            # its own fail-closed boundary without reopening a stale-write gap.
+            import api.models as session_models
+
             for _attempt in range(3):
                 with ExitStack() as locks:
                     for lineage_sid in sorted(lineage_ids):
                         locks.enter_context(_get_session_agent_lock(lineage_sid))
-                    try:
-                        current_ids = resolve_archive_scope()
-                    except KeyError:
-                        return bad(handler, "Session lineage not found", 404)
-                    except PermissionError as exc:
-                        return bad(handler, str(exc), 400)
-                    except RuntimeError as exc:
-                        return bad(handler, str(exc), 409)
-                    if set(current_ids) != set(lineage_ids):
-                        lineage_ids = current_ids
-                        continue
-                    sessions = []
-                    try:
-                        for lineage_sid in lineage_ids:
-                            if _session_is_subagent_view_only(lineage_sid):
-                                raise PermissionError("Subagent sessions are view-only")
-                            # Missing CLI sidecars must be staged with the rest
-                            # of the lineage, not published during prevalidation.
-                            session = _get_or_materialize_session(lineage_sid, persist=False)
-                            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
-                                raise PermissionError("Session not found")
-                            sessions.append(session)
-                    except (KeyError, PermissionError) as exc:
-                        return bad(handler, str(exc), 400)
-                    try:
-                        commit_session_archive_batch(sessions, archived)
-                    except SessionBatchTransactionError as exc:
-                        return j(handler, exc.response(), status=503)
-                    break
+                    with session_store_transaction_lock(session_models.SESSION_DIR):
+                        try:
+                            current_ids = resolve_archive_scope()
+                        except KeyError:
+                            return bad(handler, "Session lineage not found", 404)
+                        except PermissionError as exc:
+                            return bad(handler, str(exc), 400)
+                        except RuntimeError as exc:
+                            return bad(handler, str(exc), 409)
+                        if set(current_ids) != set(lineage_ids):
+                            lineage_ids = current_ids
+                            continue
+                        sessions = []
+                        try:
+                            for lineage_sid in lineage_ids:
+                                if _session_is_subagent_view_only(lineage_sid):
+                                    raise PermissionError("Subagent sessions are view-only")
+                                # Reload durable local bytes while the store lock
+                                # is held; a cache entry may predate a sibling
+                                # process save. Missing CLI sidecars are staged
+                                # without publishing during prevalidation.
+                                session = Session.load(lineage_sid)
+                                if session is None:
+                                    session = _get_or_materialize_session(lineage_sid, persist=False)
+                                elif getattr(session, "read_only", False):
+                                    raise PermissionError("read-only imported session")
+                                else:
+                                    with LOCK:
+                                        SESSIONS[lineage_sid] = session
+                                if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                                    raise PermissionError("Session not found")
+                                sessions.append(session)
+                        except (KeyError, PermissionError) as exc:
+                            return bad(handler, str(exc), 400)
+                        try:
+                            commit_session_archive_batch(sessions, archived)
+                        except SessionBatchTransactionError as exc:
+                            return j(handler, exc.response(), status=503)
+                        break
             else:
                 return bad(handler, "Session lineage changed during archive; retry", 409)
             publish_session_list_changed("session_archive", profile=getattr(sessions[0], "profile", None), session_id=sid)

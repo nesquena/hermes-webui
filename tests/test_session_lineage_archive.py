@@ -205,7 +205,7 @@ def _write_lineage_test_db(path, schema):
     conn.close()
 
 
-def _call_lineage_archive_route(monkeypatch, db, *, archived):
+def _call_lineage_archive_route(monkeypatch, db, *, archived, session_id="local-singleton"):
     import api.routes as routes
 
     captured = {}
@@ -214,7 +214,7 @@ def _call_lineage_archive_route(monkeypatch, db, *, archived):
         routes,
         "read_body",
         lambda _handler: {
-            "session_id": "local-singleton",
+            "session_id": session_id,
             "archived": archived,
             "lineage": True,
         },
@@ -320,6 +320,166 @@ def test_lineage_route_does_not_singleton_fallback_for_local_ancestry(
     )["archived"] is False
 
 
+@pytest.mark.parametrize("archived", [True, False], ids=["archive", "restore"])
+@pytest.mark.parametrize("target", ["fork", "parent"], ids=["fork", "fork-parent"])
+def test_lineage_route_keeps_local_webui_forks_independent_without_agent_rows(
+    lineage_session_store,
+    monkeypatch,
+    archived,
+    target,
+):
+    """Fork provenance is not compression lineage for either endpoint direction."""
+    from api.models import Session
+
+    parent = Session(
+        session_id="local-parent",
+        title="Parent",
+        workspace="",
+        model="test-model",
+        profile="default",
+        messages=[{"role": "user", "content": "parent"}],
+    )
+    fork = Session(
+        session_id="local-fork",
+        title="Fork",
+        workspace="",
+        model="test-model",
+        profile="default",
+        parent_session_id=parent.session_id,
+        session_source="fork",
+        messages=[{"role": "user", "content": "fork"}],
+    )
+    for session in (parent, fork):
+        session.archived = not archived
+        session.save(touch_updated_at=False)
+    db = lineage_session_store.parent / "complete-empty.db"
+    _write_lineage_test_db(db, "complete-empty")
+    target_id = fork.session_id if target == "fork" else parent.session_id
+    related_id = parent.session_id if target == "fork" else fork.session_id
+
+    captured = _call_lineage_archive_route(
+        monkeypatch,
+        db,
+        archived=archived,
+        session_id=target_id,
+    )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["session_ids"] == [target_id]
+    target_sidecar = json.loads(
+        (lineage_session_store / f"{target_id}.json").read_text(encoding="utf-8")
+    )
+    related_sidecar = json.loads(
+        (lineage_session_store / f"{related_id}.json").read_text(encoding="utf-8")
+    )
+    assert target_sidecar["archived"] is archived
+    assert related_sidecar["archived"] is (not archived)
+
+
+@pytest.mark.parametrize("relation", ["branch", "delegate", "unrelated", "cross-surface"])
+def test_lineage_route_ignores_noncontinuation_local_children(
+    lineage_session_store,
+    monkeypatch,
+    relation,
+):
+    """Only canonical continuation children make singleton scope ambiguous."""
+    from api.models import Session
+
+    parent = Session(
+        session_id="local-parent",
+        title="Parent",
+        workspace="",
+        model="test-model",
+        profile="default",
+        messages=[{"role": "user", "content": "parent"}],
+    )
+    child = Session(
+        session_id="local-child",
+        title="Child",
+        workspace="",
+        model="test-model",
+        profile="default",
+        parent_session_id=parent.session_id,
+        messages=[{"role": "user", "content": "child"}],
+    )
+    if relation == "cross-surface":
+        parent.raw_source = "cli"
+        child.raw_source = "webui"
+        parent.pre_compression_snapshot = True
+    parent.save(touch_updated_at=False)
+    child.save(touch_updated_at=False)
+    child_path = lineage_session_store / "local-child.json"
+    child_payload = json.loads(child_path.read_text(encoding="utf-8"))
+    if relation == "branch":
+        child_payload["model_config"] = {"_branched_from": parent.session_id}
+    elif relation == "delegate":
+        child_payload["model_config"] = {"_delegate_from": parent.session_id}
+    child_path.write_text(json.dumps(child_payload), encoding="utf-8")
+    target_id = child.session_id if relation == "cross-surface" else parent.session_id
+    related_path = (
+        lineage_session_store / "local-parent.json"
+        if target_id == child.session_id
+        else child_path
+    )
+    related_before = related_path.read_bytes()
+    db = lineage_session_store.parent / "complete-empty.db"
+    _write_lineage_test_db(db, "complete-empty")
+
+    captured = _call_lineage_archive_route(
+        monkeypatch,
+        db,
+        archived=True,
+        session_id=target_id,
+    )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["session_ids"] == [target_id]
+    assert json.loads((lineage_session_store / f"{target_id}.json").read_text())["archived"] is True
+    assert related_path.read_bytes() == related_before
+
+
+def test_lineage_route_rejects_true_local_compression_without_agent_authority(
+    lineage_session_store,
+    monkeypatch,
+):
+    """A real compression handoff remains fail-closed when state.db is absent."""
+    from api.models import Session
+
+    parent = Session(
+        session_id="compression-parent",
+        title="Parent",
+        workspace="",
+        model="test-model",
+        profile="default",
+        pre_compression_snapshot=True,
+        messages=[{"role": "user", "content": "parent"}],
+    )
+    child = Session(
+        session_id="compression-child",
+        title="Child",
+        workspace="",
+        model="test-model",
+        profile="default",
+        parent_session_id=parent.session_id,
+        messages=[{"role": "user", "content": "child"}],
+    )
+    parent.save(touch_updated_at=False)
+    child.save(touch_updated_at=False)
+    before = _durable_images(lineage_session_store)
+    db = lineage_session_store.parent / "complete-empty.db"
+    _write_lineage_test_db(db, "complete-empty")
+
+    captured = _call_lineage_archive_route(
+        monkeypatch,
+        db,
+        archived=True,
+        session_id=child.session_id,
+    )
+
+    assert captured["status"] == 409
+    assert _durable_images(lineage_session_store) == before
+
+
 @pytest.mark.parametrize("case", ["foreign", "read-only"])
 def test_lineage_route_does_not_singleton_fallback_for_foreign_or_read_only_target(
     lineage_session_store,
@@ -395,6 +555,125 @@ def test_lineage_route_does_not_singleton_fallback_for_agent_only_materializatio
 
     assert captured["status"] == 404
     assert not (lineage_session_store / "local-singleton.json").exists()
+
+
+def test_lineage_route_serializes_materialization_with_cross_process_publication(
+    lineage_session_store,
+    monkeypatch,
+):
+    """A sibling writer cannot land newer bytes between final load and archive."""
+    import api.routes as routes
+    from api.models import Session
+
+    session = Session(
+        session_id="local-singleton",
+        title="Local singleton",
+        workspace="",
+        model="test-model",
+        profile="default",
+        messages=[{"role": "user", "content": "original"}],
+    )
+    session.save(touch_updated_at=False)
+    db = lineage_session_store.parent / "complete-empty.db"
+    _write_lineage_test_db(db, "complete-empty")
+
+    materialized = threading.Event()
+    resume_publication = threading.Event()
+    original_commit = routes.commit_session_archive_batch
+
+    def pause_after_materialization(sessions, archived):
+        materialized.set()
+        assert resume_publication.wait(10), "test did not release archive publication"
+        return original_commit(sessions, archived)
+
+    monkeypatch.setattr(routes, "commit_session_archive_batch", pause_after_materialization)
+    captured = {}
+
+    def archive():
+        captured.update(_call_lineage_archive_route(monkeypatch, db, archived=True))
+
+    archive_thread = threading.Thread(target=archive)
+    archive_thread.start()
+    assert materialized.wait(5), "archive did not reach the post-materialization barrier"
+
+    child_script = """
+import fcntl
+import os
+import sys
+from pathlib import Path
+import api.models as models
+from api.models import Session
+from api.session_batch_transaction import _STORE_LOCK_NAME, session_store_transaction_lock
+
+session_dir = Path(sys.argv[1])
+models.SESSION_DIR = session_dir
+models.SESSION_INDEX_FILE = session_dir / "_index.json"
+fd = os.open(session_dir / _STORE_LOCK_NAME, os.O_CREAT | os.O_RDWR, 0o600)
+try:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        state = "blocked"
+    else:
+        state = "available"
+        fcntl.flock(fd, fcntl.LOCK_UN)
+finally:
+    os.close(fd)
+print(state, flush=True)
+sys.stdin.readline()
+with session_store_transaction_lock(session_dir):
+    session = Session.load("local-singleton")
+    session.messages.append({"role": "assistant", "content": "newer child write"})
+    session.project_id = "newer-project"
+    session.save(touch_updated_at=False)
+print("wrote", flush=True)
+"""
+    child_env = os.environ.copy()
+    child_env["HERMES_HOME"] = str(lineage_session_store.parent / "child-hermes-home")
+    child_env["HERMES_WEBUI_STATE_DIR"] = str(lineage_session_store.parent / "child-webui-state")
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_script, str(lineage_session_store)],
+        cwd=ROOT,
+        env=child_env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None
+    assert child.stdin is not None
+    lock_state = child.stdout.readline().strip()
+    assert lock_state in {"available", "blocked"}
+
+    if lock_state == "available":
+        # Pre-fix schedule: the child lands newer bytes while the stale route
+        # object is paused immediately before publication.
+        child.stdin.write("write\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "wrote"
+        resume_publication.set()
+    else:
+        # Fixed schedule: route resolution/materialization already owns the real
+        # cross-process lock. Publish first; the child then extends that state.
+        resume_publication.set()
+        archive_thread.join(timeout=10)
+        child.stdin.write("write\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "wrote"
+
+    archive_thread.join(timeout=10)
+    child.stdin.close()
+    child_stderr = child.stderr.read() if child.stderr is not None else ""
+    child_rc = child.wait(timeout=5)
+    assert child_rc == 0, child_stderr
+    assert not archive_thread.is_alive()
+    assert captured["status"] == 200
+    persisted = json.loads(
+        (lineage_session_store / "local-singleton.json").read_text(encoding="utf-8")
+    )
+    assert persisted["archived"] is True
+    assert persisted["project_id"] == "newer-project"
+    assert persisted["messages"][-1]["content"] == "newer child write"
 
 
 def _duplicate_partial_messages(label):
