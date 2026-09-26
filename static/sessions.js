@@ -3647,6 +3647,12 @@ function _captureSameSessionForceReloadHint(sid){
     loaded_renderable_count:loadedRenderableCount,
     loaded_message_count:loadedMessageCount,
     message_count:knownMessageCount,
+    // Retained as captured state (and asserted by the frontend contract test),
+    // but no longer a decision switch: _messageReloadLimitForSession() used to
+    // short-circuit to a full-transcript reload when this was false, which made
+    // every fully-loaded conversation refetch its whole transcript on a
+    // return-from-background refresh. Width is now derived from the loaded
+    // counts alone.
     truncated:!!_messagesTruncated,
   };
 }
@@ -3662,11 +3668,23 @@ function _messageReloadLimitForSession(sid){
     const loadedRenderableCount=Math.max(0,Number(hint.loaded_renderable_count)||0);
     const loadedMessageCount=Math.max(0,Number(hint.loaded_message_count)||0);
     if(loadedRenderableCount>0 || loadedMessageCount>0){
-      if(!hint.truncated) return null;
       const previousMessageCount=Math.max(0,Number(hint.message_count)||0);
       const currentMessageCount=Math.max(0,Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0);
       const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
-      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+      // Width that preserves everything currently on screen plus whatever was
+      // appended while we were away. `loadedMessageCount+appendedMessageCount`
+      // covers the untruncated case too: the whole conversation is loaded, so
+      // the tail window simply widens by the new rows.
+      const desired=Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+      // Anti-shrink invariant (#6154): a bounded request is safe only when the
+      // entire loaded-plus-appended window fits under the server ceiling. If
+      // `desired` exceeds it, the backend would clamp to the latest rows and the
+      // wholesale replacement below would silently drop already-loaded older
+      // rows. Keep the bare full-transcript fallback in that case; the ordinary
+      // return-from-background path stays bounded whenever its whole window fits.
+      const ceiling=Math.max(0,Number(_msgLimitMax)||0);
+      if(ceiling>0 && desired>ceiling) return null;
+      return desired;
     }
   }
   return _INITIAL_MSG_LIMIT;
@@ -3723,26 +3741,60 @@ async function _ensureMessagesLoaded(sid, opts) {
     return;
   }
   // Fetch session messages with a tail window for fast initial load.
+  // _messageReloadLimitForSession() owns the ceiling decision (bound only when
+  // the entire desired window fits, null otherwise) — see the anti-shrink note
+  // there. This caller only rejects a nonsensical width.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
+  const boundedReloadLimit = (reloadLimit && reloadLimit > 0) ? reloadLimit : null;
   const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  // Paginated responses shorten large hidden tool rows, even when the window
+  // includes every visible row. Retry only when the clipped row is the same
+  // tool result that this same-session refresh already held in full.
+  const reloadHint=_sameSessionForceReloadHint;
+  const previousMessages=(Array.isArray(_pendingCarryForwardSnapshot)&&_pendingCarryForwardSnapshot.length)
+    ? _pendingCarryForwardSnapshot : (S.messages||[]);
+  const toolRowIdentity=(m)=>String(m&&(m.tool_call_id||m.tool_use_id||m.call_id||m.tid||m.id||m.row_id||'')||'').trim();
+  const previousFullToolRowsById=new Map();
+  if(boundedReloadLimit && reloadHint && reloadHint.session_id===sid){
+    for(const m of previousMessages){
+      if(!m||m.role!=='tool'||m._content_truncated) continue;
+      const id=toolRowIdentity(m);
+      if(!id) continue;
+      // Duplicate explicit identities are ambiguous, so neither may authorize
+      // an unbounded retry or overwrite the bounded response.
+      previousFullToolRowsById.set(id,previousFullToolRowsById.has(id)?null:m);
+    }
+  }
+  const previousFullToolRow=(m)=>m&&m.role==='tool'&&m._content_truncated
+    ? previousFullToolRowsById.get(toolRowIdentity(m)) : null;
+  const sessionUrl=`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
   let data;
   try {
-    data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
-      {timeoutMs:120000}
-    );
+    data = await api(`${sessionUrl}${reloadLimitParam}${expandParam}`, {timeoutMs:120000});
+    if(_ownsLoad() && data && data.session && Array.isArray(data.session.messages)
+      && data.session.messages.some(previousFullToolRow)){
+      // The bare retry is an optional fidelity upgrade. If it fails, the
+      // bounded response remains usable and its matching tool rows are restored
+      // from the complete copies already held by the browser.
+      try {
+        const fullData=await api(sessionUrl, {timeoutMs:120000});
+        if(fullData&&fullData.session&&Array.isArray(fullData.session.messages)) data=fullData;
+      } catch(_) {}
+      if(data&&data.session&&Array.isArray(data.session.messages)){
+        data={...data,session:{...data.session,messages:data.session.messages.map(m=>{
+          const previous=previousFullToolRow(m);
+          if(!previous) return m;
+          const restored={...m,content:previous.content};
+          delete restored._content_truncated;
+          delete restored._content_original_chars;
+          return restored;
+        })}};
+      }
+    }
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
