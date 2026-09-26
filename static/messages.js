@@ -7389,10 +7389,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
 }
 
-function transcript(){
-  const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
-    `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
-  for(const m of S.messages){
+function transcript(session=S.session, messages=S.messages){
+  const lines=[`# Hermes session ${session?.session_id||''}`,``,
+    `Workspace: ${session?.workspace||''}`,`Model: ${session?.model||''}`,``];
+  for(const m of messages){
     if(!m||m.role==='tool')continue;
     let c=m.content||'';
     if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('\n');
