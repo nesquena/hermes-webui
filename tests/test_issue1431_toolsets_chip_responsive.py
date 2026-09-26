@@ -235,11 +235,22 @@ class TestToolsetsDropdownResizeGuard:
         )
         assert m, "toggleToolsetsDropdown function must exist"
         body = m.group(0)
-        # Currently the only invoker is the chip's own onclick (so this is
-        # latent), but defensive guard is needed because the function is in
-        # global scope and could be called by future #1431 redesign code.
-        assert "offsetParent" in body, (
-            "toggleToolsetsDropdown must check chip.offsetParent === null "
-            "before opening — function is global and could be invoked when "
-            "the chip is hidden by responsive CSS"
+        # This guard anticipated "future #1431 redesign code" invoking the
+        # toggle — and the redesign did: it added a second entry point, the
+        # mobile config panel action, which is the ONLY live entry point in
+        # .cf-burger while the chip is hidden there by design. So the guard is
+        # generalised from "the chip is hidden" to "no entry point is rendered",
+        # and it lives in _activeToolsetsTrigger(), which checks both. The
+        # intent is unchanged: never open without a visible anchor.
+        # Behavioural proof: test_7437 ... test_does_not_open_when_no_entry_point_is_rendered.
+        assert "_activeToolsetsTrigger()" in body and "if (!trigger) return;" in body, (
+            "toggleToolsetsDropdown must refuse to open when no entry point is "
+            "rendered — function is global and can be invoked while every "
+            "trigger is hidden by responsive CSS"
+        )
+        trig = re.search(r"function _activeToolsetsTrigger\(\)\s*\{.*?\n\}", js, re.DOTALL)
+        assert trig, "_activeToolsetsTrigger must exist"
+        assert trig.group(0).count("offsetParent") >= 2, (
+            "_activeToolsetsTrigger must check visibility of BOTH the chip and "
+            "the mobile panel action"
         )
