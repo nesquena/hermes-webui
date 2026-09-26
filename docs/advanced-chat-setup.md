@@ -93,6 +93,16 @@ The WebUI's `auto_title_refresh_every` setting remains a separate control for
 periodic refreshes of already-generated titles; it does not re-enable
 automatic generation when the auxiliary flag is off.
 
+Title-generation LLM requests are schema-first: the WebUI asks the model for a
+strict `{"title": ...}` JSON object via the `response_format` parameter
+(mirroring the Hermes Agent's own title generator). The schema attempt sends
+only `response_format`, never a reasoning extension, so routes that accept
+structured output but reject nonstandard fields work on the first attempt.
+When a route rejects `response_format` (or answers empty/non-object), the
+WebUI falls back to the compatibility shape with reasoning disabled
+(`reasoning: {enabled: false}`) for routes that support it, keeping the
+provider whitelist out of the schema path.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
