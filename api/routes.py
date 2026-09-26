@@ -67,6 +67,49 @@ from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
 
+# Process-local ownership for WebUI slash commands whose durable transcript row
+# is marked pending. The session transcript remains the durable source of truth;
+# this registry only distinguishes a command that is live in this process from
+# an orphaned pending marker recovered after a restart. Never hold this lock
+# while executing command handlers or acquiring a per-session lock.
+_WEBUI_COMMAND_RUNS_LOCK = threading.Lock()
+_WEBUI_COMMAND_RUNS: dict[tuple[str, str], str] = {}
+
+
+def _webui_command_run_is_active(
+    session_id: str,
+    command_id: str,
+    run_token: str | None = None,
+) -> bool:
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        active_token = _WEBUI_COMMAND_RUNS.get((session_id, command_id))
+        return bool(active_token and (run_token is None or active_token == run_token))
+
+
+def _register_webui_command_run(session_id: str, command_id: str) -> str | None:
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        key = (session_id, command_id)
+        if key in _WEBUI_COMMAND_RUNS:
+            return None
+        run_token = uuid.uuid4().hex
+        _WEBUI_COMMAND_RUNS[key] = run_token
+        return run_token
+
+
+def _unregister_webui_command_run(session_id: str, command_id: str, run_token: str) -> None:
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        key = (session_id, command_id)
+        if _WEBUI_COMMAND_RUNS.get(key) == run_token:
+            _WEBUI_COMMAND_RUNS.pop(key, None)
+
+
+def _invalidate_webui_command_runs(session_id: str) -> None:
+    """Revoke live command ownership after transcript deletion/truncation."""
+    with _WEBUI_COMMAND_RUNS_LOCK:
+        stale = [key for key in _WEBUI_COMMAND_RUNS if key[0] == session_id]
+        for key in stale:
+            _WEBUI_COMMAND_RUNS.pop(key, None)
+
 
 def _publish_session_list_changed(
     reason: str,
@@ -16431,6 +16474,9 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        requested_profile = str(body.get("profile") or "").strip() or None
+        if requested_profile and not _profiles_match(requested_profile, _get_active_profile_name()):
+            return bad(handler, "Draft owner profile is no longer active", 409)
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
@@ -16452,6 +16498,8 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(sid)
         except KeyError:
+            return bad(handler, "Session not found", 404)
+        if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
@@ -16629,6 +16677,18 @@ def handle_post(handler, parsed) -> bool:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+            # Keep CLI/state.db deletion in the same exclusion window as the
+            # sidecar removal. Otherwise a command can recover and save the
+            # session in the gap, resurrecting it after deletion.
+            state_db_cleanup_failed = False
+            if not is_messaging_session:
+                try:
+                    from api.models import delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except Exception:
+                    state_db_cleanup_failed = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -16674,17 +16734,6 @@ def handle_post(handler, parsed) -> bool:
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         return j(
             handler,
@@ -17250,24 +17299,204 @@ def handle_post(handler, parsed) -> bool:
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
+        sid = str(body.get("session_id", "") or "").strip()
+        command_id = str(body.get("command_id", "") or "").strip()
+        if sid and not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        if command_id and not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", command_id):
+            return bad(handler, "Invalid command_id", 400)
+        if bool(sid) != bool(command_id):
+            return bad(handler, "session_id and command_id must be provided together", 400)
 
-        try:
-            return j(handler, {"output": execute_agent_command(command)})
-        except KeyError:
-            pass
-        except ValueError as e:
-            return bad(handler, str(e), 400)
-        except RuntimeError as e:
-            return bad(handler, _sanitize_error(e), 500)
+        def _run_webui_command():
+            try:
+                return execute_agent_command(command)
+            except KeyError:
+                return execute_plugin_command(command)
 
+        if not sid:
+            try:
+                return j(handler, {"output": _run_webui_command()})
+            except ValueError as e:
+                return bad(handler, str(e), 400)
+            except KeyError:
+                return bad(handler, "Plugin command not found", 404)
+            except RuntimeError as e:
+                return bad(handler, _sanitize_error(e), 500)
+
+        # Persist and register the idempotency marker while holding the session
+        # lock. Command handlers themselves run OUTSIDE it: plugin/built-in
+        # commands may perform slow I/O or acquire this same non-reentrant lock.
+        # Finalization reacquires the lock and reconciles by command_id.
+        run_token = None
+        with _get_session_agent_lock(sid):
+            try:
+                session = get_session(sid)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
+            if getattr(session, "read_only", False) or getattr(session, "is_read_only", False):
+                return bad(handler, "Read-only sessions cannot run WebUI commands", 400)
+            if not isinstance(getattr(session, "messages", None), list):
+                session.messages = []
+            for message in list(session.messages):
+                if (isinstance(message, dict)
+                        and message.get("_webui_command_id") == command_id
+                        and message.get("role") == "assistant"):
+                    if message.get("_webui_command_pending"):
+                        if _webui_command_run_is_active(
+                            sid,
+                            command_id,
+                            message.get("_webui_command_run_token"),
+                        ):
+                            return bad(handler, "Command execution is already in progress", 409)
+                        # The marker survived but no live process owns it. We
+                        # cannot know whether the side effect ran before the
+                        # interruption, so settle visibly and NEVER repeat it.
+                        output = (
+                            "The previous command attempt was interrupted and may have run, "
+                            "but its final result was not saved. Hermes did not run it again; "
+                            "verify the effect before submitting a new command."
+                        )
+                        message["content"] = output
+                        message.pop("_webui_command_pending", None)
+                        message["_webui_command_interrupted"] = True
+                        message["_error"] = True
+                        try:
+                            session.save()
+                        except Exception:
+                            logger.exception("Could not settle interrupted WebUI command for session %s", sid)
+                            return bad(handler, "Could not recover interrupted command state", 503)
+                        return j(handler, {
+                            "output": output,
+                            "command_id": command_id,
+                            "recovered_interrupted": True,
+                        })
+                    return j(handler, {
+                        "output": str(message.get("content") or "(no output)"),
+                        "command_id": command_id,
+                    })
+            pending_ids = {
+                message.get("_webui_command_id")
+                for message in session.messages
+                if isinstance(message, dict)
+                and message.get("role") == "assistant"
+                and message.get("_webui_command_pending")
+                and message.get("_webui_command_id")
+            }
+            if any(
+                isinstance(message, dict)
+                and message.get("role") == "user"
+                and message.get("_webui_command_id") in pending_ids
+                and str(message.get("content") or "").strip() == command
+                for message in session.messages
+            ):
+                return bad(handler, "A matching command may already have run; refusing to run it again", 409)
+            now = time.time()
+            run_token = _register_webui_command_run(sid, command_id)
+            if not run_token:
+                return bad(handler, "Command execution is already in progress", 409)
+            user_message = {
+                "role": "user",
+                "content": command,
+                "_ts": now,
+                "_webui_command_id": command_id,
+            }
+            assistant_message = {
+                "role": "assistant",
+                "content": "Command started; its final result has not been saved yet.",
+                "_ts": now,
+                "_webui_command_id": command_id,
+                "_webui_command_pending": True,
+                "_webui_command_run_token": run_token,
+            }
+            session.messages.extend([user_message, assistant_message])
+            try:
+                # Persist the idempotency marker before any side effect. If this
+                # write fails, rollback the in-memory append and do not execute.
+                session.save()
+            except Exception:
+                del session.messages[-2:]
+                _unregister_webui_command_run(sid, command_id, run_token)
+                run_token = None
+                logger.exception("Could not persist WebUI command marker for session %s", sid)
+                return bad(handler, "Could not save command before execution", 503)
+
+        response_status = 200
+        response_detail = None
         try:
-            return j(handler, {"output": execute_plugin_command(command)})
-        except ValueError as e:
-            return bad(handler, str(e), 400)
-        except KeyError:
-            return bad(handler, "Plugin command not found", 404)
-        except RuntimeError as e:
-            return bad(handler, _sanitize_error(e), 500)
+            try:
+                output = str(_run_webui_command() or "(no output)")
+            except ValueError as e:
+                output = f"Command error: {e}"
+                response_status = 400
+                response_detail = str(e)
+            except KeyError:
+                output = "Command error: Plugin command not found"
+                response_status = 404
+                response_detail = "Plugin command not found"
+            except RuntimeError as e:
+                response_detail = _sanitize_error(e)
+                output = f"Command error: {response_detail}"
+                response_status = 500
+            except Exception:
+                logger.exception("Unexpected WebUI command failure for session %s", sid)
+                response_detail = "Command failed unexpectedly"
+                output = f"Command error: {response_detail}"
+                response_status = 500
+
+            persistence_warning = False
+            with _get_session_agent_lock(sid):
+                try:
+                    latest_session = get_session(sid)
+                except KeyError:
+                    latest_session = None
+                if latest_session is None or not _session_visible_to_active_profile(
+                        getattr(latest_session, "profile", None), handler):
+                    # The session may have been deleted while the unlocked
+                    # command was running. Never save the stale object and
+                    # recreate an orphaned session.
+                    persistence_warning = True
+                else:
+                    messages = getattr(latest_session, "messages", None)
+                    target = next((
+                        message for message in (messages if isinstance(messages, list) else [])
+                        if isinstance(message, dict)
+                        and message.get("role") == "assistant"
+                        and message.get("_webui_command_id") == command_id
+                        and message.get("_webui_command_run_token") == run_token
+                    ), None)
+                    if target is None:
+                        persistence_warning = True
+                    elif not target.get("_webui_command_pending"):
+                        # A terminal row already won reconciliation. Return its
+                        # authoritative content instead of appending a second row.
+                        output = str(target.get("content") or "(no output)")
+                    else:
+                        target["content"] = output
+                        target.pop("_webui_command_pending", None)
+                        if response_status != 200:
+                            target["_error"] = True
+                        try:
+                            latest_session.save()
+                        except Exception:
+                            # The durable marker prevents a same-id retry from
+                            # repeating a side effect. A restart can now settle
+                            # that marker as an interrupted terminal state.
+                            persistence_warning = True
+                            logger.exception("Could not persist WebUI command result for session %s", sid)
+
+            payload = {"output": output, "command_id": command_id}
+            if persistence_warning:
+                payload["persistence_warning"] = True
+            if response_status != 200:
+                payload["error"] = response_detail or "Command failed"
+                return j(handler, payload, status=response_status)
+            return j(handler, payload)
+        finally:
+            if run_token:
+                _unregister_webui_command_run(sid, command_id, run_token)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":

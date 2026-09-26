@@ -107,7 +107,10 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
     assert "const _loadGeneration = ++_loadSessionGeneration" in body, (
         "loadSession() must increment and capture per-call generation"
     )
-    assert "const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration" in body
+    normalized = _normalise_ws(body)
+    assert "const_isCurrentLoad=()=>_loadingSessionId===sid&&_loadSessionGeneration===_loadGeneration" in normalized, (
+        "loadSession() must reject stale session or generation continuations"
+    )
     assert "loadGeneration:_loadGeneration" in body, (
         "loadSession() must thread generation into _ensureMessagesLoaded()"
     )
@@ -288,6 +291,7 @@ function createEnvironment() {
   globalThis._syncCtxIndicator = () => {};
   globalThis._renderPendingPromptsForActiveSession = () => {};
   globalThis._restoreComposerDraft = () => {};
+  globalThis._restoreApprovalTransportFailureForSession = () => false;
   globalThis.renderSessionArtifacts = () => {};
   globalThis.renderMessages = () => {};
   globalThis._checkAndShowHandoffHint = () => {};

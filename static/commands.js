@@ -1,5 +1,5 @@
 const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','skills','memory',
   'moa','sessions','resume','pet'
 ]);
 // ── Slash commands ──────────────────────────────────────────────────────────
@@ -20,7 +20,22 @@ const COMMANDS=[
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
+  // subArgs lists canonical names only for the dropdown (discovery) -- deliberately
+  // excludes the apply/deny/drop aliases SKILLS_AGENT_SUBCOMMANDS accepts below, so the
+  // menu doesn't show three synonyms for "reject". Typing an alias still works either way.
+  // Each entry carries its own `desc` -- {value,desc} objects, not bare strings -- so
+  // the dropdown shows what THIS subcommand does instead of repeating cmd_skills' own
+  // description under all six (the bare-string form, still used by /goal and
+  // /reasoning below, has no per-option slot for that; see getSlashAutocompleteMatches).
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query',
+   subArgs:[
+     {value:'pending', desc:'List staged skill writes awaiting approval'},
+     {value:'approve', desc:'Apply a staged skill write by id'},
+     {value:'reject', desc:'Discard a staged skill write by id'},
+     {value:'diff', desc:'Show the diff for a staged skill write by id'},
+     {value:'approval', desc:'Turn the write-approval gate on or off'},
+     {value:'mode', desc:'Alias for approval on|off'},
+   ]},
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
@@ -42,6 +57,17 @@ const COMMANDS=[
 const SLASH_SUBARG_SOURCES={
   model:{desc:t('cmd_model'), subArgs:'models'},
   personality:{desc:t('cmd_personality'), subArgs:'personalities'},
+  // /memory has no local COMMANDS entry (unlike /skills) -- it's dispatched entirely via
+  // messages.js' generic _AGENT_COMMANDS_RUN_ON_WEBUI mechanism, so it needs its dropdown
+  // wired up here instead. No 'diff' -- memory entries are small enough to review inline
+  // (api/commands.py's _run_memory_write_approval_command has no diff subcommand either).
+  memory:{desc:t('cmd_memory'), subArgs:[
+    {value:'pending', desc:'List staged memory writes awaiting approval'},
+    {value:'approve', desc:'Apply a staged memory write by id'},
+    {value:'reject', desc:'Discard a staged memory write by id'},
+    {value:'approval', desc:'Turn the write-approval gate on or off'},
+    {value:'mode', desc:'Alias for approval on|off'},
+  ]},
 };
 
 function parseCommand(text){
@@ -499,11 +525,101 @@ async function executeAgentPluginCommand(text,_meta){
 async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
-  const data=await api('/api/commands/exec',{
-    method:'POST',
-    body:JSON.stringify({command})
-  });
-  return String(data&&data.output||'(no output)');
+  const ownerSid=S&&S.session&&S.session.session_id||null;
+  const ownerProfile=S&&S.activeProfile||'default';
+  const retryId=ownerSid&&typeof _approvalCommandRetryId==='function'
+    ? _approvalCommandRetryId(ownerProfile,ownerSid,command)
+    : null;
+  const commandId=ownerSid
+    ? (retryId||`webui-command-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`)
+    : null;
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command,session_id:ownerSid,...(commandId?{command_id:commandId}:{})})
+    });
+    const responseId=String(data&&data.command_id||commandId||'')||null;
+    let output=String(data&&data.output||'(no output)');
+    if(data&&data.persistence_warning){
+      output+=`\n\n⚠️ The command ran, but its final result could not be saved. Hermes will not run this command again automatically.`;
+    }
+    if(ownerSid&&responseId){
+      const tracksDraftClear=!!(_meta&&Object.prototype.hasOwnProperty.call(_meta,'draftClearPromise'));
+      let draftCleared=true;
+      if(tracksDraftClear){
+        try{draftCleared=(await Promise.resolve(_meta.draftClearPromise))!==false;}
+        catch(e){draftCleared=false;}
+      }
+      if(draftCleared&&typeof _clearApprovalCommandRetry==='function'){
+        _clearApprovalCommandRetry(ownerProfile,ownerSid,command,responseId);
+      }else if(!draftCleared&&typeof _rememberApprovalCommandRetry==='function'){
+        // The side effect succeeded but the submitted server draft still exists.
+        // Preserve its command id so a reload/resend reconciles the same durable
+        // transcript row instead of executing the command again.
+        _rememberApprovalCommandRetry({
+          profile:ownerProfile,sid:ownerSid,text:command,command_id:responseId,
+        });
+      }
+    }
+    return {
+      output,
+      command_id:responseId,
+      persistence_warning:!!(data&&data.persistence_warning),
+      recovered_interrupted:!!(data&&data.recovered_interrupted),
+    };
+  }catch(e){
+    // Preserve the identity even when api() throws for a timeout/non-2xx. A
+    // restored draft must retry the SAME server-owned transcript row.
+    if(e&&typeof e==='object'&&commandId)e.webuiCommandId=commandId;
+    throw e;
+  }
+}
+
+function _agentCommandResultOutput(result){
+  return String(result&&typeof result==='object'&&Object.prototype.hasOwnProperty.call(result,'output')
+    ? result.output
+    : (result||'(no output)'));
+}
+
+function _agentCommandResultId(result){
+  return String(result&&typeof result==='object'&&result.command_id||'')||null;
+}
+
+async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){
+  const commandId=_agentCommandResultId(result);
+  if(!ownerSid||!commandId||typeof loadSession!=='function')return false;
+  const activeProfile=(S&&S.activeProfile)||'default';
+  const profileMatches=typeof _profileMatchesActiveProfile!=='function'
+    ||_profileMatchesActiveProfile(ownerProfile,activeProfile);
+  const sessionMatches=!(S&&S.session&&S.session.session_id)
+    ||S.session.session_id===ownerSid;
+  if(!profileMatches||!sessionMatches){
+    if(typeof showToast==='function')showToast(
+      'Command output was saved in the original conversation. Switch back to see it.',
+      4000,'warning'
+    );
+    return false;
+  }
+  // The endpoint is explicitly telling us that the returned output is not a
+  // durable terminal transcript row. Keep the returned warning visible rather
+  // than hiding it behind an otherwise successful reload.
+  if(result&&result.persistence_warning)return false;
+  try{
+    // The server transcript owns both rows. Reload it rather than appending a
+    // second browser-owned assistant result beside a pending/final server row.
+    await loadSession(ownerSid,{force:true,preserveActiveInput:true,commandReconcileId:commandId});
+    return !!(S&&Array.isArray(S.messages)&&S.messages.some((message)=>
+      message&&message.role==='assistant'
+      &&String(message._webui_command_id||'')===commandId
+      &&!message._webui_command_pending
+    ));
+  }catch(e){
+    if(typeof showToast==='function')showToast(
+      'Command output was saved, but this conversation could not refresh. Reopen it to see the result.',
+      4000,'warning'
+    );
+    return false;
+  }
 }
 
 async function resolveBundleCommand(text,_meta){
@@ -558,15 +674,21 @@ async function getSlashAutocompleteMatches(text){
   if(!parsed) return [];
   if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
   const options=await _getSlashSubArgOptions(parsed.command.subArgs);
+  // Each option is either a bare string (/goal, /reasoning -- no per-option desc slot,
+  // falls back to the parent command's own desc as before) or a {value,desc} object
+  // (/skills -- shows what that specific subcommand does).
   return options
-    .filter(opt=>String(opt).toLowerCase().startsWith(parsed.query))
-    .map(opt=>({
-      name:parsed.command.name,
-      value:String(opt),
-      desc:parsed.command.desc,
-      source:'subarg',
-      parent:parsed.command.name,
-    }));
+    .filter(opt=>String((opt&&typeof opt==='object')?opt.value:opt).toLowerCase().startsWith(parsed.query))
+    .map(opt=>{
+      const isRich=opt&&typeof opt==='object';
+      return {
+        name:parsed.command.name,
+        value:String(isRich?opt.value:opt),
+        desc:(isRich&&opt.desc)?opt.desc:parsed.command.desc,
+        source:'subarg',
+        parent:parsed.command.name,
+      };
+    });
 }
 
 function _findComposerPathToken(text,cursor){
@@ -1175,15 +1297,104 @@ async function cmdTheme(args){
 }
 
 // Subcommands owned by the agent's own /skills write-approval handler
-// (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
-// fall through to the normal send path rather than be swallowed by the local search below.
+// (hermes_cli/write_approval_commands.py, dispatched here via /api/commands/exec ->
+// api/commands.py:_run_skills_write_approval_command). A plain `return false` fallthrough
+// does NOT reach that handler in a native WebUI session -- /api/chat/start hands the raw
+// text straight to AIAgent.run_conversation as a normal message (api/streaming.py), with
+// no slash-command interception; gateway/slash_commands.py and the interactive CLI's own
+// dispatch (hermes_cli/cli_commands_mixin.py) only run for their own session kinds. So
+// these subcommands are dispatched explicitly here, the same way /reload-skills and the
+// other _AGENT_COMMANDS_RUN_ON_WEBUI commands already are (see messages.js).
 // Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
-// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+// Keep in sync with handle_pending_subcommand() and api/commands.py's
+// _SKILLS_WRITE_APPROVAL_SUBCOMMANDS — a missing alias is silently swallowed here.
 const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
+
+// _steerOwnerIsCurrent(null) is always false -- correct for steer (a steer reply always needs
+// a real active session/stream) but wrong here: a null ownerSid means there was no session to
+// begin with (e.g. right after deleting the last one), so there is nothing to have "switched
+// away from". Only a session that existed and then changed should discard the response.
+function _skillsResponseOwnerStillValid(ownerSid, ownerProfile){
+  if(ownerSid && !_steerOwnerIsCurrent(ownerSid)) return false;
+  if(ownerProfile && typeof _profileMatchesActiveProfile==='function'){
+    return _profileMatchesActiveProfile(ownerProfile,S.activeProfile||'default');
+  }
+  return true;
+}
 
 function cmdSkills(args){
   const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
-  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)) return false;
+  // Capture the complete owner before either branch awaits anything.
+  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  const ownerProfile=(typeof S!=='undefined'&&S.activeProfile)||'default';
+  const ownerMutationGeneration=typeof _approvalCommandMutationGeneration==='function'
+    ? _approvalCommandMutationGeneration(ownerProfile,ownerSid)
+    : 0;
+  const ownerLifecycleStillValid=()=>_skillsResponseOwnerStillValid(ownerSid,ownerProfile)
+    &&(typeof _approvalCommandMutationGeneration!=='function'
+      ||_approvalCommandMutationGeneration(ownerProfile,ownerSid)===ownerMutationGeneration);
+  const commandText='/skills '+(args||'');
+  const composer=(typeof $==='function'&&$('msg'))||(typeof document!=='undefined'&&document.getElementById('msg'));
+  const draftText=composer?String(composer.value||''):commandText;
+  const draftFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  // Clear the originating session's persisted draft before either async branch;
+  // a debounced save must not resurrect this already-submitted slash command.
+  const draftClearPromise=ownerSid&&typeof _clearComposerDraft==='function'
+    ? _clearComposerDraft(ownerSid,draftText,draftFiles,ownerProfile)
+    : Promise.resolve(true);
+  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)){
+    (async()=>{
+      let result=null, failure=null;
+      try{
+        result = await _runAgentCommandTransport(commandText,{draftClearPromise});
+      }catch(e){
+        failure=e;
+      }
+      const commandId=(typeof _agentCommandResultId==='function'
+        ? _agentCommandResultId(result)
+        : String(result&&result.command_id||''))||(failure&&failure.webuiCommandId)||null;
+      const out=failure
+        ? `Skill write-approval command failed: ${failure&&failure.message||failure}`
+        : (typeof _agentCommandResultOutput==='function'
+          ? _agentCommandResultOutput(result)
+          : String(result&&result.output||result||'(no output)'));
+      let failedDraftKept=false;
+      if(failure&&typeof _stashApprovalTransportFailure==='function'){
+        failedDraftKept=!!_stashApprovalTransportFailure(
+          ownerProfile,ownerSid,draftText,draftFiles,commandId
+        );
+      }
+      if(!ownerLifecycleStillValid()){
+        if(typeof showToast==='function') showToast(failure
+          ? (failedDraftKept
+            ? 'Command could not finish after you switched conversations; its draft was kept for the originating session.'
+            : 'Command could not finish after you switched conversations; reopen the original conversation and try again.')
+          : 'Command completed after you switched conversations; its output was saved in the originating session.',4000,'warning');
+        return;
+      }
+      if(ownerSid&&commandId){
+        const reconciled=await _reconcileAgentCommandTranscript(
+          ownerProfile,ownerSid,result||{command_id:commandId,output:out}
+        );
+        if(!ownerLifecycleStillValid()){
+          if(typeof showToast==='function')showToast(
+            'Command finished while you switched conversations; reopen the original conversation to see its result.',
+            4000,'warning'
+          );
+          return;
+        }
+        if(reconciled)return;
+      }
+      if(failure&&typeof _restoreApprovalCommandDraft==='function'){
+        await Promise.resolve(draftClearPromise).catch(()=>{});
+        if(!ownerLifecycleStillValid())return;
+        _restoreApprovalCommandDraft(ownerProfile,ownerSid,draftText,draftFiles);
+      }
+      S.messages.push({role:'assistant', content:String(out||'(no output)'), _ts:Date.now()/1000});
+      renderMessages();
+    })();
+    return true;
+  }
   (async()=>{
     try{
       const data = await api('/api/skills');
@@ -1195,6 +1406,10 @@ function cmdSkills(args){
           (s.description||'').toLowerCase().includes(q) ||
           (s.category||'').toLowerCase().includes(q)
         );
+      }
+      if(!ownerLifecycleStillValid()){
+        if(typeof showToast==='function') showToast('Skills finished loading after you switched conversations; reopen the command if needed.',4000,'warning');
+        return;
       }
       if(!skills.length){
         const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
@@ -1223,6 +1438,11 @@ function cmdSkills(args){
       renderMessages();
       showToast(t('type_slash'));
     }catch(e){
+      if(!ownerLifecycleStillValid()){
+        if(typeof showToast==='function') showToast('Skills failed to load after you switched conversations.',4000,'warning');
+        return;
+      }
+      if(typeof _restoreApprovalCommandDraft==='function') _restoreApprovalCommandDraft(ownerProfile,ownerSid,draftText,draftFiles);
       showToast('Failed to load skills: '+e.message);
     }
   })();

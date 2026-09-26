@@ -1190,6 +1190,1360 @@ def test_skills_slash_command_defined():
         "HANDLERS.skills registration missing from commands.js"
 
 
+def test_skills_dropdown_options_have_distinct_per_option_descriptions():
+    """/skills' dropdown must surface the write-approval subcommands (pending,
+    approve, reject, diff, approval, mode) the same way /goal and /reasoning
+    surface their own static subArgs -- otherwise they're only usable by typing
+    them from memory, with no discovery path in the chat box's autocomplete.
+
+    It must ALSO show what each subcommand actually does, not the same generic
+    /skills description six times over -- the pre-existing bug every other
+    static-subArgs command (e.g. /goal) still has, deliberately left alone here
+    as separate, larger follow-up work (fixing it for all of them touches the
+    shared getSlashAutocompleteMatches() dispatch, not just this one command).
+
+    Real execution via node, not a source-string check: proves the actual
+    getSlashAutocompleteMatches() output, and that /goal's existing behavior
+    (all its options sharing the parent desc) is unchanged.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    skills_entry = _js_block(src, "{name:'skills',", "\n  {name:'use',")
+    goal_entry = _js_block(src, "{name:'goal',", "\n  {name:'queue',")
+    get_options_fn = _js_block(src, "function _getSlashSubArgOptions(spec){", "\nfunction _activeSlashCommandOffset")
+    offset_fn = _js_block(src, "function _activeSlashCommandOffset(text){", "\nfunction _parseSlashAutocomplete")
+    parse_fn = _js_block(src, "function _parseSlashAutocomplete(text){", "\nasync function getSlashAutocompleteMatches")
+    autocomplete_fn = _js_block(src, "async function getSlashAutocompleteMatches(text){", "\nfunction _findComposerPathToken")
+
+    harness = textwrap.dedent(
+        """
+        function t(k){ return k; }
+        function getMatchingCommands(){ return []; }
+        function cmdSkills(){}
+        function cmdGoal(){}
+        const COMMANDS = [
+          %(skills_entry)s
+          %(goal_entry)s
+        ];
+
+        %(offset_fn)s
+        %(parse_fn)s
+        %(get_options_fn)s
+        %(autocomplete_fn)s
+
+        (async () => {
+          const skillsMatches = await getSlashAutocompleteMatches('/skills ');
+          const goalMatches = await getSlashAutocompleteMatches('/goal ');
+
+          const skillsDescByValue = Object.fromEntries(skillsMatches.map(m => [m.value, m.desc]));
+          const skillsDescSet = new Set(skillsMatches.map(m => m.desc));
+          const goalDescSet = new Set(goalMatches.map(m => m.desc));
+
+          console.log(JSON.stringify({
+            skillsCount: skillsMatches.length,
+            skillsAllDistinct: skillsDescSet.size === skillsMatches.length,
+            skillsPendingDesc: skillsDescByValue['pending'] || null,
+            skillsApproveDesc: skillsDescByValue['approve'] || null,
+            skillsDescEqualsParent: skillsMatches.some(m => m.desc === 'cmd_skills'),
+            goalCount: goalMatches.length,
+            goalAllShareParentDesc: goalDescSet.size === 1 && goalMatches[0].desc === 'cmd_goal',
+          }));
+        })();
+        """
+    ) % {
+        "skills_entry": skills_entry,
+        "goal_entry": goal_entry,
+        "offset_fn": offset_fn,
+        "parse_fn": parse_fn,
+        "get_options_fn": get_options_fn,
+        "autocomplete_fn": autocomplete_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["skillsCount"] == 6, "/skills must offer all six write-approval subcommands"
+    assert out["skillsAllDistinct"] is True, \
+        "each /skills subcommand must show its OWN description, not a repeated generic one"
+    assert out["skillsDescEqualsParent"] is False, \
+        "/skills options must not fall back to the parent command's own description"
+    assert out["skillsPendingDesc"] and out["skillsPendingDesc"] != out["skillsApproveDesc"], \
+        "pending and approve must have distinct, real descriptions"
+    # Unchanged commands (bare-string subArgs) keep sharing the parent desc -- this is the
+    # documented pre-existing limitation, not something this change was meant to fix.
+    assert out["goalCount"] == 4
+    assert out["goalAllShareParentDesc"] is True, \
+        "/goal's bare-string subArgs must keep its existing (shared-desc) behavior unchanged"
+
+
+def test_memory_dropdown_lists_write_approval_subcommands():
+    """/memory has no local COMMANDS entry (unlike /skills), so its dropdown must come
+    from SLASH_SUBARG_SOURCES -- the same fallback map /model and /personality already
+    use for commands with no local handler function. Without this, /memory pending etc.
+    are only usable by typing them from memory (no pun intended), with zero discovery
+    path in the chat box's autocomplete -- exactly the gap /skills had before its own
+    subArgs were added.
+
+    Real execution via node: proves the actual getSlashAutocompleteMatches() output for
+    a SLASH_SUBARG_SOURCES-sourced command, not a source-string check.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    subarg_sources = _js_block(src, "const SLASH_SUBARG_SOURCES={", "\n};") + "\n};"
+    get_options_fn = _js_block(src, "function _getSlashSubArgOptions(spec){", "\nfunction _activeSlashCommandOffset")
+    offset_fn = _js_block(src, "function _activeSlashCommandOffset(text){", "\nfunction _parseSlashAutocomplete")
+    parse_fn = _js_block(src, "function _parseSlashAutocomplete(text){", "\nasync function getSlashAutocompleteMatches")
+    autocomplete_fn = _js_block(src, "async function getSlashAutocompleteMatches(text){", "\nfunction _findComposerPathToken")
+
+    harness = textwrap.dedent(
+        """
+        function t(k){ return k; }
+        const COMMANDS = [];
+
+        %(subarg_sources)s
+        %(offset_fn)s
+        %(parse_fn)s
+        %(get_options_fn)s
+        %(autocomplete_fn)s
+
+        (async () => {
+          const memoryMatches = await getSlashAutocompleteMatches('/memory ');
+          const descByValue = Object.fromEntries(memoryMatches.map(m => [m.value, m.desc]));
+          const descSet = new Set(memoryMatches.map(m => m.desc));
+
+          console.log(JSON.stringify({
+            values: memoryMatches.map(m => m.value).sort(),
+            allDistinct: descSet.size === memoryMatches.length,
+            pendingDesc: descByValue['pending'] || null,
+            approveDesc: descByValue['approve'] || null,
+          }));
+        })();
+        """
+    ) % {
+        "subarg_sources": subarg_sources,
+        "offset_fn": offset_fn,
+        "parse_fn": parse_fn,
+        "get_options_fn": get_options_fn,
+        "autocomplete_fn": autocomplete_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["values"] == ["approval", "approve", "mode", "pending", "reject"], (
+        "/memory's dropdown must offer its five write-approval subcommands "
+        "(no 'diff' -- memory entries are reviewed inline)")
+    assert out["allDistinct"] is True, "each /memory subcommand must show its OWN description"
+    assert out["pendingDesc"] and out["pendingDesc"] != out["approveDesc"]
+
+
+def _js_block(source: str, start_marker: str, end_marker: str) -> str:
+    """Slice a JS source string between two exact markers (inclusive of start)."""
+    start = source.index(start_marker)
+    end = source.index(end_marker, start)
+    return source[start:end]
+
+
+def test_memory_command_routed_through_webui_agent_command_allowlist():
+    """/memory has no client-side handler at all in commands.js (unlike /skills'
+    local search), so it must be reachable via messages.js'
+    _AGENT_COMMANDS_RUN_ON_WEBUI allowlist -- otherwise it falls straight through
+    to plain chat text with no clue anything went wrong (/skills at least had a
+    visibly wrong search result pointing at the bug; /memory had nothing)."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    allowlist_line = _js_block(
+        src, "const _AGENT_COMMANDS_RUN_ON_WEBUI", "\n\n") or ""
+    assert "'memory'" in allowlist_line, \
+        "/memory must be in _AGENT_COMMANDS_RUN_ON_WEBUI so it reaches executeAgentCommand()"
+    # And commands.js must NOT have grown a competing local /memory handler --
+    # if it ever does, that handler (like cmdSkills) becomes solely responsible
+    # for reaching the write-approval store, same as this PR found for /skills.
+    commands_src = (REPO_ROOT / "static/commands.js").read_text()
+    assert "name:'memory'" not in commands_src, (
+        "a local /memory COMMANDS entry appeared -- it must dispatch write-approval "
+        "subcommands itself (like cmdSkills does) or /memory will silently stop "
+        "reaching handle_pending_subcommand()")
+
+
+def test_skills_write_approval_response_targets_owner_session_not_current():
+    """A `/skills approve <id>` reply landing after the user has switched sessions
+    must NOT be appended to whichever session happens to be open when the async
+    /api/commands/exec call resolves -- it must be withheld with a visible warning, the same
+    owner-session guard the delayed steer paths use (_steerOwnerIsCurrent). Real execution via a
+    node harness, not a mock of the guard itself: proves the actual message array is left
+    untouched and a warning is emitted.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+
+        let resolveTransport;
+        function _runAgentCommandTransport(text){
+          return new Promise((resolve) => { resolveTransport = resolve; });
+        }
+
+        const S = { session: { session_id: 'sid-A' }, messages: [] };
+        let renderCount = 0;
+        let toastCount = 0;
+        function renderMessages(){ renderCount++; }
+        function showToast(){ toastCount++; }
+
+        %(cmd_skills_fn)s
+
+        const returned = cmdSkills('approve abc123');
+
+        // User switches sessions before the /api/commands/exec response lands --
+        // loadSession() swaps in a fresh session object AND a fresh messages array.
+        S.session = { session_id: 'sid-B' };
+        S.messages = [];
+
+        resolveTransport('Approved 1 skill write(s).');
+
+        // Let the microtask queue drain so the async IIFE's .then chain runs.
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            returnedTrueSynchronously: returned === true,
+            newSessionMessages: S.messages.length,
+            renderCalledAfterSwitch: renderCount,
+            warningShownAfterSwitch: toastCount,
+          }));
+        }, 20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["returnedTrueSynchronously"] is True, \
+        "cmdSkills must return true synchronously so the caller doesn't treat it as a fallthrough"
+    assert out["newSessionMessages"] == 0, (
+        "the response for sid-A's command was appended to sid-B's (the now-current "
+        "session's) messages array -- it must be dropped instead")
+    assert out["renderCalledAfterSwitch"] == 0, \
+        "renderMessages() must not run for a response whose owner session is no longer current"
+    assert out["warningShownAfterSwitch"] == 1, \
+        "a withheld response must produce a visible non-sensitive warning"
+
+
+def test_skills_write_approval_switch_during_reconcile_never_appends_fallback_output():
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    src = (REPO_ROOT / "static" / "commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+        const S={session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
+        const composer={value:'/skills approve abc123'};
+        const $=()=>composer;
+        let renders=0,warnings=0;
+        const renderMessages=()=>{renders++;};
+        const showToast=()=>{warnings++;};
+        const _clearComposerDraft=()=>Promise.resolve(true);
+        const _runAgentCommandTransport=async()=>({output:'approved',command_id:'command-1'});
+        const _agentCommandResultId=(result)=>result.command_id;
+        const _agentCommandResultOutput=(result)=>result.output;
+        const _reconcileAgentCommandTranscript=async()=>{
+          S.session={session_id:'sid-B'};
+          S.messages=[];
+          composer.value='draft in B';
+          return false;
+        };
+        %(cmd_skills_fn)s
+        cmdSkills('approve abc123');
+        setTimeout(()=>console.log(JSON.stringify({
+          sid:S.session.session_id,messages:S.messages,composer:composer.value,renders,warnings,
+        })),20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out == {
+        "sid": "sid-B",
+        "messages": [],
+        "composer": "draft in B",
+        "renders": 0,
+        "warnings": 1,
+    }
+
+def _run_webui_agent_command_scenarios():
+    """Execute the REAL awaited WebUI agent-command block from static/messages.js (the
+    `_AGENT_COMMANDS_RUN_ON_WEBUI` path that /memory, /credits, /reload-mcp ... use) in node,
+    once per ownership scenario, and return each scenario's observable end state.
+
+    The block is sliced verbatim out of send() (from the `sessions`/`resume` branch to the
+    Plugin branch), so this drives production code, not a copy of the guard."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    block = _js_block(
+        src,
+        "if(_parsedCmd.name==='sessions' || _parsedCmd.name==='resume'){",
+        "if(_agentCmd&&_agentCmd.category==='Plugin'){",
+    )
+    allowlist_start = src.index("const _AGENT_COMMANDS_RUN_ON_WEBUI")
+    allowlist_end = src.index("]);", allowlist_start) + 3
+    allowlist_decl = src[allowlist_start:allowlist_end]
+
+    harness = textwrap.dedent(
+        """
+        %(allowlist_decl)s
+        function cliOnlyCommandResponse(){ return 'cli-only'; }
+
+        function makeEnv(initialSession){
+          const env = {
+            S: { session: initialSession, activeProfile: 'default', messages: [] },
+            composer: { value: '/memory pending' },
+            draftRevision: 0,
+            commandGeneration: 0,
+            renders: 0,
+            toasts: 0,
+            stashes: [],
+            clears: [],
+            reconciles: [],
+            executeCalls: 0,
+            transcripts: {},
+            pending: {},
+          };
+          return env;
+        }
+
+        async function runScenario(name, opts){
+          const env = makeEnv(opts.initialSession === undefined ? { session_id: 'sid-A' } : opts.initialSession);
+          const S = env.S;
+          const $ = () => env.composer;
+          const autoResize = () => {};
+          const hideCmdDropdown = () => {};
+          const renderMessages = () => { env.renders++; };
+          const showToast = () => { env.toasts++; };
+          const _approvalCommandMutationGeneration=()=>env.commandGeneration;
+          const _stashApprovalTransportFailure = (profile, sid, text, files) => {
+            env.stashes.push({ profile, sid, text, files });
+            return true;
+          };
+          const _clearComposerDraft = (sid, text, files) => { env.clears.push({ sid, text, files }); };
+          const _reconcileAgentCommandTranscript = async (profile,sid,result) => {
+            env.reconciles.push({profile,sid,id:result.command_id});
+            if(opts.switchDuringReconcile){
+              S.session={session_id:'sid-B'};
+              S.messages=[];
+              env.composer.value='draft typed in B';
+            }
+            if(opts.clearDuringReconcile){
+              env.commandGeneration++;
+              S.messages=[];
+            }
+            if(opts.reconcileFalse)return false;
+            S.messages=[
+              {role:'user',content:'/memory pending',_webui_command_id:result.command_id},
+              {role:'assistant',content:result.output,_webui_command_id:result.command_id},
+            ];
+            return true;
+          };
+          const _composerDraftRevision = () => env.draftRevision;
+          const renderSessionList = async () => {};
+          const newSession = async () => { S.session = { session_id: 'sid-NEW' }; S.messages = []; };
+          const getAgentCommandMetadata = () => new Promise((res) => {
+            env.pending.metadata = () => res({ name: 'memory' });
+            if (opts.metadataImmediate) env.pending.metadata();
+          });
+          const executeAgentCommand = () => new Promise((res, rej) => {
+            env.executeCalls++;
+            env.pending.execute = () => opts.executeReject
+              ? rej(new Error('offline'))
+              : res({output:'memory result',command_id:'webui-command-original'});
+          });
+          const text = '/memory pending';
+          const _parsedCmd = { name: 'memory', args: 'pending' };
+
+          const run = async () => {
+            %(block)s
+            return 'fell-through';
+          };
+
+          const done = run();
+          await new Promise((r) => setTimeout(r, 5));
+          const snapshotBefore = { composer: env.composer.value };
+          await opts.during(env, S);
+          if (env.pending.metadata && !opts.metadataImmediate) env.pending.metadata();
+          await new Promise((r) => setTimeout(r, 5));
+          if (env.pending.execute) env.pending.execute();
+          const result = await done;
+          return {
+            name, result, snapshotBefore,
+            composer: env.composer.value,
+            executeCalls: env.executeCalls,
+            currentMessages: S.messages.map((m) => m.role + ':' + m.content),
+            renders: env.renders,
+            warnings: env.toasts,
+            stashes: env.stashes,
+            clears: env.clears,
+            reconciles: env.reconciles,
+            currentSid: S.session && S.session.session_id,
+          };
+        }
+
+        (async () => {
+          const out = {};
+
+          // 1. Positive control: no switch -> reply lands, composer cleared.
+          out.noSwitch = await runScenario('noSwitch', {
+            metadataImmediate: true,
+            during: async () => {},
+          });
+
+          // 2. Switch WHILE the metadata lookup is in flight, then land B's draft.
+          out.switchDuringMetadata = await runScenario('switchDuringMetadata', {
+            during: async (env, S) => {
+              S.session = { session_id: 'sid-B' }; S.messages = [];
+              env.composer.value = 'draft typed in B';
+            },
+          });
+
+          // 3. Switch WHILE the command itself is in flight.
+          out.switchDuringCommand = await runScenario('switchDuringCommand', {
+            metadataImmediate: true,
+            during: async (env, S) => {
+              S.session = { session_id: 'sid-B' }; S.messages = [];
+              env.composer.value = 'draft typed in B';
+            },
+          });
+
+          // 4. Profile switch while the command is in flight (same session id).
+          out.profileSwitchDuringCommand = await runScenario('profileSwitchDuringCommand', {
+            metadataImmediate: true,
+            during: async (env, S) => {
+              S.activeProfile = 'other-profile';
+              env.composer.value = 'draft typed under other profile';
+            },
+          });
+
+          // 5. A transport failure after switching must preserve the originating
+          // command as a restorable draft instead of falsely claiming it was saved.
+          out.failureAfterSwitch = await runScenario('failureAfterSwitch', {
+            metadataImmediate: true,
+            executeReject: true,
+            during: async (env, S) => {
+              S.session = { session_id: 'sid-B' }; S.messages = [];
+              env.composer.value = 'draft typed in B';
+            },
+          });
+
+          // A switch WHILE transcript reconciliation is awaiting its reload must
+          // not let fallback output land in the newly selected session.
+          out.switchDuringReconcile = await runScenario('switchDuringReconcile', {
+            metadataImmediate:true,
+            switchDuringReconcile:true,
+            reconcileFalse:true,
+            during:async()=>{},
+          });
+
+          out.clearDuringReconcile = await runScenario('clearDuringReconcile', {
+            metadataImmediate:true,
+            clearDuringReconcile:true,
+            reconcileFalse:true,
+            during:async()=>{},
+          });
+
+          // 6. New input in the SAME session while metadata is loading belongs to
+          // a new draft and must not be erased when the earlier command resumes.
+          out.sameOwnerNewerDraft = await runScenario('sameOwnerNewerDraft', {
+            during: async (env) => {
+              env.composer.value = 'newer draft';
+              env.draftRevision++;
+            },
+          });
+
+          // 7. Revision, not only text equality, guards the clear. The user may
+          // edit and then return to the same visible text before metadata resolves.
+          out.sameTextNewerRevision = await runScenario('sameTextNewerRevision', {
+            during: async (env) => {
+              env.composer.value = '/memory pending';
+              env.draftRevision++;
+            },
+          });
+
+          // 8. No session yet: newSession() creates one; reply must land in THAT session.
+          out.noSessionYet = await runScenario('noSessionYet', {
+            initialSession: null,
+            metadataImmediate: true,
+            during: async () => {},
+          });
+
+          console.log(JSON.stringify(out));
+        })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+        """
+    ) % {"allowlist_decl": allowlist_decl, "block": block}
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_webui_agent_command_positive_control_delivers_and_clears_composer():
+    out = _run_webui_agent_command_scenarios()["noSwitch"]
+    assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+    assert out["composer"] == ""
+    assert out["executeCalls"] == 1
+    assert out["warnings"] == 0
+    assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
+    assert out["reconciles"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "id": "webui-command-original",
+    }]
+
+def test_webui_agent_command_switch_during_metadata_lookup_touches_nothing():
+    """Switching sessions while the command-metadata lookup is in flight must not run the
+    command, append anything to the newly selected conversation, or clear ITS unsent draft."""
+    out = _run_webui_agent_command_scenarios()["switchDuringMetadata"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == [], (
+        "the command's transcript entries landed in the newly selected conversation")
+    assert out["composer"] == "draft typed in B", (
+        "the newly selected conversation's unsent composer draft was erased")
+    assert out["executeCalls"] == 0, "command executed for an abandoned request"
+    assert out["warnings"] == 0
+    assert out["clears"] == []
+
+
+def test_webui_agent_command_switch_during_command_never_touches_new_conversation():
+    """Switching sessions while `/memory ...` is executing must drop the reply instead of
+    appending it to (and clearing the composer of) the newly selected conversation."""
+    out = _run_webui_agent_command_scenarios()["switchDuringCommand"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == [], (
+        "reply for sid-A was appended to sid-B's transcript")
+    assert out["composer"] == "draft typed in B", (
+        "sid-B's unsent composer draft was erased by sid-A's command finishing")
+    assert out["renders"] == 0, "renderMessages() must not run once ownership has changed"
+    assert out["warnings"] == 1, "a withheld completion must produce a visible warning"
+    assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
+
+
+def test_webui_agent_command_clears_origin_composer_before_awaiting_command():
+    """The originating composer is cleared BEFORE the command await (so a session switch
+    mid-command can never leave the sent text behind, nor clear a different draft after)."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    block = _js_block(
+        src,
+        "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){",
+        "if(_agentCmd&&_agentCmd.category==='Plugin'){",
+    )
+    clear_at = block.index("$('msg').value=''")
+    await_at = block.index("await executeAgentCommand(")
+    assert clear_at < await_at, "composer must be cleared before the command await"
+    tail = block[await_at:]
+    assert "$('msg').value" not in tail, (
+        "composer is touched again after the command await -- it may belong to another conversation now")
+
+
+def test_webui_agent_command_profile_switch_during_command_drops_reply():
+    out = _run_webui_agent_command_scenarios()["profileSwitchDuringCommand"]
+    assert "assistant:memory result" not in out["currentMessages"], (
+        "a reply produced under another profile was delivered after the profile changed")
+    assert out["composer"] == "draft typed under other profile"
+    assert out["warnings"] == 1
+    assert out["clears"] == [{"sid": "sid-A", "text": "/memory pending", "files": []}]
+
+
+def test_webui_agent_command_failure_after_switch_stashes_originating_draft():
+    out = _run_webui_agent_command_scenarios()["failureAfterSwitch"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["warnings"] == 1
+    assert out["stashes"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "text": "/memory pending",
+        "files": [],
+    }]
+
+
+def test_webui_agent_command_switch_during_reconcile_never_appends_fallback_output():
+    out = _run_webui_agent_command_scenarios()["switchDuringReconcile"]
+    assert out["currentSid"] == "sid-B"
+    assert out["currentMessages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["renders"] == 0
+    assert out["warnings"] == 1
+
+
+def test_webui_agent_command_clear_during_reconcile_never_resurrects_output():
+    out = _run_webui_agent_command_scenarios()["clearDuringReconcile"]
+    assert out["currentSid"] == "sid-A"
+    assert out["currentMessages"] == []
+    assert out["renders"] == 0
+    assert out["warnings"] == 1
+
+
+def test_webui_sessionless_agent_transport_omits_command_id():
+    """Legacy sessionless commands must not send half of the persistence owner pair."""
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    assert "const commandId=ownerSid" in source
+    assert "...(commandId?{command_id:commandId}:{})" in source
+
+
+def test_webui_agent_transport_reuses_restored_command_id_and_returns_identity():
+    """A retry must keep the original durable row identity so the server can reconcile it."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    transport = _js_block(
+        source,
+        "async function _runAgentCommandTransport(text,_meta){",
+        "\nasync function resolveBundleCommand",
+    )
+    script = textwrap.dedent(
+        """
+        const S={session:{session_id:'sid-A'},activeProfile:'default'};
+        const calls=[];
+        const cleared=[];
+        const _approvalCommandRetryId=(profile,sid,text)=>'webui-command-original';
+        const _clearApprovalCommandRetry=(profile,sid,text,id)=>cleared.push({profile,sid,text,id});
+        const api=async(_path,opts)=>{
+          const body=JSON.parse(opts.body);
+          calls.push(body);
+          return {output:'saved output',command_id:body.command_id};
+        };
+        %(transport)s
+        (async()=>{
+          const result=await _runAgentCommandTransport('/memory pending',{});
+          console.log(JSON.stringify({calls,cleared,result}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"transport": transport}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["calls"][0]["command_id"] == "webui-command-original"
+    assert out["result"] == {
+        "output": "saved output",
+        "command_id": "webui-command-original",
+        "persistence_warning": False,
+        "recovered_interrupted": False,
+    }
+    assert out["cleared"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "text": "/memory pending",
+        "id": "webui-command-original",
+    }]
+
+
+def test_webui_agent_transport_reuses_success_identity_until_draft_clear_succeeds():
+    """A stale restored draft must reconcile the prior side effect, never run a fresh one."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    command_source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    session_source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    transport = _js_block(
+        command_source,
+        "async function _runAgentCommandTransport(text,_meta){",
+        "\nasync function resolveBundleCommand",
+    )
+    profile_matcher = _js_block(
+        session_source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        session_source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={session:{session_id:'sid-A'},activeProfile:'default',activeProfileIsDefault:true};
+        const calls=[];
+        const api=async(_path,opts)=>{
+          const body=JSON.parse(opts.body);
+          calls.push(body);
+          return {output:'saved output',command_id:body.command_id};
+        };
+        %(profile_matcher)s
+        %(helpers)s
+        %(transport)s
+        (async()=>{
+          const first=await _runAgentCommandTransport('/memory pending',{
+            draftClearPromise:Promise.resolve(false),
+          });
+          const retained=_approvalCommandRetryId('default','sid-A','/memory pending');
+          const second=await _runAgentCommandTransport('/memory pending',{
+            draftClearPromise:Promise.resolve(true),
+          });
+          const remaining=_approvalCommandRetryId('default','sid-A','/memory pending');
+          console.log(JSON.stringify({calls,first,retained,second,remaining}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {
+        "transport": transport,
+        "profile_matcher": profile_matcher,
+        "helpers": helpers,
+    }
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["retained"] == out["first"]["command_id"]
+    assert out["second"]["command_id"] == out["first"]["command_id"]
+    assert [call["command_id"] for call in out["calls"]] == [
+        out["first"]["command_id"],
+        out["first"]["command_id"],
+    ]
+    assert out["remaining"] is None
+
+
+def test_webui_command_failure_restore_runs_after_server_draft_restore():
+    """Session load must apply the normal server draft before failure recovery overrides it."""
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    normal_restore = source.index("_restoreComposerDraft(_draft, sid")
+    failure_restore = source.index("_restoreApprovalTransportFailureForSession(S.session)", normal_restore)
+    assert failure_restore > normal_restore
+
+
+def test_webui_command_failure_record_survives_until_draft_save_succeeds():
+    """Do not discard the only recovery copy before its server draft write confirms success."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const composer={value:''};
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        const $=()=>composer;
+        const autoResize=()=>{};
+        const renderTray=()=>{};
+        let finishSave;
+        const _saveComposerDraftNow=()=>new Promise((resolve)=>{finishSave=resolve;});
+        %(profile_matcher)s
+        %(helpers)s
+        (async()=>{
+          _stashApprovalTransportFailure(
+            'default','sid-A','/memory pending',[],'webui-command-original'
+          );
+          const restoring=_restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+          await Promise.resolve();
+          const before={
+            text:composer.value,
+            failures:_readApprovalTransportFailures(),
+          };
+          finishSave(true);
+          await restoring;
+          const after={
+            failures:_readApprovalTransportFailures(),
+            retryId:_approvalCommandRetryId('default','sid-A','/memory pending'),
+          };
+          console.log(JSON.stringify({before,after}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["before"]["text"] == "/memory pending"
+    assert len(out["before"]["failures"]) == 1
+    assert out["after"]["failures"] == []
+    assert out["after"]["retryId"] == "webui-command-original"
+
+
+def test_webui_overlapping_command_failures_keep_each_command_identity():
+    """Concurrent failures in one session must not erase an earlier recovery record."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        %(profile_matcher)s
+        %(helpers)s
+        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'command-first');
+        _stashApprovalTransportFailure('default','sid-A','/skills approve second',[],'command-second');
+        console.log(JSON.stringify({
+          failures:_readApprovalTransportFailures(),
+          first:_approvalCommandRetryId('default','sid-A','/skills approve first'),
+          second:_approvalCommandRetryId('default','sid-A','/skills approve second'),
+        }));
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert [record["command_id"] for record in out["failures"]] == [
+        "command-first",
+        "command-second",
+    ]
+    assert out["first"] == "command-first"
+    assert out["second"] == "command-second"
+
+
+def test_webui_clear_command_state_removes_both_retry_stores_for_only_its_session():
+    """Transcript deletion must invalidate identities whose server rows were deleted."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    profile_matcher = _js_block(
+        source,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        source,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const S={activeProfile:'default',activeProfileIsDefault:true,pendingFiles:[]};
+        %(profile_matcher)s
+        %(helpers)s
+        _stashApprovalTransportFailure('default','sid-A','/skills approve first',[],'failure-A');
+        _stashApprovalTransportFailure('default','sid-B','/skills approve second',[],'failure-B');
+        _rememberApprovalCommandRetry({profile:'default',sid:'sid-A',text:'/memory pending',command_id:'retry-A'});
+        _rememberApprovalCommandRetry({profile:'default',sid:'sid-B',text:'/memory pending',command_id:'retry-B'});
+        _clearApprovalCommandStateForSession('default','sid-A');
+        console.log(JSON.stringify({
+          failures:_readApprovalTransportFailures(),
+          retries:_readApprovalCommandRetries(),
+        }));
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert [record["command_id"] for record in out["failures"]] == ["failure-B"]
+    assert [record["command_id"] for record in out["retries"]] == ["retry-B"]
+
+
+def test_webui_transcript_clear_and_truncate_invalidate_command_retry_state():
+    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    ui = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    clear_block = _js_block(panels, "async function clearConversation() {", "\n// ── Skills panel")
+    truncate_block = _js_block(ui, "async function submitEdit(msgIdx, newText) {", "\nasync function regenerateResponse")
+    assert "_clearApprovalCommandStateForSession" in clear_block
+    assert "_clearApprovalCommandStateForSession" in truncate_block
+
+
+def test_webui_command_reconcile_requires_durable_terminal_row_and_surfaces_warning():
+    """A reload alone is not proof that a command result was persisted."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    result_id = _js_block(source, "function _agentCommandResultId(result){", "\nasync function _reconcileAgentCommandTranscript")
+    reconcile = _js_block(source, "async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){", "\nasync function resolveBundleCommand")
+    script = textwrap.dedent(
+        """
+        const S={messages:[]};
+        let mode='terminal';
+        let loads=0;
+        const toasts=[];
+        const showToast=(...args)=>toasts.push(args);
+        const loadSession=async()=>{
+          loads++;
+          if(mode==='terminal')S.messages=[{role:'assistant',content:'saved',_webui_command_id:'command-1'}];
+          if(mode==='pending')S.messages=[{role:'assistant',content:'pending',_webui_command_id:'command-1',_webui_command_pending:true}];
+          if(mode==='missing')S.messages=[];
+        };
+        %(result_id)s
+        %(reconcile)s
+        (async()=>{
+          const warning=await _reconcileAgentCommandTranscript('default','sid-A',{
+            command_id:'command-1',output:'ran but not saved',persistence_warning:true,
+          });
+          mode='terminal';
+          const terminal=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          mode='pending';
+          const pending=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          mode='missing';
+          const missing=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          console.log(JSON.stringify({warning,terminal,pending,missing,loads,toasts}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"result_id": result_id, "reconcile": reconcile}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["warning"] is False
+    assert out["terminal"] is True
+    assert out["pending"] is False
+    assert out["missing"] is False
+    assert out["loads"] == 3
+
+
+def test_reconcile_agent_command_transcript_refuses_profile_or_session_mismatch():
+    """Reconciliation must not let an old owner reload over the active UI."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    source = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    result_id = _js_block(source, "function _agentCommandResultId(result){", "\nasync function _reconcileAgentCommandTranscript")
+    reconcile = _js_block(source, "async function _reconcileAgentCommandTranscript(ownerProfile,ownerSid,result){", "\nasync function resolveBundleCommand")
+    script = textwrap.dedent(
+        """
+        const S={session:{session_id:'sid-B'},activeProfile:'other-profile',activeProfileIsDefault:false,messages:[]};
+        let loads=0;
+        const toasts=[];
+        const showToast=(...args)=>toasts.push(args);
+        const loadSession=async()=>{ loads++; };
+        const _profileMatchesActiveProfile=(owner,active)=>owner===active;
+        %(result_id)s
+        %(reconcile)s
+        (async()=>{
+          const profileMismatch=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          S.activeProfile='default';
+          const sessionMismatch=await _reconcileAgentCommandTranscript('default','sid-A',{command_id:'command-1'});
+          console.log(JSON.stringify({profileMismatch,sessionMismatch,loads,toasts}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"result_id": result_id, "reconcile": reconcile}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["profileMismatch"] is False
+    assert out["sessionMismatch"] is False
+    assert out["loads"] == 0
+    assert len(out["toasts"]) == 2
+
+
+def _run_webui_plugin_command_scenario(*, reject=False):
+    """Run the real awaited plugin-command branch while ownership changes."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    block = _js_block(
+        src,
+        "if(_agentCmd&&_agentCmd.category==='Plugin'){",
+        "if(_agentCmdName==='moa'){",
+    )
+    harness = textwrap.dedent(
+        """
+        (async () => {
+          const env = { composer: {value:'/plugin run'}, clears:[], stashes:[], warnings:0, renders:0 };
+          const S = {session:{session_id:'sid-A'},activeProfile:'default',messages:[],pendingFiles:[]};
+          const text='/plugin run';
+          const _agentCmd={name:'plugin',category:'Plugin'};
+          const _cmdOwner={sid:'sid-A',profile:'default'};
+          const _cmdOwnerIsCurrent=()=>((S.session&&S.session.session_id)||null)===_cmdOwner.sid
+            &&(S.activeProfile||'default')===_cmdOwner.profile;
+          const _cmdLifecycleIsCurrent=_cmdOwnerIsCurrent;
+          let _cmdDraftRevision=0;
+          const _composerDraftRevision=()=>0;
+          const $=()=>env.composer;
+          const autoResize=()=>{};
+          const hideCmdDropdown=()=>{};
+          const renderMessages=()=>{env.renders++;};
+          const renderSessionList=async()=>{};
+          const newSession=async()=>{};
+          const showToast=()=>{env.warnings++;};
+          const _clearComposerDraft=(sid,value,files)=>env.clears.push({sid,value,files});
+          const _stashApprovalTransportFailure=(profile,sid,value,files)=>{
+            env.stashes.push({profile,sid,value,files}); return true;
+          };
+          let settle;
+          const executeAgentPluginCommand=()=>new Promise((resolve,rejectFn)=>{
+            settle=()=>%(reject)s ? rejectFn(new Error('offline')) : resolve('plugin result');
+          });
+          const run=async()=>{
+            %(block)s
+            return 'fell-through';
+          };
+          const done=run();
+          await new Promise((r)=>setTimeout(r,5));
+          S.session={session_id:'sid-B'};
+          S.messages=[];
+          env.composer.value='draft typed in B';
+          settle();
+          await done;
+          console.log(JSON.stringify({
+            messages:S.messages.map((m)=>m.role+':'+m.content),
+            composer:env.composer.value,
+            clears:env.clears,
+            stashes:env.stashes,
+            warnings:env.warnings,
+            renders:env.renders,
+          }));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"block": block, "reject": "true" if reject else "false"}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_webui_plugin_command_switch_never_writes_to_new_conversation():
+    out = _run_webui_plugin_command_scenario()
+    assert out["messages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["warnings"] == 1
+    assert out["renders"] == 0
+    assert out["clears"] == [{"sid": "sid-A", "value": "/plugin run", "files": []}]
+
+
+def test_webui_plugin_command_failure_after_switch_stashes_originating_draft():
+    out = _run_webui_plugin_command_scenario(reject=True)
+    assert out["messages"] == []
+    assert out["composer"] == "draft typed in B"
+    assert out["stashes"] == [{
+        "profile": "default",
+        "sid": "sid-A",
+        "value": "/plugin run",
+        "files": [],
+    }]
+
+
+def test_transport_failure_draft_survives_reload_with_profile_alias_and_expires():
+    """The bounded per-tab fallback restores only its owner and prunes stale data."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    profile_matcher = _js_block(
+        src,
+        "function _profileMatchesActiveProfile(profile, activeProfile){",
+        "function _sessionEventProfilesMatch",
+    )
+    helpers = _js_block(
+        src,
+        "const _APPROVAL_TRANSPORT_FAILURE_KEY=",
+        "function _restoreApprovalCommandDraft",
+    )
+    script = textwrap.dedent(
+        """
+        const store=new Map();
+        const sessionStorage={
+          getItem:(key)=>store.has(key)?store.get(key):null,
+          setItem:(key,value)=>store.set(key,String(value)),
+          removeItem:(key)=>store.delete(key),
+        };
+        const composer={value:''};
+        const _profilesCache={profiles:[{name:'renamed-root',is_default:true}]};
+        const _cronProfileNameIsRootAlias=(name)=>name==='default'||_profilesCache.profiles.some(p=>p.name===name&&p.is_default);
+        const S={activeProfile:'renamed-root',activeProfileIsDefault:true,pendingFiles:[]};
+        const $=()=>composer;
+        const autoResize=()=>{};
+        const renderTray=()=>{};
+        const saved=[];
+        const _saveComposerDraftNow=(...args)=>{saved.push(args);return Promise.resolve(true);};
+        %(profile_matcher)s
+        %(helpers)s
+        (async()=>{
+          const kept=_stashApprovalTransportFailure('default','sid-A','/memory pending',[]);
+          await _restoreApprovalTransportFailureForSession({session_id:'sid-A'});
+          const restored={kept,text:composer.value,saved,remaining:_readApprovalTransportFailures()};
+          composer.value='';
+          S.activeProfile='default';
+          _stashApprovalTransportFailure('renamed-root','sid-reverse','reverse alias',[]);
+          await _restoreApprovalTransportFailureForSession({session_id:'sid-reverse'});
+          const reverseRestored={text:composer.value,remaining:_readApprovalTransportFailures()};
+          S.activeProfile='renamed-root';
+          composer.value='';
+          _stashApprovalTransportFailure('default','sid-B','secret',[]);
+          _clearApprovalTransportFailuresForSession('renamed-root','sid-B');
+          const cleared=_readApprovalTransportFailures();
+          sessionStorage.setItem(_APPROVAL_TRANSPORT_FAILURE_KEY,JSON.stringify([{
+            profile:'default',sid:'old',text:'old secret',files:[],
+            created_at:Date.now()-_APPROVAL_TRANSPORT_FAILURE_TTL_MS-1,
+          }]));
+          const expired=_readApprovalTransportFailures();
+          console.log(JSON.stringify({restored,reverseRestored,cleared,expired,raw:sessionStorage.getItem(_APPROVAL_TRANSPORT_FAILURE_KEY)}));
+        })().catch((e)=>{console.error(e&&e.stack||e);process.exit(1);});
+        """
+    ) % {"profile_matcher": profile_matcher, "helpers": helpers}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["restored"]["kept"] is True
+    assert out["restored"]["text"] == "/memory pending"
+    assert out["restored"]["remaining"] == []
+    assert out["reverseRestored"]["text"] == "reverse alias"
+    assert out["reverseRestored"]["remaining"] == []
+    assert out["cleared"] == []
+    assert out["expired"] == []
+    assert out["raw"] is None
+
+
+def test_webui_agent_command_preserves_newer_same_session_draft():
+    out = _run_webui_agent_command_scenarios()["sameOwnerNewerDraft"]
+    assert out["currentSid"] == "sid-A"
+    assert out["executeCalls"] == 1
+    assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+    assert out["composer"] == "newer draft"
+    assert out["clears"] == []
+
+
+def test_webui_agent_command_uses_revision_when_newer_draft_has_same_text():
+    out = _run_webui_agent_command_scenarios()["sameTextNewerRevision"]
+    assert out["executeCalls"] == 1
+    assert out["composer"] == "/memory pending"
+    assert out["clears"] == []
+
+
+def test_webui_agent_command_creates_session_and_delivers_to_it():
+    out = _run_webui_agent_command_scenarios()["noSessionYet"]
+    assert out["currentSid"] == "sid-NEW"
+    assert out["currentMessages"] == ["user:/memory pending", "assistant:memory result"]
+    assert out["warnings"] == 0
+    assert out["clears"] == [{"sid": "sid-NEW", "text": "/memory pending", "files": []}]
+
+
+def test_webui_agent_commands_use_server_persisted_session_transcript():
+    """Command transport must bind a stable id + owner session, while the server
+    persists and deduplicates the transcript under the per-session lock."""
+    commands = (REPO_ROOT / "static/commands.js").read_text()
+    routes = (REPO_ROOT / "api/routes.py").read_text()
+    sessions = (REPO_ROOT / "static/sessions.js").read_text()
+    assert "session_id:ownerSid,...(commandId?{command_id:commandId}:{})" in commands
+    assert 'with _get_session_agent_lock(sid):' in routes
+    assert 'message.get("_webui_command_id") == command_id' in routes
+    assert '"_webui_command_id": command_id' in routes
+    assert '"_webui_command_pending": True' in routes
+    assert 'Could not save command before execution' in routes
+    assert 'session.save()' in routes
+    assert "hermes-webui-approval-command-results" not in sessions
+
+
+def test_skills_write_approval_response_delivered_when_no_session_existed():
+    """A `/skills pending` reply must still be delivered when there was NO active
+    session at invocation time (e.g. right after deleting the last session) --
+    _steerOwnerIsCurrent(null) is always false (correct for steer, which always
+    needs a real session/stream), but a null ownerSid here means there was nothing
+    to have switched away FROM, so there is no real owner mismatch to guard against.
+    The prior fix (owner-session guard) over-applied that check and silently
+    dropped every response sent with no session, both for reserved subcommands and
+    for the plain local search branch. Real execution via node, not a mock of the
+    guard: proves the message is genuinely appended and rendered.
+    """
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    src = (REPO_ROOT / "static/commands.js").read_text()
+    cmd_skills_fn = _js_block(src, "function cmdSkills(args){", "\nasync function cmdUse")
+    steer_owner_fn = _js_block(src, "function _steerOwnerIsCurrent(ownerSid){", "\nfunction _steerOwnerStreamIsCurrent")
+    subcommands_decl = src[src.index("const SKILLS_AGENT_SUBCOMMANDS="):src.index("\n\nfunction cmdSkills")]
+
+    harness = textwrap.dedent(
+        """
+        %(subcommands_decl)s
+        %(steer_owner_fn)s
+
+        let resolveTransport;
+        function _runAgentCommandTransport(text){
+          return new Promise((resolve) => { resolveTransport = resolve; });
+        }
+
+        // No active session at invocation -- e.g. the last session was just deleted.
+        const S = { session: null, messages: [] };
+        let renderCount = 0;
+        let toastCount = 0;
+        function renderMessages(){ renderCount++; }
+        function showToast(){ toastCount++; }
+
+        %(cmd_skills_fn)s
+
+        const returned = cmdSkills('pending');
+        resolveTransport('No pending skill writes.');
+
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            returnedTrueSynchronously: returned === true,
+            messageCount: S.messages.length,
+            lastMessageContent: S.messages.length ? S.messages[S.messages.length - 1].content : null,
+            renderCalled: renderCount,
+            warningShown: toastCount,
+          }));
+        }, 20);
+        """
+    ) % {
+        "subcommands_decl": subcommands_decl,
+        "steer_owner_fn": steer_owner_fn,
+        "cmd_skills_fn": cmd_skills_fn,
+    }
+
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["returnedTrueSynchronously"] is True
+    assert out["messageCount"] == 1, (
+        "the response must be delivered when there was no session to have switched "
+        "away from -- it must not be silently dropped")
+    assert out["lastMessageContent"] == "No pending skill writes."
+    assert out["renderCalled"] == 1
+    assert out["warningShown"] == 0
+
+
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
     """Reload recovery must persist a durable per-session inflight snapshot.
     Without these helpers, loadSession() references loadInflightState() but a full
