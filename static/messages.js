@@ -2932,7 +2932,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return Number.isFinite(seq)&&seq>0?seq:1;
   }
   function _anchorSceneActiveMode(){
-    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'?value:'';
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='transparent_live_compact_settled'||value==='hide_all_activity'?value:'';
     if(typeof window!=='undefined'){
       if(typeof window.chatActivityMode==='function'){
         try{
@@ -2945,6 +2945,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(window._transparentStream) return 'transparent_stream';
     }
     return 'compact_worklog';
+  }
+  // transparent_live_compact_settled resolves per render path: the live scene
+  // streams transparently, the persisted/settled scene folds to Compact Worklog.
+  function _anchorSceneLiveMode(){
+    const mode=_anchorSceneActiveMode();
+    return mode==='transparent_live_compact_settled'?'transparent_stream':mode;
+  }
+  function _anchorSceneSettledMode(){
+    const mode=_anchorSceneActiveMode();
+    return mode==='transparent_live_compact_settled'?'compact_worklog':mode;
   }
   function _anchorSceneRowDisplayHintForMode(row, sceneMode){
     const hints=row&&typeof row==='object'&&row.display_hints&&typeof row.display_hints==='object'
@@ -2960,7 +2970,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
     try{
       return !!window._renderLiveAnchorActivitySceneForStream(streamId, activeSid, {
-        mode:_anchorSceneActiveMode(),
+        mode:_anchorSceneLiveMode(),
       });
     }catch(err){
       if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
@@ -2973,7 +2983,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _projectLiveAnchorActivityScene(){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
     try{
-      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneActiveMode()});
+      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneSettledMode()});
     }catch(_){
       return null;
     }
@@ -3721,7 +3731,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
-    const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
+    const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneSettledMode();
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
       ? messageFinalAnswer
@@ -4650,6 +4660,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return window._fadeTextEffect===true;
   }
   function _shouldUseTransparentStreamFade(){
+    // The live prose fade belongs to the LIVE render path: the hybrid
+    // transparent_live_compact_settled mode streams transparently but settles
+    // compact, so the settled predicate (isTransparentStream) is false there.
+    // Prefer the live resolver; keep the settled predicate as the fallback for
+    // runtimes that only expose the older helper.
+    if(typeof isTransparentLiveMode==='function') return !!isTransparentLiveMode();
     return typeof isTransparentStream==='function'&&isTransparentStream();
   }
   function _shouldUseLiveProseFade(){
