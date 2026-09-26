@@ -591,7 +591,7 @@
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
-        <textarea id="msg" rows="1" enterkeyhint="enter" placeholder="Message Hermes…"></textarea>
+        <textarea id="msg" rows="1" enterkeyhint="enter" placeholder="Message Hermes…" data-i18n-placeholder="composer_placeholder_static"></textarea>
         <div id="composerWorkspaceContext" class="sr-only"></div>
         <div class="composer-footer">
           <div class="composer-left">
@@ -698,7 +698,7 @@
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
             <div class="ctx-indicator-wrap" id="ctxIndicatorWrap" style="display:none">
-              <button class="ctx-indicator" id="ctxIndicator" type="button" aria-label="Context window usage" aria-describedby="ctxTooltip">
+              <button class="ctx-indicator" id="ctxIndicator" type="button" aria-label="Context window usage" data-i18n-aria-label="ctx_aria_usage" aria-describedby="ctxTooltip">
                 <span class="ctx-ring">
                   <svg class="ctx-ring-svg" viewBox="0 0 24 24" aria-hidden="true">
                     <circle class="ctx-ring-track" cx="12" cy="12" r="9.75"></circle>
@@ -708,7 +708,7 @@
                 </span>
               </button>
               <div class="ctx-tooltip" id="ctxTooltip" role="tooltip" aria-hidden="true">
-                <div class="ctx-tooltip-title">Context window</div>
+                <div class="ctx-tooltip-title" data-i18n="ctx_tooltip_title">Context window</div>
                 <div class="ctx-tooltip-line" id="ctxTooltipUsage"></div>
                 <div class="ctx-tooltip-line" id="ctxTooltipTokens"></div>
                 <div class="ctx-tooltip-line" id="ctxTooltipThreshold"></div>
@@ -740,7 +740,7 @@
               <span class="composer-reasoning-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
               <span class="composer-mobile-config-copy"><span class="composer-mobile-config-kicker" data-i18n="composer_mobile_reasoning">Reasoning</span><span class="composer-mobile-config-value" id="composerMobileReasoningLabel"></span></span>
             </button>
-            <div class="composer-mobile-config-action composer-mobile-context-action" id="composerMobileContextAction" role="group" aria-label="Context window" style="display:none">
+            <div class="composer-mobile-config-action composer-mobile-context-action" id="composerMobileContextAction" role="group" aria-label="Context window" data-i18n-aria-label="ctx_tooltip_title" style="display:none">
               <span class="composer-mobile-config-copy composer-mobile-context-copy">
                 <span class="composer-mobile-config-kicker" data-i18n="composer_mobile_context">Context</span>
                 <span class="composer-mobile-config-value" id="composerMobileContextUsage"></span>
@@ -753,14 +753,14 @@
           </div>
           <div class="ws-dropdown ws-dropdown-footer" id="composerWsDropdown" hidden aria-hidden="true" inert></div>
           <div class="composer-reasoning-dropdown" id="composerReasoningDropdown">
-            <div class="reasoning-option" data-effort="">Default</div>
-            <div class="reasoning-option" data-effort="none">None</div>
-            <div class="reasoning-option" data-effort="minimal">Minimal</div>
-            <div class="reasoning-option" data-effort="low">Low</div>
-            <div class="reasoning-option" data-effort="medium">Medium</div>
-            <div class="reasoning-option" data-effort="high">High</div>
-            <div class="reasoning-option" data-effort="xhigh">Extra High</div>
-            <div class="reasoning-option" data-effort="max">Max</div>
+            <div class="reasoning-option" data-effort="" data-i18n="reasoning_effort_default">Default</div>
+            <div class="reasoning-option" data-effort="none" data-i18n="reasoning_effort_none">None</div>
+            <div class="reasoning-option" data-effort="minimal" data-i18n="reasoning_effort_minimal">Minimal</div>
+            <div class="reasoning-option" data-effort="low" data-i18n="reasoning_effort_low">Low</div>
+            <div class="reasoning-option" data-effort="medium" data-i18n="reasoning_effort_medium">Medium</div>
+            <div class="reasoning-option" data-effort="high" data-i18n="reasoning_effort_high">High</div>
+            <div class="reasoning-option" data-effort="xhigh" data-i18n="reasoning_effort_xhigh">Extra High</div>
+            <div class="reasoning-option" data-effort="max" data-i18n="reasoning_effort_max">Max</div>
           </div>
           <div class="composer-toolsets-dropdown" id="composerToolsetsDropdown">
             <div class="toolsets-dropdown-desc" id="toolsetsDropdownDesc"></div>
@@ -1251,7 +1251,7 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="dictation_append_desc">When ON, dictated text is appended to any text already in the composer (with a space if needed). When OFF, dictated text replaces the composer content.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option><option value="openai">OpenAI TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
+              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser" data-i18n="settings_tts_engine_browser">Browser speech synthesis</option><option value="edge" data-i18n="settings_tts_engine_edge">Edge TTS (server)</option><option value="elevenlabs" data-i18n="settings_tts_engine_elevenlabs">ElevenLabs (server)</option><option value="openai" data-i18n="settings_tts_engine_openai">OpenAI TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="">Default system voice</option>
               </select>

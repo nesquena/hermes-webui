@@ -523,7 +523,7 @@ def test_openai_tts_rejects_oversized_upstream_audio(monkeypatch):
 
 def test_openai_option_in_html():
     src = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert '<option value="openai">OpenAI TTS (server)</option>' in src
+    assert '<option value="openai" data-i18n="settings_tts_engine_openai">OpenAI TTS (server)</option>' in src
 
 
 def test_openai_voice_placeholder_in_panels():

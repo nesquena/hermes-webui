@@ -5409,6 +5409,9 @@ function _normalizeReasoningEffort(eff){
 }
 
 function _formatReasoningEffortLabel(effort){
+  const _n=String(effort||'').trim().toLowerCase();
+  const _k=_n?'reasoning_effort_'+_n:'reasoning_effort_default';
+  if(typeof t==='function'){const _v=t(_k);if(_v&&_v!==_k)return _v;}
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
   if(effort==='minimal') return 'Minimal';
@@ -7245,21 +7248,21 @@ function _syncCtxIndicator(usage){
   _setCtxCompressButton(compressBtn,compressText);
   const cacheHitPct=usage.cache_hit_percent;
   const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
-  const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
-  let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
-  if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
+  const contextLabel=hasPostCompressionEstimate?t('ctx_est_next'):t('ctx_tooltip_title');
+  let label=hasPromptTok?t('ctx_pct_used',contextLabel,pct,100-pct):t('ctx_tokens_used_short',_fmtTokens(totalTok));
+  if(!hasExplicitCtx&&hasPromptTok) label+=' '+t('ctx_est_128k');
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
-  const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  const tokensText=hasPromptTok?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasPromptTok?(overflowed?t('ctx_pct_exceeded',contextLabel,rawPct):t('ctx_pct_used',contextLabel,pct,100-pct)):t('ctx_tokens_used_short',_fmtTokens(totalTok));
+  const tokensText=hasPromptTok?t('ctx_tokens_detail',contextLabel,_fmtTokens(contextPromptTok),_fmtTokens(ctxWindow)):t('ctx_in_out',_fmtTokens(usage.input_tokens||0),_fmtTokens(usage.output_tokens||0));
   if(usageLine) usageLine.textContent=usageText;
   if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;
   let thresholdText='';
   if(thresholdLine){
     if(threshold&&ctxWindow){
-      thresholdText=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+      thresholdText=t('ctx_autocompress',_fmtTokens(threshold),Math.round(threshold/ctxWindow*100));
       thresholdLine.style.display='';
       thresholdLine.textContent=thresholdText;
     }else{
@@ -7270,7 +7273,7 @@ function _syncCtxIndicator(usage){
   let costText='';
   if(costLine){
     if(cost){
-      costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      costText=t('ctx_cost_est',(cost<0.01?cost.toFixed(4):cost.toFixed(2)));
       if(cacheText) costText+=` \u00b7 ${cacheText}`;
       costLine.style.display='';
       costLine.textContent=costText;
@@ -8581,7 +8584,13 @@ function lockComposerForClarify(placeholderText){
     _composerLockState={
       disabled: input.disabled,
       placeholder: input.placeholder,
+      text: placeholderText || null,
     };
+  }else{
+    // A second clarify can replace the prompt without unlocking first; the
+    // locale repaint restores _composerLockState.text, so it must track the
+    // CURRENT question or the composer describes the previous one.
+    _composerLockState.text=placeholderText||null;
   }
   input.disabled=true;
   if(placeholderText) input.placeholder=placeholderText;
@@ -8658,9 +8667,18 @@ function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
   if(_compressionPlaceholderSaved!==null) return;
+  if(_composerLockState){
+    // A clarify-style lock owns the placeholder (e.g. a question prompt).
+    // Re-assert the lock's own text (not the pre-lock placeholder) so the
+    // locale repaint pass (applyBotName inside applyLocaleToDOM) cannot
+    // stomp it and the clarify prompt survives a language switch.
+    const lockedText=typeof _composerLockState.text==='string'?_composerLockState.text:_composerLockState.placeholder;
+    if(typeof lockedText==='string') input.placeholder=lockedText;
+    return;
+  }
   if(input.disabled) return;
   if(_composerHasContent()) return;
-  const idlePlaceholder='Message '+assistantDisplayName()+'\u2026';
+  const idlePlaceholder=(typeof t==='function')?t('composer_placeholder_idle',assistantDisplayName()):('Message '+assistantDisplayName()+'\u2026');
   if(!window._showBusyPlaceholderHint||!S.busy){
     input.placeholder=idlePlaceholder;
     return;

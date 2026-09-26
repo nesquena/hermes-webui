@@ -3,6 +3,26 @@ import subprocess
 from pathlib import Path
 
 
+# Minimal en locale so the localized _syncCtxIndicator renders English text
+# under the t() stub (ctx_* keys from #7698); unknown keys still return the key.
+T_STUB = """
+(key, ...args) => {
+  const en = {
+    ctx_est_next: 'Estimated next model context',
+    ctx_tooltip_title: 'Context window',
+    ctx_pct_used: (c, p, l) => `${c}: ${p}% used (${l}% left)`,
+    ctx_pct_exceeded: (c, p) => `${c}: ${p}% used (context exceeded)`,
+    ctx_tokens_used_short: v => `${v} tokens used`,
+    ctx_tokens_detail: (c, a, b) => `${c}: ${a} / ${b} tokens used`,
+    ctx_in_out: (i, o) => `In: ${i} \u00b7 Out: ${o}`,
+    ctx_autocompress: (v, p) => `Auto-compress at ${v} (${p}%)`,
+    ctx_est_128k: '(est. 128K)',
+    ctx_cost_est: v => `Estimated cost: $${v}`,
+  }[key];
+  if (en === undefined) return key;
+  return typeof en === 'function' ? en(...args) : en;
+}
+"""
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -21,7 +41,7 @@ global.window = {{}};
 global._syncMobileCtxDisplay = () => {{}};
 global._setCtxCompressButton = () => {{}};
 global._fmtTokens = value => String(value);
-global.t = key => key;
+global.t = {T_STUB};
 {indicator}
 _syncCtxIndicator({json.dumps(usage)});
 console.log(JSON.stringify({{percent: nodes.ctxPercent.textContent, label: nodes.ctxIndicator['aria-label'], usage: nodes.ctxTooltipUsage.textContent, tokens: nodes.ctxTooltipTokens.textContent}}));
@@ -157,7 +177,7 @@ def test_context_indicator_without_estimate_preserves_current_behavior():
     no_data = _run_context_indicator({"input_tokens": 100_000, "output_tokens": 1})
 
     assert historical["percent"] == "78"
-    assert historical["label"].startswith("Context window 78% used")
+    assert historical["label"].startswith("Context window: 78% used (22% left)")
     assert no_data["percent"] == "\N{MIDDLE DOT}"
 
 
