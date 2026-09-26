@@ -203,6 +203,46 @@ To widen the guard, fix the pre-existing intentional hits first (as of 2026-05-3
 
 ---
 
+## Native workspace routing reproduction (issue #5937)
+
+`tests/test_native_workspace_routing_integration.py` is an opt-in integration
+reproduction for the native Agent/WebUI workspace boundary. It starts the real
+`server.py` with isolated temporary `HOME`, `HERMES_HOME`, WebUI state, profiles,
+and workspaces, logs in over HTTP, obtains the server's CSRF token, and drives
+streaming `/api/chat/*` requests. The loopback model is deterministic input only;
+the terminal `pwd` and `read_file` results are produced by the real Agent tools.
+The test uses two distinct profile-default and selected-workspace sentinels,
+checks persisted session metadata, actual tool-role responses, and the exact
+Docker host-to-`/workspace` mount. It skips in the canonical suite unless
+explicitly enabled. Once enabled it asserts the intended behavior, so a routing
+defect is a failing test, not an expected-failure pass. Missing prerequisites
+also fail when opted in. Docker must be running and the chosen image must already
+be cached; this fixture does not pull images. The Docker row uses a nonpersistent,
+network-disabled container with its native default user, not a production worker
+image or privileged mounts.
+
+```bash
+# Required: a checked-out native Agent and its supported interpreter.
+export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent
+export HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python
+export HERMES_WEBUI_NATIVE_WORKSPACE_TEST=1
+./scripts/test.sh tests/test_native_workspace_routing_integration.py -v
+
+# Optional controls:
+# HERMES_WEBUI_NATIVE_WORKSPACE_BACKENDS=local,docker
+# HERMES_WEBUI_TEST_DOCKER_IMAGE=python:3.11-slim
+# HERMES_WEBUI_NATIVE_TEST_SOURCE=/path/to/another/hermes-webui-checkout
+```
+
+`HERMES_WEBUI_NATIVE_TEST_SOURCE` defaults to the checkout containing the test;
+set it to a pristine comparison checkout (for example `../pr6586` or `../pr6321`)
+to run the same harness against that source without copying state or credentials.
+Docker cleanup is restricted to containers carrying the exact profile and session
+labels created by this test. Each backend runs both profiles sequentially in one
+WebUI process. Concurrent turns, mixed-backend transitions, delegated/recovery
+paths, browser rendering, and non-streaming chat are out of scope; this is not a
+reproduction of the original SSH-to-local cache issue or a filesystem escape test.
+
 ## How to Use This Document
 
 Each test has:
