@@ -1109,22 +1109,33 @@ def read_importable_agent_session_rows(
             # NOTE: this can return more than ``limit`` rows (see docstring).
             have = {row.get('id') for row in selected}
             by_id = {row.get('id'): row for row in projected if row.get('id')}
+            # A compressed parent is projected under its tip id; a child delegated before the
+            # compression names the old segment, so resolve it through the lineage root too.
+            by_root = {row['_lineage_root_id']: row for row in projected if row.get('_lineage_root_id')}
             pending = list(selected)
+            unresolved = []
             while pending:
                 row = pending.pop()
                 if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
                     continue
                 parent_id = row.get('parent_session_id')
-                if not parent_id or parent_id in have:
+                if not parent_id:
                     continue
-                parent = by_id.get(parent_id)
-                if parent is None:
+                parent = by_id.get(parent_id) or by_root.get(row.get('_parent_lineage_root_id') or parent_id)
+                if parent is not None and parent.get('id') in have:
                     continue
-                if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                if parent is None or str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                    if parent is None:
+                        unresolved.append(row)
                     continue
                 selected.append(parent)
-                have.add(parent_id)
+                have.add(parent.get('id'))
                 pending.append(parent)
+            # The sidebar reads parent_source as "the parent is in this payload"; a subagent parent that
+            # could not be placed here (e.g. projected away) must not claim that, or the child vanishes.
+            for row in unresolved:
+                if str(row.get('parent_source') or '').strip().lower() == 'subagent':
+                    row['parent_source'] = None
             return _result(selected, window_exhausted)
 
         cur.execute(

@@ -221,6 +221,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions; delegated subagent sessions have no project of their own and follow their nearest ancestor's project in the project filter and the Unassigned chip; forks and other child sessions keep their own project, so a fork moved to "No project" stays Unassigned
+- Delegated subagent sessions nest under their parent row. When that parent is filtered out of the current view (project, source tab, hidden), the subagent is hidden with it rather than shown as a stray top-level "Subagent Session"; it stays a top-level row only when its parent is in the other (CLI/TUI) tab or was never imported, and a subagent that matches an active sidebar search is always listed
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON

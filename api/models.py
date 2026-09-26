@@ -6942,6 +6942,10 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
                 '_state_db_source_label',
             ):
                 entry.pop(key, None)
+            # Importer rows carry parent_source (null = parent outside its window); keep it,
+            # since the sidebar reads it as "parent was imported".
+            if 'parent_source' in session:
+                entry.pop('parent_source', None)
             session.update(entry)
 
 

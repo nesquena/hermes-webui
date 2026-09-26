@@ -7599,6 +7599,11 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
 
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
+  let searchActive=false;
+  try{
+    const searchEl=typeof $==='function' ? $('sessionSearch') : null;
+    searchActive=Boolean(searchEl&&String(searchEl.value||'').trim());
+  }catch(_e){ searchActive=false; }
   const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
   const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
   const cleanSidebarRow=(s)=>{
@@ -7778,7 +7783,14 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // trigger from archived to filtered-out. A cross-surface WebUI child of a
       // genuinely external (messaging/CLI) parent is handled by the parentIsExternal
       // branch above and still orphans as before.
-      if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
+      // A flag-less subagent is suppressed only when parent_source proves a parent that shares its
+      // (WebUI) sidebar bucket, classified by the same _isCliSession the partition uses; an unimported
+      // or CLI/TUI/ACP parent never attaches here, so it stays an orphan.
+      // While searching, a matching child stays openable whatever its lineage flags.
+      const childParentSource=String(child.parent_source||'').trim().toLowerCase();
+      const subagentParentKnown=childIsDelegatedSubagent&&!!childParentSource&&!_isCliSession({raw_source: childParentSource});
+      const crossSurfaceChild=!!(child&&child._cross_surface_child_session&&_isChildSession(child));
+      if(!searchActive&&(subagentParentKnown||crossSurfaceChild)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
