@@ -1141,6 +1141,10 @@ const LOCALES = {
     session_time_bucket_older: 'Older',
     scheduled_jobs: 'Scheduled jobs',
     new_job: 'New job',
+    composer_action_stop: 'Stop',
+    composer_action_queue: 'Queue',
+    composer_action_interrupt: 'Interrupt',
+    composer_action_steer: 'Steer',
     loading: 'Loading...',
     search_skills: 'Search skills...',
     new_skill: 'New skill',
@@ -27156,6 +27160,21 @@ function applyLocaleToDOM() {
   });
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
+  // #1804 (re-gate 9/24): the busy-mode action label is rendered as
+  // a real <span class="send-btn-label"> child of #btnSend, with the
+  // text materialised by ``_setComposerPrimaryButtonIcon`` from the
+  // current locale's ``t()`` translation. The standard ``[data-i18n]``
+  // restamp does not touch this span (it is set imperatively, not via
+  // the ``data-i18n`` machinery), so an in-place locale change while
+  // the button is busy left the pill in the old language. Re-run the
+  // single owner of the action-to-label mapping so the live locale
+  // always wins, without duplicating the four-key map here. The
+  // helper also removes the span outside busy mode, so this is a
+  // no-op for the common idle path.
+  const _sendBtnLocaleRestamp = document.getElementById('btnSend');
+  if (_sendBtnLocaleRestamp && typeof _setComposerPrimaryButtonIcon === 'function') {
+    _setComposerPrimaryButtonIcon(_sendBtnLocaleRestamp, _sendBtnLocaleRestamp.dataset.action || 'send');
+  }
 }
 
 // Apply saved locale immediately so there's no flash of English on reload.

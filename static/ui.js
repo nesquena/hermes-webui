@@ -5303,6 +5303,21 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // #1804 re-gate 9/24: the busy-mode send button renders a Stop/Queue/
+  // Interrupt/Steer label that widens it from a 34px round button to a
+  // 74-108px pill (see .send-btn[data-action=...]: width:auto). That
+  // extra width steals room from .composer-left, so measuring overflow
+  // with the pill in place resolves a tighter stage than with the
+  // icon-only (idle) button — the footer would otherwise flicker between
+  // stages the moment a turn starts (the #4968 chip-label flicker) and
+  // clip the mobile config burger under the pill at narrow widths.
+  // Pin the label hidden so the button is at its idle width during the
+  // measurement, the same shape as the existing height/visibility
+  // freeze: commit nothing to the screen, restore both in `finally`.
+  const sendBtn=document.getElementById('btnSend');
+  const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
+  const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
+  if(sendBtnLabel) sendBtnLabel.style.display='none';
   // Measure without ever PAINTING the expanded state. Stripping the stage
   // classes makes the footer briefly full-width, which grows the composer and
   // shrinks #messages by a few px; restoring them a moment later shrinks it
@@ -5337,6 +5352,7 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+    if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;
   }
 }
 window._fitComposerFooter=_fitComposerFooter;
@@ -8692,8 +8708,24 @@ function _setComposerPrimaryButtonIcon(btn,action){
     stop:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>',
     disabled:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
   };
-  const next=icons[action]||icons.send;
-  if(btn.innerHTML!==next) btn.innerHTML=next;
+  // #1804 re-gate 9/24: surface a short text label next to the icon for
+  // busy-mode actions so the user can see the current mode without
+  // relying on the hover tooltip. The label is a real <span
+  // class="send-btn-label"> child (not a ::after pseudo-element) so it
+  // does not collide with the .has-tooltip::after rule that owns the
+  // hover tooltip. The text is resolved through t() so non-English
+  // locales get the translated name.
+  const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  let _fullInner=icons[action]||icons.send;
+  if(_labelKeys[action]){
+    const _key=_labelKeys[action];
+    const _val=(typeof t==='function')?t(_key):_key;
+    const _text=_val||_key;
+    // Escape for safe innerHTML injection of translator-controlled text.
+    const _esc=String(_text).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+    _fullInner+='<span class="send-btn-label">'+_esc+'</span>';
+  }
+  if(btn.innerHTML!==_fullInner) btn.innerHTML=_fullInner;
 }
 
 function updateSendBtn(){
@@ -8722,6 +8754,14 @@ function updateSendBtn(){
   }
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
+  // #1804 re-gate 9/24: #btnSend is .has-tooltip and its hover tooltip
+  // is driven by the [data-tooltip] attribute (see .has-tooltip::after at
+  // static/style.css:2110). The static markup ships data-tooltip="Send
+  // message" (composer_send), so every busy mode showed "Send message"
+  // on hover even though title/aria-label carried the correct mode name.
+  // Mirror the same string into [data-tooltip] so the hover tooltip and
+  // the screen-reader label stay in sync with the action.
+  btn.setAttribute('data-tooltip',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
