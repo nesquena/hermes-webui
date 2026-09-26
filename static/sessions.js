@@ -3684,6 +3684,25 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   // copying it across, the fallback source is empty exactly on the cold-load
   // path it's meant to repair.
   if(S.session&&Array.isArray(sessionToolCalls)) S.session.tool_calls=sessionToolCalls.map(tc=>({...tc}));
+  // #7358 round 5 (re-gate 9/22): when the cold-reload fallback clears
+  // ``S.toolCalls`` (the messages-with-tool-metadata branch below), the
+  // render path loses the persisted ``is_error`` for every tool. The compact
+  // and transparent render paths in static/messages.js and static/ui.js
+  // look up by tool id (``tid``) when copying live metadata onto a settled
+  // row, so index the persisted ``is_error`` by tid here and read it from
+  // the render path. ``sessionToolCalls`` is the server's settled summary,
+  // which carries ``is_error`` after the round-3 server-side fix; the
+  // per-tid map is the cold-reload-friendly handoff that survives the
+  // ``S.toolCalls = []`` clearing.
+  const _persistedIsErrorByTid=Object.create(null);
+  if(Array.isArray(sessionToolCalls)){
+    for(const tc of sessionToolCalls){
+      if(!tc||typeof tc!=='object') continue;
+      const _ptid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(_ptid&&tc.is_error===true) _persistedIsErrorByTid[_ptid]=true;
+    }
+  }
+  S._settledToolIsErrorByTid=_persistedIsErrorByTid;
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;

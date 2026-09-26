@@ -8419,6 +8419,213 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
+def _emit_tool_complete_to_mirrors_and_sse(
+    *,
+    tool_call_id,
+    name,
+    args,
+    function_result,
+    live_tool_calls_list,
+    shared_tool_calls_list,
+    put,
+    record_live_tool_complete,
+    args_snapshot_fn,
+    is_error_override=None,
+) -> bool:
+    """#7358: shared body for the structured ``on_tool_complete`` path.
+    Computes ``is_error`` once, writes it into the per-stream
+    ``_live_tool_calls`` mirror AND the cross-process
+    ``STREAM_LIVE_TOOL_CALLS`` mirror, then emits the
+    ``tool_complete`` SSE payload with the same value so the
+    WebUI card and the native clients (Hermex) agree.
+
+    Extracted as a module-level helper so the cancellation-vs-live
+    agreement can be tested without driving the full
+    ``_run_agent_streaming`` generator. The on_tool_complete closure
+    is a thin wrapper that just supplies the closure-bound lists and
+    ``put`` sink.
+
+    ``is_error_override`` carries the Agent's authoritative
+    ``is_error`` captured by ``on_tool`` on the structured-callback
+    suppression path (round 5); when ``None`` the helper re-derives
+    it from the payload. Tests may also pass it to pin the exact
+    classification.
+    """
+    is_error = (
+        is_error_override
+        if is_error_override is not None
+        else _tool_result_is_error(name, function_result)
+    )
+    record_live_tool_complete(tool_call_id, name, function_result)
+    result_snippet = _tool_result_snippet(function_result)
+    for live_tc in reversed(live_tool_calls_list):
+        if live_tc.get('done'):
+            continue
+        if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
+            live_tc['done'] = True
+            live_tc['snippet'] = result_snippet
+            live_tc['is_error'] = is_error
+            break
+    for shared_tc in reversed(shared_tool_calls_list):
+        if shared_tc.get('done'):
+            continue
+        if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
+            shared_tc['done'] = True
+            shared_tc['snippet'] = result_snippet
+            shared_tc['is_error'] = is_error
+            break
+    _checkpoint_activity_holder = []
+    put('tool_complete', {
+        'event_type': 'tool.completed',
+        'name': name,
+        'preview': result_snippet,
+        'args': args_snapshot_fn(args),
+        'tid': tool_call_id,
+        'is_error': is_error,
+    })
+    return is_error
+
+
+def _decode_tool_result_payload(function_result):
+    """#7358 round-3: structurally decode a structured tool result.
+
+    The real Agent hands the ``tool_complete_callback`` a JSON **string**
+    for most tools — ``tools/terminal_tool.py`` returns
+    ``json.dumps({"output": ..., "exit_code": N, "error": None})`` and
+    ``run_agent.py:6816`` forwards that string verbatim as
+    ``function_result``. A captured successful call is therefore the
+    literal text::
+
+        {"output": "hello-world", "exit_code": 0, "error": null}
+
+    Any classification that scans that text for the substring ``error``
+    matches the *key name* and reports a failure on the happy path —
+    the reviewer's Finding 1 false positive. Decoding first is the only
+    way to tell ``"error": null`` from ``"error": "boom"``.
+
+    Returns a dict when the payload is a mapping or decodes as a JSON
+    object; returns ``None`` for anything else (non-JSON text, malformed
+    JSON-like text, lists, scalars) so the caller can fall back
+    fail-safe rather than substring-matching.
+    """
+    if isinstance(function_result, dict):
+        return function_result
+    if isinstance(function_result, (bytes, bytearray)):
+        try:
+            function_result = function_result.decode('utf-8', errors='replace')
+        except Exception:
+            return None
+    if not isinstance(function_result, str):
+        return None
+    text = function_result.strip()
+    if not text.startswith('{'):
+        # Not JSON-object-shaped (plain prose, list text, …). The Agent's
+        # own generic marker heuristic still applies to these, so signal
+        # "not decodable" and let the caller run that heuristic.
+        return None
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Malformed JSON-like input: reject conservatively. Never fall
+        # back to a substring scan here — a truncated payload can still
+        # contain the literal ``"error"`` key text.
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    return decoded
+
+
+def _tool_result_is_error(name, function_result) -> bool:
+    """#7358: the structured tool_complete callback signature is
+    ``(tool_call_id, name, args, function_result)`` and does not
+    receive the already-classified ``is_error`` bit that the sibling
+    tool_progress_callback carries. The Agent core computes that bit
+    with ``_detect_tool_failure()``, but the WebUI cannot import that
+    helper (it lives in the agent repo), so re-derive a conservative
+    failure flag from the structured payload.
+
+    #7358 round-3 (reviewer Finding 1, SILENT): ``function_result``
+    arrives as a JSON **string** for most tools, so the payload is
+    first structurally decoded via ``_decode_tool_result_payload``.
+    The previous implementation substring-scanned that text for
+    ``"error"``, which matched the *key name* in the Agent's canonical
+    success shape ``{"exit_code": 0, "error": null}`` and painted every
+    successful terminal call red — a false positive on the happy path,
+    which is strictly worse than the false negative this PR fixes.
+    Substring scanning is gone: classification only ever reads decoded
+    fields, and malformed JSON-like input is rejected conservatively
+    (default ``False``) rather than scanned.
+
+    Classification then mirrors the Agent's own ``_detect_tool_failure``
+    shape (agent/display.py:710-744):
+
+    * explicit ``is_error: true`` always fails, in dict or string form;
+    * ``terminal``: non-zero ``exit_code`` is the canonical failure;
+    * ``memory``: ``success: false`` only fails on the store-full signal;
+    * other tools: ``success: false`` fails; a non-empty ``error`` or
+      ``failed`` marker fails;
+    * anything ambiguous (``error: null``, a bare informational ``error``
+      key without ``success: false``, a custom ``status`` field,
+      non-JSON prose) defaults to ``False``.
+
+    Ambiguity deliberately resolves to ``False`` so the change can never
+    flip a success card to failed. The gateway translator at
+    ``api/gateway_chat.py:508-518`` already classifies its own payloads
+    and is not affected by this helper.
+    """
+    payload = _decode_tool_result_payload(function_result)
+    if payload is None:
+        # Not decodable as a JSON object. The Agent's generic heuristic
+        # (agent/display.py:740-742) still inspects the raw text for
+        # ``"error"`` / ``"failed"`` markers and an ``Error`` prefix on
+        # non-JSON results, so mirror that on the raw text only.
+        if isinstance(function_result, str):
+            head = function_result[:500].lower()
+            if '"error"' in head or '"failed"' in head or function_result.startswith('Error'):
+                return True
+        return False
+
+    if payload.get('is_error') is True:
+        return True
+    # Terminal: non-zero exit_code is the canonical failure signal. This
+    # mirrors the Agent's own _detect_tool_failure at
+    # agent/display.py:720-728 so the WebUI card stays in sync with the
+    # CLI's ``[error]`` tag. A successful call decodes to
+    # ``{"output": ..., "exit_code": 0, "error": null}`` — note the
+    # ``error`` key is present-but-null and must NOT be a failure.
+    if name == 'terminal':
+        exit_code = payload.get('exit_code')
+        if exit_code is not None and exit_code != 0:
+            return True
+        return False
+    if payload.get('success') is False:
+        # Memory: only count as failure when the "store full" signal is
+        # present, matching the Agent's own guard at
+        # agent/display.py:731-737.
+        if name == 'memory':
+            return 'exceed the limit' in str(payload.get('error', ''))
+        # Other tools: success:false with any error/message is a
+        # failure. success:false alone also counts.
+        return True
+    if payload.get('success') is True:
+        # Explicit success is authoritative: no real Agent tool pairs
+        # ``success: True`` with a non-empty ``error`` (verified across
+        # tools/ and agent/), so honour the explicit flag rather than
+        # second-guessing it with the generic marker check below.
+        return False
+    # Generic marker check on the decoded payload: a non-empty ``error``
+    # value or a truthy ``failed`` flag is a failure even without an
+    # explicit ``success: false``. This is the shape the Agent's own
+    # ``tool_error()`` helper emits for plain failures —
+    # ``json.dumps({"error": "file not found"})`` — so it must classify.
+    error_value = payload.get('error')
+    if error_value not in (None, '', False, {}, []):
+        return True
+    if payload.get('failed') is True:
+        return True
+    return False
+
+
 def _truncate_tool_args(args, limit: int = 6) -> dict:
     """Truncate tool args for compact session persistence.
 
@@ -8447,13 +8654,67 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
     return -1
 
 
-def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
-    """Build persisted tool-call summaries from final messages plus live progress fallback."""
+def _live_tool_calls_by_tid(live_tool_calls):
+    """#7358 round-3: index the live mirror by tool-call id.
+
+    ``_emit_tool_complete_to_mirrors_and_sse`` writes the classified
+    ``is_error`` onto the per-stream ``_live_tool_calls`` entries keyed
+    by ``tid``. Settled summaries are built from the final message
+    history, which does not carry that bit, so the only way to carry the
+    live classification into ``s.tool_calls`` is to look the live entry
+    up by its tid.
+    """
+    by_tid = {}
+    for tc in live_tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        tid = tc.get('tid') or ''
+        if tid:
+            by_tid.setdefault(tid, tc)
+    return by_tid
+
+
+def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
+    """Build persisted tool-call summaries from final messages plus live progress fallback.
+
+    #7358 round-3 (reviewer Finding 2, SILENT): the live ``is_error``
+    classified by the structured ``tool_complete`` path is copied into
+    every settled summary by ``tid`` — including the live-fallback
+    branch. Without this, a card shown red live becomes "Completed"
+    after a normal settlement and reload: the persisted summary carried
+    no ``is_error``, hydration built a successful transcript-owned row,
+    and ``merge_duplicate_tool_row`` had no error status to merge.
+    Round 2 only covered the cancellation path
+    (``_build_partial_message`` -> ``_partial_tool_calls``); normal
+    settlement is the common case.
+
+    #7358 round 6 (re-gate 9/23): ``prior_tool_calls`` carries the
+    pre-settlement ``s.tool_calls`` so a historical failure classification
+    survives a subsequent turn's settlement. The verified two-turn
+    regression went from ``[("t1", True)]`` to ``[("t1", False),
+    ("t2", False)]`` because the new turn's live mirror no longer
+    contained the previous turn's tool call — the ``is_error`` from
+    the live fallback defaulted to ``False`` and overwrote the prior
+    verdict. We now merge by stable ``tid`` so the prior verdict wins
+    when the new turn's live mirror lacks the call but the prior
+    summary had classified it.
+    """
     tool_calls = []
     pending_names = {}
     pending_args = {}
     pending_asst_idx = {}
     tool_msg_sequence = []
+    live_by_tid = _live_tool_calls_by_tid(live_tool_calls)
+    # #7358 round 6: index prior verdicts by tid so the merge step
+    # below can fall back to them when the new turn's live mirror
+    # has lost the call (the cause of the two-turn regression).
+    prior_by_tid = {}
+    for _ptc in (prior_tool_calls or []):
+        if not isinstance(_ptc, dict):
+            continue
+        _ptid = _ptc.get('tid') or ''
+        if _ptid:
+            prior_by_tid.setdefault(_ptid, _ptc)
 
     for msg_idx, m in enumerate(messages or []):
         if not isinstance(m, dict):
@@ -8490,12 +8751,46 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if tid:
                 name = pending_names.get(tid, '')
                 if name and name != 'tool':
+                    live_tc = live_by_tid.get(tid)
+                    # #7358 round 6: prefer live classification; fall
+                    # back to the prior turn's verdict when the live
+                    # mirror no longer carries this call (the two-turn
+                    # regression case).
+                    # #7358 round 7 (re-gate 9/23): treat a live record
+                    # that LACKS ``is_error`` as ``None`` (unknown)
+                    # rather than ``False`` (default in the previous
+                    # ``bool(... , False)`` call). The round-6 default
+                    # silently inverted an unknown classification into
+                    # a success, which masked the round-7 case where
+                    # the structured callback's helper never wrote the
+                    # verdict (the live record was pre-marked ``done``
+                    # by the legacy suppression branch and the
+                    # helper's done-guard skipped the per-tid write).
+                    # The prior-tc fallback is symmetric: missing on
+                    # the prior also yields ``None`` (unknown). The
+                    # final default to ``False`` below remains so the
+                    # downstream ``tool_calls`` entry is always a
+                    # concrete bool — the "unknown" state is the
+                    # intermediate, propagated so the caller can
+                    # distinguish a never-determined verdict from a
+                    # determined-False one if it chooses to.
+                    _is_error = live_tc.get('is_error') if live_tc else None
+                    if _is_error is None:
+                        _prior_tc = prior_by_tid.get(tid)
+                        if _prior_tc is not None:
+                            _is_error = _prior_tc.get('is_error')
+                        if _is_error is None:
+                            _is_error = False
                     tool_calls.append({
                         'name': name,
                         'snippet': _tool_result_snippet(raw),
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
+                        # Carry the live classification into the settled
+                        # summary so a failed tool stays failed after
+                        # settlement + reload (Finding 2).
+                        'is_error': _is_error,
                     })
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
@@ -8508,12 +8803,27 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if seq_idx >= len(live):
                 break
             live_tc = live[seq_idx]
+            # #7358 round 6: the live-fallback row's identity comes
+            # from the live mirror, so the live classification wins.
+            # Prior-turn verdicts only apply when the live mirror is
+            # absent, which the main path above already handles.
+            # #7358 round 7 (re-gate 9/23): symmetric with the main
+            # path above — missing ``is_error`` on the live record
+            # is ``None`` (unknown) rather than ``False``. The final
+            # default to ``False`` keeps the stored value concrete.
+            _live_is_error = live_tc.get('is_error')
+            if _live_is_error is None:
+                _live_is_error = False
             tool_calls.append({
                 'name': live_tc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+                # The live-fallback branch is the only source of this
+                # row's identity, so it must carry the live is_error too
+                # (Finding 2, fallback summaries).
+                'is_error': _live_is_error,
             })
 
     return tool_calls
@@ -10904,6 +11214,40 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
+            # #7358 round 5 (re-gate 9/22): the Agent's authoritative
+            # ``is_error`` is delivered via the legacy ``tool_progress_callback``'s
+            # ``cb_kwargs`` but the structured ``tool_complete_callback`` signature
+            # does not carry it. The legacy path early-returns when the structured
+            # callback is wired, so the authoritative bit is dropped. Capture it
+            # here on the suppression path, key it by ``tid`` (looked up by name
+            # in the most recent live entry), and pass it as ``is_error_override``
+            # from ``on_tool_complete``. The text-inference fallback
+            # (``_tool_result_is_error``) only fires when no authoritative value
+            # was captured — a Codex success whose output contains the literal
+            # ``"error"`` key name and a guardrail_refusal read both stay
+            # correctly classified as the Agent intended.
+            _authoritative_is_error_by_tid = {}
+            # #7358 round 7 (re-gate 9/23): FIFO queue of no-ID verdicts
+            # staged from ``tool_progress_callback`` events that lack
+            # ``cb_kwargs['tool_call_id']`` (the live path on Hermes Agent
+            # 0.21.x — the cross-repo fix in
+            # ``hermes-agent/agent/tool_executor.py`` that threads
+            # ``tool_call_id`` into the cb_kwargs is still pending). The
+            # paired structured ``tool_complete_callback`` that fires
+            # immediately after supplies the real ``tool_call_id``, so
+            # it dequeues the next entry and applies the staged verdict
+            # to the matching live row. Without this, the suppression
+            # branch's name-based reverse walk pre-marks the WRONG
+            # live row done (the newest not-done one), and the
+            # structured callback's ``done`` guard at
+            # ``api/streaming.py:7942`` then skips the per-tid write —
+            # so two concurrent same-name completions swap verdicts and
+            # the persisted summary silently loses the real ``is_error``.
+            # Pre-marking is replaced with a position-preserving stage,
+            # so the structured callback is the only writer to the
+            # live row and the verdict reaches the persisted summary
+            # even when the Agent omits ``tool_call_id``.
+            _staged_no_tid_verdicts = []  # list[dict{name,is_error,snippet,duration}]
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -11057,27 +11401,111 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
+                    # #7358 round 5 (re-gate 9/22): the structured callback
+                    # takes over the completion path, but the Agent's
+                    # authoritative ``is_error`` was passed via the legacy
+                    # tool_progress_callback's cb_kwargs and is about to be
+                    # dropped. Capture it here, key it by ``tid``, so
+                    # on_tool_complete can pass it as ``is_error_override``
+                    # and the helper skips the text-inference fallback for
+                    # this tool.
+                    _cb_is_error = cb_kwargs.get('is_error')
+                    if _cb_is_error is not None:
+                        # #7358 round 7 (re-gate 9/23): prefer the per-call
+                        # tool_call_id when the Agent passes it through
+                        # cb_kwargs. The legacy Agent path (no tid) STAGES
+                        # the verdict on a FIFO queue and the paired
+                        # structured ``on_tool_complete`` consumes it by
+                        # the real tid. The structured callback is the
+                        # only writer to the live row, so the verdict
+                        # reaches the persisted summary even when the
+                        # Agent omits ``tool_call_id``. The cross-repo
+                        # fix that would thread ``tool_call_id`` into
+                        # the cb_kwargs of the legacy callback lives in
+                        # ``hermes-agent/agent/tool_executor.py``; once
+                        # that lands, the fast-path below activates
+                        # with no further change here. The previous
+                        # round's behaviour — name-based reverse walk
+                        # that pre-marked the matched entry ``done``
+                        # — caused two failure modes the reviewer
+                        # pinned in the 9/23 re-gate:
+                        #   1. The reverse walk takes the newest
+                        #      not-done row, so two concurrent same-name
+                        #      completions swap verdicts.
+                        #   2. The pre-marked ``done`` makes the
+                        #      structured callback's helper see
+                        #      ``live_tc['done'] is True`` and skip the
+                        #      per-tid write, so the persisted
+                        #      summary silently loses the real
+                        #      ``is_error``.
+                        # The FIFO stage fixes both without depending
+                        # on the unshipped Agent change.
+                        _cb_tid = cb_kwargs.get('tool_call_id') or ''
+                        if _cb_tid:
+                            _authoritative_is_error_by_tid[_cb_tid] = bool(_cb_is_error)
+                        else:
+                            # #7358 round 7: stage the no-ID verdict
+                            # and the progress event's result together
+                            # in a FIFO queue. The structured callback
+                            # will dequeue the next entry by position
+                            # (FIFO matches the Agent's paired
+                            # production order) and apply the verdict
+                            # to the live row identified by the
+                            # real ``tool_call_id``. Do NOT pre-mark
+                            # any live row ``done`` — that would
+                            # starve the structured callback's helper
+                            # of the per-tid write.
+                            _staged_no_tid_verdicts.append({
+                                'name': name,
+                                'is_error': bool(_cb_is_error),
+                                'snippet': cb_kwargs.get('result'),
+                                'duration': cb_kwargs.get('duration'),
+                            })
                     return
 
                 if event_type == 'tool.completed':
-                    for live_tc in reversed(_live_tool_calls):
-                        if live_tc.get('done'):
-                            continue
-                        if not name or live_tc.get('name') == name:
-                            live_tc['done'] = True
-                            live_tc['duration'] = cb_kwargs.get('duration')
-                            live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
-                            break
+                    # #7358 round 6 (re-gate 9/23): when the Agent passes
+                    # ``tool_call_id`` through cb_kwargs (hermes-agent
+                    # fix pending in ``tool_executor.py``), use it as the
+                    # authoritative key. Otherwise fall back to the
+                    # name-based reverse walk and claim the matched
+                    # entry ``done`` so two concurrent same-name tool
+                    # completions do not swap verdicts.
+                    _cb_tid = cb_kwargs.get('tool_call_id') or ''
+                    if _cb_tid:
+                        for live_tc in reversed(_live_tool_calls):
+                            if live_tc.get('tid') == _cb_tid:
+                                live_tc['done'] = True
+                                live_tc['duration'] = cb_kwargs.get('duration')
+                                live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                break
+                    else:
+                        for live_tc in reversed(_live_tool_calls):
+                            if live_tc.get('done'):
+                                continue
+                            if not name or live_tc.get('name') == name:
+                                live_tc['done'] = True
+                                live_tc['duration'] = cb_kwargs.get('duration')
+                                live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                break
                     # Mirror done state to shared dict (#1361 §B)
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
-                        for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                            if shared_tc.get('done'):
-                                continue
-                            if not name or shared_tc.get('name') == name:
-                                shared_tc['done'] = True
-                                shared_tc['duration'] = cb_kwargs.get('duration')
-                                shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
-                                break
+                        if _cb_tid:
+                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                if shared_tc.get('tid') == _cb_tid:
+                                    shared_tc['done'] = True
+                                    shared_tc['duration'] = cb_kwargs.get('duration')
+                                    shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                    break
+                        else:
+                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                if shared_tc.get('done'):
+                                    continue
+                                if not name or shared_tc.get('name') == name:
+                                    shared_tc['done'] = True
+                                    shared_tc['duration'] = cb_kwargs.get('duration')
+                                    shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                    break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
@@ -11159,34 +11587,98 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
-                    _record_live_tool_complete(tool_call_id, name, function_result)
-                    if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
-                        _live_tool_event_complete_ids.add(tool_call_id)
-                        result_snippet = _tool_result_snippet(function_result)
-                        for live_tc in reversed(_live_tool_calls):
-                            if live_tc.get('done'):
-                                continue
-                            if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
-                                live_tc['done'] = True
-                                live_tc['snippet'] = result_snippet
-                                break
-                        if stream_id in STREAM_LIVE_TOOL_CALLS:
-                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                if shared_tc.get('done'):
-                                    continue
-                                if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
-                                    shared_tc['done'] = True
-                                    shared_tc['snippet'] = result_snippet
+                    # #7358: delegate to the module-level helper so
+                    # live_tc, shared_tc, and the SSE payload all
+                    # agree on is_error. Without the mirror writes,
+                    # a failed tool would render red live and then
+                    # become a successful/completed card after
+                    # cancel + reload — see
+                    # api/streaming.py:14009-14017 where
+                    # _build_partial_message persists the shared
+                    # mirror through _partial_tool_calls.
+                    seen_ids = _live_tool_event_complete_ids
+                    if tool_call_id and tool_call_id not in seen_ids:
+                        seen_ids.add(tool_call_id)
+                        # #7358 round 5 (re-gate 9/22): prefer the Agent's
+                        # authoritative ``is_error`` (captured by on_tool
+                        # before the structured-callback suppression) over
+                        # text-inference from the payload. The dict is
+                        # per-tid and popped on use so a stale entry from
+                        # a prior tool with the same id can never leak into
+                        # a later, different tool. A Codex success whose
+                        # output contains the literal ``"error"`` key name
+                        # and a guardrail_refusal read both reach the
+                        # helper with the Agent's verdict intact, instead
+                        # of being silently re-classified.
+                        _is_error_override = None
+                        if tool_call_id:
+                            _is_error_override = _authoritative_is_error_by_tid.pop(tool_call_id, None)
+                        # #7358 round 7 (re-gate 9/23): consume the
+                        # next staged no-tid verdict from the FIFO
+                        # queue. The Agent invokes progress and
+                        # complete callbacks in PAIRS and in
+                        # production order, so the dequeued entry
+                        # belongs to this ``tool_call_id`` — the
+                        # name match is a defensive guard, not the
+                        # primary key. This is the only way to carry
+                        # the legacy-callback verdict (no tid) onto
+                        # the correct live row without depending on
+                        # the unshipped Agent change that would
+                        # thread ``tool_call_id`` into the
+                        # ``tool_progress_callback`` cb_kwargs. Pop
+                        # the entry on consume so a stale stage
+                        # from a prior tool can never leak into a
+                        # later, different tool — same discipline
+                        # as the round-5 pop on
+                        # ``_authoritative_is_error_by_tid``.
+                        _staged_verdict = None
+                        if _staged_no_tid_verdicts:
+                            for _i, _sv in enumerate(_staged_no_tid_verdicts):
+                                if not _sv.get('name') or _sv.get('name') == name:
+                                    _staged_verdict = _staged_no_tid_verdicts.pop(_i)
                                     break
+                        if _is_error_override is None and _staged_verdict is not None:
+                            _is_error_override = _staged_verdict.get('is_error')
+                        # When the staged verdict carries a result
+                        # snippet (the Agent passed it through
+                        # ``cb_kwargs['result']``), apply it to the
+                        # live row so the SSE payload and the
+                        # persisted summary agree with the staged
+                        # verdict's source of truth. The structured
+                        # helper computes its own snippet from
+                        # ``function_result`` (a JSON string the
+                        # Agent forwards), but a flat text snippet
+                        # from the progress event wins when the
+                        # structured payload is absent or empty.
+                        if _staged_verdict is not None and tool_call_id:
+                            _staged_snippet = _staged_verdict.get('snippet')
+                            if _staged_snippet:
+                                for _live_tc in _live_tool_calls:
+                                    if _live_tc.get('tid') == tool_call_id and not _live_tc.get('snippet'):
+                                        _live_tc['snippet'] = _staged_snippet
+                                        break
+                                if stream_id in STREAM_LIVE_TOOL_CALLS:
+                                    for _shared_tc in STREAM_LIVE_TOOL_CALLS[stream_id]:
+                                        if _shared_tc.get('tid') == tool_call_id and not _shared_tc.get('snippet'):
+                                            _shared_tc['snippet'] = _staged_snippet
+                                            break
+                        _emit_tool_complete_to_mirrors_and_sse(
+                            tool_call_id=tool_call_id,
+                            name=name,
+                            args=args,
+                            function_result=function_result,
+                            live_tool_calls_list=_live_tool_calls,
+                            shared_tool_calls_list=(
+                                STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
+                                if stream_id in STREAM_LIVE_TOOL_CALLS
+                                else []
+                            ),
+                            put=put,
+                            record_live_tool_complete=_record_live_tool_complete,
+                            args_snapshot_fn=_tool_args_snapshot,
+                            is_error_override=_is_error_override,
+                        )
                         _checkpoint_activity[0] += 1
-                        put('tool_complete', {
-                            'event_type': 'tool.completed',
-                            'name': name,
-                            'preview': result_snippet,
-                            'args': _tool_args_snapshot(args),
-                            'tid': tool_call_id,
-                            'is_error': False,
-                        })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
                         # update in real-time without waiting for the
@@ -12886,9 +13378,14 @@ def _run_agent_streaming(
                     s.cache_write_tokens = cache_write_tokens
                 # Persist tool-call summaries even when the final message history only
                 # kept bare tool rows and omitted explicit assistant tool_call IDs.
+                # #7358 round 6 (re-gate 9/23): carry the prior
+                # ``s.tool_calls`` so a historical failure classification
+                # survives a subsequent turn's settlement (Finding 2).
+                _prior_s_tool_calls = list(s.tool_calls or []) if s.tool_calls else []
                 tool_calls = _extract_tool_calls_from_messages(
                     s.messages,
                     live_tool_calls=_live_tool_calls,
+                    prior_tool_calls=_prior_s_tool_calls,
                 )
                 s.tool_calls = tool_calls
                 s.active_stream_id = None
@@ -13974,9 +14471,15 @@ def _run_agent_streaming(
                                     # ``finally`` cannot re-materialize this user
                                     # turn and append a spurious "Response
                                     # interrupted" marker after the settled answer.
+                                    # #7358 round 6 (re-gate 9/23): carry the prior
+                                    # ``s.tool_calls`` so a historical failure
+                                    # classification survives a subsequent turn's
+                                    # settlement (Finding 2).
+                                    _prior_s_tool_calls = list(s.tool_calls or []) if s.tool_calls else []
                                     s.tool_calls = _extract_tool_calls_from_messages(
                                         s.messages,
                                         live_tool_calls=_live_tool_calls,
+                                        prior_tool_calls=_prior_s_tool_calls,
                                     )
                                     s.active_stream_id = None
                                     s.pending_user_message = None

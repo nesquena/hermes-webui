@@ -18323,8 +18323,26 @@ function renderMessages(options){
       if(tid&&!liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid,{tc,idx});
     });
     const usedLiveToolMetadata=new Set();
+    // #7358 round 5 (re-gate 9/22): cold-reload-friendly persisted
+    // ``is_error`` index populated by ``_syncToolCallsForLoadedMessages``.
+    // When the browser has no in-memory live mirror (a true cold reload),
+    // ``liveMetadataByTid`` is empty and the per-tid lookup below cannot
+    // upgrade a settled row to a failure. Fall back to this map so a
+    // failed tool that was correctly classified server-side still renders
+    // red after reload, instead of falling back to the default ``false``
+    // and silently flipping to "Completed" (Finding 2 of the 9/22
+    // re-gate review). The merge is one-way: a missing-or-false row can
+    // only be upgraded to ``true``; an already-true row is never cleared.
+    const _persistedIsErrorByTid=(S&&S._settledToolIsErrorByTid&&typeof S._settledToolIsErrorByTid==='object')?S._settledToolIsErrorByTid:null;
     const copyLiveToolMetadata=(next,name,tid)=>{
-      let matchEntry=tid?liveMetadataByTid.get(tid):null;
+      // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
+      // distinct — the one-way is_error upgrade below may only run off the
+      // id map. A name match can pair an older successful terminal call
+      // with a newer failed one, settling the older row as Failed. The
+      // name fallback stays name-matchable for the presentation-only keys
+      // (burst / duration / started_at).
+      const idMatchEntry=tid?liveMetadataByTid.get(tid):null;
+      let matchEntry=idMatchEntry;
       if(!matchEntry){
         const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
@@ -18335,6 +18353,18 @@ function renderMessages(options){
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
         }
+        // One-way is_error upgrade from the live mirror — id-map hit only
+        // (#7358 re-gate 9/24): a name-fallback match must not inherit
+        // another call's failure.
+        if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
+          next.is_error=true;
+        }
+      }
+      // #7358 round 5 (re-gate 9/22): cold-reload fallback to the
+      // persisted per-tid map when the live mirror is empty (the
+      // common case on a hard browser reload). Same one-way rule.
+      if(tid&&_persistedIsErrorByTid&&_persistedIsErrorByTid[tid]===true&&next.is_error!==true){
+        next.is_error=true;
       }
       return next;
     };
