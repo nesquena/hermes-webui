@@ -71,6 +71,37 @@ cache or publish its result to a later subscriber cohort. The subscriber lock
 protects removal, epoch checks and cache commits, but is not held during DB
 reads, so disconnect is not blocked by a slow projection.
 
+## Reasoning settlement
+
+When a `/api/chat/stream` turn settles, `_settle_turn_reasoning()` in
+`api/streaming.py` persists a reasoning trace on each of the turn's new
+assistant messages before the session is saved. Assistant messages from
+earlier turns are never modified.
+
+- **Non-empty agent `reasoning` wins.** The agent writes the key on every
+  assistant message it builds, but `None` only means the provider did not
+  return final reasoning. It is not evidence the step had no thinking, so
+  stream-only providers fall through to the stream.
+- **Stream segments are bound to the step that owns them.** When a tool
+  starts, `on_tool_start()` binds its `tool_call_id` to the segment streamed
+  since the previous tool, or to `None` if that step streamed no thinking.
+  A visible interim message (`on_interim_assistant()`) also closes its step:
+  the open segment is bound to that message's text, so the next tool call
+  cannot claim it. Settlement resolves a tool-call step through its call ids:
+  from `tool_calls`, else from the following tool results' `tool_call_id`,
+  else from the next unclaimed live tool starts in order. A step with
+  commentary can also resolve through its interim binding. Other
+  steps are matched to interim bindings by their content, in order. The final
+  step takes the segment still open at settlement. The positional index is
+  used only when there are no bindings, as with older agents that lack
+  `tool_start_callback`. It is not authoritative on its own: it advances
+  only at a tool boundary that already holds reasoning, so with
+  adaptive-thinking models segment `k` can hold step `k+1`'s trace.
+- **Inline `<think>` blocks** in the content are always split into `reasoning`
+  and merged with the value chosen above.
+
+Regression coverage: `tests/test_settlement_agent_reasoning_authoritative.py`.
+
 ## Heartbeats and proxy behavior
 
 - All long-lived streams emit SSE keepalive comment lines on the
