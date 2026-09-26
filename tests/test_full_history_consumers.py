@@ -26,6 +26,7 @@ def browser():
 @pytest.fixture
 def page(browser):
     page = browser.new_page()
+    page.set_default_timeout(5000)
     page.set_content('''<button id="btnDownload">Download</button>
       <span id="workspaceArtifactsCount"></span>
       <section id="workspaceArtifacts"></section>''')
@@ -70,6 +71,12 @@ def page(browser):
     start = boot.index("$('btnDownload').onclick=")
     end = boot.index('\nfunction _buildSessionExportUrl', start)
     page.add_script_tag(content=boot[start:end])
+    panels = (ROOT / 'static/panels.js').read_text()
+    start = panels.index('function _syncHermesPanelSessionActions(){')
+    end = panels.index('\n}\n', start) + 3
+    page.add_script_tag(content=panels[start:end])
+    page.evaluate('''() => { const handler=$('btnDownload').onclick;
+      $('btnDownload').onclick=()=>{window.downloadTask=handler();}; }''')
     yield page
     page.close()
 
@@ -95,7 +102,7 @@ def test_export_rejects_departed_owner(page, switch):
     page.click('#btnDownload')
     assert page.evaluate('requests.length') == 1
     page.evaluate(f'{switch};resolveFetch()')
-    page.wait_for_function('!document.getElementById("btnDownload").disabled')
+    page.evaluate('downloadTask')
     assert page.evaluate('downloads') == []
 
 
@@ -112,7 +119,7 @@ def test_export_never_silently_downloads_partial_history(page, failure):
     page.evaluate(failure)
     page.wait_for_function('!document.getElementById("btnDownload").disabled')
     assert page.evaluate('downloads') == []
-    assert page.evaluate('Boolean(statusText)') is True
+    assert page.evaluate('statusText') == 'session_history_failed'
 
 
 def test_artifacts_load_on_demand_and_keep_live_tail(page):
@@ -156,3 +163,44 @@ def test_artifacts_late_old_owner_cannot_overwrite_new_session(page):
     page.evaluate("full.session_id='a';resolveA()")
     assert page.locator('[data-artifact-path="b.md"]').count() == 1
     assert page.locator('[data-artifact-path="old.md"]').count() == 0
+
+
+def test_artifacts_include_middle_of_large_history(page):
+    page.evaluate('''full.messages=Array.from({length:80},(_,i)=>({
+      role:'assistant',tool_calls:[{name:'write_file',args:{path:`file-${i}.md`}}]}));
+      S.messages=full.messages.slice(-15);switchWorkspacePanelTab('artifacts');resolveFetch();''')
+    page.wait_for_function("document.getElementById('workspaceArtifactsCount').textContent==='80'")
+    assert page.locator('[data-artifact-path="file-60.md"]').count() == 1
+    assert page.locator('[data-artifact-path]').count() == 80
+
+
+def test_artifacts_reuse_same_version_but_refresh_changed_history(page):
+    page.evaluate("window._isSessionCurrentPane=sid=>sid===S.session.session_id;switchWorkspacePanelTab('artifacts');resolveFetch()")
+    page.wait_for_selector('[data-artifact-path="old.md"]')
+    page.evaluate("switchWorkspacePanelTab('files');switchWorkspacePanelTab('artifacts');projectSessionArtifactsForOwner('a')")
+    assert page.evaluate('requests.length') == 1
+    page.evaluate("S.session.message_count=80;projectSessionArtifactsForOwner('a')")
+    assert page.evaluate('requests.length') == 2
+    page.evaluate('resolveFetch()')
+    page.wait_for_function("document.getElementById('workspaceArtifactsCount').textContent==='1'")
+
+
+def test_old_download_does_not_enable_empty_new_session(page):
+    page.click('#btnDownload')
+    page.evaluate("S.session={session_id:'empty'};S.messages=[];_loadingSessionId='empty';_loadSessionGeneration++;_syncHermesPanelSessionActions();resolveFetch()")
+    page.evaluate('downloadTask')
+    assert page.locator('#btnDownload').is_disabled()
+    assert page.evaluate('downloads') == []
+
+
+def test_old_download_does_not_enable_new_pending_download(page):
+    page.click('#btnDownload')
+    page.evaluate("window.oldTask=downloadTask;window.resolveA=resolveFetch;S.session={session_id:'b'};_loadingSessionId='b';_loadSessionGeneration++;_syncHermesPanelSessionActions()")
+    page.click('#btnDownload')
+    page.evaluate('resolveA()')
+    page.evaluate('oldTask')
+    assert page.locator('#btnDownload').is_disabled()
+    page.evaluate("full.session_id='b';resolveFetch()")
+    page.evaluate('downloadTask')
+    assert not page.locator('#btnDownload').is_disabled()
+    assert page.evaluate('downloads') == ['hermes-b.md']

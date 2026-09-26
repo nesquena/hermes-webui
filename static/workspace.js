@@ -391,10 +391,7 @@ function switchWorkspacePanelTab(tab){
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
   const todosPanel = $('workspaceTodosPanel');
   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
-  if(_workspacePanelActiveTab === 'artifacts'){
-    _artifactHistory=null;
-    renderSessionArtifacts();
-  }
+  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
 }
 
@@ -520,7 +517,7 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
-function collectSessionArtifacts(messages=S.messages, toolCalls=S.toolCalls){
+function collectSessionArtifacts(messages=S.messages, toolCalls=S.toolCalls, limit=50){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
@@ -565,7 +562,7 @@ function collectSessionArtifacts(messages=S.messages, toolCalls=S.toolCalls){
       }
     }
   }
-  return items.slice(0, 50);
+  return items.slice(0, limit);
 }
 
 // Keep only compact artifact paths, never the full transcript. Loading is
@@ -573,13 +570,14 @@ function collectSessionArtifacts(messages=S.messages, toolCalls=S.toolCalls){
 let _artifactHistory=null;
 function _loadArtifactHistory(){
   if(typeof _sessionSnapshotOwner!=='function' || !S.session) return null;
-  if(_artifactHistory && !_artifactHistory.owner.isCurrent()) _artifactHistory=null;
+  const version=JSON.stringify([S.session.message_count,S.session.updated_at,S.session.last_message_at]);
+  if(_artifactHistory && (!_artifactHistory.owner.isCurrent() || _artifactHistory.version!==version)) _artifactHistory=null;
   if(_artifactHistory || _workspacePanelActiveTab!=='artifacts') return _artifactHistory;
-  const state={owner:_sessionSnapshotOwner(), status:'loading', items:[]};
+  const state={owner:_sessionSnapshotOwner(), version, status:'loading', items:[]};
   _artifactHistory=state;
   _readFullSessionSnapshot(state.owner).then(snapshot=>{
     if(_artifactHistory!==state || !state.owner.isCurrent() || !snapshot) return;
-    state.items=collectSessionArtifacts(snapshot.session.messages,snapshot.session.tool_calls);
+    state.items=collectSessionArtifacts(snapshot.session.messages,snapshot.session.tool_calls,Infinity);
     state.status='ready';
     renderSessionArtifacts();
   }).catch(()=>{
@@ -595,14 +593,14 @@ function renderSessionArtifacts(){
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const history = _loadArtifactHistory();
-  const items = collectSessionArtifacts();
+  const items = collectSessionArtifacts(S.messages,S.toolCalls,Infinity);
   const seen = new Set(items.map(a=>a.path));
   for(const item of history?.items || []){
     if(!seen.has(item.path)){items.push(item);seen.add(item.path);}
   }
   const incomplete = !!S.session && typeof _sessionSnapshotOwner==='function' && history?.status!=='ready';
   if(count) count.textContent = String(items.length) + (incomplete ? '…' : '');
-  const notice = incomplete ? `<div class="workspace-artifact-empty">${esc(history?.status==='error'?'Could not load complete session history.':t('loading'))}${history?.status==='error'?` <button type="button" data-artifacts-retry>${esc(t('steer_recovery_retry'))}</button>`:''}</div>` : '';
+  const notice = incomplete ? `<div class="workspace-artifact-empty">${esc(history?.status==='error'?t('session_history_failed'):t('loading'))}${history?.status==='error'?` <button type="button" data-artifacts-retry>${esc(t('steer_recovery_retry'))}</button>`:''}</div>` : '';
   const bindRetry = ()=>{
     const retry=root.querySelector('[data-artifacts-retry]');
     if(retry) retry.onclick=()=>{_artifactHistory=null;renderSessionArtifacts();};
@@ -650,7 +648,6 @@ function renderSessionArtifacts(){
 function projectSessionArtifactsForOwner(sessionId){
   if(!sessionId||!S.session||S.session.session_id!==sessionId) return false;
   if(typeof _isSessionCurrentPane!=='function'||!_isSessionCurrentPane(sessionId)) return false;
-  _artifactHistory=null;
   renderSessionArtifacts();
   return true;
 }

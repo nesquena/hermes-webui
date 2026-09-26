@@ -2115,9 +2115,9 @@ $('btnDownload').onclick=async()=>{
     const a=document.createElement('a');a.href=URL.createObjectURL(blob);
     a.download=`hermes-${session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
   }catch(_){
-    if(owner.isCurrent())setStatus('Could not load complete session history. Please retry.');
+    if(owner.isCurrent())setStatus(t('session_history_failed'));
   }finally{
-    button.disabled=false;
+    if(owner.isCurrent())_syncHermesPanelSessionActions();
   }
 };
 function _buildSessionExportUrl(sessionId,params){
