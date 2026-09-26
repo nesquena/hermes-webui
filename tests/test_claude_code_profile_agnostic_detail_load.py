@@ -96,7 +96,7 @@ def test_claude_code_detail_load_survives_named_active_profile(monkeypatch):
     synth = _synth_for(row)
 
     handler = MagicMock()
-    parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % CLAUDE_SID)
+    parsed = urlparse("/api/session?session_id=%s&messages=1&resolve_model=0" % CLAUDE_SID)
 
     with patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)), \
          patch("api.routes._get_active_profile_name", return_value="feng-family"), \
