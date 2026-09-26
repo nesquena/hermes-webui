@@ -9,8 +9,6 @@
      correct base when the page is served from /session/<id> routes. See #2226. -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
 <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
-<link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
-<link rel="shortcut icon" href="static/favicon.ico">
 <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -987,7 +985,12 @@
               </div>
               <input type="hidden" id="settingsSkin" value="default">
             </div>
-                        <div class="settings-field">
+            <div class="settings-field">
+              <label for="settingsIconTint" data-i18n="settings_label_icon_tint">App icon color</label>
+              <input type="color" id="settingsIconTint" value="#08EBF1" oninput="_pickIconTint(this.value)" style="width:48px;height:34px;padding:2px;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;cursor:pointer">
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_icon_tint">Tint the browser tab and installed app icon to distinguish this agent.</div>
+            </div>
+            <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
               <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
