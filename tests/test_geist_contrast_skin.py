@@ -44,7 +44,14 @@ def test_geist_contrast_selection_is_neutral_not_solid_yellow():
 
 def test_geist_contrast_solid_accent_controls_use_black_text_in_dark_mode():
     assert ':root[data-skin="geist-contrast"] button.send-btn:not(:disabled)' in CSS
-    assert "color:#050505!important" in CSS
+    # #7092 replaced the hardcoded #050505 with the shared token; the resolved
+    # ratio for every dark skin is asserted in test_7098_dark_skin_btn_contrast.
+    assert (
+        ':root[data-skin="geist-contrast"] .clarify-submit{background:var(--accent)!important;'
+        "border-color:var(--accent)!important;color:var(--btn-primary-text)!important;"
+        "font-weight:600!important;box-shadow:none!important;}" in CSS
+    ), "Geist Contrast solid-accent controls must read --btn-primary-text (dark pins it to #050505)"
+    assert "--btn-primary-text:#050505" in CSS
     assert ':root[data-skin="geist-contrast"] button.send-btn:disabled{background:var(--surface-subtle)!important;border-color:var(--border)!important;color:var(--muted)!important;opacity:1!important;}' in CSS
     assert ':root.dark[data-skin="geist-contrast"] button.send-btn:disabled svg' in CSS
 
