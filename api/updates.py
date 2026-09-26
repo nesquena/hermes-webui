@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -543,10 +544,17 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
 
 
 def _gateway_health_base_url() -> str:
-    """Return the configured/default Hermes Agent gateway base URL."""
+    """Return the configured/default Hermes Agent gateway base URL.
+
+    Falls back through the same env-var chain used by agent_health.py
+    (#6150): GATEWAY_HEALTH_URL → HERMES_GATEWAY_HEALTH_URL →
+    HERMES_API_URL → HERMES_WEBUI_GATEWAY_BASE_URL → default.
+    """
     raw = (
         os.environ.get('GATEWAY_HEALTH_URL')
         or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
+        or os.environ.get('HERMES_API_URL')
+        or os.environ.get('HERMES_WEBUI_GATEWAY_BASE_URL')
         or 'http://hermes-agent:8642'
     ).strip()
     if raw.endswith('/health/detailed'):
@@ -574,22 +582,81 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
 
 def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
     """Best-effort cross-container gateway API fallback for Agent version."""
-    base = _gateway_health_base_url()
-    if not base:
+    try:
+        base = _gateway_health_base_url()
+        if not base:
+            return None
+        parsed = urlparse(base)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            return None
+        for path in ('/health', '/health/detailed'):
+            try:
+                with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
+                    payload = json.loads(resp.read().decode('utf-8'))
+            except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError, http.client.HTTPException, ValueError):
+                continue
+            version = _version_from_gateway_health_payload(payload)
+            if version:
+                return version
+    except Exception:
         return None
-    parsed = urlparse(base)
-    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
-        return None
-    for path in ('/health', '/health/detailed'):
-        try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        version = _version_from_gateway_health_payload(payload)
-        if version:
-            return version
     return None
+
+
+# Cache wrapper so /api/settings doesn't block on every page load when
+# the gateway is unreachable (#6150, #6289).  Negative results (None)
+# are cached with a shorter TTL so a recovering gateway is picked up
+# promptly.
+#
+# The cache is a single immutable ``(value, completed_at)`` snapshot,
+# published/replaced in ONE assignment.  Lock-free readers snapshot the
+# whole tuple in a single read, so they can never combine a value from one
+# cache generation with a completion timestamp from another (#6289).
+_GATEWAY_AGENT_VERSION_CACHE: tuple[str | None, float] | None = None
+_GATEWAY_AGENT_VERSION_TTL = 30.0
+_GATEWAY_AGENT_VERSION_NEGATIVE_TTL = 5.0
+_gateway_version_lock = threading.Lock()
+
+
+def _cached_agent_version_from_gateway() -> str | None:
+    """Return a cached gateway agent version, refreshing at most once per TTL.
+
+    Uses double-checked locking under ``_gateway_version_lock`` to guarantee
+    that at most one thread performs the gateway probe per TTL window, even
+    under the ``ThreadingHTTPServer`` (128 workers) request model (#6289).
+    """
+    global _GATEWAY_AGENT_VERSION_CACHE
+    now = time.monotonic()
+    snapshot = _GATEWAY_AGENT_VERSION_CACHE
+    if snapshot is not None:
+        cached, cached_at = snapshot
+        ttl = (
+            _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+            if cached is None
+            else _GATEWAY_AGENT_VERSION_TTL
+        )
+        if cached_at and (now - cached_at) < ttl:
+            return cached
+
+    with _gateway_version_lock:
+        # Double-check: another thread may have refreshed while we waited
+        now = time.monotonic()
+        snapshot = _GATEWAY_AGENT_VERSION_CACHE
+        if snapshot is not None:
+            cached, cached_at = snapshot
+            ttl = (
+                _GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+                if cached is None
+                else _GATEWAY_AGENT_VERSION_TTL
+            )
+            if cached_at and (now - cached_at) < ttl:
+                return cached
+
+        result = _detect_agent_version_from_gateway_health(timeout=0.75)
+        # Publish the value and its completion time as ONE immutable
+        # snapshot in a single assignment — never two.
+        _GATEWAY_AGENT_VERSION_CACHE = (result, time.monotonic())
+    return result
 
 
 def _detect_agent_version() -> str:
