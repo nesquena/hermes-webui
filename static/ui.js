@@ -3285,10 +3285,13 @@ function _captureModelDropdownSelection(sel){
   return {model:String(sel.value||''),model_provider:null};
 }
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
   if(!model) return null;
+  // The dropdown is the user's most recent intent. An explicit provider
+  // embedded in a qualified id (@provider:model) is authoritative; else, when
+  // the sent model is the currently selected option, its option-provider wins
+  // over a STALE session provider — the session's model_provider is only
+  // updated on apply/pending paths, not on plain picker changes (#7860).
   const explicitProvider=typeof _providerFromModelValue==='function'
     ? _providerFromModelValue(model)
     : '';
@@ -3298,10 +3301,13 @@ function _modelProviderForSend(modelId){
     try{
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
-        return dropdownState.model_provider||null;
+        const dropdownProvider=dropdownState.model_provider;
+        if(dropdownProvider) return dropdownProvider;
       }
     }catch(_){}
   }
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  if(sessionProvider) return sessionProvider;
   if(typeof _readPersistedModelState==='function'){
     try{
       const persisted=_readPersistedModelState();
