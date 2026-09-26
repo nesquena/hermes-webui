@@ -339,7 +339,11 @@ function _clearComposerDraft(sid, text, files) {
   else _suppressComposerDraftRestoreAfterSubmit(sid);
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
+    // Explicit clear shape: both optional fields are sent so the server
+    // classifies the request as a clear from the merged draft (an omitted
+    // `files` would leave stored attachments alive and skip the sidecar
+    // cleanup — #6242).
+    body: JSON.stringify({ session_id: sid, text: '', files: [] }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
   }).catch(() => {});
