@@ -79,6 +79,100 @@ def _wait_for_health(timeout=30):
     return False
 
 
+def _check_markdown_code_rendering(page, renderer_path):
+    """Exercise raw-code/backtick edge cases through the production renderer."""
+    page.goto("about:blank")
+    page.add_script_tag(path=renderer_path)
+    if not page.evaluate("typeof renderMd === 'function'"):
+        return ["production renderMd() failed to load in the browser harness"]
+    inputs = [
+        {
+            "name": "backticks in separate raw code elements",
+            "markdown": "Use <code>`</code> for inline code and <code>```</code> for fences.",
+            "expectedText": "Use ` for inline code and ``` for fences.",
+            "expectedCode": ["`", "```"],
+            "expectedImage": None,
+        },
+        {
+            "name": "fenced code displays literal code tags",
+            "markdown": "```html\n<code>foo</code>\n```",
+            "expectedText": "html<code>foo</code>",
+            "expectedCode": ["<code>foo</code>"],
+            "expectedImage": None,
+        },
+        {
+            "name": "inline raw code tag displays literally in prose",
+            "markdown": "Explain `<code>npm test</code>` syntax.",
+            "expectedText": "Explain <code>npm test</code> syntax.",
+            "expectedCode": ["<code>npm test</code>"],
+            "expectedCodeParents": ["P"],
+            "expectedImage": None,
+        },
+        {
+            "name": "inline raw pre tag displays literally in prose",
+            "markdown": "Use `<pre>block</pre>` for preformatted text.",
+            "expectedText": "Use <pre>block</pre> for preformatted text.",
+            "expectedCode": ["<pre>block</pre>"],
+            "expectedCodeParents": ["P"],
+            "expectedImage": None,
+        },
+        {
+            "name": "inline raw code tag displays literally in list item",
+            "markdown": "- Wrap with `<code>x</code>`",
+            "expectedText": "Wrap with <code>x</code>",
+            "expectedCode": ["<code>x</code>"],
+            "expectedCodeParents": ["LI"],
+            "expectedImage": None,
+        },
+        {
+            "name": "inline raw code tag displays literally in table cell",
+            "markdown": "| Example | Meaning |\n| --- | --- |\n| `<code>x</code>` | literal |",
+            "expectedText": "\nExampleMeaning<code>x</code>literal\n",
+            "expectedCode": ["<code>x</code>"],
+            "expectedCodeParents": ["TD"],
+            "expectedImage": None,
+        },
+        {
+            "name": "raw-code backtick before image and inline code",
+            "markdown": "Type <code>`</code> then see ![i](https://e.x/i.png) and `x`.",
+            "expectedText": "Type ` then see  and x.",
+            "expectedCode": ["`", "x"],
+            "expectedImage": "https://e.x/i.png",
+        },
+    ]
+    results = page.evaluate(
+        """(inputs) => inputs.map(input => {
+          if (typeof renderMd !== 'function') throw new Error('renderMd is unavailable');
+          const root = document.createElement('div');
+          root.innerHTML = renderMd(input.markdown);
+          return {
+            name: input.name,
+            text: root.textContent,
+            "code": Array.from(root.querySelectorAll('code'), node => node.textContent),
+            "codeParents": Array.from(root.querySelectorAll('code'), node => node.parentElement.tagName),
+            images: Array.from(root.querySelectorAll('img'), node => node.getAttribute('src')),
+            "html": root.innerHTML,
+            "leakedStash": /\\u0000F\\d+\\u0000|\\bF\\d+\\b/.test(root.textContent),
+          };
+        })""",
+        inputs,
+    )
+    failures = []
+    for case, result in zip(inputs, results, strict=True):
+        if result["text"] != case["expectedText"]:
+            failures.append(f"{case['name']}: text={result['text']!r}; html={result['html']!r}")
+        if result["code"] != case["expectedCode"]:
+            failures.append(f"{case['name']}: code={result['code']!r}")
+        if "expectedCodeParents" in case and result["codeParents"] != case["expectedCodeParents"]:
+            failures.append(f"{case['name']}: code parents={result['codeParents']!r}; html={result['html']!r}")
+        expected_images = [case["expectedImage"]] if case["expectedImage"] else []
+        if result["images"] != expected_images:
+            failures.append(f"{case['name']}: images={result['images']!r}; html={result['html']!r}")
+        if result["leakedStash"]:
+            failures.append(f"{case['name']}: inline-code stash token leaked")
+    return failures
+
+
 def main():
     try:
         from playwright.sync_api import sync_playwright
@@ -144,6 +238,17 @@ def main():
                 except Exception:
                     pass
                 time.sleep(1.5)
+
+                if path == "/":
+                    try:
+                        renderer_failures = _check_markdown_code_rendering(
+                            page, os.path.join(repo_root, "static", "ui.js")
+                        )
+                        failures.extend(f"  [markdown renderer] {failure}" for failure in renderer_failures)
+                        if not renderer_failures:
+                            print("OK  markdown raw-code/backtick regressions — Chromium + production renderMd()")
+                    except Exception as exc:
+                        failures.append(f"  [markdown renderer] browser regression check failed: {exc}")
 
                 meaningful = [(kind, txt) for (kind, txt) in errors if not _is_benign(txt)]
                 if meaningful:

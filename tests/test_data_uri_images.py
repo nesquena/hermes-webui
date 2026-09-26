@@ -88,7 +88,12 @@ eval(extractFunc('renderMd'));
 
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+process.stdin.on('end', () => {
+  const input = process.argv[3] === '--lone-surrogate'
+    ? '![x]\n(/home/joe/.hermes/cache/images/x\uD800.png)'
+    : buf;
+  process.stdout.write(renderMd(input));
+});
 """
 
 
@@ -99,9 +104,9 @@ def driver_path(tmp_path_factory):
     return str(path)
 
 
-def _render(driver_path: str, markdown: str) -> str:
+def _render(driver_path: str, markdown: str, *driver_args: str) -> str:
     result = subprocess.run(
-        [NODE, driver_path, str(REPO_ROOT / "static" / "ui.js")],
+        [NODE, driver_path, str(REPO_ROOT / "static" / "ui.js"), *driver_args],
         input=markdown,
         capture_output=True,
         text=True,
@@ -128,6 +133,126 @@ def test_media_token_with_data_image_renders_img(driver_path):
     html = _render(driver_path, f"MEDIA:{PNG_URI}")
     assert f'src="{PNG_URI}"' in html
     assert "api/media?path=data" not in html, "data: URI must never route to api/media"
+
+
+def test_markdown_image_with_line_break_before_bare_cache_path_renders_inline(driver_path):
+    html = _render(driver_path, "![Photorealistic cat on a tightrope]\n(/home/joe/.hermes/cache/images/mai_test.png)")
+    assert "api/media?path=%2Fhome%2Fjoe%2F.hermes%2Fcache%2Fimages%2Fmai_test.png" in html
+    assert '<img' in html
+    assert "![Photorealistic" not in html
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "`![x](/home/joe/.hermes/cache/images/x.png)`",
+        "- `![x](/home/joe/.hermes/cache/images/x.png)`",
+        "| code |\n| --- |\n| `![x](/home/joe/.hermes/cache/images/x.png)` |",
+    ],
+    ids=["paragraph", "list", "table"],
+)
+def test_markdown_bare_cache_image_inside_inline_code_stays_code(driver_path, markdown):
+    html = _render(driver_path, markdown)
+    assert "api/media" not in html
+    assert "<img" not in html
+    assert "<code>![x](/home/joe/.hermes/cache/images/x.png)</code>" in html
+
+
+@pytest.mark.parametrize(
+    "code_markup",
+    [
+        "<code>![x](/home/joe/.hermes/cache/images/x.png)</code>",
+        "&lt;code&gt;![x](/home/joe/.hermes/cache/images/x.png)&lt;/code&gt;",
+    ],
+    ids=["raw-html-code", "entity-escaped-code"],
+)
+def test_markdown_image_inside_code_markup_stays_literal(driver_path, code_markup):
+    html = _render(driver_path, f"See {code_markup} for the syntax.")
+    assert "api/media" not in html
+    assert "<img" not in html
+    assert "![x](/home/joe/.hermes/cache/images/x.png)" in html
+
+
+def test_markdown_lone_surrogate_cache_path_stays_inert(driver_path):
+    # The surrogate is constructed inside Node; text-mode stdin would replace it
+    # with U+FFFD before renderMd() can exercise encodeURIComponent().
+    html = _render(driver_path, "", "--lone-surrogate")
+    assert "api/media" not in html
+    assert "<img" not in html
+    assert "![x]" in html and "cache/images/" in html
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [
+        ("https://example.test/chart.png", "src=\"https://example.test/chart.png\""),
+        ("file:///tmp/chart.png", "api/media?path=%2Ftmp%2Fchart.png"),
+        (PNG_URI, PNG_URI),
+    ],
+    ids=["https", "file", "data-image"],
+)
+def test_explicit_markdown_image_in_table_cell_still_renders(driver_path, target, expected):
+    html = _render(driver_path, f"| image |\n| --- |\n| ![chart]({target}) |")
+    assert "<table>" in html
+    assert "<img" in html
+    assert expected in html
+
+
+def test_markdown_root_relative_web_image_stays_unchanged(driver_path):
+    html = _render(driver_path, "![logo](/images/logo.png)")
+    assert "api/media" not in html
+    assert "file:///images/logo.png" not in html
+    assert "![logo](/images/logo.png)" in html
+
+
+def test_markdown_protocol_relative_image_stays_unchanged(driver_path):
+    html = _render(driver_path, "![remote](//cdn.example/image.png)")
+    assert "api/media" not in html
+    assert "file://" not in html
+    assert "![remote](//cdn.example/image.png)" in html
+
+
+def test_markdown_blank_line_does_not_join_image_paragraphs(driver_path):
+    html = _render(driver_path, "![label]\n\n(/home/joe/.hermes/cache/images/mai_test.png)")
+    assert "api/media" not in html
+    assert '<img' not in html
+
+
+def test_markdown_encoded_cache_traversal_stays_inert(driver_path):
+    html = _render(driver_path, "![x]\n(/home/joe/.hermes/cache/images/%2e%2e%2fsecrets.png)")
+    assert "api/media" not in html
+    assert '<img' not in html
+
+
+def test_markdown_backslash_cache_traversal_stays_inert(driver_path):
+    html = _render(driver_path, "![x]\n(/home/joe/.hermes/cache/images/..%5csecrets.png)")
+    assert "api/media" not in html
+    assert '<img' not in html
+
+
+def test_markdown_percent_filename_renders_inline(driver_path):
+    html = _render(driver_path, "![photo]\n(/home/joe/.hermes/cache/images/photo%25done.png)")
+    assert "api/media?path=%2Fhome%2Fjoe%2F.hermes%2Fcache%2Fimages%2Fphoto%25done.png" in html
+    assert '<img' in html
+
+
+def test_markdown_double_encoded_slash_traversal_stays_inert(driver_path):
+    html = _render(driver_path, "![x]\n(/home/joe/.hermes/cache/images/%252e%252e%252fprivate.png)")
+    assert "api/media" not in html
+    assert '<img' not in html
+
+
+def test_markdown_double_encoded_backslash_traversal_stays_inert(driver_path):
+    html = _render(driver_path, "![x]\n(/home/joe/.hermes/cache/images/%252e%252e%255cprivate.png)")
+    assert "api/media" not in html
+    assert '<img' not in html
+
+
+def test_markdown_tilde_cache_path_stays_inert(driver_path):
+    html = _render(driver_path, "![x]\n(~/cache/images/mai_test.png)")
+    assert "api/media" not in html
+    assert '<img' not in html
+
 
 
 def test_markdown_file_image_renders_media_img_not_anchor_bug(driver_path):
@@ -181,3 +306,10 @@ def test_onerror_attribute_stripped_from_data_image(driver_path):
     html = _render(driver_path, f'<img src="{PNG_URI}" onerror="alert(1)">')
     assert "onerror" not in html
     assert f'src="{PNG_URI}"' in html
+
+
+def test_image_between_raw_code_elements_still_renders(driver_path):
+    markdown = "<code>first`last</code> ![x](https://example.test/a.png) <code>end</code>"
+    html = _render(driver_path, markdown)
+    assert html.count("<img") == 1
+    assert 'src="https://example.test/a.png"' in html

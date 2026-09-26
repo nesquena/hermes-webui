@@ -7923,6 +7923,8 @@ function renderMd(raw){
   // This prevents double-escaping when LLM outputs entities like &lt; &gt; &amp;
   const decode=s=>s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
   s=decode(s);
+  // Keep raw-code stash for restoration, but populate it after fence extraction.
+  const rawCodeStash=[];
   // Pre-pass: convert safe inline HTML tags the model may emit into their
   // markdown equivalents so the pipeline can render them correctly.
   // Only runs OUTSIDE fenced code blocks and backtick spans (stash + restore).
@@ -7995,7 +7997,23 @@ function renderMd(raw){
     }
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
-  s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
+  // Scan left-to-right after fenced blocks are opaque. A backtick span that
+  // starts before raw HTML is escaped as inline-code text; a raw <pre>/<code>
+  // element that starts first gets its own placeholder. This preserves source
+  // order and prevents backticks inside one raw element pairing across others.
+  const rawPreStash=[];
+  s=s.replace(/`([^`\n]+)`|(<pre\b[^>]*>[\s\S]*?<\/pre>)|(<code>([^<]*?)<\/code>)/gi,(match,inline,pre,code,codeText)=>{
+    if(inline!==undefined){
+      fence_stash.push('<code>'+esc(inline)+'</code>');
+      return '\x00F'+(fence_stash.length-1)+'\x00';
+    }
+    if(pre!==undefined){
+      rawPreStash.push(pre);
+      return `\x00R${rawPreStash.length-1}\x00`;
+    }
+    rawCodeStash.push(codeText);
+    return '\x00RC'+(rawCodeStash.length-1)+'\x00';
+  });
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -8011,11 +8029,6 @@ function renderMd(raw){
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
-  // Stash raw <pre> blocks so the inline <code> rewrite below does not run
-  // inside them. Running that rewrite in <pre> content can introduce stray
-  // backticks for multiline code and break subsequent code-box rendering.
-  const rawPreStash=[];
-  s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
   // Bare file:// artifact links → media. Some gateway/tool surfaces emit bare
   // file:// links for local artifacts instead of MEDIA: tokens; browser clients
   // cannot open the server filesystem directly, so route them through /api/media.
@@ -8039,7 +8052,8 @@ function renderMd(raw){
   };
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>_emphasis(t));
-  s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
+  // Raw code content is already protected by the earlier rawCodeStash token;
+  // do not convert backticks to markup again here.
   // Convert <br> to a newline, EXCEPT inside genuine markdown table rows — there a
   // newline would split the row and destroy the table. No sentinel token is used on
   // purpose: any fixed placeholder is attacker-suppliable in message text and would be
@@ -8299,7 +8313,48 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  // Hermes image providers may emit a bare absolute cache path on the next line.
+  // Restrict that compatibility form to decoded image files below a cache/images
+  // segment; root-relative web URLs, protocol-relative URLs, traversal, malformed
+  // escapes, and tilde paths remain inert.
+  const _bareHermesImageCacheRe=/^\/(?!\/)[^\)\r\n]*\/cache\/images\/[^\/()\r\n]+\.(?:png|jpe?g|gif|webp|avif|bmp|ico)(?:[?#][^\)\r\n]*)?$/i;
+  const _decodeBareHermesImagePath=(raw)=>{
+    const value=String(raw||'').trim();
+    if(value.startsWith('~')||value.includes('\\'))return null;
+    try{
+      const decoded=decodeURIComponent(value);
+      if(decoded.includes('\\')||/(^|[\\/])\.\.(?:[\\/]|$)/.test(decoded))return null;
+      if(/%(?:2f|5c)/i.test(decoded)||/(^|\/)%(?:2e){2}(?:%2f|%5c|\/|$)/i.test(decoded))return null;
+      return decoded;
+    }catch(_){return null;}
+  };
+  const _bareHermesImageFileUri=(path)=>{
+    try{return `file://${path.split('/').map(encodeURIComponent).join('/')}`;}
+    catch(_){return null;}
+  };
+  const _outerImageCodeRanges=[];
+  s.replace(/<code\b[^>]*>[\s\S]*?<\/code>/gi,(code,offset)=>{
+    _outerImageCodeRanges.push([offset,offset+code.length]);
+    return code;
+  });
+  // Raw <code> elements are placeholders now, so only code tags produced by
+  // the inline-code pass need guarding. Do not pair backticks globally: a
+  // backtick inside raw code must not pair with a later code element.
+  _outerImageCodeRanges.sort((a,b)=>a[0]-b[0]);
+  let _outerImageCodeRange=0;
+  s=s.replace(/!\[([^\]]*)\](?:[ \t]*\r?\n[ \t]*|[ \t]*)\([ \t]*([^\)\r\n]+?)[ \t]*\)/g,(match,alt,rawUrl,offset)=>{
+    while(_outerImageCodeRange<_outerImageCodeRanges.length&&_outerImageCodeRanges[_outerImageCodeRange][1]<=offset)_outerImageCodeRange++;
+    const codeRange=_outerImageCodeRanges[_outerImageCodeRange];
+    if(codeRange&&offset>=codeRange[0]&&offset<codeRange[1])return match;
+    const url=String(rawUrl||'').trim();
+    const decodedBare=_decodeBareHermesImagePath(url);
+    const bare=decodedBare!==null&&_bareHermesImageCacheRe.test(decodedBare);
+    const explicit=/^(?:https?:\/\/|file:\/\/|data:image\/)/i.test(url);
+    if(!explicit&&!bare)return `![${alt}](${url})`;
+    const normalized=bare?_bareHermesImageFileUri(decodedBare):url;
+    if(normalized===null)return `![${alt}](${url})`;
+    return(typeof _mdImageHtml==='function')?_mdImageHtml(alt,normalized):`<img src="${normalized.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+  });
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -8475,7 +8530,10 @@ function renderMd(raw){
     return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
   });
   s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
-  // Restore math stash → katex placeholder spans/divs
+  // Raw <code> elements stay opaque through all Markdown passes; restore their
+  // escaped contents only after Markdown links/images and autolinking are done.
+  s=s.replace(/\x00RC(\d+)\x00/g,(_,i)=>`<code>${esc(rawCodeStash[+i]).replace(/`/g,'&#96;')}</code>`);
+
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
     const item=math_stash[+i];
