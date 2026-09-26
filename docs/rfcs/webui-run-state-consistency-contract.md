@@ -267,6 +267,106 @@ and 5; it does not mark every run-state boundary implemented.
    still owns a live channel. Staleness is measured from the cancellation
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
+10. **Current-turn ownership is proven by the producer contract or not claimed.**
+   When an Agent result lacks the WebUI's current user row, settlement
+   (`_settle_current_turn_boundary` in `api/streaming.py`) and every consumer
+   that classifies this turn's output (`_assistant_reply_added_after_current_turn`,
+   `_self_heal_result_succeeded`, `_append_result_partial_on_error`,
+   `_merged_transcript_lacks_final_assistant_answer`, the display merge, the
+   replayed-context dedupe) locate the current turn only through a proven
+   coordinate. There is no text search and no role-derived projection guess.
+
+   **Producer contract v2** (hermes-agent `AIAgent.TURN_BOUNDARY_CONTRACT = 2`).
+   The Agent stamps this turn's user row with a `_turn_id` marker at append time
+   (it survives compaction's deep copies, is carried across user-row merges, is
+   never sent to providers and never persisted to `state.db`) and exports on
+   **every** result envelope — success, partial/error, interrupt, retry-exhausted,
+   tool-limit, preflight timeout, durable-lease early return —
+   `turn_boundary_contract`, `turn_id` (this invocation's), `messages_projection`
+   (`"full"`: the exact final `messages` list; the loop never returns an
+   output-only delta) and `current_turn_user_idx`: the marked row, or `None`.
+
+   **Consumer rules.** `_callable_boundary_contract` reads the capability from
+   the Agent callable BEFORE each invocation, including every replacement Agent
+   a self-heal lane constructs; it is never inferred from the keys an envelope
+   happens to carry. `_resolve_active_turn_authority` then binds ONE coherent
+   coordinate:
+   - contract >= 2: the envelope must carry `turn_boundary_contract >= 2`, a
+     `turn_id` equal to the live Agent's `_current_turn_id` (unavailable or
+     different → rejected) and a projection in `{"full", "delta"}`; the index
+     is honoured only when the addressed row is a user row carrying the same
+     `_turn_id` marker, and the WebUI token is stamped on that exact row before
+     marker cleaning shifts indexes. The producer marker is then stripped from
+     every transcript/context row at writeback (rows copied, never mutated) and
+     is listed among the public-projection internal fields, so it never reaches
+     the session sidecar, the terminal SSE payload or session/export responses.
+     An omitted (`None`) or malformed coordinate leaves the turn
+     capable-but-unproven. The mutable Agent-instance index is never combined
+     with a result `turn_id`;
+   - contract < 2 (legacy callable — every released hermes-agent until the
+     producer contract ships): master's behaviour for ordinary prefix/append
+     results — where "prefix" is decided with an exact, untruncated row
+     comparator (`_messages_have_exact_prefix`) in every turn-sensitive
+     consumer (lookup, boundary, settlement, display merge, reply
+     classification, self-heal success, partial-on-error), and the
+     eager-checkpoint drop that builds the previous context compares
+     untruncated too. Every replay/context operation that slices, reorders or
+     authenticates rows — the context dedupe's continuity checks, its
+     repaired-boundary slice and replay stripping, and the adjacent-merge
+     signature's unchanged-prefix proof — uses the untruncated
+     provider-facing `_exact_replay_key` / `_exact_message_key`; with a turn
+     identity the dedupe's repaired boundary must be the proven current row,
+     never a prompt-text or text-detected merge. `_message_identity` /
+     `_message_replay_key`, which truncate text at 500 characters, remain for
+     cosmetic display dedupe only. A legacy index pointing inside the prior
+     context is honoured only under exact continuity, and an unproven rewrite
+     has no text-only boundary: `_active_turn_boundary` returns 0 (inherit no
+     historical ids or reasoning), historical rows are preserved and the
+     pending prompt is materialized after them. For a **rewritten** (non-prefix) result the legacy index pair is
+     text-derived and can address an identical historical prompt, so ownership
+     needs an invocation-bound coordinate: the WebUI token; the user row
+     carrying this turn's `pending_started_at` — the WebUI passes it as
+     `persist_user_timestamp` and the Agent stamps exactly that value on the row
+     it appends for this invocation (never overwriting an existing timestamp;
+     its finalizer re-applies it to the re-anchored row), so a historical row
+     cannot carry it; or, when the sent history ended with an unanswered user
+     row, the Agent's adjacent-user merge of that exact row with this
+     invocation's exact submitted message (`trailing + "\n\n" + user_message`,
+     captured before the call), bound by content AND position: at the trailing
+     row's index, after an unchanged sent prefix, as the last user row — so a
+     historical row with the same text can never qualify. Otherwise the turn
+     fails closed. An Agent that never received `persist_user_timestamp` (the
+     #6935 signature shim omits it for older callables; recorded per
+     invocation, including both self-heal lanes) cannot stamp its row, so a
+     rewritten reply from it fails closed too — with an explicit
+     `agent_update_required` error ("this hermes-agent is too old to prove turn
+     ownership after a history rewrite; please update") on the main lane and
+     both self-heal lanes, not "No response from provider" or an
+     authentication error. It is reported only for new output (an assistant
+     row not present, exactly, in the prior context), and only in place of
+     the silent no-response fallback; real provider failures keep their own
+     classification. The
+     `current_turn_user_idx - len(previous_context)` placement is gone for
+     legacy Agents too, so a stale pre-repair index can never write the live
+     prompt at index 0. A valid rewritten reply from a released Agent still
+     completes; an Agent that does not stamp its row fails closed on a
+     rewrite. Remove the legacy path once the minimum supported Agent carries
+     the contract.
+   The WebUI token that survived the projection always wins.
+
+   **Fail closed.** Without a proven coordinate on a rewritten (non-prefix)
+   result: the pending prompt stays visible, streamed text is kept as a partial,
+   no historical row receives the live token, no prior answer is settled or
+   classified as current, no `done`, no false tool-limit closure. A full
+   projection holding only historical assistant/tool rows is never a delta;
+   only a bound `messages_projection: "delta"` is inserted at the front after
+   leading compression markers. A full-history result that still carries
+   `previous_context` as a prefix gets the turn right after that prefix;
+   anything else is left unchanged (no `idx - len(previous_context)`, no
+   "before the trailing assistant/tool run", no write at index 0 of a full
+   history — a current turn stored before prior rows is merged into the first
+   user message by the Agent's next repair, rewriting the prompt's leading
+   messages every turn).
 
 ## Client-side unread persistence (sidebar layer)
 
@@ -382,6 +482,16 @@ context reconstruction, or session metadata:
   (`hermes-session-viewed-counts`, `hermes-session-completion-unread`,
   `hermes-session-completion-unread-cleared`), and does it keep the merge and
   tombstone rules in the client-side unread persistence section?
+- If it touches current-turn settlement or classification: is the producer
+  capability read from the callable (replacement Agents included) rather than
+  from envelope keys; is the coordinate bound to the live `turn_id` and
+  validated by the row's `_turn_id` marker rather than prompt text; is the
+  projection shape taken from the envelope rather than row roles; and does a
+  rewritten result with a repeated historical prompt, a foreign turn id, an
+  omitted index or a malformed projection fail closed — and, for an Agent that
+  does not advertise the contract, is a rewritten result bound only through
+  the WebUI token or this turn's stamped timestamp (never a text-derived pair),
+  while ordinary prefix/append results settle exactly as before?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

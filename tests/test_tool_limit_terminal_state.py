@@ -28,7 +28,16 @@ def _run_streaming_with_fake_agent(
     turn_id="turn-current",
     agent_results=None,
     enable_auth_retry=False,
+    agent_contract=None,
+    agent_profiles=None,
+    agent_run_signature="kwargs",
 ):
+    """``agent_contract`` sets ``TURN_BOUNDARY_CONTRACT`` on the fake Agent class (None =
+    legacy callable). ``agent_profiles`` is consumed one dict per constructed Agent —
+    keys ``turn_id``, ``current_turn_user_idx``, ``contract`` — so replacement Agents on
+    the self-heal lanes can vary capability, turn id and index. ``agent_run_signature``
+    "strict" gives ``run_conversation`` an explicit pre-#6935 signature without
+    ``persist_user_timestamp`` (the WebUI's compatibility shim then omits it)."""
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -74,9 +83,11 @@ def _run_streaming_with_fake_agent(
     event_queue = queue.Queue()
     streaming.STREAMS[stream_id] = event_queue
     result_queue = list(agent_results or [])
+    profile_queue = list(agent_profiles or [])
 
     class FakeAgent:
         def __init__(self, **kwargs):
+            profile = profile_queue.pop(0) if profile_queue else {}
             self.session_id = kwargs.get("session_id")
             self.stream_delta_callback = kwargs.get("stream_delta_callback")
             self.context_compressor = None
@@ -88,26 +99,46 @@ def _run_streaming_with_fake_agent(
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
-            self._persist_user_message_idx = current_turn_user_idx
-            self._current_turn_id = turn_id if current_turn_user_idx is not None else ""
+            self._persist_user_message_idx = profile.get("current_turn_user_idx", current_turn_user_idx)
+            self._current_turn_id = profile.get(
+                "turn_id", turn_id if current_turn_user_idx is not None else ""
+            )
+            contract = profile.get("contract", agent_contract)
+            if contract is not None:
+                self.TURN_BOUNDARY_CONTRACT = contract
 
         def run_conversation(self, **kwargs):
             if result_queue:
                 next_result = result_queue.pop(0)
                 if isinstance(next_result, BaseException):
                     raise next_result
-                return next_result
-            return agent_result
+                return next_result(**kwargs) if callable(next_result) else next_result
+            return agent_result(**kwargs) if callable(agent_result) else agent_result
 
         def interrupt(self, _message):
             return None
+
+    agent_class = FakeAgent
+    if agent_run_signature == "strict":
+        class StrictSignatureFakeAgent(FakeAgent):
+            def run_conversation(
+                self, user_message, system_message=None, conversation_history=None,
+                task_id=None, persist_user_message=None, moa_config=None,
+            ):
+                return FakeAgent.run_conversation(
+                    self, user_message=user_message, system_message=system_message,
+                    conversation_history=conversation_history, task_id=task_id,
+                    persist_user_message=persist_user_message,
+                )
+
+        agent_class = StrictSignatureFakeAgent
 
     fake_hermes_state = types.ModuleType("hermes_state")
     fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
 
     with monkeypatch.context() as m:
         m.setattr(streaming, "get_session", lambda _sid: session)
-        m.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+        m.setattr(streaming, "_get_ai_agent", lambda: agent_class)
         m.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("gpt-4o", "openai", None))
         m.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
         m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
