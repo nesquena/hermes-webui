@@ -2300,17 +2300,31 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
         existing_checkpoint = result_messages[_checkpoint_idx]
         _mark_active_turn_checkpoint(existing_checkpoint, identity)
         checkpoint = identity.get('checkpoint')
+        # #7361: the turn provenance stamp must not be gated on the eager
+        # checkpoint dict. The default deferred save mode carries no
+        # checkpoint row when the turn settles, so the stamp used to fall
+        # through silently here while the materialize path
+        # (_materialize_active_turn_user) still stamped — dropping _source
+        # (and the _wakeup_meta that rides on it) for every process_wakeup
+        # turn, plus the _fork_child_turn marker regeneration authorization
+        # relies on. Keep the id/timestamp/attachments merge gated on the
+        # checkpoint (that data only exists there); stamp unconditionally.
+        _settle_source = identity.get('source') or source or 'webui'
+        stamp_message_source(
+            existing_checkpoint,
+            _settle_source,
+            active_turn_token=identity.get('token'),
+        )
+        if str(_settle_source).strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                existing_checkpoint['_fork_child_turn'] = child_session_id
         if isinstance(checkpoint, dict):
             for key in ('id', 'timestamp'):
                 if existing_checkpoint.get(key) is None and checkpoint.get(key) is not None:
                     existing_checkpoint[key] = copy.deepcopy(checkpoint[key])
             if checkpoint.get('attachments'):
                 existing_checkpoint['attachments'] = copy.deepcopy(checkpoint['attachments'])
-            stamp_message_source(
-                existing_checkpoint,
-                identity.get('source') or source or 'webui',
-                active_turn_token=identity.get('token'),
-            )
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
