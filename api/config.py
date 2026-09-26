@@ -6439,7 +6439,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         tmp = str(cache_path) + f".{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        os.rename(tmp, str(cache_path))
+        os.replace(tmp, str(cache_path))
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
 
