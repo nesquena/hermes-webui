@@ -9586,14 +9586,24 @@ async function loadSettingsPanel(){
     // Right-to-left chat layout (#1721 salvage) — Settings-only, no composer button.
     const rtlCb=$('settingsRtl');
     if(rtlCb){
-      const saved=!!settings.rtl || localStorage.getItem('hermes-rtl')==='true';
-      rtlCb.checked=saved;
-      try{localStorage.setItem('hermes-rtl',saved?'true':'false');}catch(_){}
-      document.documentElement.classList.toggle('chat-content-rtl',saved);
+      const currentLocale = (typeof _locale !== 'undefined' && _locale && _locale._lang) || (typeof resolvePreferredLocale === 'function' ? resolvePreferredLocale() : localStorage.getItem('hermes-lang'));
+      const isFaLocale = currentLocale === 'fa';
+      const storedRtl = localStorage.getItem('hermes-rtl');
+      let saved;
+      if (settings && settings.rtl === true) {
+        saved = true;
+      } else if (storedRtl !== null) {
+        saved = storedRtl === 'true';
+      } else {
+        saved = isFaLocale;
+      }
+      rtlCb.checked = saved;
+      try{localStorage.setItem('hermes-rtl', saved ? 'true' : 'false');}catch(_){}
+      document.documentElement.classList.toggle('chat-content-rtl', saved);
       rtlCb.addEventListener('change',()=>{
-        const on=rtlCb.checked;
-        try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}
-        document.documentElement.classList.toggle('chat-content-rtl',on);
+        const on = rtlCb.checked;
+        try{localStorage.setItem('hermes-rtl', on ? 'true' : 'false');}catch(_){}
+        document.documentElement.classList.toggle('chat-content-rtl', on);
         _schedulePreferencesAutosave();
       },{once:false});
     }

@@ -11377,6 +11377,16 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Neplatn\u00e9 heslo",
         "conn_failed": "P\u0159ipojen\u00ed selhalo",
     },
+    "fa": {
+        "lang": "fa-IR",
+        "dir": "rtl",
+        "title": "ورود",
+        "subtitle": "برای ادامه رمز عبور خود را وارد کنید",
+        "placeholder": "رمز عبور",
+        "btn": "ورود",
+        "invalid_pw": "رمز عبور نامعتبر است",
+        "conn_failed": "اتصال برقرار نشد",
+    },
 }
 
 
@@ -11413,7 +11423,7 @@ def _resolve_login_locale_key(raw_lang: str | None) -> str:
 
 # ── Login page (self-contained, no external deps) ────────────────────────────
 _LOGIN_PAGE_HTML = """<!doctype html>
-<html lang="{{LANG}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="{{LANG}}"{{DIR_ATTR}}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -14058,11 +14068,14 @@ def handle_get(handler, parsed) -> bool:
         else:
             _password_form_html = ""
         version_token = quote(WEBUI_VERSION, safe="")
+        _login_dir = _login_strings.get("dir")
+        _dir_attr = f' dir="{_html.escape(_login_dir)}"' if _login_dir else ""
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
             .replace("{{WEBUI_VERSION}}", version_token)
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
+            .replace("{{DIR_ATTR}}", _dir_attr)
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
             .replace("{{PASSWORD_FORM_HTML}}", _password_form_html)
