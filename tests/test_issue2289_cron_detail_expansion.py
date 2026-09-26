@@ -41,5 +41,10 @@ def test_cron_expansion_i18n_keys_exist_in_every_locale():
         "cron_collapse_prompt",
         "cron_expand_output",
         "cron_collapse_output",
+        "cron_view_diagnostics",
+        "cron_view_raw_output",
     ):
-        assert I18N_JS.count(f"{key}:") >= locale_count
+        assert I18N_JS.count(f"{key}:") == locale_count
+    english = I18N_JS.split("  en: {", 1)[1].split("\n  it: {", 1)[0]
+    assert english.count("cron_view_diagnostics:") == 1
+    assert english.count("cron_view_raw_output:") == 1
