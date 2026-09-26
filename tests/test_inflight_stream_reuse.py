@@ -2430,3 +2430,148 @@ assert.strictEqual(users3[1].content, 'new turn different text',
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_load_session_merge_drops_divergent_stale_live_partial_when_settled_exists():
+    """Greptile P1 (2026-09-26, sessions.js:4268): when a completed (settled)
+    response and a divergent live partial coexist after a lost `done` event,
+    the loadSession merge flow must NOT append the live partial as a second
+    assistant row. The authoritative settled response must remain the only
+    assistant row for the turn.
+
+    Trace: _prepareRunningLiveTail correctly returns false for the divergence
+    (preserving the settled response against the drop), but
+    _mergeInflightTailMessages then pushed the live partial as a second
+    assistant row because _sameTranscriptMessage compares assistant rows by
+    text — divergent text -> not a duplicate -> appended.
+
+    The fix reconciles the live row's content to the persisted text in the
+    same style as the existing backfill branches, so the merge's text
+    equality dedupes the stale live partial away. End-to-end through the
+    loadSession merge flow: exactly one assistant row, carrying the settled
+    text.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// INFLIGHT recovery scenario: base ends with a settled (non-live) assistant
+// because the `done` event was lost. The inflight carries a live partial
+// with genuinely divergent text. After the full loadSession merge flow
+// (prepare + skip drop + merge), exactly ONE assistant row for the turn
+// must remain, carrying the SETTLED text — not the stale live partial.
+let base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'authoritative settled answer'}},
+];
+let inflight = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'stale divergent partial'}},
+];
+
+// Step 1: _prepareRunningLiveTail must return false (drop is unsafe).
+let prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, false,
+  'Divergent live text: must return false so the drop preserves the settled response');
+
+// Step 2: loadSession skips the drop (preserves the settled assistant).
+if(prepared){{
+  base = _dropCurrentTurnAssistantMessages(base);
+}}
+
+// Step 3: _mergeInflightTailMessages runs. This is where the P1 leak
+// lives — divergent text -> not a duplicate -> appended as a second row.
+let merged = _mergeInflightTailMessages(base, inflight);
+
+// End-to-end assertion: exactly ONE assistant row for the turn, carrying
+// the settled text. The stale divergent live partial must not survive as
+// a second assistant row.
+let assistants = merged.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants.length, 1,
+  'Stale divergent live partial must not be appended as a second assistant row: ' +
+  'expected 1, got ' + assistants.length + ' (' + JSON.stringify(assistants.map(a => a.content)) + ')');
+assert.strictEqual(assistants[0].content, 'authoritative settled answer',
+  'The surviving assistant must be the authoritative settled response, not the stale live partial');
+assert.strictEqual(assistants[0]._live, undefined,
+  'The surviving assistant must be the non-live settled row');
+
+// Sanity: the inflight user is deduped against the base user (no duplicate
+// user row).
+let users = merged.filter(m => m.role === 'user');
+assert.strictEqual(users.length, 1,
+  'Reverse scan must dedup the inflight user against the base user: expected 1, got ' + users.length);
+assert.strictEqual(users[0].content, 'hello');
+
+// Multi-turn anti-regression: the same fix must work when the current turn
+// follows earlier settled turns. The settled answer for the CURRENT turn
+// must remain the only assistant row after the merge.
+let base2 = [
+  {{role:'user', content:'first turn'}},
+  {{role:'assistant', content:'first answer'}},
+  {{role:'user', content:'second turn'}},
+  {{role:'assistant', content:'second turn settled answer'}},
+];
+let inflight2 = [
+  {{role:'user', content:'second turn'}},
+  {{role:'assistant', _live:true, content:'second turn stale partial'}},
+];
+let prepared2 = _prepareRunningLiveTail(base2, inflight2);
+assert.strictEqual(prepared2, false,
+  'Multi-turn divergence: must return false so the drop preserves the settled response');
+if(prepared2){{
+  base2 = _dropCurrentTurnAssistantMessages(base2);
+}}
+let merged2 = _mergeInflightTailMessages(base2, inflight2);
+let assistants2 = merged2.filter(m => m.role === 'assistant');
+assert.strictEqual(assistants2.length, 2,
+  'Multi-turn: both settled answers must survive, no stale partial appended: ' +
+  'expected 2, got ' + assistants2.length);
+assert.strictEqual(assistants2[1].content, 'second turn settled answer',
+  'The current-turn assistant must be the settled response, not the stale live partial');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_prepare_running_live_tail_reconciles_divergent_live_to_persisted():
+    """Focused unit-level assertion: when _prepareRunningLiveTail detects a
+    divergence between the live row and the settled persisted text, it must
+    reconcile the live row's content in place to the persisted text. This is
+    the in-style backfill that lets the downstream
+    _mergeInflightTailMessages dedupe the stale live partial away via text
+    equality (#6649 greptile P1 follow-up).
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+// Divergence: live row has a genuinely different text. The function must
+// return false (drop is unsafe) AND reconcile the live row's content to
+// the persisted text so the merge's text equality dedupes it away.
+let base = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', content:'authoritative settled answer'}},
+];
+let inflight = [
+  {{role:'user', content:'hello'}},
+  {{role:'assistant', _live:true, content:'stale divergent partial'}},
+];
+let live = inflight[1];
+let prepared = _prepareRunningLiveTail(base, inflight);
+assert.strictEqual(prepared, false,
+  'Divergent live: must return false (drop would lose the settled response)');
+assert.strictEqual(live.content, 'authoritative settled answer',
+  'Divergent live row must be reconciled to persisted text in place so the merge dedupes it away');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
