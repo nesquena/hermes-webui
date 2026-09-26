@@ -34,13 +34,25 @@ def test_model_picker_renders_selected_badge_without_replacing_configured_badge(
 
 
 def test_selected_badge_is_keyed_to_current_model_value():
-    # The selected badge must key on the resolved model identity, not a raw
-    # string of the dropdown value: catalog rows carry the qualified
-    # @custom:<slug>:<model> value while the outgoing state model is bare
-    # (#6884), so both sides are normalized via _modelPickerOptionIdentity
-    # before comparison.
-    assert "const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'" in UI_JS
-    assert "_norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)" in UI_JS
+    # #7400 re-gate: the selected row must be matched by CANONICAL identity on
+    # BOTH sides — the bare model derived with _qualifiedCatalogOptionMeta for a
+    # provider-qualified row (@provider:model). Comparing a canonicalized row
+    # against a RAW selected value drops the active row and the Selected badge
+    # whenever the selected option comes from a producer that does not stamp
+    # dataset.model (Settings population, live-model insertion).
+    assert "const _canonicalRowModelForCompare=(m)=>{" in UI_JS
+    assert "const _canonicalSelectedModelForCompare=()=>{" in UI_JS
+    assert "const _selectedModelForCompare=_canonicalSelectedModelForCompare();" in UI_JS
+    assert "const _rowModel=String(_canonicalRowModelForCompare(m));" in UI_JS
+    assert "_rowModel===_selectedModelForCompare" in UI_JS
+    # The raw-value comparison is what silently lost the badge: it must not return.
+    assert "String(_canonicalRowModelForCompare(m))===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" not in UI_JS
+    # #6895: catalog rows can carry a qualified @custom:<slug>:<model> value
+    # whose host:port slug _qualifiedCatalogOptionMeta leaves raw, while the
+    # outgoing state model is bare, so both sides also go through the picker
+    # dedup identity (_modelPickerOptionIdentity) before comparison.
+    assert "const _normIdentity=(model,provider)=>typeof _modelPickerOptionIdentity==='function'" in UI_JS
+    assert "_normIdentity(_rowModel,_rowProvider)===_normIdentity(_selectedModelForCompare,_stateProvider)" in UI_JS
 
 
 def test_selected_badge_is_keyed_to_current_model_provider():
