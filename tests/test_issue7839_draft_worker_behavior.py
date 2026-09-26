@@ -1,17 +1,28 @@
 """Behavioral regression tests for draft-save coalescing (#7839).
 
-These drive the real `_draft_save_worker` against a real (isolated) session
-store, not just source assertions:
+Drives the real `_draft_save_worker` AND the real POST handler (via
+`routes.handle_post` with a fake handler) against a real isolated session
+store — including the concurrent-POST interleavings the gate review demanded:
 
 1. A published intent is durably persisted to the session JSON.
-2. A burst of N intents collapses to fewer full saves (latest-wins).
-3. A missing session settles without saving and clears the worker state.
-4. A bounded agent-lock timeout requeues the intent (no false ok:true / data
-   loss edge of the kind that killed the earlier sidecar attempts #6011/#6252).
+2. A burst collapses: the queued latest intent wins, one save per payload.
+3. A missing session settles honestly (404), never as ok:true.
+4. A bounded agent-lock timeout requeues the intent (retryable 503, no data
+   drop) and a bounded self-heal timer makes it durable without any further
+   request; retries stop at the cap.
+5. Two concurrent POSTs start exactly ONE worker; both settle 200 with the
+   newest text durable.
+6. A non-KeyError load exception settles as 503 and does not strand the
+   worker: the next request recovers.
+7. The 200 response carries the actual durable draft (including preserved
+   files on a text-only POST).
 """
 import collections
+import io
+import json
 import threading
 import time
+import urllib.parse
 
 import pytest
 
@@ -39,7 +50,17 @@ def isolated_session_env(monkeypatch, tmp_path):
     yield sessions_dir
 
 
-def _make_persisted_session(sid):
+@pytest.fixture(autouse=True)
+def _clean_draft_registry():
+    """Keep the module-global coalescing registry from leaking across tests."""
+    from api import routes
+
+    routes._DRAFT_COALESCE.clear()
+    yield
+    routes._DRAFT_COALESCE.clear()
+
+
+def _make_persisted_session(sid, draft=None):
     from api.models import Session
 
     s = Session(
@@ -50,6 +71,8 @@ def _make_persisted_session(sid):
             {"role": "assistant", "content": "reply", "timestamp": time.time()},
         ],
     )
+    if draft is not None:
+        s.composer_draft = draft
     s.save()
     return s
 
@@ -67,57 +90,99 @@ def _wait_for_draft(sid, expected_text, timeout=10.0):
     return None
 
 
+def _wait_until(predicate, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+class _FakeHandler:
+    """Minimal handler shim for routes.handle_post (pattern of test_465)."""
+
+    def __init__(self, payload):
+        raw = json.dumps(payload).encode("utf-8")
+        self.status = None
+        self.response = b""
+        self.headers = {"Content-Type": "application/json", "Content-Length": str(len(raw))}
+        self.rfile = io.BytesIO(raw)
+        self.wfile = io.BytesIO()
+        self.command = "POST"
+        self.path = "/api/session/draft"
+        self.client_address = ("127.0.0.1", 12345)
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def _safe_webui_print(self, *_args, **_kwargs):
+        pass
+
+
+@pytest.fixture
+def draft_responses(monkeypatch):
+    """Capture j()/bad() responses issued by the draft handler."""
+    from api import routes
+
+    def _j(handler, obj, *args, **kwargs):
+        handler.response = obj
+        handler.status = kwargs.get("status", 200)
+        return True
+
+    def _bad(handler, msg, code=400):
+        handler.response = {"error": msg}
+        handler.status = code
+        return True
+
+    monkeypatch.setattr(routes, "j", _j)
+    monkeypatch.setattr(routes, "bad", _bad)
+
+
+def _post_draft(sid, text, files=None):
+    from api import routes
+
+    handler = _FakeHandler({"session_id": sid, "text": text, "files": files})
+    parsed = urllib.parse.urlparse("/api/session/draft")
+    routes.handle_post(handler, parsed)
+    return handler
+
+
 def test_worker_persists_intent_durably(isolated_session_env):
     from api import routes
     from api.models import Session
 
     sid = "dwkr0001"
     _make_persisted_session(sid)
-    routes._DRAFT_COALESCE.clear()
 
-    with routes._DRAFT_COALESCE_LOCK:
-        routes._DRAFT_COALESCE[sid] = {
-            "pending": None,
-            "published": routes._DraftSaveIntent(text="persisted draft", files=None),
-            "worker_alive": threading.Event(),
-            "worker_event": threading.Event(),
-            "settled_unchanged": False,
-        }
+    state = routes._DraftSaveState()
+    state.generation = 1
+    state.pending = routes._DraftSaveIntent(text="persisted draft", files=None)
+    with routes._DRAFT_CV:
+        routes._DRAFT_COALESCE[sid] = state
     routes._draft_save_worker(sid)
 
-    draft = _wait_for_draft(sid, "persisted draft")
-    assert draft is not None, "worker must durably persist the published intent"
-    assert routes._DRAFT_COALESCE.get(sid) is None, "drained state must be evicted"
-    # The saved session must not be a stub: messages survive the draft save.
+    assert _wait_for_draft(sid, "persisted draft") is not None, (
+        "worker must durably persist the published intent"
+    )
+    with routes._DRAFT_CV:
+        assert routes._DRAFT_COALESCE.get(sid) is None, "drained state must be evicted"
     s = Session.load(sid)
-    assert len(s.messages) == 2
+    assert len(s.messages) == 2, "draft save must not touch messages"
 
 
-def test_worker_settles_missing_session_without_saving(isolated_session_env):
-    from api import routes
-
-    sid = "dwkr0002"
-    routes._DRAFT_COALESCE.clear()
-
-    with routes._DRAFT_COALESCE_LOCK:
-        routes._DRAFT_COALESCE[sid] = {
-            "pending": None,
-            "published": routes._DraftSaveIntent(text="x", files=None),
-            "worker_alive": threading.Event(),
-            "worker_event": threading.Event(),
-            "settled_unchanged": False,
-        }
-    routes._draft_save_worker(sid)
-    assert routes._DRAFT_COALESCE.get(sid) is None, "missing session must clear state"
-
-
-def test_burst_coalesces_to_single_save(isolated_session_env):
+def test_worker_coalesces_pending_to_latest_payload(isolated_session_env):
     from api import routes
     from api.models import Session
 
     sid = "dwkr0003"
     _make_persisted_session(sid)
-    routes._DRAFT_COALESCE.clear()
 
     saves = {"n": 0}
     real_save = Session.save
@@ -128,34 +193,55 @@ def test_burst_coalesces_to_single_save(isolated_session_env):
 
     Session.save = counting_save
     try:
-        with routes._DRAFT_COALESCE_LOCK:
-            routes._DRAFT_COALESCE[sid] = {
-                "pending": None,
-                "published": routes._DraftSaveIntent(text="v1", files=None),
-                "worker_alive": threading.Event(),
-                "worker_event": threading.Event(),
-                "settled_unchanged": False,
-            }
-        # A second intent arrives while the worker is still draining v1: the
-        # v2 payload must win and only one additional full save may run.
-        with routes._DRAFT_COALESCE_LOCK:
-            routes._DRAFT_COALESCE[sid]["pending"] = routes._DraftSaveIntent(text="v2", files=None)
+        state = routes._DraftSaveState()
+        state.generation = 2
+        state.published = routes._DraftSaveIntent(text="v1", files=None)
+        state.published_gen = 1
+        state.pending = routes._DraftSaveIntent(text="v2", files=None)
+        with routes._DRAFT_CV:
+            routes._DRAFT_COALESCE[sid] = state
         routes._draft_save_worker(sid)
     finally:
         Session.save = real_save
 
-    assert saves["n"] == 1, f"burst must coalesce to one save, got {saves['n']}"
-    draft = _wait_for_draft(sid, "v2")
-    assert draft is not None, "latest payload must win"
-    assert routes._DRAFT_COALESCE.get(sid) is None
+    assert saves["n"] == 1, f"queued burst must collapse to one save, got {saves['n']}"
+    assert _wait_for_draft(sid, "v2") is not None, "latest queued payload must win"
+    with routes._DRAFT_CV:
+        assert routes._DRAFT_COALESCE.get(sid) is None
 
 
-def test_lock_timeout_requeues_intent_instead_of_dropping(isolated_session_env, monkeypatch):
+def test_missing_session_settles_missing(isolated_session_env, monkeypatch, draft_responses):
+    """Preflight passes, the worker's load 404s: settle honestly (404)."""
+    from api import routes
+
+    sid = "dwkr-deleted"
+    full_loads = {"n": 0}
+    real_get = routes.get_session
+
+    def get_session_stub(_sid, metadata_only=False):
+        if metadata_only:
+            # Handler preflight / subagent check: session still exists here.
+            return real_get(_sid, metadata_only=True)
+        full_loads["n"] += 1
+        if full_loads["n"] == 1:
+            raise KeyError(_sid)  # worker full load: session vanished
+        return real_get(_sid, metadata_only=False)
+
+    monkeypatch.setattr(routes, "get_session", get_session_stub)
+
+    handler = _post_draft(sid, "never lands")
+    assert handler.status == 404, (
+        f"a post-preflight missing session must 404, got {handler.status} {handler.response}"
+    )
+    with routes._DRAFT_CV:
+        assert routes._DRAFT_COALESCE.get(sid) is None, "missing settle must clear state"
+
+
+def test_lock_timeout_requeues_and_reports_failure(isolated_session_env, monkeypatch, draft_responses):
     from api import routes
 
     sid = "dwkr0004"
     _make_persisted_session(sid)
-    routes._DRAFT_COALESCE.clear()
 
     class BusyLock:
         def acquire(self, timeout=None):
@@ -166,39 +252,24 @@ def test_lock_timeout_requeues_intent_instead_of_dropping(isolated_session_env, 
 
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: BusyLock())
     monkeypatch.setattr(routes, "_DRAFT_SAVE_LOCK_WAIT", 0.05)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 3600.0)  # no self-heal in test
 
-    with routes._DRAFT_COALESCE_LOCK:
-        routes._DRAFT_COALESCE[sid] = {
-            "pending": None,
-            "published": routes._DraftSaveIntent(text="must survive", files=None),
-            "worker_alive": threading.Event(),
-            "worker_event": threading.Event(),
-            "settled_unchanged": False,
-        }
-    routes._draft_save_worker(sid)
-
-    with routes._DRAFT_COALESCE_LOCK:
+    handler = _post_draft(sid, "must survive")
+    assert handler.status == 503, (
+        f"failed settle must be 503 (no false ok:true), got {handler.status} {handler.response}"
+    )
+    with routes._DRAFT_CV:
         state = routes._DRAFT_COALESCE.get(sid)
         assert state is not None, "failed save must keep the state for retry"
-        assert state["pending"] is not None and state["pending"].text == "must survive", (
-            "lock timeout must requeue the intent (no silent drop / false ok:true)"
-        )
-        assert state["published"] is None
-        assert not state["worker_alive"].is_set()
+        assert state.pending is not None and state.pending.text == "must survive"
+        assert not state.owner_alive, "worker must retire after failure"
 
 
-def test_failed_settle_self_heals_once_lock_frees(isolated_session_env, monkeypatch):
-    """A queued intent must become durable even if no further request comes.
-
-    The pre-coalescing code waited synchronously on the agent lock and always
-    saved; after a failed settle the coalescing worker must therefore respawn
-    itself and persist the intent (bounded retry timer), not silently lose it.
-    """
+def test_failed_settle_self_heals_once_lock_frees(isolated_session_env, monkeypatch, draft_responses):
     from api import routes
 
     sid = "dwkr0005"
     _make_persisted_session(sid)
-    routes._DRAFT_COALESCE.clear()
 
     class FlakyLock:
         def __init__(self):
@@ -216,31 +287,22 @@ def test_failed_settle_self_heals_once_lock_frees(isolated_session_env, monkeypa
     monkeypatch.setattr(routes, "_DRAFT_SAVE_LOCK_WAIT", 0.05)
     monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 0.2)
 
-    with routes._DRAFT_COALESCE_LOCK:
-        routes._DRAFT_COALESCE[sid] = {
-            "pending": None,
-            "published": routes._DraftSaveIntent(text="self healed", files=None),
-            "worker_alive": threading.Event(),
-            "worker_event": threading.Event(),
-            "settled_unchanged": False,
-        }
-    routes._draft_save_worker(sid)  # fails, requeues, schedules the retry timer
-
-    draft = _wait_for_draft(sid, "self healed", timeout=10.0)
-    assert draft is not None, "bounded self-heal retry must persist the queued intent"
-    with routes._DRAFT_COALESCE_LOCK:
-        assert routes._DRAFT_COALESCE.get(sid) is None, "drained state must be evicted after self-heal"
+    handler = _post_draft(sid, "self healed")
+    # The handler may 503 (its own wait expired) or 200; either way the queued
+    # intent must become durable via the bounded self-heal timer.
+    assert _wait_for_draft(sid, "self healed", timeout=10.0) is not None, (
+        "bounded self-heal retry must persist the queued intent without a further request"
+    )
+    assert _wait_until(
+        lambda: routes._DRAFT_COALESCE.get(sid) is None
+    ), "drained state must be evicted after self-heal"
 
 
-def test_self_heal_retries_are_bounded(isolated_session_env, monkeypatch):
-    """A persistent failure must stop retrying instead of spinning forever."""
-    import time as _time
-
+def test_self_heal_retries_are_bounded(isolated_session_env, monkeypatch, draft_responses):
     from api import routes
 
     sid = "dwkr0006"
     _make_persisted_session(sid)
-    routes._DRAFT_COALESCE.clear()
 
     class BusyLock:
         def acquire(self, timeout=None):
@@ -254,28 +316,127 @@ def test_self_heal_retries_are_bounded(isolated_session_env, monkeypatch):
     monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 0.05)
     monkeypatch.setattr(routes, "_DRAFT_SAVE_MAX_RETRIES", 2)
 
-    with routes._DRAFT_COALESCE_LOCK:
-        routes._DRAFT_COALESCE[sid] = {
-            "pending": None,
-            "published": routes._DraftSaveIntent(text="never lands", files=None),
-            "worker_alive": threading.Event(),
-            "worker_event": threading.Event(),
-            "settled_unchanged": False,
-        }
-    routes._draft_save_worker(sid)
-    deadline = _time.monotonic() + 5.0
-    while _time.monotonic() < deadline:
-        with routes._DRAFT_COALESCE_LOCK:
-            state = routes._DRAFT_COALESCE.get(sid)
-            if state and state.get("retries", 0) >= 3:
-                break
-        _time.sleep(0.05)
-    _time.sleep(0.5)  # would-be fourth retry window
-    with routes._DRAFT_COALESCE_LOCK:
+    _post_draft(sid, "never lands")
+    assert _wait_until(
+        lambda: (routes._DRAFT_COALESCE.get(sid) is not None
+                 and routes._DRAFT_COALESCE.get(sid).retries >= 3),
+        timeout=10.0,
+    ), "worker must run initial + 2 retry spawns"
+    time.sleep(0.5)  # would-be fourth retry window
+    with routes._DRAFT_CV:
         state = routes._DRAFT_COALESCE.get(sid)
         assert state is not None, "state must remain for the next real request"
-        assert state.get("retries", 0) == 3, (
-            f"initial run + {routes._DRAFT_SAVE_MAX_RETRIES} retry spawns, then stop; got {state.get('retries')}"
+        assert state.retries == 3, (
+            f"initial run + {routes._DRAFT_SAVE_MAX_RETRIES} retry spawns, then stop; got {state.retries}"
         )
-        assert state["pending"] is not None and state["pending"].text == "never lands"
-        assert not state["worker_alive"].is_set()
+        assert state.pending is not None and state.pending.text == "never lands"
+        assert not state.owner_alive
+
+
+def test_load_exception_settles_and_next_request_recovers(isolated_session_env, monkeypatch, draft_responses):
+    """A non-KeyError load failure must 503 and must not strand the worker."""
+    from api import routes
+    from api.models import Session
+
+    sid = "dwkr0007"
+    _make_persisted_session(sid)
+    full_loads = {"n": 0}
+    real_get = routes.get_session
+
+    def get_session_stub(_sid, metadata_only=False):
+        if metadata_only:
+            return real_get(_sid, metadata_only=True)  # handler paths OK
+        full_loads["n"] += 1
+        # Full load #1 = _session_is_subagent_view_only check (inside its own
+        # try/except), #2 = the worker's load — that one must fail, then heal.
+        if full_loads["n"] == 2:
+            raise RuntimeError("disk hiccup")
+        return real_get(_sid, metadata_only=False)
+
+    monkeypatch.setattr(routes, "get_session", get_session_stub)
+    monkeypatch.setattr(routes, "_DRAFT_SAVE_RETRY_DELAY", 3600.0)
+
+    handler = _post_draft(sid, "first try")
+    assert handler.status == 503, f"load failure must settle 503, got {handler.status}"
+
+    # Next request must be able to claim a fresh worker and succeed.
+    def get_session_ok(_sid, metadata_only=False):
+        return real_get(_sid, metadata_only=metadata_only)
+
+    monkeypatch.setattr(routes, "get_session", get_session_ok)
+    handler2 = _post_draft(sid, "second try")
+    assert handler2.status == 200, (
+        f"next request must recover after a load failure, got {handler2.status} {handler2.response}"
+    )
+    assert _wait_for_draft(sid, "second try") is not None
+
+
+def test_response_carries_durable_draft_with_files(isolated_session_env, draft_responses):
+    """A text-only POST on a session with stored attachments must answer with
+    the durable draft (files preserved), not the request fields (#7840 gate)."""
+    sid = "dwkr0008"
+    _make_persisted_session(sid, draft={"text": "old", "files": ["upload-1.png"]})
+
+    handler = _post_draft(sid, "new text", files=None)
+    assert handler.status == 200, f"expected 200, got {handler.status} {handler.response}"
+    draft = handler.response.get("draft") or {}
+    assert draft.get("text") == "new text"
+    assert draft.get("files") == ["upload-1.png"], (
+        f"response must carry the durable draft's files, got {draft}"
+    )
+
+
+def test_two_concurrent_posts_spawn_one_worker_and_both_settle(isolated_session_env, draft_responses):
+    """The exact handler-level interleaving the gate reproduced: two POSTs at
+    the ownership decision must yield ONE worker; both requests settle 200 and
+    the newest text is durable."""
+    from api.models import Session
+
+    sid = "dwkr0009"
+    # A save heavy enough (~0.4s) that the two overlapping requests are both
+    # still in flight while the worker owns the state.
+    big = [
+        {"role": "user", "content": "x" * 40000, "timestamp": time.time()},
+        {"role": "assistant", "content": "y" * 40000, "timestamp": time.time()},
+    ] * 30
+    s = Session(
+        session_id=sid,
+        title=f"Session {sid}",
+        messages=big,
+    )
+    s.save()
+
+    worker_counts = []
+    stop = {"flag": False}
+
+    def sample_workers():
+        while not stop["flag"]:
+            n = sum(1 for t in threading.enumerate() if t.name == f"draft-save-{sid}")
+            worker_counts.append(n)
+            time.sleep(0.005)
+
+    sampler = threading.Thread(target=sample_workers, daemon=True)
+    sampler.start()
+
+    results = {}
+
+    def run(key, text):
+        results[key] = _post_draft(sid, text)
+
+    t1 = threading.Thread(target=run, args=("a", "concurrent-one"))
+    t2 = threading.Thread(target=run, args=("b", "concurrent-two"))
+    t1.start()
+    time.sleep(0.05)  # let A reach the publish point first (its gen is 1)
+    t2.start()
+    t1.join(60)
+    t2.join(60)
+    stop["flag"] = True
+    sampler.join(5)
+
+    assert results["a"].status == 200, f"A: {results['a'].status} {results['a'].response}"
+    assert results["b"].status == 200, f"B: {results['b'].status} {results['b'].response}"
+    max_workers = max(worker_counts) if worker_counts else 0
+    assert max_workers == 1, (
+        f"concurrent POSTs must never spawn more than one worker, saw {max_workers}"
+    )
+    assert _wait_for_draft(sid, "concurrent-two") is not None, "the newest text must be durable"

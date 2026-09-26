@@ -8,10 +8,10 @@ their own full rewrite of the same payload, producing a lock convoy:
 manual refresh.
 
 The fix: POST /api/session/draft publishes the latest intent to a single
-per-session worker (latest-wins coalescing, one save per distinct payload)
-and answers with 503 if the worker cannot settle within the request wait.
-The debounced autosave raises its client timeout and suppresses the generic
-timeout toast so background saves cannot spam the UI.
+per-session worker (claimed atomically under _DRAFT_CV, generation-tagged
+settlements) and answers with 503 if the worker cannot settle within the
+request wait. The debounced autosave raises its client timeout and suppresses
+the generic timeout toast so background saves cannot spam the UI.
 """
 from pathlib import Path
 
@@ -33,11 +33,74 @@ def test_draft_handler_delegates_persistence_to_coalescing_worker():
         'if parsed.path == "/api/session/draft":',
         'if parsed.path == "/api/session/update":',
     )
-    assert "_DRAFT_COALESCE_LOCK" in handler_body, "draft POST must publish its intent via the coalescing registry"
-    assert "worker_event.wait(" in handler_body, "draft POST must wait for the per-session worker result"
+    assert "_DRAFT_CV" in handler_body, "draft POST must publish its intent under the coalescing condition"
+    assert "_DRAFT_CV.wait(" in handler_body, "draft POST must wait for its generation settlement"
     assert "s.save(touch_updated_at=False" not in handler_body, "draft POST must not rewrite the session inline"
     assert 'return bad(handler, "Draft save still in progress; retry shortly", 503)' in handler_body, (
         "a still-running worker must answer 503 instead of stacking handlers behind the lock"
+    )
+
+
+def test_worker_claim_is_atomic_under_the_condition():
+    """Two concurrent POSTs must never both start a worker (gate finding)."""
+    spawn_body = _block(ROUTES, "def _maybe_spawn_draft_worker(", "def _draft_save_retry_wake(")
+    assert "state.owner_alive = True" in spawn_body, "owner claim must happen inside the spawn helper"
+    assert "threading.Thread(" in spawn_body, "worker start belongs to the claim helper"
+    # The claim must NOT be split across a registry-lock boundary in the handler.
+    handler_body = _block(
+        ROUTES,
+        'if parsed.path == "/api/session/draft":',
+        'if parsed.path == "/api/session/update":',
+    )
+    assert "threading.Thread(" not in handler_body, "worker creation must live in the atomic claim helper"
+    assert "worker_alive" not in handler_body, "the old split claim protocol must be gone"
+
+
+def test_settlements_are_generation_tagged_and_never_reset():
+    """A failed settle can never surface as a later false ok:true (gate)."""
+    worker_body = _block(ROUTES, "def _draft_save_worker(", "def _session_is_subagent_view_only(")
+    assert "state.settled_gen" in worker_body and "state.generation" in worker_body, (
+        "settlements must be generation-tagged"
+    )
+    assert "settled_outcome = outcome" in worker_body, (
+        "settlement outcome is only ever assigned from the settled generation's result"
+    )
+    assert "settled_outcome = None" not in worker_body, (
+        "the worker must never reset a settlement outcome at runtime"
+    )
+    state_body = _block(ROUTES, "class _DraftSaveState", "def _maybe_spawn_draft_worker(")
+    assert "self.settled_outcome = None" in state_body, (
+        "reset only in the constructor, never at runtime"
+    )
+
+
+def test_eviction_is_identity_checked():
+    """A retiring worker must not evict a newer state object (gate finding)."""
+    worker_body = _block(ROUTES, "def _draft_save_worker(", "def _session_is_subagent_view_only(")
+    assert worker_body.count("pop(sid") == worker_body.count("_DRAFT_COALESCE.get(sid) is state"), (
+        "every pop must be identity-guarded: pop only after get(sid) is state holds"
+    )
+
+
+def test_every_load_failure_path_settles():
+    """KeyError, other exceptions and stub upgrades must all settle/retire."""
+    worker_body = _block(ROUTES, "def _draft_save_worker(", "def _session_is_subagent_view_only(")
+    assert 'except KeyError:' in worker_body and 'except Exception:' in worker_body, (
+        "both load-failure shapes must be handled"
+    )
+    assert worker_body.count("notify_all()") >= 3, "every exit path must wake waiters"
+
+
+def test_missing_session_settles_as_404_never_ok():
+    handler_body = _block(
+        ROUTES,
+        'if parsed.path == "/api/session/draft":',
+        'if parsed.path == "/api/session/update":',
+    )
+    assert 'outcome == "missing"' in handler_body, "the handler must distinguish the missing outcome"
+    assert 'return bad(handler, "Session not found", 404)' in handler_body
+    assert "get_session(sid, metadata_only=True)" in handler_body, (
+        "missing sessions must still 404 before publishing an intent (issue #4765)"
     )
 
 
@@ -52,28 +115,20 @@ def test_draft_worker_persists_exactly_like_the_old_inline_path():
     assert "Draft persistence is not conversation activity" in worker_body
     # A metadata-only stub must never be saved (#1558 P0: would wipe messages).
     assert "_loaded_metadata_only" in worker_body
-
-
-def test_draft_worker_coalesces_to_latest_payload():
-    worker_body = _block(ROUTES, "def _draft_save_worker(", "def _session_is_subagent_view_only(")
-    assert 'state["pending"]' in worker_body and 'state["published"]' in worker_body, (
-        "worker must move the queued latest intent into the published slot (latest-wins)"
-    )
     assert "lock.acquire(timeout=_DRAFT_SAVE_LOCK_WAIT)" in worker_body, (
         "worker must use a bounded agent-lock wait so a heavy op cannot strand draft saves forever"
     )
 
 
-def test_draft_404_contract_preserved_for_missing_sessions():
+def test_response_carries_the_durable_draft():
     handler_body = _block(
         ROUTES,
         'if parsed.path == "/api/session/draft":',
         'if parsed.path == "/api/session/update":',
     )
-    assert "get_session(sid, metadata_only=True)" in handler_body, (
-        "missing sessions must still 404 before publishing an intent (issue #4765)"
+    assert '"draft": durable' in handler_body, (
+        "the 200 body must carry the actually persisted draft (files preserved), not request fields"
     )
-    assert 'return bad(handler, "Session not found", 404)' in handler_body
 
 
 def test_autosave_client_raises_timeout_and_suppresses_timeout_toast():
