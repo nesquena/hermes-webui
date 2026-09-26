@@ -819,9 +819,10 @@ def _get_disabled_skill_names_for_profile() -> set:
 
     Unlike ``tools.skills_tool._get_disabled_skill_names`` which reads from
     the process-global ``HERMES_HOME``, this uses ``_get_config_path()`` which
-    resolves against the WebUI's active profile.  Checks
-    ``skills.platform_disabled.webui`` first, falling back to
-    ``skills.disabled``.
+    resolves against the WebUI's active profile.  Unions
+    ``skills.platform_disabled.webui`` with ``skills.disabled`` the way
+    ``agent.skill_utils.get_disabled_skill_names`` does, and never returns an
+    essential skill.
     """
     config_path = _active_profile_config_path()
     if not config_path.exists():
@@ -835,11 +836,31 @@ def _get_disabled_skill_names_for_profile() -> set:
     skills_cfg = cfg.get("skills")
     if not isinstance(skills_cfg, dict):
         return set()
-    # Check platform_disabled.webui first (mirrors agent platform resolution)
+    disabled = _normalize_disabled_set(skills_cfg.get("disabled"))
+    # A platform list ADDS to the global one, it does not replace it -- that is what
+    # agent/skill_utils.get_disabled_skill_names() does, and the two views of one config
+    # must not disagree: returning only platform_disabled.webui here re-enabled every
+    # globally disabled skill in this UI the moment a webui key existed.
     platform_disabled = skills_cfg.get("platform_disabled")
     if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
-        return _normalize_disabled_set(platform_disabled["webui"])
-    return _normalize_disabled_set(skills_cfg.get("disabled"))
+        disabled |= _normalize_disabled_set(platform_disabled["webui"])
+    # ...and the essential skills are never disabled, whatever the config says.
+    return disabled - _essential_skill_names()
+
+
+def _essential_skill_names() -> set:
+    """Skills the agent refuses to disable (agent/skill_utils.ESSENTIAL_SKILLS).
+
+    Read from the agent source the WebUI already imports from, so an upstream change to
+    that set moves this UI with it; the fallback keeps the panel usable if the agent dir
+    is not importable in this deployment.
+    """
+    try:
+        from agent.skill_utils import ESSENTIAL_SKILLS
+
+        return {str(n) for n in ESSENTIAL_SKILLS}
+    except Exception:
+        return {"hermes-agent"}
 
 
 def _parse_config_string_list(value) -> list:
@@ -29061,6 +29082,15 @@ def _handle_skill_toggle(handler, body):
     name = body["name"].strip()
     enabled = bool(body["enabled"])
 
+    # An essential skill cannot be disabled from any surface: the agent loads it whatever the
+    # config says, hermes_cli.skills_config.save_disabled_skills drops it on the way to disk,
+    # and _get_disabled_skill_names_for_profile() subtracts it on the way back. Writing the
+    # name here anyway left the config, this response and the panel all claiming a state the
+    # agent refuses to honour, so the write is turned into the effective one instead -- which
+    # also strips a name an earlier write left behind in either list.
+    if not enabled and name in _essential_skill_names():
+        enabled = True
+
     # Validate the skill exists in the filesystem
     skills_dir = _active_skills_dir()
     search_dirs = _active_skill_search_dirs(skills_dir)
@@ -29096,6 +29126,8 @@ def _handle_skill_toggle(handler, body):
 
     reload_config()  # outside with block — reload_config() acquires the lock itself
     _SKILLS_STATS_CACHE.clear()
+    # `enabled` is the state that was written, not the state that was asked for: they differ
+    # for an essential skill, and the caller needs the one that is now on disk.
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 

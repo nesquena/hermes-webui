@@ -4941,6 +4941,24 @@ function _toggleCatCollapse(cat) {
   });
 }
 
+/* The disabled-skill summary and the per-category enabled/total count. Kept out of
+   renderSkills() so its collapse logic stays where tests/test_skills_category_collapse.py
+   reads it, in the first 2000 characters of the function. */
+function _appendSkillsPolicyNote(box, skills) {
+  const off = skills.filter(s => s.disabled).length;
+  if (!off) return;
+  const sum = document.createElement('div');
+  sum.className = 'skills-policy-note';
+  /* The two words are the labels the panel already ships in every locale
+     (i18n keys skill_enabled / skill_disabled), so this line is not English-only. */
+  sum.textContent = `${skills.length - off} ${t('skill_enabled')} · ${off} ${t('skill_disabled')}`;
+  box.appendChild(sum);
+}
+function _skillsCatCount(items) {
+  const off = items.filter(s => s.disabled).length;
+  return off ? `${items.length - off}/${items.length}` : `${items.length}`;
+}
+
 function renderSkills(skills) {
   const query = ($('skillsSearch').value || '').toLowerCase();
   const filtered = query ? skills.filter(s =>
@@ -4958,6 +4976,7 @@ function renderSkills(skills) {
   const box = $('skillsList');
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
+  _appendSkillsPolicyNote(box, filtered);
   for (const [cat, items] of Object.entries(cats).sort()) {
     const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
@@ -4965,7 +4984,7 @@ function renderSkills(skills) {
     const hdr = document.createElement('div');
     hdr.className = 'skills-cat-header';
     hdr.dataset.cat = cat;
-    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${items.length})</span>`;
+    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${_skillsCatCount(items)})</span>`;
     hdr.onclick = () => _toggleCatCollapse(cat);
     sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
@@ -4986,7 +5005,17 @@ function renderSkills(skills) {
       const descEl = document.createElement('span');
       descEl.className = 'skill-desc';
       descEl.textContent = skill.description || '';
-      el.append(toggle, nameEl, descEl);
+      el.append(toggle, nameEl);
+      if (isDisabled) {
+        /* .skill-item.disabled only dims the row, which reads as styling rather than as state:
+           the agent will REFUSE this skill, so the panel says so in words. */
+        const offEl = document.createElement('span');
+        offEl.className = 'skill-off-tag';
+        offEl.textContent = t('skill_disabled');
+        offEl.title = t('skill_disabled');
+        el.append(offEl);
+      }
+      el.append(descEl);
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
     }
@@ -5007,9 +5036,12 @@ async function toggleSkill(name, currentlyEnabled) {
       body: JSON.stringify({ name, enabled: newEnabled })
     });
     if (result && result.ok) {
+      /* The server writes the effective state, which is not always the requested one: an
+         essential skill stays enabled however its row was clicked. Render what came back. */
+      const effective = typeof result.enabled === 'boolean' ? result.enabled : newEnabled;
       if (_skillsData) {
         const skill = _skillsData.find(s => s.name === name);
-        if (skill) skill.disabled = !newEnabled;
+        if (skill) skill.disabled = !effective;
       }
       if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
       renderSkills(_skillsData || []);

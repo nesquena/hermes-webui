@@ -299,12 +299,13 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Plain skills match case-insensitive keywords in their name or description; built-in, agent/plugin, and bundle commands keep prefix matching and take precedence over a same-slug skill
 - Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
 - Arrow keys navigate, Tab/Enter select, Escape closes
+- A skill disabled in the active profile's config is not offered: `/skills` lists only the skills the agent can load and says how many are held back, and `/use <name>` on a disabled skill answers with the reason instead of forcing it
 - Unrecognized commands pass through to the agent
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
-- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
+- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer; a disabled skill keeps its row and its toggle but is tagged as disabled, and the header counts enabled against total; a skill the agent treats as essential cannot be turned off here and its row stays enabled
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session

@@ -1188,16 +1188,25 @@ function cmdSkills(args){
     try{
       const data = await api('/api/skills');
       let skills = data.skills || [];
+      /* `skills.disabled` in the agent's config is the policy: list what it can actually load,
+         and say how many are held back rather than offering them as if they were available. */
+      let offSkills = skills.filter(s => s && s.disabled);
+      skills = skills.filter(s => !(s && s.disabled));
       if(args){
         const q = args.toLowerCase();
-        skills = skills.filter(s =>
+        const matchesQuery = s =>
           (s.name||'').toLowerCase().includes(q) ||
           (s.description||'').toLowerCase().includes(q) ||
-          (s.category||'').toLowerCase().includes(q)
-        );
+          (s.category||'').toLowerCase().includes(q);
+        skills = skills.filter(matchesQuery);
+        /* The held-back count is printed next to a filtered listing, so it answers the
+           same query: a profile-wide total there would read as "N more MATCHING skills". */
+        offSkills = offSkills.filter(matchesQuery);
       }
+      const offCount = offSkills.length;
       if(!skills.length){
-        const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
+        const none = offCount ? ` (${offCount} disabled in config)` : '';
+        const msg = {role:'assistant', content: (args ? `No skills matching "${args}"` : 'No enabled skills found') + none + '.'};
         S.messages.push(msg); renderMessages(); return;
       }
       // Group by category
@@ -1219,7 +1228,8 @@ function cmdSkills(args){
       const header = args
         ? `Skills matching "${args}" (${skills.length}):\n\n`
         : `Available skills (${skills.length}):\n\n`;
-      S.messages.push({role:'assistant', content: header + lines.join('\n')});
+      const footer = offCount ? `\n_${offCount} more ${offCount === 1 ? 'is' : 'are'} disabled in this profile's config and cannot be used._` : '';
+      S.messages.push({role:'assistant', content: header + lines.join('\n') + footer});
       renderMessages();
       showToast(t('type_slash'));
     }catch(e){
@@ -1244,6 +1254,15 @@ async function cmdUse(args){
     const data = await api('/api/skills');
     const skills = data.skills || [];
     const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
+    if(match && match.disabled){
+      resolve(null);
+      if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+      if(isCurrentSession()){
+        const msg = {role:'assistant', content:`Skill \`${match.name}\` is disabled in this profile's config, so the agent cannot load it. Enable it in the Skills panel first.`};
+        S.messages.push(msg); renderMessages();
+      }
+      return;
+    }
     if(!match){
       resolve(null);
       if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;

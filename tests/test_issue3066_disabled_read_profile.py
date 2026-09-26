@@ -38,9 +38,10 @@ def test_disabled_read_uses_active_profile_config(tmp_path, monkeypatch):
     assert result == {"skill-x", "skill-y"}
 
 
-def test_disabled_read_prefers_platform_disabled_webui(tmp_path, monkeypatch):
-    """When platform_disabled.webui exists, it takes precedence over the
-    global disabled list."""
+def test_disabled_read_unions_platform_and_global(tmp_path, monkeypatch):
+    """platform_disabled.webui ADDS to the global disabled list, the way
+    agent.skill_utils.get_disabled_skill_names does. Another platform's list
+    is not read here."""
     from api import routes
 
     config_path = tmp_path / "config.yaml"
@@ -56,8 +57,8 @@ def test_disabled_read_prefers_platform_disabled_webui(tmp_path, monkeypatch):
     monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
 
     result = routes._get_disabled_skill_names_for_profile()
-    assert result == {"webui-disabled-a", "webui-disabled-b"}
-    assert "global-disabled" not in result
+    assert result == {"global-disabled", "webui-disabled-a", "webui-disabled-b"}
+    assert "telegram-disabled" not in result
 
 
 def test_disabled_read_falls_back_to_global_disabled(tmp_path, monkeypatch):
@@ -179,7 +180,8 @@ def test_disabled_read_decodes_json_array_string(tmp_path, monkeypatch):
 
 def test_disabled_read_platform_webui_decodes_json_array_string(tmp_path, monkeypatch):
     """Issue #7120: platform_disabled.webui stored as a JSON-array string is
-    decoded the same way as the global disabled list."""
+    decoded the same way as the global disabled list, and both end up in the
+    union."""
     from api import routes
 
     config_path = tmp_path / "config.yaml"
@@ -192,8 +194,48 @@ def test_disabled_read_platform_webui_decodes_json_array_string(tmp_path, monkey
     monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
 
     result = routes._get_disabled_skill_names_for_profile()
-    assert result == {"webui-disabled-a", "webui-disabled-b"}
-    assert "global-disabled" not in result
+    assert result == {"global-disabled", "webui-disabled-a", "webui-disabled-b"}
+
+
+def test_disabled_read_subtracts_essential_skills(tmp_path, monkeypatch):
+    """An essential skill is never reported disabled, whatever the config says:
+    the agent loads it anyway, so showing it as disabled here would be a lie."""
+    from api import routes
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "skills": {
+            "disabled": ["hermes-agent", "skill-x"],
+            "platform_disabled": {"webui": ["hermes-agent", "skill-y"]},
+        }
+    })
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.routes._essential_skill_names", lambda: {"hermes-agent"})
+
+    result = routes._get_disabled_skill_names_for_profile()
+    assert result == {"skill-x", "skill-y"}
+
+
+def test_essential_skill_names_falls_back_without_agent_modules(monkeypatch):
+    """Not every deployment can import the agent package. The fallback keeps
+    the panel usable and still protects hermes-agent."""
+    import sys
+
+    from api import routes
+
+    monkeypatch.setitem(sys.modules, "agent.skill_utils", None)
+    assert routes._essential_skill_names() == {"hermes-agent"}
+
+
+@requires_agent_modules
+def test_essential_skill_names_reads_the_agent_set():
+    """When the agent package is importable, the set comes from it, so an
+    upstream change to ESSENTIAL_SKILLS moves this UI with it."""
+    from agent.skill_utils import ESSENTIAL_SKILLS
+
+    from api import routes
+
+    assert routes._essential_skill_names() == {str(n) for n in ESSENTIAL_SKILLS}
 
 
 @requires_agent_modules
@@ -216,3 +258,121 @@ def test_skills_list_disabled_decodes_json_array_string(tmp_path, monkeypatch):
 
     assert skills["skill-a"]["disabled"] is True
     assert skills["skill-b"]["disabled"] is True
+
+
+def _essential_toggle_env(monkeypatch, config_path, skills_dir):
+    """Point the toggle handler at a throwaway profile and make it return its payload.
+
+    ``_find_skill_in_dirs`` is stubbed the way tests/test_skills_toggle.py stubs it, so the
+    write path can be exercised without the agent package.
+    """
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.routes._active_skills_dir", lambda: skills_dir)
+    monkeypatch.setattr(
+        "api.routes._find_skill_in_dirs",
+        lambda n, dirs: (skills_dir / n, skills_dir / n / "SKILL.md"),
+    )
+    monkeypatch.setattr("api.routes._essential_skill_names", lambda: {"hermes-agent"})
+    monkeypatch.setattr("api.routes.reload_config", lambda: None)
+    monkeypatch.setattr("api.routes.j", lambda _handler, payload: payload)
+    monkeypatch.setattr(
+        "api.routes.bad",
+        lambda _handler, message, status=400: {"error": message, "status": status},
+    )
+
+
+def test_toggle_cannot_persist_an_essential_skill_as_disabled(tmp_path, monkeypatch):
+    """The write path honours the invariant the read path enforces. Disabling an essential
+    skill used to be written to both lists and echoed back as disabled while the agent and
+    the read path went on loading it, so the panel rendered a state nothing else believed."""
+    from api import routes
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "hermes-agent")
+    _write_skill(skills_dir, "skill-x")
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "skills": {"disabled": [], "platform_disabled": {"webui": []}},
+    })
+    _essential_toggle_env(monkeypatch, config_path, skills_dir)
+
+    response = routes._handle_skill_toggle(None, {"name": "hermes-agent", "enabled": False})
+
+    # the response carries the state that was written, not the state that was asked for
+    assert response == {"ok": True, "name": "hermes-agent", "enabled": True}
+    # nothing landed in either list
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert cfg["skills"]["disabled"] == []
+    assert cfg["skills"]["platform_disabled"]["webui"] == []
+    # and the effective read agrees with both
+    assert "hermes-agent" not in routes._get_disabled_skill_names_for_profile()
+
+    # an ordinary skill still toggles, so this is a guard and not a blanket refusal
+    assert routes._handle_skill_toggle(None, {"name": "skill-x", "enabled": False}) == {
+        "ok": True, "name": "skill-x", "enabled": False,
+    }
+    assert "skill-x" in routes._get_disabled_skill_names_for_profile()
+
+
+def test_toggle_strips_an_essential_skill_an_earlier_write_left_behind(tmp_path, monkeypatch):
+    """A config written before this guard existed can still name an essential skill. Clicking
+    that row clears it from both lists instead of leaving it there to be ignored forever."""
+    from api import routes
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "hermes-agent")
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "skills": {
+            "disabled": ["hermes-agent", "skill-y"],
+            "platform_disabled": {"webui": ["hermes-agent"], "telegram": ["skill-z"]},
+        },
+    })
+    _essential_toggle_env(monkeypatch, config_path, skills_dir)
+
+    response = routes._handle_skill_toggle(None, {"name": "hermes-agent", "enabled": False})
+
+    assert response == {"ok": True, "name": "hermes-agent", "enabled": True}
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert cfg["skills"]["disabled"] == ["skill-y"]
+    assert cfg["skills"]["platform_disabled"]["webui"] == []
+    # another platform's list is not this endpoint's business
+    assert cfg["skills"]["platform_disabled"]["telegram"] == ["skill-z"]
+
+
+@requires_agent_modules
+def test_skills_listing_agrees_after_an_essential_toggle(tmp_path, monkeypatch):
+    """The last link in the chain: the listing the panel renders from reports the essential
+    skill as enabled after the write, so persistence, response, read and panel all agree."""
+    from api import routes
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "hermes-agent")
+    _write_skill(skills_dir, "skill-x")
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "skills": {"disabled": ["hermes-agent"], "platform_disabled": {"webui": []}},
+    })
+    _essential_toggle_env(monkeypatch, config_path, skills_dir)
+
+    routes._handle_skill_toggle(None, {"name": "hermes-agent", "enabled": False})
+
+    listed = {s["name"]: s for s in routes._skills_list_from_dir(skills_dir)["skills"]}
+    assert listed["hermes-agent"]["disabled"] is False
+    assert listed["skill-x"]["disabled"] is False
+
+
+def test_panel_toggle_renders_the_state_the_server_returned():
+    """static/panels.js must read result.enabled instead of inverting the click, or the guard
+    above is invisible in the UI: the row would still flip to disabled for one render."""
+    source = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(
+        encoding="utf-8"
+    )
+    idx = source.find("async function toggleSkill(")
+    assert idx != -1
+    body = source[idx:idx + 1200]
+    assert "result.enabled" in body
+    assert "skill.disabled = !newEnabled" not in body
