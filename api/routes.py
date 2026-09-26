@@ -13907,6 +13907,21 @@ def _handle_session_get(handler, parsed) -> bool:
         # the wire shape stays byte-equivalent to the previous inline
         # synthesis (the frontend has been reading these exact keys).
         msgs = list(synth.messages or [])
+        # Apply the same message window as the sidecar path above (#6491).
+        # The synthesized transcript is stitched across every compression
+        # segment, so returning it whole on each metadata poll or paginated
+        # load produces multi-megabyte payloads for long Desktop/CLI sessions.
+        if load_messages:
+            _foreign_msgs, _foreign_offset = _message_window_for_display(
+                msgs,
+                msg_limit=msg_limit,
+                msg_before=msg_before,
+                expand_renderable=expand_renderable,
+            )
+            if msg_limit is not None:
+                _foreign_msgs = _messages_for_limited_payload(_foreign_msgs)
+        else:
+            _foreign_msgs, _foreign_offset = [], 0
         sess = {
             "session_id": synth.session_id,
             "title": synth.title,
@@ -13946,10 +13961,18 @@ def _handle_session_get(handler, parsed) -> bool:
             # sessions and the user only discovers the block at
             # POST time with a confusing 403.
             "read_only": bool(getattr(synth, "read_only", False)),
-            "messages": msgs,
+            "messages": _foreign_msgs,
             "tool_calls": [],
         }
-        attach_todo_state(sess, msgs)
+        # Derive todo state from the full transcript, not the display window,
+        # so the latest settled todo write outside msg_limit still counts.
+        if load_messages:
+            attach_todo_state(sess, msgs)
+        sess["_messages_truncated"] = bool(
+            load_messages and msg_limit is not None and _foreign_offset > 0
+        )
+        sess["_messages_offset"] = _foreign_offset
+        sess["_msg_limit_max"] = _MAX_MSG_LIMIT
         sess = _merge_cli_sidebar_metadata(sess, cli_meta)
         return j(handler, {"session": public_session_projection(sess)})
 

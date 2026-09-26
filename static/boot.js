@@ -2102,11 +2102,23 @@ $('btnNewChat').onclick=async()=>{
   }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
 };
-$('btnDownload').onclick=()=>{
-  if(!S.session)return;
-  const blob=new Blob([transcript()],{type:'text/markdown'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+$('btnDownload').onclick=async()=>{
+  if(!S.session || $('btnDownload').disabled)return;
+  const button=$('btnDownload');
+  const owner=_sessionSnapshotOwner();
+  button.disabled=true;
+  try{
+    const snapshot=await _readFullSessionSnapshot(owner);
+    if(!snapshot || !snapshot.isCurrent())return;
+    const session=snapshot.session;
+    const blob=new Blob([transcript(session,session.messages)],{type:'text/markdown'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=`hermes-${session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+  }catch(_){
+    if(owner.isCurrent())setStatus(t('session_history_failed'));
+  }finally{
+    if(owner.isCurrent())_syncHermesPanelSessionActions();
+  }
 };
 function _buildSessionExportUrl(sessionId,params){
   const url=new URL('api/session/export',document.baseURI||location.href);

@@ -4507,6 +4507,29 @@ async function _ensureAllMessagesLoaded() {
   }
 }
 
+// A detached full-history read for export and artifact discovery. Never hydrate
+// S.messages here: a response can arrive while streaming or while paging.
+function _sessionSnapshotOwner(){
+  const sid = S.session?.session_id;
+  const profile = S.activeProfile || 'default';
+  const generation = _loadSessionGeneration;
+  return {sid, profile, isCurrent:()=>!!sid && S.session?.session_id===sid
+    && (S.activeProfile||'default')===profile && _loadSessionGeneration===generation
+    && (!_loadingSessionId || _loadingSessionId===sid)};
+}
+
+async function _readFullSessionSnapshot(owner = _sessionSnapshotOwner()){
+  if(!owner.isCurrent()) return null;
+  const data = await api(`/api/session?session_id=${encodeURIComponent(owner.sid)}&profile=${encodeURIComponent(owner.profile)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
+  if(!owner.isCurrent()) return null;
+  const session = data?.session;
+  if(!session || session.session_id!==owner.sid || !Array.isArray(session.messages)
+      || session._messages_truncated || Number(session._messages_offset||0)>0){
+    throw new Error('Incomplete session history');
+  }
+  return {session, isCurrent:owner.isCurrent};
+}
+
 const SESSION_ARCHIVED_PAGE_SIZE = 100;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
 let _allSessions = [];  // cached for search filter
