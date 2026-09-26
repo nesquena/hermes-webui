@@ -32714,11 +32714,24 @@ def _normalize_names_list(names) -> list[str]:
 
 
 def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
-    """Add or remove *name* from *names*, returning a new list."""
+    """Add or remove *name* from *names*, returning a new list.
+
+    Entries are COMPARED in their env-RESOLVED form but RETURNED in their raw
+    form: a profile may hold ``skills.disabled: ["${DISABLED_SKILL}"]``, and the
+    reader expands that to the real skill name. Comparing the raw placeholder
+    against the resolved ``name`` would never match, so the API reported success
+    while the skill stayed disabled (#5619). Returning the original raw entries
+    keeps the ``${VAR}`` indirection on disk instead of baking the resolved
+    value into config.yaml.
+    """
     names = _normalize_names_list(names)
+    resolved = _expand_env_vars(names)
     if enabled:
-        return [d for d in names if d != name]
-    if name not in names:
+        # strict=True: _expand_env_vars() maps 1:1, so the lengths always match.
+        return [
+            raw for raw, res in zip(names, resolved, strict=True) if res != name
+        ]
+    if name not in resolved:
         names.append(name)
     return names
 
