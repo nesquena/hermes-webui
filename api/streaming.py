@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import traceback
+import unicodedata
 import copy
 import inspect
 from pathlib import Path
@@ -4620,17 +4621,76 @@ def _detect_title_language(text: str) -> str:
     return ''
 
 
+# Unicode-name keywords for alphabetic characters outside the fast ordinal
+# ranges below. Checked in order. This is how half-width katakana, full-width
+# Latin, ligatures, polytonic Greek, and presentation forms land in their real
+# script instead of being dropped or mistaken for foreign text.
+_SCRIPT_NAME_KEYWORDS = (
+    ('KATAKANA', 'cjk'),
+    ('HIRAGANA', 'cjk'),
+    ('HANGUL', 'cjk'),
+    ('IDEOGRAPH', 'cjk'),
+    ('LATIN', 'latin'),
+    ('CYRILLIC', 'cyrillic'),
+    ('ARABIC', 'arabic'),
+    ('HEBREW', 'hebrew'),
+    ('GREEK', 'greek'),
+    ('DEVANAGARI', 'devanagari'),
+    ('THAI', 'thai'),
+    ('GEORGIAN', 'georgian'),
+    ('ARMENIAN', 'armenian'),
+    ('ETHIOPIC', 'ethiopic'),
+    ('BENGALI', 'bengali'),
+    ('TAMIL', 'tamil'),
+    ('TELUGU', 'telugu'),
+    ('KANNADA', 'kannada'),
+    ('MALAYALAM', 'malayalam'),
+    ('GUJARATI', 'gujarati'),
+    ('GURMUKHI', 'gurmukhi'),
+    ('SINHALA', 'sinhala'),
+    ('KHMER', 'khmer'),
+    ('MYANMAR', 'myanmar'),
+    ('TIBETAN', 'tibetan'),
+    ('LAO', 'lao'),
+    ('MONGOLIAN', 'mongolian'),
+)
+
+
 def _script_counts(text: str) -> dict:
     """Return per-script alphabetic character counts for *text*.
 
     Buckets: ``latin``, ``cjk`` (Han/Hiragana/Katakana/Hangul), ``cyrillic``,
-    ``arabic``, ``hebrew``, ``greek``, ``devanagari``. Non-alphabetic and
-    unclassified characters are ignored.
+    ``arabic``, ``hebrew``, ``greek``, ``devanagari``, ``thai``,
+    ``georgian``, ``armenian``, ``ethiopic``, the Indic and South-East
+    Asian scripts named in ``_SCRIPT_NAME_KEYWORDS``, and ``other``. Common ranges are matched by
+    ordinal for speed; everything alphabetic outside them is classified by
+    its Unicode character name. Nothing alphabetic is dropped: a letter no
+    keyword recognizes counts as ``other``, so a title written in an
+    unclassified script is still visible to drift detection instead of
+    vanishing from the denominator. Each character is NFKC-expanded, so a
+    mathematical, circled, enclosed or fullwidth letter counts as the plain
+    letter it decomposes to, and a ligature counts as each of its letters.
+    Characters that are numbers in their original form (Roman numerals,
+    circled digits) are left out entirely.
     """
     counts: dict[str, int] = {}
-    for ch in str(text or ''):
-        if not ch.isalpha():
-            continue
+    # Enclosed letters (Ⓐ) are category So and fail isalpha() in their
+    # original form, and a ligature (ﬁ) expands to two letters; counting each
+    # character's NFKC expansion codepoint by codepoint makes both visible to
+    # the denominator. Number characters are excluded on their ORIGINAL
+    # category, before expansion: a Roman numeral (Ⅲ, category Nl) expands to
+    # Latin letters and would otherwise make a CJK chapter title (U+7B2C U+2162
+    # U+7AE0) look Latin-dominant, and
+    # circled digits (①, No) expand to digits. Scripts with no compatibility
+    # form (Ethiopic, Cherokee) are unchanged by NFKC.
+    def _letters():
+        for raw in str(text or ''):
+            if unicodedata.category(raw).startswith('N'):
+                continue
+            for ch in unicodedata.normalize('NFKC', raw):
+                if ch.isalpha():
+                    yield ch
+    for ch in _letters():
         o = ord(ch)
         if (0x0041 <= o <= 0x024F) or (0x1E00 <= o <= 0x1EFF):
             bucket = 'latin'
@@ -4651,7 +4711,12 @@ def _script_counts(text: str) -> dict:
         elif 0x0900 <= o <= 0x097F:
             bucket = 'devanagari'
         else:
-            continue
+            name = unicodedata.name(ch, '')
+            bucket = 'other'
+            for keyword, mapped in _SCRIPT_NAME_KEYWORDS:
+                if keyword in name:
+                    bucket = mapped
+                    break
         counts[bucket] = counts.get(bucket, 0) + 1
     return counts
 
@@ -4675,7 +4740,231 @@ def _dominant_script(text: str) -> str:
     return ''
 
 
-def _title_prompt_language_rule(user_text: str) -> str:
+# Maps a pinned ``auxiliary.title_generation.language`` value to the
+# ``_script_counts`` bucket its titles should be written in. A tuple value
+# names a language with more than one script in majority use today; a title
+# in any of them is accepted, and an explicit script qualifier on the pin (see
+# ``_TITLE_SCRIPT_QUALIFIERS``) narrows it to one. A script with minority use
+# (Kazakh in Latin or Arabic script, Malay in Jawi) is not listed here, so a
+# bare pin keeps rejecting it; the qualifier (``kk-Latn``, ``Malay (Jawi)``)
+# is how a user who writes that way opts in.
+#
+# Keys are lowercase English names and ISO 639-1 codes, ASCII only. This
+# module has to stay English-only (see
+# test_title_generation_source_has_no_cjk_literals), so a pin written in its
+# own script is not mapped. Diacritics are folded before lookup.
+#
+# Serbian is missing on purpose: it is written in both Cyrillic and Latin
+# with no majority either way, so an unqualified pin falls back to
+# conversation-based validation like anything else unmapped. ``sr-Latn`` and
+# ``Serbian (Cyrillic)`` resolve through the qualifier table.
+_TITLE_LANGUAGE_SCRIPTS = {
+    # latin
+    'english': 'latin', 'german': 'latin', 'deutsch': 'latin',
+    'french': 'latin', 'francais': 'latin',
+    'spanish': 'latin', 'espanol': 'latin', 'castellano': 'latin',
+    'portuguese': 'latin', 'portugues': 'latin',
+    'italian': 'latin', 'italiano': 'latin',
+    'dutch': 'latin', 'nederlands': 'latin',
+    'polish': 'latin', 'polski': 'latin',
+    'turkish': 'latin', 'turkce': 'latin',
+    'vietnamese': 'latin', 'indonesian': 'latin', 'malay': 'latin',
+    'swedish': 'latin', 'svenska': 'latin', 'norwegian': 'latin', 'norsk': 'latin',
+    'danish': 'latin', 'dansk': 'latin', 'finnish': 'latin', 'suomi': 'latin',
+    'czech': 'latin', 'slovak': 'latin', 'hungarian': 'latin', 'magyar': 'latin',
+    'romanian': 'latin', 'croatian': 'latin', 'catalan': 'latin',
+    'filipino': 'latin', 'tagalog': 'latin', 'swahili': 'latin',
+    'en': 'latin', 'de': 'latin', 'fr': 'latin', 'es': 'latin', 'pt': 'latin',
+    'it': 'latin', 'nl': 'latin', 'pl': 'latin', 'tr': 'latin', 'vi': 'latin',
+    # cyrillic
+    'russian': 'cyrillic', 'ukrainian': 'cyrillic',
+    'bulgarian': 'cyrillic', 'belarusian': 'cyrillic', 'macedonian': 'cyrillic',
+    'ru': 'cyrillic', 'uk': 'cyrillic', 'bg': 'cyrillic',
+    # cjk (one bucket for Han/Hiragana/Katakana/Hangul, same as _script_counts)
+    'japanese': 'cjk', 'chinese': 'cjk', 'mandarin': 'cjk', 'cantonese': 'cjk',
+    'korean': 'cjk',
+    'ja': 'cjk', 'zh': 'cjk', 'ko': 'cjk',
+    # scripts with a dedicated bucket
+    'arabic': 'arabic', 'ar': 'arabic',
+    'hebrew': 'hebrew', 'he': 'hebrew',
+    'greek': 'greek', 'el': 'greek',
+    'hindi': 'devanagari', 'marathi': 'devanagari', 'nepali': 'devanagari',
+    'hi': 'devanagari',
+    'thai': 'thai', 'th': 'thai',
+    'georgian': 'georgian', 'ka': 'georgian',
+    'armenian': 'armenian', 'hy': 'armenian',
+    'persian': 'arabic', 'farsi': 'arabic', 'urdu': 'arabic', 'pashto': 'arabic',
+    'fa': 'arabic', 'ur': 'arabic', 'ps': 'arabic',
+    'kazakh': 'cyrillic', 'kyrgyz': 'cyrillic', 'tajik': 'cyrillic',
+    'kk': 'cyrillic', 'ky': 'cyrillic', 'tg': 'cyrillic',
+    'yiddish': 'hebrew', 'yi': 'hebrew',
+    'sanskrit': 'devanagari', 'sa': 'devanagari',
+    'amharic': 'ethiopic', 'tigrinya': 'ethiopic', 'am': 'ethiopic', 'ti': 'ethiopic',
+    'bengali': 'bengali', 'bangla': 'bengali', 'bn': 'bengali',
+    'tamil': 'tamil', 'ta': 'tamil',
+    'telugu': 'telugu', 'te': 'telugu',
+    'kannada': 'kannada', 'kn': 'kannada',
+    'malayalam': 'malayalam', 'ml': 'malayalam',
+    'gujarati': 'gujarati', 'gu': 'gujarati',
+    'sinhala': 'sinhala', 'sinhalese': 'sinhala', 'si': 'sinhala',
+    'khmer': 'khmer', 'cambodian': 'khmer', 'km': 'khmer',
+    'burmese': 'myanmar', 'myanmar': 'myanmar', 'my': 'myanmar',
+    'tibetan': 'tibetan', 'bo': 'tibetan',
+    'lao': 'lao', 'lo': 'lao',
+    # two scripts in majority use
+    # Punjabi: Gurmukhi in India, Shahmukhi (Arabic script) in Pakistan.
+    'punjabi': ('gurmukhi', 'arabic'), 'panjabi': ('gurmukhi', 'arabic'),
+    'pa': ('gurmukhi', 'arabic'),
+    # Mongolian: Cyrillic in Mongolia, the traditional script in Inner Mongolia.
+    'mongolian': ('cyrillic', 'mongolian'), 'mn': ('cyrillic', 'mongolian'),
+}
+
+# Script qualifiers a pin can carry beside its language token: ISO 15924
+# codes as used in BCP 47 tags (``pa-Arab``, ``sr-Latn``, ``zh-Hant``) and the
+# English names people write in parentheses (``Punjabi (Arabic)``). When one
+# is present it replaces the language's own entry, so ``pa-Arab`` accepts
+# Shahmukhi alone and ``pa-Guru`` Gurmukhi alone.
+_TITLE_SCRIPT_QUALIFIERS = {
+    'latn': 'latin', 'latin': 'latin',
+    'roman': 'latin', 'romanized': 'latin', 'romanised': 'latin',
+    'cyrl': 'cyrillic', 'cyrillic': 'cyrillic',
+    'arab': 'arabic', 'arabic': 'arabic', 'shahmukhi': 'arabic', 'jawi': 'arabic',
+    'guru': 'gurmukhi', 'gurmukhi': 'gurmukhi',
+    'mong': 'mongolian',
+    'deva': 'devanagari', 'devanagari': 'devanagari',
+    'hans': 'cjk', 'hant': 'cjk', 'hani': 'cjk', 'jpan': 'cjk', 'kore': 'cjk',
+    'hebr': 'hebrew', 'grek': 'greek',
+}
+
+# Qualifiers that mean a script only beside one language: "Traditional"
+# names the Mongolian script for Mongolian and Han for Chinese, so it cannot
+# sit in the general table.
+_TITLE_LANGUAGE_QUALIFIERS = {
+    'mongolian': {'traditional': 'mongolian', 'classical': 'mongolian'},
+    'mn': {'traditional': 'mongolian', 'classical': 'mongolian'},
+}
+
+
+def _resolve_pinned_title_scripts(language: str) -> tuple:
+    """Map a pinned title language to the script buckets a title may use, or ().
+
+    Diacritics are folded first, so "Francais", "Gurmukhi" and their
+    accented spellings all resolve. The language is the first token that
+    names one ("Brazilian Portuguese", "pt-BR", "Egyptian Arabic"). Any other
+    token that names a script is an explicit qualifier and wins over the
+    language's own entry ("pa-Arab", "Punjabi (Arabic)", "Latin Egyptian
+    Arabic"). In a tag, a BCP 47 singleton such as ``x`` starts an
+    extension or private-use section, so nothing after it is read. With no language token,
+    the qualifiers alone decide ("sr-Latn", "Cyrillic"). Returns () for blank or unrecognized values, which callers treat
+    as "validate against the conversation instead" (#3293 behaviour).
+    """
+    folded = ''.join(
+        ch for ch in unicodedata.normalize('NFKD', str(language or '').strip().lower())
+        if not unicodedata.combining(ch)
+    )
+    if not folded:
+        return ()
+    is_tag = not re.search(r'\s', folded)
+    tokens = []
+    for token in re.split(r'[\s\-_/(),.]+', folded):
+        if len(token) == 1:
+            # A BCP 47 singleton ("x", "u") after a subtag ends the tag. Any
+            # other lone character (the initials in "U.S. English", a dash
+            # or "+" between words) carries nothing and is skipped.
+            if is_tag and tokens and token.isascii() and token.isalnum():
+                break
+            continue
+        if token:
+            tokens.append(token)
+    lang_at = next((i for i, t in enumerate(tokens) if t in _TITLE_LANGUAGE_SCRIPTS), None)
+    if lang_at is None:
+        # An unmapped language with a script qualifier ("sr-Latn", "Serbian
+        # (Cyrillic)") resolves to the qualifier; a bare script name
+        # ("Cyrillic") is its own qualifier.
+        qualified = [_TITLE_SCRIPT_QUALIFIERS[t] for t in tokens if t in _TITLE_SCRIPT_QUALIFIERS]
+        return tuple(dict.fromkeys(qualified))
+    lang = tokens[lang_at]
+    own = _TITLE_LANGUAGE_QUALIFIERS.get(lang, {})
+    qualified = [
+        own.get(t) or _TITLE_SCRIPT_QUALIFIERS[t]
+        for i, t in enumerate(tokens)
+        if i != lang_at and (t in own or t in _TITLE_SCRIPT_QUALIFIERS)
+    ]
+    if qualified:
+        return tuple(dict.fromkeys(qualified))
+    hit = _TITLE_LANGUAGE_SCRIPTS[lang]
+    return hit if isinstance(hit, tuple) else (hit,)
+
+
+def _script_drift(title: str, expected_script) -> bool:
+    """True when a substantial share of *title* is written outside *expected_script*.
+
+    *expected_script* is one bucket name or a collection of them; a title in
+    any accepted bucket is on-script.
+
+    Same proportion rule as the #3293 cross-script check: some single other
+    script holds >=35% of the title's alphabetic characters with at least 2
+    characters, so a borrowed technical term (a CJK title containing
+    "Python") does not trip it while genuine drift does.
+    """
+    counts = _script_counts(str(title or ''))
+    total = sum(counts.values())
+    if total < 2:
+        return False
+    # Sum every non-expected bucket, then apply the minimum-two / 35% rule to the
+    # aggregate. Per-bucket testing let a title that is 30% Greek and 30%
+    # Cyrillic pass a Latin pin because neither share reached 35% alone.
+    expected = {expected_script} if isinstance(expected_script, str) else set(expected_script)
+    if not expected:
+        return False
+    foreign = 0
+    for script, n in counts.items():
+        if script in expected:
+            continue
+        # CJK text routinely borrows Latin product/technical terms ("WeChat
+        # Pay", "Python", "ProRes RAW"), so when CJK is the expected script,
+        # Latin in the title is a borrowed term as long as the title also
+        # contains CJK -- the title is genuinely mixed, not pure drift. A
+        # pure-Latin title is still rejected. (#7727; applied here so the
+        # pinned path gets the same exemption as the conversation path.)
+        if 'cjk' in expected and script == 'latin' and counts.get('cjk', 0) >= 2:
+            continue
+        foreign += n
+    return foreign >= 2 and (foreign / total) >= 0.35
+
+
+def _configured_title_language() -> str:
+    """Return the trimmed ``auxiliary.title_generation.language`` pin, or ''.
+
+    A nonblank value is authoritative for a whole generation attempt: the same
+    snapshot must drive both the prompt instruction and output validation, so
+    a title requested in the pinned language is never rejected by a validator
+    that expected the conversation's language.
+    """
+    try:
+        return str((_get_aux_title_config() or {}).get("language", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _title_prompt_language_rule(user_text: str, pinned_language: Optional[str] = None) -> str:
+    """Return the language instruction used by every title prompt.
+
+    Honours ``auxiliary.title_generation.language`` when the user has pinned a
+    title language -- Hermes Agent's own generator applies the same pin via
+    ``_TITLE_PROMPT_PINNED_LANGUAGE``, so without this the setting only takes
+    effect on native surfaces and WebUI titles drift independently.
+
+    ``pinned_language`` lets callers that already snapshotted the setting pass
+    it through, keeping prompt and validation consistent within one attempt;
+    ``None`` means read the config here.
+
+    Falls back to the previous "match the conversation start" instruction when
+    no language is configured, so unpinned installs are unaffected.
+    """
+    language = _configured_title_language() if pinned_language is None else str(pinned_language).strip()
+    if language:
+        return f"Write the title in {language}.\n"
     return "Match the language of the user question.\n"
 
 
@@ -4711,20 +5000,8 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     # A pure-Latin title for a CJK conversation is still rejected.
     # Unrelated scripts (Cyrillic, Arabic, Greek …) are always flagged.
     user_script = _dominant_script(user_text)
-    if user_script:
-        title_counts = _script_counts(candidate)
-        title_total = sum(title_counts.values())
-        if title_total >= 2:
-            for script, n in title_counts.items():
-                if script == user_script:
-                    continue
-                # When user writes in CJK, Latin in the title is a borrowed
-                # term as long as the title also contains CJK characters.
-                if user_script == 'cjk' and script == 'latin':
-                    if title_counts.get('cjk', 0) >= 2:
-                        continue
-                if n >= 2 and (n / title_total) >= 0.35:
-                    return True
+    if user_script and _script_drift(candidate, user_script):
+        return True
 
     # (2) Legacy same-script German→English heuristic.
     if _detect_title_language(user_text) != 'de':
@@ -4741,9 +5018,35 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
-def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+def _generated_title_language_mismatch(user_text: str, title: str, pinned_language: str = '') -> bool:
+    """Language-validate a generated title, honouring a resolvable pin.
+
+    A pin that resolves to script buckets retargets drift detection at the
+    configured language. The title then has to be mostly in the pinned
+    script (either script, for a language written in two), whatever
+    language the conversation is in. The conversation-based
+    check does not also run in that case, because it measures against the
+    wrong thing: it would reject the pinned title the prompt just asked for.
+
+    A pin the script map cannot resolve keeps the #3293 conversation-based
+    check, exactly as a blank pin does. Validating such a title against its
+    own dominant script was tried and it disables the guard outright: any
+    single-script title agrees with itself, so an English conversation with
+    an unmapped pin accepted a Russian title that an unpinned run rejects.
+    Cross-script languages this module means to support are listed in
+    ``_TITLE_LANGUAGE_SCRIPTS`` with a bucket of their own (Amharic maps to
+    ``ethiopic``, Bengali to ``bengali``, and so on), which is what makes a
+    compliant title in one of them survive validation.
+    """
+    pinned_scripts = _resolve_pinned_title_scripts(pinned_language)
+    if pinned_scripts:
+        return _script_drift(title, pinned_scripts)
+    return _title_language_mismatch(user_text, title)
+
+
+def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text)
+    language_rule = _title_prompt_language_rule(user_text, pinned_language)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
@@ -4999,11 +5302,13 @@ def generate_title_raw_via_aux(
     provider: str = '',
     model: str = '',
     base_url: str = '',
+    *,
+    pinned_language: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -5079,14 +5384,14 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -5203,12 +5508,16 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
 
 def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
+    # One snapshot drives both the prompt and validation: when a resolvable
+    # language is pinned, the prompt asks for it and validation checks the
+    # title against the pinned script instead of the conversation start.
+    pinned_language = _configured_title_language()
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _generated_title_language_mismatch(user_text, title, pinned_language):
             return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
@@ -5236,6 +5545,11 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
+    # Same snapshot-once contract as _generate_llm_session_title_for_agent:
+    # a resolvable pin retargets language validation at the pinned script.
+    # Snapshot before the context token, since the validation below runs
+    # outside the try/finally.
+    pinned_language = _configured_title_language()
     ctx_token = None
     if conversation_id:
         try:
@@ -5252,6 +5566,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
             provider=provider,
             model=model,
             base_url=base_url,
+            pinned_language=pinned_language,
         )
     finally:
         if ctx_token is not None:
@@ -5264,7 +5579,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _generated_title_language_mismatch(user_text, title, pinned_language):
             return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]

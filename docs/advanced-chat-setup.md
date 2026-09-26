@@ -93,6 +93,59 @@ The WebUI's `auto_title_refresh_every` setting remains a separate control for
 periodic refreshes of already-generated titles; it does not re-enable
 automatic generation when the auxiliary flag is off.
 
+### Pinning the title language
+
+`auxiliary.title_generation.language` pins the language generated titles are
+written in, whatever language the conversation itself is in:
+
+```yaml
+auxiliary:
+  title_generation:
+    language: Japanese
+```
+
+A nonblank value is read once per generation attempt and drives both halves of
+that attempt. The prompt instruction becomes `Write the title in <language>.`
+in place of the default "match the language of the user question" rule, and the
+post-generation drift check is retargeted to agree with it. Both title routes
+honour the pin: the auxiliary-client route and the active-agent route.
+
+Retargeting the validator is the point. The drift check exists to reject a
+title whose language wandered away from the conversation (issue #3293), and on
+a pinned install that same check would reject the pinned title the prompt had
+just asked for. How a generated title is validated therefore depends on the
+pin:
+
+- **A pin the script map recognises** (`Japanese`, `Russian`, `Amharic`,
+  `Bengali`, `Brazilian Portuguese`, `pt-BR`) is checked against that
+  language's script. The map covers the Latin, Cyrillic, CJK, Arabic, Hebrew,
+  Greek, Devanagari, Thai, Georgian, Armenian and Ethiopic scripts, and the
+  major Indic and South-East Asian ones.
+  A title substantially outside it is still rejected, so an English pin
+  rejects a CJK title and a Japanese pin rejects a Cyrillic one. A CJK pin
+  keeps borrowed Latin terms (`Python`, `WeChat Pay`) as long as the title
+  also holds at least two CJK characters, the same exemption the
+  conversation-based check applies. "Substantially outside" means more than
+  a third of the title's letters, summed across every other script. Styled
+  alphabets such as mathematical bold, circled, enclosed or fullwidth letters
+  count as the plain letters they decompose to; Roman numerals and circled
+  digits are not letters and are left out of the count.
+- **A pin the script map cannot resolve**, and **no pin**, both keep the
+  original behaviour: the title is checked against the language of the
+  conversation's opening message. A pin outside the map therefore still
+  changes the prompt, and a title that follows it into a script the
+  conversation does not use is rejected as drift. Pin a language the map
+  knows to get cross-script titles.
+
+Language lookup is diacritic-insensitive and also matches individual tokens of
+a qualified name, so `Francais`, `Français`, `Traditional Chinese` and `pt-BR`
+all resolve to a script.
+
+The pin affects session titles only. It does not change the language the
+assistant replies in, and it has no effect when
+`auxiliary.title_generation.enabled` is `false`, since no LLM title is
+generated at all in that case.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
