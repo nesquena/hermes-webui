@@ -3036,6 +3036,23 @@ def _find_existing_assistant_for_journal_content(
     return substring_match
 
 
+def _is_own_stream_recovery_artifact(message, stream_id: str | None) -> bool:
+    """Return True when ``message`` is a recovery artifact of THIS stream.
+
+    Provenance is the only safe basis for reusing a row outside the
+    ownership-gated dedupe: the row must carry both the recovery marker and
+    this exact stream id. A live (untagged) row can never satisfy this, so a
+    genuine current-turn answer is never suppressed — it keeps appending.
+    """
+    if not stream_id or not isinstance(message, dict):
+        return False
+    if message.get('role') != 'assistant':
+        return False
+    if not message.get('_recovered_from_run_journal'):
+        return False
+    return str(message.get('_recovered_stream_id') or '') == str(stream_id)
+
+
 def _find_journal_tool_match(
     session,
     name: str,
@@ -3766,6 +3783,37 @@ def _append_journaled_partial_output(
         reasoning_parts = []
         if not content and not reasoning:
             return current_assistant_idx
+        # Resolve THIS stream's own recovery artifact for the flushed content
+        # BEFORE any ownership-gated search. The stale-pending call site
+        # appends the recovered user row first, which shifts the turn boundary
+        # past earlier artifacts so the ownership gate rejects them; keying on
+        # provenance instead keeps the reuse idempotent there. See the guard
+        # below for the full contract.
+        self_stream_same_stream_artifact_idx = None
+        if content and not dedupe_existing and stream_id:
+            # The finder only EXCLUDES rows tagged for a different stream; an
+            # untagged live row is still matchable and is returned first.
+            # Reuse is justified only by provenance, so walk the matches until
+            # one IS a recovery artifact this same stream already produced and
+            # keep rejecting anything else (fail closed toward appending).
+            _search_excluded = set(claimed_existing_assistant_indexes)
+            while True:
+                _candidate_idx = _find_existing_assistant_for_journal_content(
+                    session,
+                    content,
+                    min_index=0,
+                    max_index=initial_message_count,
+                    excluded_indexes=_search_excluded,
+                    stream_id=stream_id,
+                )
+                if _candidate_idx is None:
+                    break
+                if _is_own_stream_recovery_artifact(
+                    session.messages[_candidate_idx], stream_id
+                ):
+                    self_stream_same_stream_artifact_idx = _candidate_idx
+                    break
+                _search_excluded.add(_candidate_idx)
         if dedupe_existing and content:
             search_excluded = set(claimed_existing_assistant_indexes)
             existing_idx = None
@@ -3842,6 +3890,34 @@ def _append_journaled_partial_output(
                     # "nothing recovered".
                     output_accounted_for = True
                     return existing_idx
+        # Unconditional reuse of THIS stream's own recovery artifacts — the
+        # content/tool counterpart of the guard above. Reusing an artifact is
+        # safe precisely because provenance identifies it: only rows this
+        # recovery itself wrote for this exact stream (``_recovered_from_run_
+        # journal`` + matching ``_recovered_stream_id``) can match, so it can
+        # never consume a live current-turn row or an ordinary history row.
+        # Without it, the stale-pending call site (which passes
+        # ``dedupe_existing=False``) re-appends the journal output on every
+        # repair cycle for the same dead stream, because that site appends the
+        # recovered user row FIRST: the ownership-gated searches then refuse
+        # every earlier artifact and each pass grows the transcript by another
+        # answer row (greptile P1, #7167).
+        if self_stream_same_stream_artifact_idx is not None:
+            existing_idx = self_stream_same_stream_artifact_idx
+            claimed_existing_assistant_indexes.add(existing_idx)
+            current_assistant_idx = existing_idx
+            assistant_started_at = None
+            # The journal's visible output is already represented by the row
+            # we just claimed, so the caller must NOT treat
+            # ``session_mutated=False`` as "nothing recovered". If the
+            # claimed row still lacks the journal's display-only reasoning,
+            # attach it now — that mutation is a real backfill, not a
+            # duplicate, and keeps a content-only artifact from masking a
+            # reasoning-bearing journal.
+            if attach_display_reasoning(session.messages[existing_idx], reasoning):
+                appended_any = True
+            output_accounted_for = True
+            return existing_idx
         timestamp = int(assistant_started_at or time.time())
         recovered_assistant = {
             'role': 'assistant',
