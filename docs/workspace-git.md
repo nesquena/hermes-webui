@@ -94,6 +94,16 @@ If a hook fails, the API returns a structured Git error instead of hiding the fa
 failures include authentication errors, missing upstream branches, conflicts, dirty worktrees, invalid
 refs, missing Git binaries, and timeouts.
 
-Repository-local credential helpers and askpass commands are disabled for workspace Git operations.
-Private HTTPS remotes that depend on a stored credential helper may fail to fetch, pull, or push from
-WebUI; use an SSH remote or another externally authenticated transport for those workflows.
+Repository-local credential helpers, askpass commands, and SSH commands are disabled for workspace
+Git operations. Generic and URL-scoped credential helpers from user and system Git config remain
+available for private HTTPS remotes. SSH remotes can use the inherited SSH agent and a user/system
+`core.sshCommand`; WebUI appends the SSH variant's batch option so unattended operations do not open password,
+passphrase, or host-key prompts. Custom-named commands are recognized with a bounded `-G`
+configuration probe; failed probes and Git's `simple` variant fail closed. Explicit interactive
+`BatchMode` options are rejected because OpenSSH keeps the first value.
+
+Credential helpers, `core.sshCommand`, and `ssh.variant` must be declared directly in the
+primary system/global Git config. Includes are not followed for these settings, because an
+included file can be checkout-controlled despite appearing to have global scope. Move included
+authentication settings to the main user/system config. Explicit scope reads preserve
+compatibility with Git versions before 2.26.
