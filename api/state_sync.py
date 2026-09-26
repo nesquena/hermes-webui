@@ -49,6 +49,18 @@ def _get_state_db(profile: Optional[str] = None):
     except ImportError:
         return None
 
+    db_path = _resolve_state_db_path(profile)
+    if db_path is None:
+        return None
+    try:
+        return SessionDB(db_path)
+    except Exception:
+        logger.debug("Failed to open state.db")
+        return None
+
+
+def _resolve_state_db_path(profile: Optional[str] = None) -> Optional[Path]:
+    """Path of the profile's existing state.db, or None (see ``_get_state_db``)."""
     if profile is not None:
         # Explicit-profile path — a resolution failure here MUST NOT
         # silently fall back to HERMES_HOME or the caller's "write to
@@ -97,12 +109,7 @@ def _get_state_db(profile: Optional[str] = None):
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
         return None
-
-    try:
-        return SessionDB(db_path)
-    except Exception:
-        logger.debug("Failed to open state.db")
-        return None
+    return db_path
 
 
 def sync_session_start(session_id: str, model=None, profile: Optional[str] = None) -> None:
@@ -244,6 +251,56 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
                 db.set_auto_title(session_id, alt, source=_llm_source)
     except Exception:
         logger.debug("Failed to sync session title to state.db for %s", session_id)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close state.db")
+
+
+def state_db_knows_session(session_id: str, profile: Optional[str] = None) -> Optional[bool]:
+    """Whether ``session_id`` has a state.db row; no state.db is False, an unreadable one None."""
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        return False
+    db_path = _resolve_state_db_path(profile)
+    if db_path is None:
+        return False
+    db = None
+    try:
+        db = SessionDB(db_path)
+        return bool(db.get_session(session_id))
+    except Exception:
+        logger.debug("state.db lookup failed for %s", session_id, exc_info=True)
+        return None
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                logger.debug("Failed to close state.db")
+
+
+def sync_session_pinned(session_id: str, pinned: bool, profile: Optional[str] = None) -> bool:
+    """Pin the session's compression lineage in state.db, the record Desktop and the CLI share.
+
+    Not gated by sync_to_insights. True when the row now holds *pinned*.
+    """
+    db = _get_state_db(profile=profile)
+    if not db:
+        return False
+    try:
+        setter = getattr(db, "set_session_pinned", None)
+        if setter is None:
+            return False
+        if setter(session_id, bool(pinned)):
+            return True
+        row = db.get_session(session_id)
+        return bool(row) and bool(row.get("pinned")) == bool(pinned)
+    except Exception:
+        logger.debug("Failed to sync pin state to state.db for %s", session_id, exc_info=True)
+        return False
     finally:
         try:
             db.close()

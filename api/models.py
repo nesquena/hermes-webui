@@ -6500,6 +6500,120 @@ def agent_session_rows_existing(
         return frozenset(wanted)
 
 
+def _pin_state_db_path(profile=None) -> Path | None:
+    """state.db holding *profile*'s pins; never another profile's database."""
+    from api.state_sync import _resolve_state_db_path
+    return _resolve_state_db_path(profile if isinstance(profile, str) and profile else None)
+
+
+def _read_pin_db(profile, query, *, missing):
+    """Return ``query(cursor, session_columns)`` on *profile*'s state.db.
+
+    *missing* when the profile has no state.db; ``None`` when it cannot be read.
+    """
+    db_path = _pin_state_db_path(profile)
+    if db_path is None:
+        return missing
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            return query(cur, {str(row[1]) for row in cur.fetchall()})
+    except Exception:
+        logger.debug("state.db pin read failed for %s", db_path, exc_info=True)
+        return None
+
+
+def _pin_db_chunks(cur, sql, ids):
+    """Yield rows of ``sql`` (with an ``{ids}`` placeholder list) over *ids* in batches of 500."""
+    ids = sorted({str(sid).strip() for sid in ids if str(sid or "").strip()})
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        cur.execute(sql.format(ids=",".join("?" * len(chunk))), chunk)
+        yield from cur.fetchall()
+
+
+def agent_session_pinned_flags(session_ids, *, profile=None) -> dict[str, bool] | None:
+    """Return ``{session_id: pinned}`` from ``sessions.pinned``, the pin record Hermes Desktop shares.
+
+    ``{}`` when the profile has no state.db; ``None`` on a read error or no ``pinned`` column.
+    """
+    def query(cur, cols):
+        if not {"id", "pinned"} <= cols:
+            return None
+        rows = _pin_db_chunks(cur, "SELECT id, pinned FROM sessions WHERE id IN ({ids})", session_ids or [])
+        return {str(sid).strip(): bool(pinned) for sid, pinned in rows}
+    return _read_pin_db(profile, query, missing={}) if session_ids else {}
+
+
+def agent_session_uncarried_pins(session_ids, *, profile=None) -> set[str] | None:
+    """Unpinned ids with a pinned compression ancestor (a lineage pin that missed the child).
+
+    Empty without lineage columns; ``None`` when unreadable.
+    """
+    def query(cur, cols):
+        if not {"id", "pinned", "parent_session_id", "end_reason"} <= cols:
+            return set()
+        sql = (
+            "WITH RECURSIVE anc(start, id) AS ("
+            " SELECT c.id, p.id FROM sessions c JOIN sessions p ON p.id = c.parent_session_id"
+            " WHERE c.id IN ({ids}) AND NOT c.pinned AND p.end_reason = 'compression'"
+            " UNION SELECT a.start, p.id FROM anc a JOIN sessions c ON c.id = a.id"
+            " JOIN sessions p ON p.id = c.parent_session_id WHERE p.end_reason = 'compression')"
+            " SELECT DISTINCT a.start FROM anc a JOIN sessions s ON s.id = a.id WHERE s.pinned"
+        )
+        return {str(row[0]).strip() for row in _pin_db_chunks(cur, sql, session_ids)}
+    return _read_pin_db(profile, query, missing=set()) if session_ids else set()
+
+
+def agent_session_pin_store_present(*, profile=None) -> bool | None:
+    """Whether *profile* has a state.db with ``sessions.pinned``; ``None`` when unreadable."""
+    return _read_pin_db(profile, lambda cur, cols: "pinned" in cols, missing=False)
+
+
+def agent_session_pinned_ids(*, profile=None) -> set[str] | None:
+    """Ids pinned in *profile*'s state.db (empty without a pin store); ``None`` when unreadable."""
+    def query(cur, cols):
+        if "pinned" not in cols:
+            return set()
+        cur.execute("SELECT id FROM sessions WHERE pinned")
+        return {str(row[0]).strip() for row in cur.fetchall() if row[0]}
+    return _read_pin_db(profile, query, missing=set())
+
+
+def agent_session_pin_lineage_rows(session_ids, *, profile=None) -> list[dict] | None:
+    """Quota rows for pinned state.db sessions; ``None`` when unreadable.
+
+    ``parent_session_id`` is set only for a compression parent, so a lineage shares one slot.
+    """
+    def query(cur, cols):
+        if "id" not in cols:
+            return None
+        def col(name):
+            return f"child.{name}" if name in cols else "NULL"
+        parent, join = "NULL", ""
+        if {"parent_session_id", "end_reason"} <= cols:
+            parent = "parent.id"
+            join = (" LEFT JOIN sessions parent ON parent.id = child.parent_session_id"
+                    " AND parent.end_reason = 'compression'")
+        sql = (f"SELECT child.id, {parent}, {col('session_source')}, {col('source')}, {col('archived')}"
+               f" FROM sessions child{join} WHERE child.id IN ({{ids}})")
+        out = []
+        for sid, parent_id, session_source, source, archived in _pin_db_chunks(cur, sql, session_ids):
+            sid = str(sid).strip()
+            # Only ids without a WebUI row of this profile get here, so state.db's archive flag stands.
+            row = {"session_id": sid, "pinned": True, "archived": bool(archived)}
+            if parent_id:
+                row["parent_session_id"] = str(parent_id).strip()
+            if session_source:
+                row["session_source"] = str(session_source)
+            if source:
+                row["source"] = str(source)
+            out.append(row)
+        return out
+    return _read_pin_db(profile, query, missing=[]) if session_ids else []
+
+
 def agent_session_zero_message_sids(
     session_ids: list[str] | set[str] | frozenset[str],
     *,
@@ -9136,7 +9250,7 @@ def _load_cli_sessions_uncached(
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
             'updated_at': raw_ts,
-            'pinned': False,
+            'pinned': bool(row.get('pinned')),
             'archived': _archived,
             'project_id': _interactive_row_project_id(row),
             'profile': profile,
@@ -9211,7 +9325,7 @@ def _load_cli_sessions_uncached(
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
-                    'pinned': False,
+                    'pinned': bool(row.get('pinned')),
                     'archived': _archived,
                     'project_id': _cron_pid(),
                     'profile': profile_value,
@@ -9280,7 +9394,7 @@ def _load_cli_sessions_uncached(
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
-                    'pinned': False,
+                    'pinned': bool(row.get('pinned')),
                     'archived': _archived,
                     'project_id': _webhook_pid(),
                     'profile': profile_value,
@@ -9347,7 +9461,7 @@ def _load_cli_sessions_uncached(
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
-                    'pinned': False,
+                    'pinned': bool(row.get('pinned')),
                     'archived': _archived,
                     'project_id': _state_row_project_id(sid, _source),
                     'profile': profile_value,
