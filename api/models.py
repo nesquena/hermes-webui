@@ -1305,6 +1305,11 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+def _parse_nonnegative_json_int(value):
+    """Accept only a non-boolean JSON integer, without coercion."""
+    return value if type(value) is int and value >= 0 else None
+
+
 def model_explicit_pick_signature(model, model_provider) -> str:
     """Stable signature of a (model, provider) selection for #5979 explicit-pick
     provenance. The persisted ``Session.model_explicit_pick_signature`` is set to
@@ -1554,6 +1559,21 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        # Post-normalization count persisted by save() (see the comment there):
+        # the message length AFTER _collapse_adjacent_duplicate_partials(), i.e.
+        # exactly len(Session.load(sid).messages). Distinct from message_count,
+        # which is the raw on-disk row count and may exceed the loaded length
+        # when adjacent duplicate partials are collapsed on full load. None on
+        # sidecars written before this key existed; readers must treat None as
+        # "unknown" and fall back to a full load rather than trust message_count.
+        _raw_post_collapse_count = kwargs.get('post_collapse_message_count')
+        self._metadata_post_collapse_message_count = _parse_nonnegative_json_int(
+            _raw_post_collapse_count
+        )
+        # Populated only by load_metadata_only() from the keys actually parsed
+        # before the messages stop key. Keep this JSON-serializable because a
+        # few legacy callers still persist Session.__dict__ directly.
+        self._metadata_prefix_fields = ()
 
     @property
     def path(self):
@@ -1586,6 +1606,12 @@ class Session:
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
             )
         )
+        # Freeze the message payload once for this save. The list is live shared
+        # state and can be mutated by a streaming worker while serialization is
+        # in progress; deriving counts from it and then serializing it again can
+        # otherwise persist a trusted count for different transcript bytes.
+        # Deep-copy so nested row mutation cannot split the provenance either.
+        message_snapshot = copy.deepcopy(self.messages or [])
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1627,10 +1653,23 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
+        meta['message_count'] = len(message_snapshot)
+        # Explicit-provenance twin of message_count: the row count AFTER
+        # _collapse_adjacent_duplicate_partials(), which is what Session.load()
+        # applies before any consumer sees the messages. message_count stays the
+        # RAW row count (the .bak shrink guard and eviction checks rely on it),
+        # so on a sidecar carrying adjacent duplicate partials the two differ.
+        # Consumers that need to reason about the length of the fully loaded
+        # transcript without paying for the load — the lineage cold-load
+        # shortcut in api/routes.py — must use only this count and fail closed
+        # (full load) when it is absent.
+        _collapsed_messages, _ = _collapse_adjacent_duplicate_partials(message_snapshot)
+        meta['post_collapse_message_count'] = len(_collapsed_messages or [])
+        self._metadata_post_collapse_message_count = meta['post_collapse_message_count']
         # _mc_v marks this file as written by the current writer contract,
-        # where `message_count` equals len(messages) by construction and both
-        # keys land in the same atomic write. save()'s shrink guard takes the
+        # where `message_count` and `post_collapse_message_count` are derived
+        # from the same immutable snapshot serialized as `messages`. All keys
+        # land in the same atomic write. save()'s shrink guard takes the
         # bounded-prefix shortcut ONLY for marked files; an unmarked count
         # (a legacy pre-#5854 sidecar, a sidecar materialized by an older
         # recovery writer, any foreign writer) gets the full parse, so a stale
@@ -1645,12 +1684,15 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
+        meta['messages'] = message_snapshot
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {
+            'message_count', 'post_collapse_message_count', '_mc_v', 'anchor_scene_index',
+            'messages', 'tool_calls', 'anchor_activity_scenes',
+        }
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
@@ -1710,7 +1752,7 @@ class Session:
                         existing_msg_count = len(existing.get('messages') or [])
                     except (json.JSONDecodeError, ValueError):
                         existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(message_snapshot)
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1814,6 +1856,10 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # A full load IS the post-normalization authority: the collapse above
+        # already ran, so this count is exact regardless of what the file
+        # carried (a pre-key sidecar, or a stale value from another writer).
+        session._metadata_post_collapse_message_count = len(session.messages or [])
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -1881,9 +1927,16 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # Preserve what the cheap prefix materially proved. Session(...)
+            # fills absent keys from constructor defaults, so consumers making
+            # correctness decisions from a metadata-only stub must be able to
+            # distinguish "present with a false/empty value" from "not read
+            # because this key followed messages in an older/foreign layout".
+            metadata_prefix_fields = tuple(parsed)
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
+            session._metadata_prefix_fields = metadata_prefix_fields
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
@@ -1915,6 +1968,7 @@ class Session:
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
+                    session._metadata_prefix_fields = metadata_prefix_fields
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
                     return session

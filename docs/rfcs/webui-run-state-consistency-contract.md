@@ -207,6 +207,28 @@ and 5; it does not mark every run-state boundary implemented.
    and idempotent.
    Agent state.db alone cannot restore the original attachment if the WebUI
    sidecar is lost.
+   Sidecar-lineage traversal may avoid loading a truncate-to-empty snapshot
+   ancestor only when metadata proves its complete older fold contributes no
+   rows: the ancestor and every snapshot above it, up to the chain end, must
+   carry the truncate-to-empty sentinel in their cheap metadata stubs. The
+   optimization must first preserve explicit-fork isolation and the
+   cumulative visible-prefix return. Because `Session.load()` collapses
+   adjacent duplicate partial rows before the prefix test, the raw
+   `message_count` is not the loaded length; only the post-normalization
+   `post_collapse_message_count` that `Session.save()` persists may prove the
+   prefix return cannot apply. The save must derive that count and serialize
+   `messages` from one immutable snapshot. Readers accept only a non-boolean,
+   non-negative JSON integer for this provenance field; floats, numeric strings,
+   booleans, negative values, non-finite values, missing values, and other
+   malformed metadata fail closed. The immediate parent is then fully loaded
+   and the prefix return is kept, exactly as in the full traversal.
+   Metadata-only loads construct a session whose defaults can mask fields that
+   occur after the `messages` stop key, so every field used by the older-fold
+   proof must also be materially present in the parsed prefix. Missing proof
+   fields are unknown, not false/empty values, and force the same full traversal.
+   Because skipped ancestry lacks complete provenance, shortcut results remain
+   excluded from the lineage display cache and must serialize identically to the
+   unoptimized traversal.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
