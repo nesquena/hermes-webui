@@ -5867,6 +5867,20 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         ...fetched,
         title:keepLocalOptimistic?(local.title||fetched.title):fetched.title,
         message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount,
+        // #7681: same rule for the user-turn count. While the local optimistic
+        // row is authoritative the server row may still report a stale (or
+        // absent) count for the in-flight turn, so keep the larger value.
+        user_message_count:(()=>{
+          const localTurns=Number(local.user_message_count);
+          const fetchedTurns=Number(fetched.user_message_count);
+          const localKnown=Number.isFinite(localTurns)&&localTurns>=0;
+          const fetchedKnown=Number.isFinite(fetchedTurns)&&fetchedTurns>=0;
+          if(keepLocalOptimistic){
+            if(localKnown&&fetchedKnown) return Math.max(localTurns,fetchedTurns);
+            return localKnown?localTurns:(fetchedKnown?fetchedTurns:undefined);
+          }
+          return fetchedKnown?fetchedTurns:undefined;
+        })(),
         last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
         updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),
         active_stream_id:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.active_stream_id||local.active_stream_id||null):null),
@@ -7848,7 +7862,28 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
+    // #7681: the collapsed row is ``{...chosen}``, so it inherits only the
+    // selected tip segment's ``user_message_count`` — a compressed lineage
+    // that retains every segment would otherwise look like a two-turn
+    // conversation. Expose the deduplicated whole-lineage total (max tip
+    // count, plus every other segment's count, keyed by session id) as
+    // ``_lineage_user_message_count`` so the meta row can render the
+    // authoritative number instead of the tip's slice.
+    const lineageTurnTotals=new Map();
+    for(const item of sorted){
+      if(!item||!item.session_id) continue;
+      const turns=Number(item.user_message_count);
+      if(!Number.isFinite(turns)||turns<0) continue;
+      lineageTurnTotals.set(item.session_id,turns);
+    }
+    const lineageUserTurns=Array.from(lineageTurnTotals.values()).reduce((a,b)=>a+b,0);
+    result.push({
+      ...chosen,
+      _lineage_key:key,
+      _lineage_collapsed_count:items.length,
+      _lineage_segments:sorted,
+      ...(lineageTurnTotals.size>0?{_lineage_user_message_count:lineageUserTurns}:{}),
+    });
   }
   return result;
 }
@@ -7887,6 +7922,21 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   S.session.message_count=count;
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;
+  // #7681: the optimistic row must also advance the user-turn count, or the
+  // just-sent turn renders stale until the next /api/sessions poll lands.
+  // Only count REAL user messages — synthetic compression/task-summary cards
+  // carry role='user' but are not user turns (mirrors
+  // api/compression_anchor.is_context_compression_marker()).
+  const optimisticUserTurns=(Array.isArray(S.messages)?S.messages:[])
+    .filter(m=>m&&m.role==='user'&&!(
+      typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)
+    )).length;
+  if(optimisticUserTurns>0){
+    S.session.user_message_count=Math.max(
+      Number(S.session.user_message_count)||0,
+      optimisticUserTurns
+    );
+  }
   if((S.session.title==='Untitled'||!S.session.title)&&title){
     S.session.title=title;
   }
@@ -7901,8 +7951,18 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     profile:S.session.profile||S.activeProfile||'default',
     is_streaming:true,
   };
-  if(existingIdx>=0) _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
-  else _allSessions.unshift(row);
+  if(existingIdx>=0){
+    // Keep the pre-existing row's user-turn count when the local transcript
+    // has no user message yet (a re-render mid-send must not drop it), and
+    // keep the larger of the two when it does.
+    const existingUserTurns=Number(_allSessions[existingIdx].user_message_count);
+    if(Number.isFinite(existingUserTurns)&&existingUserTurns>=0){
+      row.user_message_count=Math.max(existingUserTurns,Number(row.user_message_count)||0);
+    }
+    _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
+  }else{
+    _allSessions.unshift(row);
+  }
   renderSessionListFromCache();
 }
 
@@ -8927,6 +8987,29 @@ function renderSessionListFromCache(){
       if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
+      // #6519 / #7681: also surface the user-turn count so a
+      // one-question/one-answer session, a cron run, and a long interactive
+      // conversation triage differently in the sidebar. The backend already
+      // exposes ``user_message_count`` on the list payload; the existing
+      // ``session_meta_messages`` row alone is ambiguous for cleanup.
+      //
+      // Appended AFTER the existing metadata on purpose: style.css:1663 forces
+      // the meta row onto a single ellipsized line and boot.js permits a 180px
+      // sidebar, so prepending this label would push previously visible
+      // model/source/profile information out of view at narrow widths.
+      //
+      // Collapsed lineage rows carry ``_lineage_user_message_count`` — the
+      // deduplicated total across all retained segments — which supersedes
+      // the chosen tip segment's own count.
+      const lineageUserTurns=Number(s._lineage_user_message_count);
+      const useLineageTotal=Number.isFinite(lineageUserTurns)&&lineageUserTurns>=0;
+      const userTurns=useLineageTotal?lineageUserTurns:s.user_message_count;
+      if(typeof userTurns==='number'&&Number.isFinite(userTurns)&&userTurns>=0){
+        const userTurnLabel=(typeof t==='function')
+          ? t('session_meta_user_turns', userTurns)
+          : `${userTurns} user turn${userTurns===1?'':'s'}`;
+        metaBits.push(userTurnLabel);
+      }
       const meta=document.createElement('div');
       meta.className='session-meta';
       meta.textContent=metaBits.join(' · ');
