@@ -660,7 +660,7 @@ def main() -> None:
             print('[ok] SessionChannel reaper thread started', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
-
+    from api.loops import start_loop_scheduler; start_loop_scheduler()  # noqa: E702
     try:
         from api.plugins import load_plugins
         load_plugins()

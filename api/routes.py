@@ -17250,6 +17250,13 @@ def handle_post(handler, parsed) -> bool:
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
+        sid = str(body.get("session_id", "") or "")
+        if sid and not _session_id_visible_to_request_profile(handler, sid):
+            return True
+        if command.split()[0].lower() in ("/loop", "loop"):
+            from api.loops import run_loop_command
+            return j(handler, {"output": run_loop_command(sid, command.partition(" ")[2],
+                                                          request_profile=_get_active_profile_name())})
 
         try:
             return j(handler, {"output": execute_agent_command(command)})
@@ -24718,7 +24725,8 @@ def _handle_goal_command(handler, body):
             or getattr(s, "pending_user_message", None)
         )
         if not has_persisted_turns:
-            s.profile = requested_profile
+            from api.loops import retag_session_profile
+            retag_session_profile(s, requested_profile)
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -24999,7 +25007,8 @@ def _handle_chat_start(handler, body, diag=None):
             ):
                 # Empty placeholders can still be retagged when the
                 # requested profile matches the active request profile.
-                s.profile = requested_profile
+                from api.loops import retag_session_profile
+                retag_session_profile(s, requested_profile)
             elif session_profile:
                 # #7710: known other profile → 409 ``session_profile_mismatch``
                 # so the client can offer to switch to it (#5419).
