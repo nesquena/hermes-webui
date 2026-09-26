@@ -8534,13 +8534,13 @@ function renderSessionListFromCache(){
   if(otherProfileCount>0&&!_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
+    pfToggle.textContent=t('session_pf_show_others',otherProfileCount);
     pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};
     list.appendChild(pfToggle);
   } else if(_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show active profile only';
+    pfToggle.textContent=t('session_pf_active_only');
     pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};
     list.appendChild(pfToggle);
   }
@@ -8549,7 +8549,7 @@ function renderSessionListFromCache(){
   if(archivedCount>0||_showArchived){
     const toggle=document.createElement('div');
     toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
+    toggle.textContent=_showArchived?t('session_hide_archived'):t('session_show_archived',archivedCount);
     toggle.onclick=()=>{
       _showArchived=!_showArchived;
       if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;

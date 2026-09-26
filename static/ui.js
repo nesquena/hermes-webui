@@ -5409,14 +5409,18 @@ function _normalizeReasoningEffort(eff){
 }
 
 function _formatReasoningEffortLabel(effort){
-  if(effort==='none') return 'None';
-  if(!effort) return 'Default';
-  if(effort==='minimal') return 'Minimal';
-  if(effort==='low') return 'Low';
-  if(effort==='medium') return 'Medium';
-  if(effort==='high') return 'High';
-  if(effort==='xhigh') return 'XHigh';
-  if(effort==='max') return 'Max';
+  const _t=(typeof t==='function')?t:(k=>({reasoning_effort_none:'None',reasoning_effort_default:'Default',reasoning_effort_minimal:'Minimal',reasoning_effort_low:'Low',reasoning_effort_medium:'Medium',reasoning_effort_high:'High',reasoning_effort_xhigh:'Extra High',reasoning_effort_xhigh_short:'XHigh',reasoning_effort_max:'Max'}[k]||k));
+  if(effort==='none') return _t('reasoning_effort_none');
+  if(!effort) return _t('reasoning_effort_default');
+  if(effort==='minimal') return _t('reasoning_effort_minimal');
+  if(effort==='low') return _t('reasoning_effort_low');
+  if(effort==='medium') return _t('reasoning_effort_medium');
+  if(effort==='high') return _t('reasoning_effort_high');
+  // The composer chip keeps the short `XHigh` wording (display-neutral vs
+  // master); the dropdown's own option text stays `reasoning_effort_xhigh`
+  // ('Extra High') via its data-i18n attribute. (#7697 re-gate)
+  if(effort==='xhigh') return _t('reasoning_effort_xhigh_short');
+  if(effort==='max') return _t('reasoning_effort_max');
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
@@ -5520,7 +5524,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    const labelText=(typeof t==='function')?t('reasoning_effort_aria_label',text):('Reasoning effort: '+text);
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -5674,9 +5678,9 @@ document.addEventListener('click',function(e){
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
+          const display=(st&&st.reasoning_effort)||effort||'';
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+display);
+          showToast('\ud83e\udde0 '+((typeof t==='function')?t('reasoning_effort_aria_label',_formatReasoningEffortLabel(display)):('Reasoning effort: '+_formatReasoningEffortLabel(display))));
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
@@ -7245,21 +7249,21 @@ function _syncCtxIndicator(usage){
   _setCtxCompressButton(compressBtn,compressText);
   const cacheHitPct=usage.cache_hit_percent;
   const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
-  const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
-  let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  const contextLabel=hasPostCompressionEstimate?t('ctx_label_estimated'):t('ctx_label_context_window');
+  let label=hasPromptTok?t('ctx_aria_usage',contextLabel,pct+`% used`):`${t('ctx_tokens_no_prompt',_fmtTokens(totalTok))}`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
-  if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-  if(cacheText) label+=` \u00b7 ${cacheText}`;
+  if(cost) label+=` · $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+  if(cacheText) label+=` · ${cacheText}`;
   el.setAttribute('aria-label',label);
-  const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  const tokensText=hasPromptTok?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasPromptTok?(overflowed?t('ctx_usage_exceeded',contextLabel,rawPct):t('ctx_usage_pct',contextLabel,pct,100-pct)):`${t('ctx_tokens_no_prompt',_fmtTokens(totalTok))}`;
+  const tokensText=hasPromptTok?t('ctx_tokens_used',contextLabel,_fmtTokens(contextPromptTok),_fmtTokens(ctxWindow)):t('ctx_in_out',_fmtTokens(usage.input_tokens||0),_fmtTokens(usage.output_tokens||0));
   if(usageLine) usageLine.textContent=usageText;
   if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;
   let thresholdText='';
   if(thresholdLine){
     if(threshold&&ctxWindow){
-      thresholdText=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+      thresholdText=t('ctx_auto_compress',_fmtTokens(threshold),Math.round(threshold/ctxWindow*100));
       thresholdLine.style.display='';
       thresholdLine.textContent=thresholdText;
     }else{
@@ -7270,7 +7274,7 @@ function _syncCtxIndicator(usage){
   let costText='';
   if(costLine){
     if(cost){
-      costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      costText=t('ctx_estimated_cost',cost<0.01?cost.toFixed(4):cost.toFixed(2));
       if(cacheText) costText+=` \u00b7 ${cacheText}`;
       costLine.style.display='';
       costLine.textContent=costText;
