@@ -1619,15 +1619,25 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
             continue
         seen_homes.add(home_key)
         is_active = _profiles_match(owner_profile, active_profile)
+        rollups: dict = {}
         try:
             with cron_profile_context_for_home(home):
                 jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
+                from api.cron_health import recent_rollups_for_jobs
+
+                rollups = recent_rollups_for_jobs(
+                    home,
+                    [job.get("id") for job in jobs if job.get("id")],
+                )
         except Exception:
             if not is_active:
                 continue
             raise
         for job in jobs:
             row = dict(job)
+            recent = rollups.get(row.get("id"))
+            if recent:
+                row["recent"] = recent
             row["owner_profile"] = owner_profile
             row["read_only"] = not is_active
             if is_active:
