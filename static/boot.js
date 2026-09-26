@@ -3808,6 +3808,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        if(typeof _resetCtxIndicatorForEmptyComposer==='function') _resetCtxIndicatorForEmptyComposer();
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
@@ -3816,6 +3817,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        if(typeof _resetCtxIndicatorForEmptyComposer==='function') _resetCtxIndicatorForEmptyComposer();
         S._bootReady=true;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
@@ -3852,6 +3854,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
       if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
         S.session=null; S.messages=[];
+        if(typeof _resetCtxIndicatorForEmptyComposer==='function') _resetCtxIndicatorForEmptyComposer();
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
         // even though there is no active session (#workspace-persist).
@@ -3877,6 +3880,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
+  if(typeof _resetCtxIndicatorForEmptyComposer==='function') _resetCtxIndicatorForEmptyComposer();
   S._bootReady=true;
   syncTopbar();
   // Restore panel pref so the workspace panel stays visible on a fresh load if the
@@ -3929,6 +3933,8 @@ window.addEventListener('pageshow', async (event) => {
         try { await checkInflightOnBoot(S.session.session_id); } catch (_) {}
       }
     } catch (_) {}
+  } else if (typeof _resetCtxIndicatorForEmptyComposer === 'function') {
+    _resetCtxIndicatorForEmptyComposer();
   }
   // Re-synchronise layout chrome that the boot IIFE sets up but bfcache
   // doesn't re-run. Each call is guarded so missing helpers degrade silently.
