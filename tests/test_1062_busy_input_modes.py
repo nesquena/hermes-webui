@@ -450,6 +450,156 @@ class TestSendBusyBranchDispatch:
 
 # ── Boot init + settings panel wiring ───────────────────────────────────
 
+
+    def test_btw_and_background_dispatch_while_busy(self):
+        """#6597: /btw and /background must run their handler while the agent is busy.
+
+        Drives the shipped busy-branch intercept out of send() against the real
+        COMMANDS registry and the real parseCommand. Each allowlisted command
+        must dispatch its own registered handler with the parsed args, clear the
+        composer exactly once, and return before the default_message_mode
+        routing that owns _trySteer / queueSessionMessage / cancelStream. A
+        registered but non-allowlisted command (/model) must still fall through
+        to that routing.
+        """
+        import json
+        import re
+        import shutil
+        import subprocess
+        import textwrap
+
+        import pytest
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+
+        busy_idx = MESSAGES_JS.find("if(S.busy||compressionRunning){")
+        assert busy_idx >= 0, "busy/compression branch not found in messages.js"
+        allow_m = re.search(
+            r"if\(_pc&&\[([^\]]*)\]\.includes\(_pc\.name\)\)", MESSAGES_JS[busy_idx:]
+        )
+        assert allow_m, "busy-command passthrough list not found inside the busy branch"
+        allowlist = allow_m.group(1)
+        for name in ("btw", "background"):
+            assert "'%s'" % name in allowlist, (
+                "/%s must be in the busy passthrough list (#6597)" % name
+            )
+        # Registered but deliberately not intercepted: /model keeps the
+        # pre-existing fallback into the default_message_mode routing.
+        assert "{name:'model'" in COMMANDS_JS
+        assert "'model'" not in allowlist
+
+        start = MESSAGES_JS.find("if(text.startsWith('/')&&!literalSlash){", busy_idx)
+        assert start >= 0, "busy slash intercept not found"
+        end = MESSAGES_JS.find("const defaultMessageMode", start)
+        assert end > start, "routing block must follow the intercept"
+        intercept_src = MESSAGES_JS[start:end].rstrip()
+        intercept_src = intercept_src[: intercept_src.rfind("}") + 1]
+        assert intercept_src.count("{") == intercept_src.count("}"), (
+            "extracted busy intercept must be brace-balanced"
+        )
+        assert "await _bc.fn(_pc.args);" in intercept_src
+        assert intercept_src.count("$('msg').value=''") == 1, (
+            "the intercept must clear the composer exactly once"
+        )
+        for sink in ("_trySteer", "queueSessionMessage", "cancelStream("):
+            assert MESSAGES_JS.find(sink, start) > 0, (
+                "%s must stay below the intercept" % sink
+            )
+
+        parse_src = _source_between(
+            COMMANDS_JS, "function parseCommand(", "\nconst DESKTOP_COMPANION"
+        )
+        commands_src = _source_between(COMMANDS_JS, "const COMMANDS=[", "\n];")
+        stubs = "\n".join(
+            "function %s(){}" % n
+            for n in sorted(set(re.findall(r"fn:(\w+)", commands_src)))
+        )
+
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            function t(k){{return k;}}
+            {stubs}
+            const PARSE_SRC = {json.dumps(parse_src)};
+            const COMMANDS_SRC = {json.dumps(commands_src)};
+            const INTERCEPT_SRC = {json.dumps(intercept_src)};
+
+            const realCommands = eval(COMMANDS_SRC.replace('const COMMANDS=', '(') + ')');
+            const handlerFor = {{}};
+            for (const c of realCommands) handlerFor[c.name] = c.fn.name;
+            assert.strictEqual(handlerFor['btw'], 'cmdBtw', '/btw must stay wired to cmdBtw');
+            assert.strictEqual(handlerFor['background'], 'cmdBackground', '/background must stay wired to cmdBackground');
+            globalThis.parseCommand = eval('(' + PARSE_SRC + ')');
+
+            async function drive(text){{
+              const input = {{value: text}};
+              let composerClears = 0;
+              let autoResizes = 0;
+              let fellThrough = false;
+              const composer = {{}};
+              Object.defineProperty(composer, 'value', {{
+                get(){{return input.value;}},
+                set(v){{if (v === '') composerClears += 1; input.value = v;}},
+              }});
+              function autoResize(){{autoResizes += 1;}}
+              const $ = () => composer;
+              const literalSlash = false;
+              const calls = [];
+              const COMMANDS = realCommands.map(c => ({{
+                ...c,
+                fn: async (args) => {{calls.push({{name: c.name, args}});}},
+              }}));
+              async function runIntercept(){{
+                eval(INTERCEPT_SRC);
+                fellThrough = true;
+              }}
+              await runIntercept();
+              return {{
+                calls: calls,
+                composerClears: composerClears,
+                autoResizes: autoResizes,
+                fellThrough: fellThrough,
+                value: input.value,
+              }};
+            }}
+
+            (async () => {{
+              const cases = [
+                ['/btw what is a worktree', 'btw', 'what is a worktree'],
+                ['/background port the auth module', 'background', 'port the auth module'],
+              ];
+              for (const pair of cases) {{
+                const text = pair[0];
+                const name = pair[1];
+                const args = pair[2];
+                const r = await drive(text);
+                assert.deepStrictEqual(r.calls, [{{name: name, args: args}}], text + ' must dispatch only its own registered handler while busy');
+                assert.strictEqual(r.composerClears, 1, 'composer must clear exactly once');
+                assert.strictEqual(r.value, '', 'composer must be empty after dispatch');
+                assert.strictEqual(r.autoResizes, 1, 'autoResize must run once on the intercept path');
+                assert.strictEqual(r.fellThrough, false, 'intercept must return before routing');
+              }}
+              const control = await drive('/model gpt-5');
+              assert.deepStrictEqual(control.calls, [], '/model must not be busy-intercepted');
+              assert.strictEqual(control.fellThrough, true, '/model must fall through to the routing block');
+              assert.strictEqual(control.composerClears, 0, 'the intercept must not clear for /model');
+              console.log('OK busy intercept');
+            }})().catch(err => {{
+              console.error(err && err.stack ? err.stack : err);
+              process.exit(1);
+            }});
+            """
+        )
+        proc = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            "busy-intercept harness failed for /btw and /background\n"
+            "stdout:\n%s\nstderr:\n%s" % (proc.stdout, proc.stderr)
+        )
+        assert "OK busy intercept" in proc.stdout, proc.stdout
+
+
 class TestBootAndPanelsWiring:
     def test_boot_init_default_path(self):
         """Boot success path initialises window._defaultMessageMode from settings.
