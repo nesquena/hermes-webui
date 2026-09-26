@@ -250,6 +250,7 @@ function createEnvironment() {
   globalThis._sessionVisitHasUnreadState = () => false;
   globalThis.scheduleTodosRefresh = () => {};
   globalThis.startSessionStream = () => {};
+  globalThis.closeOtherLiveStreams = () => {};
   globalThis.syncTopbar = () => {};
   globalThis._captureSameSessionForceReloadHint = () => {};
   globalThis._resolveSessionModelForDisplaySoon = () => {};
