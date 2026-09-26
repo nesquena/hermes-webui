@@ -7454,7 +7454,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                     configured_ids.append(configured_id)
 
             for configured_id in configured_ids:
-                label = _get_label_for_model(configured_id, [])
+                label = _label_map.get(configured_id) or _get_label_for_model(
+                    configured_id, []
+                )
                 if provider_slug == "custom":
                     custom_group_models.append({"id": configured_id, "label": label})
                 else:

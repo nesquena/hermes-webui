@@ -7762,30 +7762,15 @@ function getModelLabel(modelId){
   //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
   //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
-    const rest=rawId.slice('@custom:'.length);
-    const sep=rest.indexOf(':');
-    if(sep<0) return rest||rawId;
-    // A provider slug is a config key or a host:port authority — it never
-    // contains a `/`. A slash-bearing first segment is therefore the model
-    // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
-    // must render the whole remainder, not just `397b`), mirroring the
-    // `/`-means-routable rule api/config.py applies when building ids.
-    if(rest.slice(0,sep).includes('/')) return rest||rawId;
-    let model=rest.slice(sep+1);
-    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
-    // to the provider segment, mirroring the host:port slug check in
-    // api/config.py, so it is consumed before the model label starts.
-    const portMatch=/^(\d{1,5}):/.exec(model);
-    if(portMatch){
-      const port=Number(portMatch[1]);
-      if(port>=1&&port<=65535){
-        const host=rest.slice(0,sep).toLowerCase();
-        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
-          model=model.slice(portMatch[0].length);
-        }
-      }
-    }
-    return model||rawId;
+    // The shared qualified-ID grammar (mirror of api/config.py:
+    // _parse_provider_qualified_model_id) answers every shape here — named
+    // providers, endpoint authorities (single-label Docker/LAN hosts like
+    // `llm:8080`, dotted DNS, IPv4, bracketed IPv6), colon-bearing model tags
+    // and the authoritative provider-id prefixes from /api/models — so the
+    // inline host-shape check upstream's #6884 era parser used (which rejected
+    // short hostnames and unbracketed-ambiguous IPv6) is replaced by it. One
+    // grammar for label and route: they can no longer disagree (#6657).
+    return _customModelFromQualifiedId(rawId);
   }
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
