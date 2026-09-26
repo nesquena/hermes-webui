@@ -64,6 +64,8 @@ from api.helpers import (
     redact_session_data,
     scrub_internal_replay_fields,
     _redact_text,
+    _is_client_disconnect_error,
+    _as_client_disconnect,
 )
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.compression_recovery import stamp_compression_exhausted_recovery
@@ -8688,11 +8690,40 @@ def _upsert_current_turn_partial(
     return canonical
 
 
+def _sse_write(handler, payload: bytes) -> None:
+    """Write raw bytes to an SSE client, classifying a vanished peer correctly.
+
+    A dead peer is not always a BrokenPipe/Reset: when it disappeared at the
+    network layer (phone left the LAN, Tailscale peer dropped, stale ARP) the
+    write raises a bare OSError with a routing errno such as EHOSTUNREACH.
+    Those escaped every SSE handler's `except _CLIENT_DISCONNECT_ERRORS:` and
+    were reported as a 500 + traceback for what is just a normal disconnect.
+    Convert that narrow class of OSError here — a genuine failure (ENOSPC,
+    file errors) still propagates untouched.
+    """
+    try:
+        handler.wfile.write(payload)
+        handler.wfile.flush()
+    except OSError as exc:
+        if _is_client_disconnect_error(exc):
+            raise _as_client_disconnect(exc) from None
+        raise
+
+
+# App-level heartbeat comment. SSE lines starting with ':' are ignored by
+# EventSource; it only exists to keep the socket warm between real events.
+_SSE_KEEPALIVE_BYTES = b": keepalive\n\n"
+
+
+def _sse_keepalive(handler) -> None:
+    """Emit one app-level heartbeat comment on a long-lived SSE stream."""
+    _sse_write(handler, _SSE_KEEPALIVE_BYTES)
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    handler.wfile.write(payload.encode('utf-8'))
-    handler.wfile.flush()
+    _sse_write(handler, payload.encode('utf-8'))
 
 
 # ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────

@@ -11052,6 +11052,8 @@ from api.upload import (
 )
 from api.streaming import (
     _sse,
+    _sse_write,
+    _sse_keepalive,
     _sse_set_write_deadline,
     _run_agent_streaming,
     cancel_stream,
@@ -19380,8 +19382,7 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
                 if state in ("completed", "complete", "failed", "error", "cancelled", "canceled"):
                     _sse(handler, "stream_end", {"run_id": run_id, "status": state})
                     break
-                handler.wfile.write(b": heartbeat\n\n")
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
     except _CLIENT_DISCONNECT_ERRORS:
         pass
@@ -19469,8 +19470,7 @@ def _handle_sse_stream(handler, parsed):
             try:
                 item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b": heartbeat\n\n")
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if len(item) >= 3:
                 event, data, queued_event_id = item[0], item[1], item[2]
@@ -19602,8 +19602,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 if _current_journal_fp != _idle_journal_fp:
                     _idle_journal_fp = _current_journal_fp
                     emit_session_snapshot(active_stream_id)
-                handler.wfile.write(b": keepalive\n\n")
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
         if subscriber is None:
             return True
@@ -19619,8 +19618,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 try:
                     item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
                 except queue.Empty:
-                    handler.wfile.write(b": keepalive\n\n")
-                    handler.wfile.flush()
+                    _sse_keepalive(handler)
                     continue
                 if len(item) >= 3:
                     event, data, queued_event_id = item[0], item[1], item[2]
@@ -19828,8 +19826,7 @@ def _handle_terminal_output(handler, parsed):
             try:
                 event_seq, event, data = output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b": terminal heartbeat\n\n")
-                handler.wfile.flush()
+                _sse_write(handler, b": terminal heartbeat\n\n")
                 if term.closed.is_set() and output.empty():
                     _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
                     break
@@ -19937,8 +19934,7 @@ def _handle_gateway_sse_stream(handler, parsed):
             try:
                 event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if event_data is None:
                 break  # watcher is stopping
@@ -19967,8 +19963,7 @@ def _handle_session_events_stream(handler):
             try:
                 event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
     except _CLIENT_DISCONNECT_ERRORS:
@@ -21731,8 +21726,7 @@ def _handle_approval_sse_stream(handler, parsed):
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 # Keepalive — SSE comment line prevents proxy/CDN timeout.
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if payload is None:
                 break  # signal to close
@@ -21832,8 +21826,7 @@ def _handle_clarify_sse_stream(handler, parsed):
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if payload is None:
                 break
@@ -22004,8 +21997,7 @@ def _handle_session_sse_stream(handler, parsed):
             try:
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
-                handler.wfile.write(b': keepalive\n\n')
-                handler.wfile.flush()
+                _sse_keepalive(handler)
                 continue
             if payload is None:
                 break
