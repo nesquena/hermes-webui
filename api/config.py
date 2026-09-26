@@ -6079,7 +6079,10 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load: a write must never see env-expanded values, or saving would
+        # bake the resolved secret into config.yaml instead of the ${VAR}
+        # placeholder (#5619 write-target rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -6119,7 +6122,8 @@ def set_reasoning_effort(
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load — see set_reasoning_display() for the #5619 write rule.
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
@@ -6387,12 +6391,21 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets.
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
+        # Resolve ${VAR} before comparing: config.yaml may hold
+        # ``provider: ${MODEL_PROVIDER}``. The reader expands it, so comparing
+        # the raw placeholder against the caller's resolved provider would
+        # ALWAYS differ — falsely detected as a provider switch and dropping a
+        # valid base_url (#5619). Comparison only: model_cfg stays raw so the
+        # placeholder is never baked into config.yaml.
+        previous_provider = str(
+            _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
+        ).strip()
         requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
@@ -6418,7 +6431,12 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             persisted_provider = "custom"
 
         model_cfg["default"] = persisted_model
-        if persisted_provider:
+        if persisted_provider and persisted_provider != previous_provider:
+            # Only rewrite provider when it actually CHANGED (both sides
+            # resolved). Writing it unconditionally would replace a raw
+            # ``${MODEL_PROVIDER}`` placeholder with its resolved value even
+            # though the effective provider is identical — destroying the env
+            # indirection for no reason (#5619).
             model_cfg["provider"] = persisted_provider
 
         if resolved_base_url and not provider_override_won:
@@ -6599,7 +6617,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets.
+        config_data = _load_yaml_config_file_raw(config_path)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
@@ -6663,12 +6682,36 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # closed on a collision (raises AmbiguousCustomProviderError)
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
+                    # Match on RESOLVED names while leaving config_data's raw
+                    # entries untouched: every other caller passes the expanded
+                    # `cfg`, and the UI sends a slug derived from an expanded
+                    # read. Comparing that against a raw ``${VAR}`` name yields a
+                    # different slug, so the lookup missed and the slot fell back
+                    # to the wrong endpoint (#5619). Only the *copies* get their
+                    # name resolved for comparison — the list we save stays raw,
+                    # so the entry's own ${VAR} indirection survives.
+                    _raw_cp = config_data.get("custom_providers", [])
+                    _resolved_cp = (
+                        [
+                            {**e, "name": _expand_env_vars(e.get("name"))}
+                            if isinstance(e, dict)
+                            else e
+                            for e in _raw_cp
+                        ]
+                        if isinstance(_raw_cp, list)
+                        else _raw_cp
+                    )
                     _cp_match = _unique_custom_provider_entry(
-                        config_data.get("custom_providers", []),
+                        _resolved_cp,
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                        # base_url is NOT overridden in the resolved copies, so it
+                        # is still the raw value — a ${VAR} endpoint is persisted
+                        # as-is rather than baked.
+                        resolved_base_url = (
+                            str(_cp_match.get("base_url") or "").strip() or None
+                        )
                 if not resolved_base_url:
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a

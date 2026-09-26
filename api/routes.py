@@ -2963,6 +2963,8 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
+    _expand_env_vars,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -29036,11 +29038,24 @@ def _normalize_names_list(names) -> list[str]:
 
 
 def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
-    """Add or remove *name* from *names*, returning a new list."""
+    """Add or remove *name* from *names*, returning a new list.
+
+    Entries are COMPARED in their env-RESOLVED form but RETURNED in their raw
+    form: a profile may hold ``skills.disabled: ["${DISABLED_SKILL}"]``, and the
+    reader expands that to the real skill name. Comparing the raw placeholder
+    against the resolved ``name`` would never match, so the API reported success
+    while the skill stayed disabled (#5619). Returning the original raw entries
+    keeps the ``${VAR}`` indirection on disk instead of baking the resolved
+    value into config.yaml.
+    """
     names = _normalize_names_list(names)
+    resolved = _expand_env_vars(names)
     if enabled:
-        return [d for d in names if d != name]
-    if name not in names:
+        # strict=True: _expand_env_vars() maps 1:1, so the lengths always match.
+        return [
+            raw for raw, res in zip(names, resolved, strict=True) if res != name
+        ]
+    if name not in resolved:
         names.append(name)
     return names
 
@@ -29070,7 +29085,9 @@ def _handle_skill_toggle(handler, body):
 
     config_path = _active_profile_config_path()
     with _cfg_lock:
-        cfg = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets
+        # into the profile's config.yaml (#5619 write-target rule).
+        cfg = _load_yaml_config_file_raw(config_path)
 
         # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):
