@@ -3913,19 +3913,106 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 
+// Resolve the index where the ACTIVE turn begins — i.e. where its user row
+// belongs, above every row that turn has already produced.
+//
+// The live assistant row is not a usable anchor on its own: by the time the
+// pending prompt has to be projected, the current turn's interim commentary and
+// tool rows are usually ALREADY SETTLED in the transcript (the server persists
+// them as the turn runs), sitting above the `_live` tail. Anchoring on the live
+// row — or, when there is none, appending — therefore drops the user's own
+// message underneath the output it triggered.
+//
+// `pending_started_at` gives a placement boundary for ordinary chronological
+// transcripts, not proof of a row's turn identity: imported history or clock
+// skew can put an earlier turn's timestamp after that boundary. Scan backwards
+// for the newest definitively-older row and place the pending bubble after it.
+// There is no text/proximity exception: visible text and timestamp closeness are
+// not turn identity, so even a same-text row 0.4s earlier remains history.
+//
+// Every compared timestamp is normalized through _timestampSeconds /
+// _firstValidTimestampSeconds (static/ui.js), so ISO-string and millisecond
+// epochs compare correctly against the seconds-based boundary. Sessions with
+// such rows are reachable in production: /api/session/import preserves the
+// supplied message timestamps verbatim in a writable session.
+//
+// Fails closed: a SETTLED row the scan crosses without a comparable timestamp
+// is indistinguishable from history, so return -1 and let the caller keep the
+// previous live-row/append behaviour rather than guess — a transient duplicate
+// bubble is recoverable, re-ordering history or swallowing a turn is not. Only
+// `_live` rows (this turn's own streaming placeholders) are skippable. Index 0
+// is returned only when EVERY settled row is demonstrably at/after the
+// boundary; an empty or live-only window proves nothing and also returns -1.
+function _activeTurnInsertionIndex(messages,session){
+  if(typeof _timestampSeconds!=='function'||typeof _firstValidTimestampSeconds!=='function') return -1;
+  const startedAt=_timestampSeconds(session&&session.pending_started_at);
+  if(startedAt===null) return -1;
+  const list=Array.isArray(messages)?messages:[];
+  let sawSettledRow=false;
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(msg._live) continue;
+    const ts=_firstValidTimestampSeconds(msg._ts,msg.timestamp,msg.created_at);
+    if(ts===null) return -1;
+    sawSettledRow=true;
+    if(ts<startedAt) return i+1;
+    // A prior imported user row may carry a later timestamp than this turn.
+    // With no stream identity the proposed insertion point is ambiguous.
+    if(msg.role==='user'&&msg._pending!==true&&msg._active_turn_user!==true
+      &&!(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session))) return -1;
+  }
+  // Every settled row is demonstrably at/after the boundary: the whole visible
+  // window belongs to the active turn, so the prompt precedes all of it.
+  return sawSettledRow?0:-1;
+}
+
 // Keep pending-user recovery ordering identical across load, reconnect, and
-// explicit refresh paths. The pending prompt owns the live assistant tail and
-// must be projected before it, regardless of which recovery response arrived.
+// explicit refresh paths. The pending prompt owns the ACTIVE TURN and must be
+// projected above everything that turn produced, regardless of which recovery
+// response arrived.
 function _mergePendingSessionMessage(session,messages){
   if(!Array.isArray(messages)) return false;
   const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
   const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
   if(!pendingMsg) return false;
-  if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  const tailUser=_currentTailUserMessage(currentTurnMessages);
+  if(tailUser&&tailUser._pending===true&&_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  const boundaryIdx=typeof _activeTurnInsertionIndex==='function'
+    ? _activeTurnInsertionIndex(messages,session)
+    : -1;
+  if(boundaryIdx>=0){
+    // Placement after the time boundary does not make a same-text row this
+    // turn's row. Only the active stream's token (or server-owned public marker)
+    // can authorize adoption; otherwise preserve both prompts and attachments.
+    const existingIdx=messages.findIndex((m,idx)=>
+      idx>=boundaryIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+      &&(m._active_turn_user===true
+        ||(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(m,session)))
+    );
+    if(existingIdx>=0){
+      const existing=messages[existingIdx];
+      const attachments=Array.isArray(pendingMsg.attachments)?pendingMsg.attachments:[];
+      if(attachments.length&&!(existing.attachments&&existing.attachments.length)){
+        existing.attachments=attachments;
+      }
+      if(existingIdx>boundaryIdx){
+        // Already rendered below its own turn output — lift it back to the
+        // boundary instead of adding a second bubble.
+        messages.splice(existingIdx,1);
+        messages.splice(boundaryIdx,0,existing);
+        return true;
+      }
+      return false;
+    }
+    messages.splice(boundaryIdx,0,pendingMsg);
+    return true;
+  }
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>
-      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+      idx>liveAssistantIdx&&m&&m.role==='user'&&m._pending===true
+      &&_sameTranscriptMessage(m,pendingMsg)
     );
     if(misplacedIdx>=0){
       const [misplacedUser]=messages.splice(misplacedIdx,1);
