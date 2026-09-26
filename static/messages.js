@@ -6254,6 +6254,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
+      // Switch the status footer to "Done" right away on the done event, using the locally
+      // measured duration plus the usage carried by the event itself — no need to wait for the
+      // loadSession round-trip the settled footer normally requires.
+      if(typeof _markLiveRunStatusDone==='function') _markLiveRunStatusDone(_doneData);
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF

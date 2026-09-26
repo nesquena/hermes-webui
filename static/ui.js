@@ -15241,6 +15241,11 @@ function ensureRunActivityGroup(inner, opts){
 const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
 let _liveRunStatusTokens=null;
 let _liveRunStatusSessionId=null;
+// Whether the status footer has already switched to the completed state. Set on the done
+// event (local data only) so any remaining re-render path cannot write "Running" back; reset
+// when a new turn starts (showLiveRunStatus).
+// Opt-out: window.__vmInstantDone=false disables this change.
+let _liveRunStatusDone=false;
 function _formatRunElapsed(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'00:00';
@@ -15293,6 +15298,7 @@ function showLiveRunStatus(sid,opts){
   const el=placeLiveRunStatusHost();
   if(!el)return;
   _liveRunStatusSessionId=sid;
+  _liveRunStatusDone=false;    // new turn: reset the completed flag
   const startedAt=opts&&opts.startedAt||null;
   _liveRunStatusTokens=opts&&opts.tokens||null;
   el.hidden=false;
@@ -15305,7 +15311,40 @@ function _renderLiveRunStatusContent(el,startedAt){
   const elapsed=startedAt?Math.max(0,now-startedAt):0;
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
+  // Once completed: drop the running dot and render the status text as Done.
+  if(_liveRunStatusDone){
+    el.innerHTML=`<span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">${(typeof t==='function'?(t('done')||'Done'):'Done')}</span>`;
+    return;
+  }
   el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+}
+// Switch the status footer to "Done" as soon as the done event arrives: the duration comes
+// from the local timer and the tokens from the event's own usage block, so neither needs the
+// loadSession round-trip.
+// Opt-out: window.__vmInstantDone=false.
+function _markLiveRunStatusDone(doneData){
+  try{
+    if(typeof window!=='undefined'&&window.__vmInstantDone===false) return;
+    if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()) return;   // compact mode hides the footer
+    const el=$('liveRunStatus');
+    if(!el||el.hidden) return;                                                     // no visible footer: do not create one
+    // Stop the 1s timer first, otherwise it overwrites this within a second.
+    if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(_liveRunStatusSessionId);
+    _liveRunStatusDone=true;
+    const timer=_liveRunStatusTimers[_liveRunStatusSessionId];
+    const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||null);
+    const now=Date.now()/1000;
+    const timeStr=_formatRunElapsed(startedAt?Math.max(0,now-startedAt):0);
+    const u=(doneData&&doneData.usage)||null;
+    const inTok=u&&Number(u.input_tokens)||0;
+    const outTok=u&&Number(u.output_tokens)||0;
+    const tokensTxt=(inTok||outTok)
+      ? `<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out</span>`
+      : (_liveRunStatusTokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(_liveRunStatusTokens)} tokens</span>`:'');
+    el.innerHTML=`<span class="live-run-status-text lf-time">${timeStr}</span>${tokensTxt}<span class="lf-sep">·</span><span class="lf-status">${(typeof t==='function'?(t('done')||'Done'):'Done')}</span>`;
+    el.hidden=false;
+    _moveLiveRunStatusToTurnEnd(el);
+  }catch(_e){ /* never disturb the normal completion path */ }
 }
 function updateLiveRunStatus(opts){
   if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
@@ -17381,7 +17420,15 @@ function renderMessages(options){
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
-      requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
+      // Run post-processing in this same frame so code blocks never render once without
+      // highlight/copy buttons. That single "half-finished" frame is what flickers when
+      // scrolling in a virtualized transcript (the caveat documented upstream).
+      // Opt-out: window.__syncPostProcess===false restores the one-frame-later call.
+      if(typeof window!=='undefined' && window.__syncPostProcess!==false){
+        try{ _postProcessWithAnchorSuppression(inner); }catch(_){ }
+      }else{
+        requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
+      }
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -19035,7 +19082,12 @@ function renderMessages(options){
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
+  // Same-frame post-processing (see the note above); opt-out is window.__syncPostProcess.
+  if(typeof window!=='undefined' && window.__syncPostProcess!==false){
+    try{ _postProcessWithAnchorSuppression(inner); }catch(_){ }
+  }else{
+    requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
+  }
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
