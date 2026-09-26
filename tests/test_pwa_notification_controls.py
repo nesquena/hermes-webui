@@ -33,12 +33,18 @@ def test_browser_notifications_use_service_worker_when_available():
 
 def test_notification_payload_uses_completion_session_when_provided():
     assert "function _notificationOptions" in MESSAGES_JS
-    assert "const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);" in MESSAGES_JS
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
-    assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
+    assert "tag:sessionless?'hermes-webui-sessionless':(sid?`hermes-${sid}`:'hermes-webui')" in MESSAGES_JS
+    # #7652 review: a sessionless marker must not fall back to the current
+    # session, and needs its own tag. See the behavioural coverage in
+    # tests/test_6673_notification_renotify.py and
+    # tests/test_cron_toast_notifications.py.
+    assert "const sessionless=!!(options&&options.sessionless);" in MESSAGES_JS
+    assert "sessionless?null:((options&&options.sid)||(S&&S.session&&S.session.session_id))" in MESSAGES_JS
+    assert "'hermes-webui-sessionless'" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
-    assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
+    assert "_completionNotificationPreviewText(lastAsst,{" in MESSAGES_JS
     assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
 
