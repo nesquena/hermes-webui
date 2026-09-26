@@ -16,6 +16,7 @@ from api.config import (
     AGENT_INSTANCES,
     CANCEL_FLAGS,
     PENDING_GOAL_CONTINUATION,
+    PENDING_GOAL_CONTINUATION_PROMPTS,
     STREAM_GOAL_RELATED,
     STREAMS,
     STREAMS_LOCK,
@@ -1724,6 +1725,7 @@ def _run_gateway_chat_streaming(
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     if continuation_prompt:
                         PENDING_GOAL_CONTINUATION.add(session_id)
+                        PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = continuation_prompt
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,
                             "continuation_prompt": continuation_prompt,

@@ -31,7 +31,7 @@ from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
-    STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
+    STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_PROMPTS,
     STREAM_LAST_EVENT_ID,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
@@ -13557,7 +13557,11 @@ def _run_agent_streaming(
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
+                        # #6885: record the prompt text too, so the routes.py
+                        # consumer can tell a genuine user turn from the
+                        # browser's continuation dispatch.
                         PENDING_GOAL_CONTINUATION.add(session_id)
+                        PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = continuation_prompt
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,

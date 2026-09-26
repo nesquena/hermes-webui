@@ -2961,6 +2961,7 @@ from api.config import (
     get_config_snapshot,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    PENDING_GOAL_CONTINUATION_PROMPTS,
     _get_config_path,
     _load_yaml_config_file,
     _save_yaml_config_file,
@@ -23876,6 +23877,29 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _consume_pending_goal_continuation(session_id: str, msg: str) -> bool:
+    """#6885 admission correction: consume the goal-continuation marker only
+    when the incoming turn text matches the pending continuation prompt.
+
+    The marker is session-scoped (#1932) and set when goal_continue fires;
+    without the prompt match, a genuine user/queued turn arriving before the
+    browser's auto-dispatch would be misclassified as goal-related and would
+    inherit goal-continuation semantics. When the text differs, the user turn
+    keeps priority and the marker is left in place for the browser's actual
+    continuation dispatch (text == continuation_prompt verbatim).
+    """
+    if session_id not in PENDING_GOAL_CONTINUATION:
+        return False
+    expected = PENDING_GOAL_CONTINUATION_PROMPTS.get(session_id)
+    if expected is not None and msg.strip() == expected.strip():
+        PENDING_GOAL_CONTINUATION.discard(session_id)
+        PENDING_GOAL_CONTINUATION_PROMPTS.pop(session_id, None)
+        return True
+    # Fail closed: marker without recorded prompt (legacy/abnormal state)
+    # or non-matching text must not be consumed.
+    return False
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -23922,10 +23946,12 @@ def _start_chat_stream_for_session(
 
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+    # so the next chat/start for this session is automatically treated as
+    # goal-related. #6885: the marker is consumed ONLY when the incoming text
+    # matches the pending continuation prompt — a genuine user/queued turn
+    # keeps priority and leaves the marker for the browser's auto-dispatch.
+    if not goal_related and _consume_pending_goal_continuation(s.session_id, msg):
         goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
     # process_complete wakeup (ours-original, Option B): if this session has a
     # pending process_complete marker (set by api/background_process.py drain),

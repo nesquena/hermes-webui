@@ -58,25 +58,47 @@ def test_streaming_finally_does_not_discard_pending_goal_continuation():
 def test_routes_consumer_discards_atomically_on_read():
     """The routes.py consumer must discard the marker after consuming it,
     so the marker is single-use (one continuation = one auto-flag).
+
+    #6885: consumption is delegated to the module-level helper
+    ``_consume_pending_goal_continuation`` (admission correction: only a
+    turn whose text matches the pending continuation prompt consumes the
+    marker). The helper must keep check + discard in one tight atomic
+    block, and the caller must not discard anywhere else.
     """
     src = _read_routes()
 
-    # Find the consumption check.
+    # 1. The admission block routes through the helper with (session_id, msg).
     m = re.search(
-        r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?PENDING_GOAL_CONTINUATION\.discard",
+        r"if not goal_related and _consume_pending_goal_continuation\(\s*s\.session_id,\s*msg\s*\):",
+        src,
+    )
+    assert m is not None, (
+        "routes.py must consume PENDING_GOAL_CONTINUATION via "
+        "_consume_pending_goal_continuation(s.session_id, msg)"
+    )
+
+    # 2. Inside the helper: marker check + discard must stay in one tight
+    #    atomic block (<= 10 lines), exactly the old stage-326 contract.
+    helper = re.search(
+        r"if session_id not in PENDING_GOAL_CONTINUATION:.*?PENDING_GOAL_CONTINUATION\.discard",
         src,
         re.DOTALL,
     )
-    assert m is not None, (
-        "routes.py must consume PENDING_GOAL_CONTINUATION atomically: "
-        "check + set goal_related + discard in the same block"
+    assert helper is not None, (
+        "helper must keep check + discard in the same atomic block"
     )
-    # The discard must be within ~10 lines of the check (atomic block).
-    block = m.group(0)
+    block = helper.group(0)
     line_count = block.count("\n")
     assert line_count <= 10, (
         f"PENDING_GOAL_CONTINUATION check + discard span {line_count} lines; "
         "should be tight atomic block"
+    )
+
+    # 3. No stray direct discard anywhere else in routes.py.
+    direct = re.findall(r"PENDING_GOAL_CONTINUATION\.discard", src)
+    assert len(direct) == 1, (
+        f"PENDING_GOAL_CONTINUATION.discard must appear exactly once in routes.py "
+        f"(inside the helper), found {len(direct)}"
     )
 
 
