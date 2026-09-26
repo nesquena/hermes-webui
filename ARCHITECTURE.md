@@ -683,6 +683,28 @@ inlineMd() helper (v0.18.1):
     and headings. Escapes unknown tags via SAFE_INLINE allowlist. Replaces
     the old direct esc() calls which would double-escape pre-pass output.
 
+Link/rendering contract:
+- Settled `renderMd()` and the live streaming-Markdown path must agree on
+  destination semantics. A model may emit an unencoded space in a Markdown
+  destination; normalization removes only an optional terminal Markdown title
+  and preserves the destination itself so both paths produce the same link.
+- Labeled links are accepted only for the explicit schemes handled by the chat
+  renderer (`http(s)`, `file`, `workspace`, `session`, `mailto`,
+  `tel`, and `message`). Unknown or dangerous schemes fail closed, and the
+  final generated/restored HTML still passes through the existing tag/attribute
+  sanitizer before it reaches the DOM.
+- Parser protection is contextual, not a trust bypass. Backtick code spans and
+  raw HTML attributes remain opaque while labeled links are scanned so
+  Markdown-looking text inside them cannot become a nested anchor. A complete
+  raw `<a>...</a>` range is likewise opaque to the labeled-link scanner, while
+  ordinary non-link inline formatting in its body (for example emphasis and
+  images) is preserved before the raw anchor is restored for sanitization.
+- Malformed model output is part of the renderer contract. Link/raw-anchor
+  scanners must advance to a proven boundary after an unsuccessful search
+  rather than repeatedly rescanning overlapping suffixes on the main thread.
+  Renderer regressions therefore include bounded-growth tests as well as output
+  equivalence tests.
+
 SAFE_TAGS allowlist:
     strong, em, code, pre, h1-6, ul, ol, li, table, thead, tbody, tr, th,
     td, hr, blockquote, p, br, a, div. Everything else is escaped.
