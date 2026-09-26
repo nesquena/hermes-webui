@@ -190,7 +190,7 @@
   :root[data-skin="graphite"] .session-item.active.streaming,
   :root[data-skin="graphite"] .session-item.active.unread,
   :root[data-skin="graphite"] .session-item.active.needs-attention,
-  :root[data-skin="graphite"] .session-item.active:focus-within,
+  :root[data-skin="graphite"] .session-item.active:has(:focus-visible),
   :root[data-skin="graphite"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="graphite"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="graphite"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -199,7 +199,7 @@
   :root[data-skin="graphite"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="graphite"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="graphite"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="graphite"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="graphite"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="graphite"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="graphite"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="graphite"] .session-item.active .session-title,
@@ -316,7 +316,7 @@
   :root[data-skin="codex"] .session-item.active.streaming,
   :root[data-skin="codex"] .session-item.active.unread,
   :root[data-skin="codex"] .session-item.active.needs-attention,
-  :root[data-skin="codex"] .session-item.active:focus-within,
+  :root[data-skin="codex"] .session-item.active:has(:focus-visible),
   :root[data-skin="codex"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="codex"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="codex"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -325,7 +325,7 @@
   :root[data-skin="codex"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="codex"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="codex"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="codex"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="codex"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="codex"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="codex"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="codex"] .session-item.active .session-title,
@@ -442,7 +442,7 @@
   :root[data-skin="terracotta"] .session-item.active.streaming,
   :root[data-skin="terracotta"] .session-item.active.unread,
   :root[data-skin="terracotta"] .session-item.active.needs-attention,
-  :root[data-skin="terracotta"] .session-item.active:focus-within,
+  :root[data-skin="terracotta"] .session-item.active:has(:focus-visible),
   :root[data-skin="terracotta"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="terracotta"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="terracotta"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -451,7 +451,7 @@
   :root[data-skin="terracotta"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="terracotta"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="terracotta"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="terracotta"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="terracotta"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="terracotta"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="terracotta"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="terracotta"] .session-item.active .session-title,
@@ -568,7 +568,7 @@
   :root[data-skin="github"] .session-item.active.streaming,
   :root[data-skin="github"] .session-item.active.unread,
   :root[data-skin="github"] .session-item.active.needs-attention,
-  :root[data-skin="github"] .session-item.active:focus-within,
+  :root[data-skin="github"] .session-item.active:has(:focus-visible),
   :root[data-skin="github"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="github"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="github"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -577,7 +577,7 @@
   :root[data-skin="github"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="github"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="github"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="github"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="github"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="github"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="github"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="github"] .session-item.active .session-title,

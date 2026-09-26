@@ -336,6 +336,12 @@ def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
     except Exception:  # pragma: no cover - dependency missing path
         pytest.skip("playwright is unavailable; run the sidebar pointer-focus browser test")
 
+    appearances = [
+        {"skin": skin, "dark": dark}
+        for skin in ("graphite", "codex", "terracotta", "github")
+        for dark in (False, True)
+    ]
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
@@ -345,10 +351,10 @@ def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
         page.set_content(
             """
             <!doctype html>
-            <html class="dark">
+            <html>
               <body tabindex="-1">
                 <div class="probe">
-                  <div class="session-item" data-sid="session-a">
+                  <div class="session-item active" data-sid="session-a">
                     <div class="session-text">
                       <div class="session-title-row">
                         <div class="session-title-group">
@@ -380,29 +386,50 @@ def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
 
         row = page.locator(".session-item")
         control = page.locator(".session-open-control")
-        control.click()
-        page.mouse.move(500, 240)
+        pointer_states = []
+        for appearance in appearances:
+            page.evaluate(
+                """
+                appearance => {
+                  document.documentElement.className = appearance.dark ? 'dark' : '';
+                  document.documentElement.dataset.skin = appearance.skin;
+                }
+                """,
+                appearance,
+            )
+            page.locator("body").focus()
+            page.mouse.move(500, 240)
+            resting_padding_right = row.evaluate("row => getComputedStyle(row).paddingRight")
+            control.click()
+            page.mouse.move(500, 240)
+            state = row.evaluate(
+                """
+                row => {
+                  const control = row.querySelector('.session-open-control');
+                  const actions = row.querySelector('.session-actions');
+                  const timestamp = row.querySelector('.session-time');
+                  const attention = row.querySelector('.session-attention-indicator');
+                  return {
+                    activeControl: document.activeElement === control,
+                    focusWithin: row.matches(':focus-within'),
+                    focusVisible: control.matches(':focus-visible'),
+                    actionsOpacity: getComputedStyle(actions).opacity,
+                    actionsPointerEvents: getComputedStyle(actions).pointerEvents,
+                    timestampDisplay: getComputedStyle(timestamp).display,
+                    timestampVisibility: getComputedStyle(timestamp).visibility,
+                    timestampHasRect: timestamp.getClientRects().length > 0 &&
+                      timestamp.getBoundingClientRect().width > 0,
+                    attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
+                    paddingRight: getComputedStyle(row).paddingRight,
+                  };
+                }
+                """
+            )
+            pointer_states.append(
+                {**appearance, "restingPaddingRight": resting_padding_right, **state}
+            )
 
-        pointer_state = row.evaluate(
-            """
-            row => {
-              const control = row.querySelector('.session-open-control');
-              const actions = row.querySelector('.session-actions');
-              const timestamp = row.querySelector('.session-time');
-              const attention = row.querySelector('.session-attention-indicator');
-              return {
-                activeControl: document.activeElement === control,
-                focusWithin: row.matches(':focus-within'),
-                focusVisible: control.matches(':focus-visible'),
-                actionsOpacity: getComputedStyle(actions).opacity,
-                actionsPointerEvents: getComputedStyle(actions).pointerEvents,
-                timestampVisible: getComputedStyle(timestamp).display !== 'none',
-                attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
-              };
-            }
-            """
-        )
-
+        page.evaluate("document.documentElement.className='dark'; document.documentElement.dataset.skin='terracotta'")
         page.locator("body").focus()
         page.keyboard.press("Tab")
         keyboard_state = row.evaluate(
@@ -417,30 +444,129 @@ def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
                 focusVisible: control.matches(':focus-visible'),
                 actionsOpacity: getComputedStyle(actions).opacity,
                 actionsPointerEvents: getComputedStyle(actions).pointerEvents,
-                timestampVisible: getComputedStyle(timestamp).display !== 'none',
+                timestampVisible: getComputedStyle(timestamp).display !== 'none' &&
+                  getComputedStyle(timestamp).visibility !== 'hidden' &&
+                  timestamp.getClientRects().length > 0,
                 attentionVisible: getComputedStyle(attention).visibility !== 'hidden',
+                paddingRight: getComputedStyle(row).paddingRight,
+                focusShadow: getComputedStyle(row).boxShadow,
               };
             }
             """
         )
         browser.close()
 
-    assert pointer_state == {
+    for pointer_state in pointer_states:
+        appearance = f"{pointer_state['skin']}/{'dark' if pointer_state['dark'] else 'light'}"
+        assert pointer_state["activeControl"] is True, appearance
+        assert pointer_state["focusWithin"] is True, appearance
+        assert pointer_state["focusVisible"] is False, appearance
+        assert pointer_state["actionsOpacity"] == "0", appearance
+        assert pointer_state["actionsPointerEvents"] == "none", appearance
+        assert pointer_state["timestampDisplay"] != "none", appearance
+        assert pointer_state["timestampVisibility"] == "visible", appearance
+        assert pointer_state["timestampHasRect"] is True, appearance
+        assert pointer_state["attentionVisible"] is True, appearance
+        assert pointer_state["paddingRight"] == pointer_state["restingPaddingRight"], appearance
+        assert pointer_state["paddingRight"] != "40px", appearance
+
+    assert keyboard_state["activeControl"] is True
+    assert keyboard_state["focusVisible"] is True
+    assert keyboard_state["actionsOpacity"] == "1"
+    assert keyboard_state["actionsPointerEvents"] == "auto"
+    assert keyboard_state["timestampVisible"] is False
+    assert keyboard_state["attentionVisible"] is False
+    assert keyboard_state["paddingRight"] == "40px"
+    assert "inset" in keyboard_state["focusShadow"]
+    assert re.search(r"\b2px\b", keyboard_state["focusShadow"])
+
+
+def test_coarse_pointer_tap_keeps_resting_chrome_and_long_press_menu_state():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar coarse-pointer browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        context = browser.new_context(
+            viewport={"width": 390, "height": 844},
+            has_touch=True,
+            is_mobile=True,
+        )
+        page = context.new_page()
+        page.set_content(
+            """
+            <!doctype html>
+            <html data-skin="github">
+              <body>
+                <div class="session-item active" data-sid="session-a">
+                  <div class="session-text">
+                    <div class="session-title-row">
+                      <div class="session-title-group">
+                        <button type="button" class="session-title session-open-control">Touch conversation</button>
+                      </div>
+                      <span class="session-time">now</span>
+                    </div>
+                  </div>
+                  <span class="session-attention-indicator is-attention-generic"></span>
+                  <div class="session-actions"><button type="button" class="session-actions-trigger">More</button></div>
+                </div>
+              </body>
+            </html>
+            """
+        )
+        page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(
+            content="body{margin:8px}.session-item,.session-actions,.session-attention-indicator{transition:none!important}"
+        )
+
+        control = page.locator(".session-open-control")
+        row = page.locator(".session-item")
+        page.mouse.move(380, 830)
+        resting_padding_right = row.evaluate("row => getComputedStyle(row).paddingRight")
+        control.tap()
+        page.mouse.move(380, 830)
+        tap_state = row.evaluate(
+            """
+            row => ({
+              activeControl: document.activeElement === row.querySelector('.session-open-control'),
+              focusVisible: row.querySelector('.session-open-control').matches(':focus-visible'),
+              timestampVisibility: getComputedStyle(row.querySelector('.session-time')).visibility,
+              timestampHasRect: row.querySelector('.session-time').getClientRects().length > 0,
+              actionsDisplay: getComputedStyle(row.querySelector('.session-actions')).display,
+              paddingRight: getComputedStyle(row).paddingRight,
+            })
+            """
+        )
+        row.evaluate("row => row.classList.add('long-pressing','menu-open')")
+        long_press_state = row.evaluate(
+            """
+            row => ({
+              menuOpen: row.classList.contains('menu-open'),
+              longPressing: row.classList.contains('long-pressing'),
+              actionsDisplay: getComputedStyle(row.querySelector('.session-actions')).display,
+            })
+            """
+        )
+        browser.close()
+
+    assert tap_state == {
         "activeControl": True,
-        "focusWithin": True,
         "focusVisible": False,
-        "actionsOpacity": "0",
-        "actionsPointerEvents": "none",
-        "timestampVisible": True,
-        "attentionVisible": True,
+        "timestampVisibility": "visible",
+        "timestampHasRect": True,
+        "actionsDisplay": "none",
+        "paddingRight": resting_padding_right,
     }
-    assert keyboard_state == {
-        "activeControl": True,
-        "focusVisible": True,
-        "actionsOpacity": "1",
-        "actionsPointerEvents": "auto",
-        "timestampVisible": False,
-        "attentionVisible": False,
+    assert tap_state["paddingRight"] != "40px"
+    assert long_press_state == {
+        "menuOpen": True,
+        "longPressing": True,
+        "actionsDisplay": "none",
     }
 
 
