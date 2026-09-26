@@ -110,7 +110,10 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
+from api.routes import (
+    handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers,
+    _raw_peer_is_trusted_proxy, _forwarded_client_ip_from_trusted_proxy,
+)
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -358,9 +361,19 @@ class Handler(BaseHTTPRequestHandler):
             forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
         except Exception:
             forwarded_for = None
+
+        client_ip = remote
+        try:
+            if remote != '-' and _raw_peer_is_trusted_proxy(self):
+                resolved = _forwarded_client_ip_from_trusted_proxy(self)
+                client_ip = resolved if resolved else '-'
+        except Exception:
+            client_ip = remote
+
         record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
+            'client_ip': client_ip,
             'method': getattr(self, 'command', None) or '-',
             'path': getattr(self, 'path', None) or '-',
             'status': int(code) if str(code).isdigit() else code,
