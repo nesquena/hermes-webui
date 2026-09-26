@@ -7132,6 +7132,7 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if(typeof _invalidateVisionCapabilityFirst==='function') _invalidateVisionCapabilityFirst();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -12698,7 +12699,82 @@ function _auxProvidersFromModelGroups(groups){
  }));
 }
 
+function _invalidateVisionCapabilityFirst(){
+ const cb=$('settingsVisionCapabilityFirst');
+ if(!cb) return;
+ // A profile switch invalidates both the confirmed value and any pending reply.
+ cb._vcfToken=null;
+ cb._vcfPending=null;
+ cb._vcfProfile=null;
+ cb._vcfConfirmed=undefined;
+ cb.checked=false;
+ cb.disabled=true;
+}
+
+function _ownsVisionCapabilityFirst(cb,profile,token){
+ return cb._vcfToken===token&&cb._vcfProfile===profile&&(S.activeProfile||'default')===profile;
+}
+
+async function _loadVisionCapabilityFirst(){
+ const cb=$('settingsVisionCapabilityFirst');
+ if(!cb) return;
+ const profile=(S.activeProfile||'default');
+ if(cb._vcfProfile!==profile) _invalidateVisionCapabilityFirst();
+ cb._vcfProfile=profile;
+ // Reopening Settings in the same profile shares one pending operation.
+ if(cb._vcfPending) return cb._vcfPending;
+ cb.disabled=true;
+ if(!cb._vcfBound){
+  cb._vcfBound=true;
+  cb.addEventListener('change',()=>{
+   if(cb.disabled||cb._vcfProfile!==(S.activeProfile||'default')){
+    cb.checked=cb._vcfConfirmed===true;return;
+   }
+   const desired=cb.checked;
+   const saveProfile=cb._vcfProfile;
+   const token={};
+   cb._vcfToken=token;
+   cb.disabled=true;
+   cb._vcfPending=(async()=>{
+    try{
+     const result=await api('/api/vision-capability-first',{method:'POST',body:JSON.stringify({enabled:desired})});
+     if(!result||typeof result.vision_capability_first!=='boolean') throw new Error('Invalid vision setting');
+     if(!_ownsVisionCapabilityFirst(cb,saveProfile,token)) return;
+     cb._vcfConfirmed=result.vision_capability_first;
+     cb.checked=cb._vcfConfirmed;
+     showToast(t(cb.checked?'settings_vcf_on':'settings_vcf_off'));
+    }catch(err){
+     if(!_ownsVisionCapabilityFirst(cb,saveProfile,token)) return;
+     cb.checked=cb._vcfConfirmed;
+     showToast(t('settings_aux_save_failed')||'Failed to save setting');
+    }finally{
+     if(_ownsVisionCapabilityFirst(cb,saveProfile,token)){cb.disabled=false;cb._vcfPending=null;cb._vcfToken=null;}
+    }
+   })();
+  });
+ }
+ const token={};
+ cb._vcfToken=token;
+ cb._vcfPending=(async()=>{
+  try{
+   const result=await api('/api/vision-capability-first');
+   if(!result||typeof result.vision_capability_first!=='boolean') throw new Error('Invalid vision setting');
+   if(!_ownsVisionCapabilityFirst(cb,profile,token)) return;
+   cb.checked=cb._vcfConfirmed=result.vision_capability_first;
+   cb.disabled=false;
+  }catch(err){
+   if(!_ownsVisionCapabilityFirst(cb,profile,token)) return;
+   cb.checked=false;
+   showToast(t('settings_vcf_load_failed'));
+  }finally{
+   if(_ownsVisionCapabilityFirst(cb,profile,token)){cb._vcfPending=null;cb._vcfToken=null;}
+  }
+ })();
+ return cb._vcfPending;
+}
+
 async function _loadAuxiliaryModels(){
+ _loadVisionCapabilityFirst();
  const container=$('auxModelsContainer');
  if(!container) return;
  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
