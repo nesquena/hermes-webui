@@ -741,3 +741,60 @@ def test_i18n_files_parse_after_plural_fixes():
             text=True,
         )
         assert r.returncode == 0, f"{rel} failed node --check: {r.stderr}"
+
+
+def test_unknown_turn_count_does_not_hide_untitled_cli_row():
+    """#7681 follow-up: an UNKNOWN turn count must not hide a sidebar row.
+
+    Finding 2 keeps ``actual_user_message_count`` NULL when the state.db
+    messages table has no ``role`` column — unknown, not a confident wrong
+    number. But ``is_cli_session_row_visible()`` used that NULL as a known zero
+    in its final untitled-row threshold, so a real untitled CLI session on a
+    legacy schema vanished from the sidebar instead of being shown: the row can
+    never clear the threshold because the count is missing, not because it is
+    low. Hiding a real session is data loss the user can see; showing it with an
+    unknown turn count is not.
+
+    Revert-sensitive: removing the unknown-schema escape in
+    ``is_cli_session_row_visible()`` makes this fail.
+    """
+    import api.agent_sessions as ags
+
+    row = {
+        "id": "cli_unknown_schema",
+        "actual_message_count": 3,          # messages exist and are joinable
+        "message_count": 3,
+        "actual_user_message_count": None,  # no `role` column → unknown
+        "user_message_count": None,
+        "messages": [],                     # no sidecar fallback available
+        "ended_at": None,
+        "end_reason": None,
+        "source": "cli",
+        "source_tag": "cli",
+        "title": None,                      # untitled → hits the threshold branch
+    }
+
+    assert ags._count_user_turns(row) == 0
+    assert ags.is_cli_session_row_visible(row) is True
+
+
+def test_known_zero_turn_count_still_hides_untitled_cli_row():
+    """The known-zero path must keep hiding rows — the escape is not a blanket bypass."""
+    import api.agent_sessions as ags
+
+    row = {
+        "id": "cli_known_zero",
+        "actual_message_count": 3,
+        "message_count": 3,
+        "actual_user_message_count": 0,  # schema HAS roles; there are simply none
+        "user_message_count": 0,
+        "messages": [],
+        "ended_at": None,
+        "end_reason": None,
+        "source": "cli",
+        "source_tag": "cli",
+        "title": None,
+    }
+
+    assert ags._count_user_turns(row) == 0
+    assert ags.is_cli_session_row_visible(row) is False
