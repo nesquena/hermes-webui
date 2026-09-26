@@ -163,6 +163,10 @@ def _run_turn_context_node() -> dict:
     assert NODE, "node is required for the turn-context harness"
     fns = _collect_functions(
         [
+            "_hasHiddenProcessWakeupBoundaryBefore",
+            "_silentWakeupTurnHiddenIdxs",
+            "_computeSilentWakeupTurnIdxs",
+            "_isSilentWakeupSentinelReply",
             "_assistantTurnFinalVisibleContentMap",
             "_assistantTurnVisibleContentMap",
             "_assistantVisibleContentForReasoningCompare",
@@ -182,7 +186,9 @@ def _run_turn_context_node() -> dict:
             "msgContent",
         ]
     )
-    script = f"const window = {{}};\n{fns}\n{_TURN_CONTEXT_NODE_BODY}"
+    # The harness passes synthetic visible lists; the hidden-boundary probe also
+    # reads S.messages for silent wakeup turns, which this transcript has none of.
+    script = f"const window = {{}};\nconst S = {{messages: []}};\n{fns}\n{_TURN_CONTEXT_NODE_BODY}"
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

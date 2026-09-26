@@ -1301,6 +1301,86 @@ def _resolve_completion_target(
     return owner
 
 
+def _canonical_wakeup_session_id(session_id: str) -> str:
+    """Resolve a compression-sealed WebUI origin to its resumable continuation.
+
+    ``origin_ui_session_id`` remains the authority for cross-tab ownership, but
+    compression intentionally seals that concrete session id.  SQLite owns the
+    lineage: reuse the same read-only resolver as ``/api/chat/start``
+    (``durable_compression_continuation``), which pins the snapshot's own
+    profile (``None``/empty -> explicit ``default``, never the TLS or
+    process-global profile), follows ``get_compression_tip()`` and excludes
+    branch, delegate/subagent and tool children.  A sealed origin without a
+    resumable tip, a sidecar-only snapshot that SQLite cannot confirm, an
+    origin that cannot be loaded, or a lineage lookup error fails closed so the
+    caller's drop/retry path runs instead of writing into the sealed parent.
+    """
+    target = str(session_id or "")
+    if not target:
+        return ""
+
+    try:
+        from api.routes import _get_or_materialize_session
+
+        session = _get_or_materialize_session(target, refresh_cli_messages=False)
+    except Exception:
+        # The materializer also refuses read-only/imported sessions.  Fall back
+        # to the exact loader start_session_turn() uses; if that cannot load
+        # the origin either, the turn cannot start there, so fail closed
+        # instead of passing an unverified (possibly sealed) id through.
+        try:
+            from api.models import get_session
+
+            session = get_session(target)
+        except Exception:
+            logger.warning(
+                "process wakeup cannot load origin session %s for lineage check",
+                target,
+                exc_info=True,
+            )
+            return ""
+
+    resolved_session_id = str(getattr(session, "session_id", "") or "")
+    if resolved_session_id != target:
+        logger.error(
+            "cross-session compression route BLOCKED: expected origin %r but "
+            "snapshot reader returned %r",
+            target,
+            resolved_session_id,
+        )
+        return ""
+
+    try:
+        from api.compression_continuation import durable_compression_continuation
+
+        sealed, tip = durable_compression_continuation(session)
+    except Exception:
+        # Unknown lineage is not proof the origin is live: fail closed.
+        logger.warning(
+            "process wakeup compression-lineage resolution failed for session %s",
+            target,
+            exc_info=True,
+        )
+        return ""
+
+    if sealed:
+        tip = str(tip or "")
+        if not tip or tip == target:
+            logger.warning(
+                "process wakeup cannot resolve compressed session %s: no resumable continuation",
+                target,
+            )
+            return ""
+        return tip
+    if getattr(session, "pre_compression_snapshot", False):
+        logger.warning(
+            "process wakeup cannot resolve archived session %s: no durable continuation",
+            target,
+        )
+        return ""
+    return target
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -1384,6 +1464,7 @@ def _process_one(evt: dict) -> None:
         session_key_resolved_sid=session_id,
         origin_ui_session_id=origin_ui_session_id,
     )
+    session_id = _canonical_wakeup_session_id(session_id)
     if not session_id:
         logger.debug("process_complete drop: completion target resolved empty")
         # An async delegation event that resolves empty here must NOT silently

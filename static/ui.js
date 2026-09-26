@@ -634,6 +634,8 @@ function clearVisibleMessageRowCache(){
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
   _visWithIdxCacheSrc=null;
+  // In-place content edits keep (reference, length): drop the silent-turn memo too.
+  if(typeof _silentWakeupTurnHiddenIdxs==='function') _silentWakeupTurnHiddenIdxs.memo=null;
 }
 function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCache=[];
@@ -669,7 +671,10 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
+  if(m._source === 'process_wakeup'){
+    if(window._showBackgroundWakeups===false) return false;
+    return !!(msgContent(m)||m.attachments?.length);
+  }
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -679,12 +684,77 @@ function _messageIsRenderable(m){
   const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
+// Silent wakeup turns: an agent woken by a background process may answer with
+// exactly the [[SILENT]] sentinel to acknowledge it without speaking to the
+// user. Such a turn (the process_wakeup row, its assistant/tool rows and the
+// sentinel reply) collapses at render time. Contract:
+// - only turns opened by a process_wakeup row are eligible;
+// - the turn's FINAL assistant reply must be exactly the sentinel after trim;
+//   prose that merely contains the token is never collapsed;
+// - render-only: S.messages and persisted history are never mutated, and the
+//   collapsed rows stay a real turn boundary (_hasHiddenProcessWakeupBoundaryBefore).
+function _isSilentWakeupSentinelReply(m){
+  if(!m||m.role!=='assistant') return false;
+  // A sentinel is silent only when it has no separate user-facing payload.
+  // In particular, terminal failures can attach a status card to this reply.
+  if(m._statusCard||m.attachments?.length||m._error||m.error) return false;
+  return String(msgContent(m)??'').trim()==='[[SILENT]]';
+}
+function _computeSilentWakeupTurnIdxs(messages){
+  const hidden=new Set();
+  const msgs=Array.isArray(messages)?messages:[];
+  let turn=null;
+  const close=()=>{
+    if(turn&&turn.lastAssistantIdx>=0&&_isSilentWakeupSentinelReply(msgs[turn.lastAssistantIdx])){
+      for(const idx of turn.idxs) hidden.add(idx);
+    }
+    turn=null;
+  };
+  for(let idx=0;idx<msgs.length;idx++){
+    const m=msgs[idx];
+    if(!m||typeof m!=='object') continue;
+    if(m.role==='user'){
+      close();
+      if(m._source==='process_wakeup') turn={idxs:[idx],lastAssistantIdx:-1};
+      continue;
+    }
+    if(!turn) continue;
+    turn.idxs.push(idx);
+    if(m.role==='assistant') turn.lastAssistantIdx=idx;
+  }
+  close();
+  return hidden;
+}
+// Memoized on the (reference, length) key of the visible-row cache: the
+// hidden-boundary probe runs once per visible assistant row in several render
+// loops, so recomputing the O(n) scan per call would make each render O(n^2).
+function _silentWakeupTurnHiddenIdxs(){
+  const msgs=S.messages||[];
+  const memo=_silentWakeupTurnHiddenIdxs.memo;
+  if(memo&&memo.src===msgs&&memo.len===msgs.length) return memo.idxs;
+  const idxs=_computeSilentWakeupTurnIdxs(msgs);
+  _silentWakeupTurnHiddenIdxs.memo={src:msgs,len:msgs.length,idxs};
+  return idxs;
+}
+function _hasHiddenProcessWakeupBoundaryBefore(rawIdx){
+  const wakeupsHidden=window._showBackgroundWakeups===false;
+  const silent=_silentWakeupTurnHiddenIdxs();
+  if(!wakeupsHidden&&!silent.size) return false;
+  for(let idx=Number(rawIdx)-1;idx>=0;idx--){
+    const previous=(S.messages||[])[idx];
+    if(previous&&previous._source==='process_wakeup'&&(wakeupsHidden||silent.has(idx))) return true;
+    if(silent.has(idx)) continue;
+    if(_messageIsRenderable(previous)) return false;
+  }
+  return false;
+}
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
+    const silent=_silentWakeupTurnHiddenIdxs();
     const rebuilt=[];
     let rawIdx=0;
     for(const m of (S.messages||[])){
-      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+      if(!silent.has(rawIdx)&&_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
       rawIdx++;
     }
     _visWithIdxCache=rebuilt;
@@ -11894,6 +11964,7 @@ function _assistantTurnFinalVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
+    if(m&&m.role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) flush();
     if(m&&m.role==='assistant'){
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
@@ -11916,6 +11987,7 @@ function _assistantTurnVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
+    if(m&&m.role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) flush();
     if(m&&m.role==='assistant'){
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
@@ -17601,9 +17673,9 @@ function renderMessages(options){
   );
   if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
-  for(let i=visWithIdx.length-1;i>=0;i--){
-    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
-      lastUserRawIdx=visWithIdx[i].rawIdx;
+  for(let rawIdx=S.messages.length-1;rawIdx>=0;rawIdx--){
+    if(S.messages[rawIdx]&&S.messages[rawIdx].role==='user'){
+      lastUserRawIdx=rawIdx;
       break;
     }
   }
@@ -17643,6 +17715,7 @@ function renderMessages(options){
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
+    if(role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) lastQuestionRawIdx=-1;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
@@ -17667,6 +17740,7 @@ function renderMessages(options){
     };
     for(const entry of renderVisWithIdx){
       const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) _flush();
       if(role==='assistant'){
         _run.push(entry.rawIdx);
         // Visible prose = content with any leading <think>…</think> /channel-thought
@@ -17810,6 +17884,7 @@ function renderMessages(options){
       }
     }
     const isProcessWakeup=m&&m._source==='process_wakeup';
+    if(_hasHiddenProcessWakeupBoundaryBefore(rawIdx)) currentAssistantTurn=null;
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
@@ -17824,9 +17899,12 @@ function renderMessages(options){
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
-    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
+    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1&&rawIdx>lastUserRawIdx;
     const nextRendered=renderVisWithIdx[vi+1];
-    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
+    const isTurnFinalAssistant=!isUser&&(
+      !nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant'||
+      _hasHiddenProcessWakeupBoundaryBefore(nextRendered.rawIdx)
+    );
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
