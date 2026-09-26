@@ -1,12 +1,313 @@
 # Auto end-of-turn brief regeneration (validated 2026-08-14): worker guards,
 # canonical auxiliary routing, and route payload.
+import json
+import shutil
+import subprocess
 import sys
 import time
+from functools import lru_cache
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from api import context_brief as cb
+
+
+@lru_cache(maxsize=1)
+def _auto_refresh_harness():
+    """Exercise the production auto-refresh callback under lifecycle races."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the auto-refresh lifecycle harness")
+    src = open("static/panels.js").read()
+    start = src.index("// Refresh visible brief panels when the background worker")
+    end = src.index("\n// Banner shown", start)
+    block = src[start:end]
+    script = r"""
+const vm = require('vm');
+const timers = [];
+const activeTimers = new Set();
+const renders = [];
+let clearCount = 0;
+let fetchCount = 0;
+let currentSid = 'sid-a';
+let currentPanels = [];
+let fetchImpl = null;
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(r => { resolve = r; });
+  return {promise, resolve};
+}
+function makePanel(generation) {
+  return {
+    dataset: {briefSid: currentSid, briefLoaded: '1'},
+    hidden: false,
+    isConnected: true,
+    offsetParent: {},
+    _briefReqSeq: 4,
+    _briefData: generation === null ? {} : {llm_brief: {generated_at: generation}},
+  };
+}
+function response(payload, jsonPromise) {
+  return {json: () => jsonPromise || Promise.resolve(payload)};
+}
+
+const ctx = {
+  console,
+  _loadSessionGeneration: 1,
+  document: {querySelectorAll: () => currentPanels},
+  _contextBriefSid: () => currentSid,
+  fetch: (...args) => { fetchCount += 1; return fetchImpl(...args); },
+  renderContextBrief: (brief, panel) => {
+    renders.push({sid: panel.dataset.briefSid, generation: brief.llm_brief.generated_at});
+    panel._briefData = brief;
+  },
+  setInterval: callback => {
+    const id = timers.length + 1;
+    timers.push({id, callback});
+    activeTimers.add(id);
+    return id;
+  },
+  clearInterval: id => {
+    clearCount += 1;
+    activeTimers.delete(id);
+  },
+};
+vm.createContext(ctx);
+vm.runInContext(__BLOCK__ + `
+this.syncAuto = _syncContextBriefAutoRefresh;
+this.autoState = () => ({
+  timer: _contextBriefAutoTimer,
+  epoch: typeof _contextBriefAutoEpoch === 'undefined' ? null : _contextBriefAutoEpoch,
+  inFlight: typeof _contextBriefAutoInFlightEpoch === 'undefined' ? null : _contextBriefAutoInFlightEpoch,
+});`, ctx);
+
+const latestTick = () => timers[timers.length - 1].callback();
+const enabled = {enabled: true};
+const disabled = {enabled: false};
+const payload = (auto, generation) => ({
+  ok: true,
+  brief: {
+    ...(auto === undefined ? {} : {auto}),
+    llm_brief: {generated_at: generation},
+  },
+});
+
+(async () => {
+  const out = {};
+
+  // A disabled/missing server flag must stop even when generation is unchanged.
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  let beforeRender = renders.length;
+  let beforeClear = clearCount;
+  fetchImpl = async () => response(payload(disabled, 10));
+  await latestTick();
+  out.unchangedDisable = {
+    activeTimers: activeTimers.size,
+    clears: clearCount - beforeClear,
+    renders: renders.length - beforeRender,
+  };
+  ctx.syncAuto(enabled);
+  beforeRender = renders.length;
+  beforeClear = clearCount;
+  fetchImpl = async () => response(payload(undefined, 11));
+  await latestTick();
+  out.missingDisable = {
+    activeTimers: activeTimers.size,
+    clears: clearCount - beforeClear,
+    renders: renders.length - beforeRender,
+  };
+
+  // Stop while fetch is pending: the old owner cannot continue afterward.
+  ctx.syncAuto(enabled);
+  const pendingStop = deferred();
+  fetchImpl = () => pendingStop.promise;
+  beforeRender = renders.length;
+  const stoppedPoll = latestTick();
+  await Promise.resolve();
+  ctx.syncAuto(disabled);
+  pendingStop.resolve(response(payload(enabled, 20)));
+  await stoppedPoll;
+  out.disableDuringFetch = {
+    activeTimers: activeTimers.size,
+    renders: renders.length - beforeRender,
+  };
+
+  // Session and load-generation ownership are both revalidated after await.
+  currentSid = 'sid-a';
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  const pendingSession = deferred();
+  fetchImpl = () => pendingSession.promise;
+  beforeRender = renders.length;
+  const sessionPoll = latestTick();
+  await Promise.resolve();
+  currentSid = 'sid-b';
+  pendingSession.resolve(response(payload(enabled, 20)));
+  await sessionPoll;
+  out.sessionChange = renders.length - beforeRender;
+  ctx.syncAuto(disabled);
+
+  currentSid = 'sid-a';
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  const pendingGeneration = deferred();
+  fetchImpl = () => pendingGeneration.promise;
+  beforeRender = renders.length;
+  const generationPoll = latestTick();
+  await Promise.resolve();
+  ctx._loadSessionGeneration += 1;
+  pendingGeneration.resolve(response(payload(enabled, 20)));
+  await generationPoll;
+  out.loadGenerationChange = renders.length - beforeRender;
+  ctx.syncAuto(disabled);
+
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  const pendingPanelSeq = deferred();
+  fetchImpl = () => pendingPanelSeq.promise;
+  beforeRender = renders.length;
+  const panelSeqPoll = latestTick();
+  await Promise.resolve();
+  currentPanels[0]._briefReqSeq += 1;
+  pendingPanelSeq.resolve(response(payload(enabled, 20)));
+  await panelSeqPoll;
+  out.panelRequestSequenceChange = renders.length - beforeRender;
+  ctx.syncAuto(disabled);
+
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  const pendingPanelSid = deferred();
+  fetchImpl = () => pendingPanelSid.promise;
+  beforeRender = renders.length;
+  const panelSidPoll = latestTick();
+  await Promise.resolve();
+  currentPanels[0].dataset.briefSid = 'sid-b';
+  pendingPanelSid.resolve(response(payload(enabled, 20)));
+  await panelSidPoll;
+  out.panelSidChange = renders.length - beforeRender;
+  ctx.syncAuto(disabled);
+
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  const pendingVisibilityJson = deferred();
+  fetchImpl = async () => response(null, pendingVisibilityJson.promise);
+  beforeRender = renders.length;
+  const visibilityPoll = latestTick();
+  await Promise.resolve();
+  await Promise.resolve();
+  currentPanels[0].offsetParent = null;
+  pendingVisibilityJson.resolve(payload(enabled, 20));
+  await visibilityPoll;
+  out.panelVisibilityChange = renders.length - beforeRender;
+  ctx.syncAuto(disabled);
+
+  // A manual response can install generation 30 while auto generation 20 parses.
+  currentPanels = [makePanel(10)];
+  ctx.syncAuto(enabled);
+  const pendingJson = deferred();
+  fetchImpl = async () => response(null, pendingJson.promise);
+  beforeRender = renders.length;
+  const olderAutoPoll = latestTick();
+  await Promise.resolve();
+  await Promise.resolve();
+  currentPanels[0]._briefData = {llm_brief: {generated_at: 30}};
+  pendingJson.resolve(payload(enabled, 20));
+  await olderAutoPoll;
+  out.manualNewerAutoOlder = renders.length - beforeRender;
+  ctx.syncAuto(disabled);
+
+  // Two interval ticks under one owner serialize to one network request.
+  currentPanels = [makePanel(30)];
+  ctx.syncAuto(enabled);
+  const overlapping = deferred();
+  fetchImpl = () => overlapping.promise;
+  const fetchBefore = fetchCount;
+  beforeRender = renders.length;
+  const firstTick = latestTick();
+  await Promise.resolve();
+  const secondTick = latestTick();
+  await Promise.resolve();
+  overlapping.resolve(response(payload(enabled, 40)));
+  await Promise.all([firstTick, secondTick]);
+  out.overlappingTicks = {
+    fetches: fetchCount - fetchBefore,
+    renders: renders.length - beforeRender,
+  };
+  ctx.syncAuto(disabled);
+
+  // A stopped interval's callback stays stale after a fresh owner is enabled.
+  currentPanels = [makePanel(40)];
+  ctx.syncAuto(enabled);
+  const staleCallback = timers[timers.length - 1].callback;
+  ctx.syncAuto(disabled);
+  ctx.syncAuto(enabled);
+  const freshCallback = timers[timers.length - 1].callback;
+  fetchImpl = async () => response(payload(enabled, 50));
+  const restartFetchBefore = fetchCount;
+  beforeRender = renders.length;
+  await staleCallback();
+  await freshCallback();
+  out.stopReenable = {
+    activeTimers: activeTimers.size,
+    fetches: fetchCount - restartFetchBefore,
+    renders: renders.length - beforeRender,
+  };
+  ctx.syncAuto(disabled);
+
+  console.log(JSON.stringify(out));
+})().catch(error => {
+  console.error(error && error.stack || error);
+  process.exit(1);
+});
+""".replace("__BLOCK__", json.dumps(block))
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip())
+
+
+def _autosave_auto_sync_harness():
+    """Run the production preferences autosave function with server-confirmed values."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the preferences autosave harness")
+    src = open("static/panels.js").read()
+    start = src.index("async function _autosavePreferencesSettings(payload){")
+    end = src.index("\nfunction _retryPreferencesAutosave", start)
+    function_src = src[start:end]
+    script = r"""
+const vm = require('vm');
+const syncCalls = [];
+const saved = [{context_brief_auto: false}, {context_brief_auto: true}];
+const ctx = {
+  console,
+  window: {},
+  document: {documentElement: {dataset: {}}},
+  $: () => null,
+  _enqueueSettingsPost: async () => saved.shift(),
+  _syncContextBriefAutoRefresh: auto => syncCalls.push(auto && auto.enabled),
+  _setPreferencesAutosaveStatus: () => {},
+  _settingsPreferencesAutosaveRetryPayload: null,
+  _settingsDirty: false,
+  _settingsHermesDefaultModelOnOpen: '',
+  _settingsHermesDefaultModelProviderOnOpen: null,
+};
+vm.createContext(ctx);
+vm.runInContext(__FUNCTION__ + '\nthis.savePreferences = _autosavePreferencesSettings;', ctx);
+(async () => {
+  await ctx.savePreferences({context_brief_auto: false});
+  await ctx.savePreferences({context_brief_auto: true});
+  console.log(JSON.stringify(syncCalls));
+})().catch(error => {
+  console.error(error && error.stack || error);
+  process.exit(1);
+});
+""".replace("__FUNCTION__", json.dumps(function_src))
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip())
 
 
 @pytest.fixture(autouse=True)
@@ -543,13 +844,13 @@ class TestFrontendStatic:
         assert ".ctx-brief-model-select" not in open("static/style.css").read()
 
     def test_refresh_reads_match_payload_key(self):
-        # The auto-refresh must read brief.llm_brief (the only key the server
-        # emits) and call renderContextBrief(brief, panel) in that order.
+        # The auto-refresh generation helper must read brief.llm_brief (the only
+        # key the server emits) before rendering renderContextBrief(brief, panel).
         src = open("static/panels.js").read()
-        assert "data.brief.llm_brief" in src
+        assert "const llm = brief && brief.llm_brief;" in src
         assert "data.brief.llm)" not in src
-        assert "renderContextBrief(data.brief, p)" in src
-        assert "renderContextBrief(p, data.brief)" not in src
+        assert "renderContextBrief(data.brief, item.panel)" in src
+        assert "renderContextBrief(item.panel, data.brief)" not in src
 
     def test_settings_keys_registered(self):
         src = open("api/config.py").read()
@@ -561,55 +862,43 @@ class TestFrontendStatic:
         src = open("api/config.py").read()
         assert '"context_brief_auto": False' in src
 
-    def test_auto_refresh_poller_follows_server_auto_flag(self):
-        """Auto-regeneration is off by default: no browser poller at load.
+    def test_auto_refresh_stops_on_unchanged_generation_disable(self):
+        result = _auto_refresh_harness()
+        assert result["unchangedDisable"] == {"activeTimers": 0, "clears": 1, "renders": 0}
+        assert result["missingDisable"] == {"activeTimers": 0, "clears": 1, "renders": 0}
 
-        The poller starts only when the server reports ``brief.auto.enabled``
-        and stops again when it is reported disabled; the manual refresh
-        button stays the default path.
-        """
-        import json
-        import shutil
-        import subprocess
+    def test_auto_refresh_disable_during_fetch_invalidates_owner(self):
+        assert _auto_refresh_harness()["disableDuringFetch"] == {
+            "activeTimers": 0,
+            "renders": 0,
+        }
 
-        node = shutil.which("node")
-        if not node:
-            pytest.skip("node is required for the auto-refresh gating harness")
-        src = open("static/panels.js").read()
-        start = src.index("// Refresh visible brief panels when the background worker")
-        end = src.index("\n// Banner shown", start)
-        block = src[start:end]
-        assert "_startContextBriefAutoRefresh();\n" not in block.replace(
-            "if (auto && auto.enabled === true) _startContextBriefAutoRefresh();", ""
-        )
-        script = """
-const vm = require('vm');
-const calls = {set: 0, clear: 0};
-const ctx = {
-  setInterval: () => { calls.set += 1; return 7; },
-  clearInterval: () => { calls.clear += 1; },
-  document: {querySelectorAll: () => []},
-};
-vm.createContext(ctx);
-vm.runInContext(BLOCK + "\\nthis.sync = _syncContextBriefAutoRefresh;", ctx);
-const out = [];
-out.push(calls.set);
-ctx.sync(undefined);
-ctx.sync({enabled: false});
-out.push(calls.set);
-ctx.sync({enabled: true});
-ctx.sync({enabled: true});
-out.push(calls.set);
-ctx.sync({enabled: false});
-out.push(calls.clear);
-ctx.sync({enabled: true});
-out.push(calls.set);
-console.log(JSON.stringify(out));
-""".replace("BLOCK", json.dumps(block))
-        proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
-        assert proc.returncode == 0, proc.stderr
-        # load: 0 timers; disabled: still 0; enabled twice: 1; disable: 1 clear; re-enable: 2
-        assert json.loads(proc.stdout.strip()) == [0, 0, 1, 1, 2]
+    def test_auto_refresh_rejects_session_and_load_generation_changes(self):
+        result = _auto_refresh_harness()
+        assert result["sessionChange"] == 0
+        assert result["loadGenerationChange"] == 0
+
+    def test_auto_refresh_rejects_panel_owner_changes_after_await(self):
+        result = _auto_refresh_harness()
+        assert result["panelRequestSequenceChange"] == 0
+        assert result["panelSidChange"] == 0
+        assert result["panelVisibilityChange"] == 0
+
+    def test_auto_refresh_rejects_older_generation_after_manual_refresh(self):
+        assert _auto_refresh_harness()["manualNewerAutoOlder"] == 0
+
+    def test_auto_refresh_serializes_overlapping_ticks(self):
+        assert _auto_refresh_harness()["overlappingTicks"] == {"fetches": 1, "renders": 1}
+
+    def test_auto_refresh_stop_and_reenable_replaces_owner(self):
+        assert _auto_refresh_harness()["stopReenable"] == {
+            "activeTimers": 1,
+            "fetches": 1,
+            "renders": 1,
+        }
+
+    def test_context_brief_preference_save_syncs_server_confirmed_timer_state(self):
+        assert _autosave_auto_sync_harness() == [False, True]
 
     def test_switch_static_wiring(self):
         index = open("static/index.html").read()

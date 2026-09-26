@@ -4334,41 +4334,99 @@ async function _pollContextBriefJob(){
 // runs while the server-reported `brief.auto.enabled` is true; the manual ↻
 // button always regenerates on demand.
 let _contextBriefAutoTimer = null;
+let _contextBriefAutoEpoch = 0;
+let _contextBriefAutoInFlightEpoch = null;
 function _syncContextBriefAutoRefresh(auto){
   if (auto && auto.enabled === true) _startContextBriefAutoRefresh();
   else _stopContextBriefAutoRefresh();
 }
 function _stopContextBriefAutoRefresh(){
-  if (!_contextBriefAutoTimer) return;
+  // Invalidate callbacks that have already crossed an await, even when the
+  // interval was stopped by another lifecycle path first.
+  _contextBriefAutoEpoch += 1;
+  if (_contextBriefAutoTimer === null) return;
   clearInterval(_contextBriefAutoTimer);
   _contextBriefAutoTimer = null;
 }
 function _startContextBriefAutoRefresh(){
-  if (_contextBriefAutoTimer) return;
-  _contextBriefAutoTimer = setInterval(async () => {
-    const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
-      .filter(p => p.dataset.briefLoaded === '1' && p.offsetParent !== null);
-    if (!panels.length) return;
-    const sid = _contextBriefSid();
-    if (!sid) return;
-    let data;
-    try {
-      const res = await fetch('/api/session/context-brief', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sid}),
-      });
-      data = await res.json();
-    } catch(_) { return; }
-    if (!data || !data.ok || !data.brief) return;
-    const newGen = ((data.brief.llm_brief || {}).generated_at) || 0;
-    for (const p of panels){
-      if (p.dataset.briefSid !== sid) continue;
-      const oldGen = (((p._briefData || {}).llm_brief || {}).generated_at) || 0;
-      if (newGen !== oldGen){
-        renderContextBrief(data.brief, p);
+  if (_contextBriefAutoTimer !== null) return;
+  const epoch = ++_contextBriefAutoEpoch;
+  _contextBriefAutoTimer = setInterval(() => _pollContextBriefAutoRefresh(epoch), 45000);
+}
+function _contextBriefAutoPanelVisible(panel){
+  if (!panel || panel.isConnected === false || panel.hidden) return false;
+  return typeof panel.offsetParent === 'undefined' || panel.offsetParent !== null;
+}
+function _contextBriefAutoOwnerCurrent(owner){
+  if (!owner || _contextBriefAutoTimer === null || _contextBriefAutoEpoch !== owner.epoch) return false;
+  if (_contextBriefSid() !== owner.sid) return false;
+  if (owner.loadGeneration !== null
+      && (typeof _loadSessionGeneration !== 'number'
+          || _loadSessionGeneration !== owner.loadGeneration)) return false;
+  return owner.panels.every(item => {
+    const panel = item.panel;
+    return _contextBriefAutoPanelVisible(panel)
+      && panel.dataset.briefLoaded === '1'
+      && panel.dataset.briefSid === owner.sid
+      && (panel._briefReqSeq || 0) === item.requestSeq;
+  });
+}
+function _contextBriefAutoGeneration(brief){
+  const llm = brief && brief.llm_brief;
+  if (!llm) return 0;
+  const generation = llm.generated_at;
+  return (typeof generation === 'number' && Number.isFinite(generation) && generation > 0)
+    ? generation
+    : null;
+}
+async function _pollContextBriefAutoRefresh(epoch){
+  if (_contextBriefAutoTimer === null || _contextBriefAutoEpoch !== epoch) return;
+  // setInterval may tick again while fetch/json parsing is pending. Only one
+  // callback may own a given epoch; a re-enabled successor gets a new epoch.
+  if (_contextBriefAutoInFlightEpoch === epoch) return;
+  const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
+    .filter(p => p.dataset.briefLoaded === '1' && _contextBriefAutoPanelVisible(p));
+  if (!panels.length) return;
+  const sid = _contextBriefSid();
+  if (!sid) return;
+  const owner = {
+    epoch,
+    sid,
+    loadGeneration: typeof _loadSessionGeneration === 'number' ? _loadSessionGeneration : null,
+    panels: panels.map(panel => ({panel, requestSeq: panel._briefReqSeq || 0})),
+  };
+  if (!_contextBriefAutoOwnerCurrent(owner)) return;
+  _contextBriefAutoInFlightEpoch = epoch;
+  try {
+    const res = await fetch('/api/session/context-brief', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sid}),
+    });
+    if (!_contextBriefAutoOwnerCurrent(owner)) return;
+    const data = await res.json();
+    if (!_contextBriefAutoOwnerCurrent(owner)) return;
+
+    // The response owns the effective setting. Consume it before looking at
+    // generations so an unchanged brief still stops a disabled poller.
+    const auto = data && data.brief && data.brief.auto;
+    if (!auto || auto.enabled !== true){
+      _syncContextBriefAutoRefresh(auto);
+      return;
+    }
+    if (!data.ok || !data.brief) return;
+    const newGen = _contextBriefAutoGeneration(data.brief);
+    if (newGen === null) return;
+    for (const item of owner.panels){
+      const oldGen = _contextBriefAutoGeneration(item.panel._briefData || {});
+      if (oldGen !== null && newGen > oldGen){
+        renderContextBrief(data.brief, item.panel);
       }
     }
-  }, 45000);
+  } catch(_) {
+    return;
+  } finally {
+    if (_contextBriefAutoInFlightEpoch === epoch) _contextBriefAutoInFlightEpoch = null;
+  }
 }
 
 // Banner shown above the message window when the session history is
@@ -9432,6 +9490,10 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    if(payload&&Object.prototype.hasOwnProperty.call(payload,'context_brief_auto')
+       &&typeof _syncContextBriefAutoRefresh==='function'){
+      _syncContextBriefAutoRefresh({enabled:!!(saved&&saved.context_brief_auto)});
+    }
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
