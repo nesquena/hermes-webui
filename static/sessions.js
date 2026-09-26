@@ -3979,10 +3979,25 @@ function _mergePendingSessionMessage(session,messages){
   if(!pendingMsg) return false;
   const tailUser=_currentTailUserMessage(currentTurnMessages);
   if(tailUser&&tailUser._pending===true&&_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  // Inflight reconciliation can leave the browser-owned optimistic projection
+  // below the live assistant row. It is distinct from an unmarked settled row:
+  // relocate this exact `_pending` projection, but keep settled-row adoption
+  // restricted to the server marker or active-stream token below.
+  const misplacedPendingIdx=liveAssistantIdx>=0
+    ? messages.findIndex((m,idx)=>
+      idx>liveAssistantIdx&&m&&m.role==='user'&&m._pending===true
+      &&_sameTranscriptMessage(m,pendingMsg)
+    )
+    : -1;
   const boundaryIdx=typeof _activeTurnInsertionIndex==='function'
     ? _activeTurnInsertionIndex(messages,session)
     : -1;
   if(boundaryIdx>=0){
+    if(misplacedPendingIdx>=0){
+      const [misplacedUser]=messages.splice(misplacedPendingIdx,1);
+      messages.splice(boundaryIdx,0,misplacedUser);
+      return true;
+    }
     // Placement after the time boundary does not make a same-text row this
     // turn's row. Only the active stream's token (or server-owned public marker)
     // can authorize adoption; otherwise preserve both prompts and attachments.
@@ -4010,12 +4025,8 @@ function _mergePendingSessionMessage(session,messages){
     return true;
   }
   if(liveAssistantIdx>=0){
-    const misplacedIdx=messages.findIndex((m,idx)=>
-      idx>liveAssistantIdx&&m&&m.role==='user'&&m._pending===true
-      &&_sameTranscriptMessage(m,pendingMsg)
-    );
-    if(misplacedIdx>=0){
-      const [misplacedUser]=messages.splice(misplacedIdx,1);
+    if(misplacedPendingIdx>=0){
+      const [misplacedUser]=messages.splice(misplacedPendingIdx,1);
       messages.splice(liveAssistantIdx,0,misplacedUser);
     }else{
       messages.splice(liveAssistantIdx,0,pendingMsg);

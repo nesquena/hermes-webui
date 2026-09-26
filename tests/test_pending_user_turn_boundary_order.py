@@ -197,6 +197,49 @@ def test_materialized_pending_prompt_stays_above_output_with_live_row():
     )
 
 
+def test_misplaced_optimistic_pending_row_is_lifted_without_duplication():
+    """Inflight reconciliation may leave the browser-owned optimistic row after
+    the live assistant row. A valid timestamp boundary must relocate that exact
+    `_pending` projection instead of materializing a second, attachment-less row.
+    """
+    body = f"""
+{_PROBE_TAIL}
+const session={_SESSION_JS};
+const messages=[
+  {{role:'user', content:'prompt precedent', timestamp:{_T0 - 200}}},
+  {{role:'assistant', content:'reponse precedente', timestamp:{_T0 - 150}}},
+  {{role:'assistant', content:'je verifie X', timestamp:{_T0 + 10}}},
+  {{role:'tool', content:'{{}}', timestamp:{_T0 + 11}}},
+  {{role:'assistant', content:'streaming', _live:true}},
+  {{role:'user', content:{json.dumps(_PROMPT)}, timestamp:{_T0 + 0.4}, _pending:true,
+    attachments:[{{name:'courant.pdf'}}]}},
+];
+const merged=_mergePendingSessionMessage(session,messages);
+const idxs=idxsOfPrompt(messages);
+const firstOutput=firstTurnOutputIdx(messages);
+const liveIdx=messages.findIndex(m=>m&&m._live===true);
+process.stdout.write(JSON.stringify({{
+  merged,
+  promptIdxs:idxs,
+  firstOutputIdx:firstOutput,
+  liveIdx,
+  attachmentsByIdx:messages.map(m=>Array.isArray(m&&m.attachments)?m.attachments.map(a=>a&&a.name):null),
+  order:messages.map(m=>`${{m.role}}@${{m.timestamp!==undefined?m.timestamp:'live'}}`),
+}}));
+"""
+    result = _run_probe(body)
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [2], (
+        "the optimistic pending row must move to the active-turn boundary, not "
+        f"be duplicated around live output: {result['order']}"
+    )
+    assert result["promptIdxs"][0] < result["firstOutputIdx"] < result["liveIdx"]
+    assert result["attachmentsByIdx"][2] == ["courant.pdf"], (
+        "relocating the optimistic row must preserve its attachments: "
+        f"{result['attachmentsByIdx']} ({result['order']})"
+    )
+
+
 def test_unmatched_transcript_row_keeps_pending_prompt_above_output():
     """A sub-second drift without a turn token is ambiguous: keep both rows.
 
