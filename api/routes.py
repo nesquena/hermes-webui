@@ -2938,6 +2938,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     peek_stream,
@@ -10912,7 +10913,7 @@ from api.models import (
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
-    _record_webui_deleted_session_tombstone,
+    _record_webui_deleted_session_tombstone,  # noqa: F401 - compatibility test seam
     retire_session_sidecar,
     ensure_cron_project,
     _profile_has_user_projects,
@@ -16700,6 +16701,12 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
+            # A live worker owns periodic checkpoints and final writeback until
+            # its teardown clears this exact registry entry. Refuse deletion
+            # rather than unlinking beneath an admitted writer that could
+            # recreate the sidecar after this route returns success.
+            if session_writeback_owner(sid) is not None:
+                return bad(handler, "Session busy, try again", 503)
             with LOCK:
                 evicted_session = SESSIONS.pop(sid, None)
             try:
@@ -16714,6 +16721,7 @@ def handle_post(handler, parsed) -> bool:
                     sid,
                     remove_backup=True,
                     record_deleted_tombstone=not is_messaging_session,
+                    invalidate_generation=True,
                 )
             except Exception:
                 logger.warning("Failed to retire session sidecar %s", p, exc_info=True)

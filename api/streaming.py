@@ -2784,15 +2784,72 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_started_at = None
     session.pending_user_source = None
     try:
-        from api.models import retire_session_sidecar
+        from api.models import prune_session_from_index, retire_session_sidecar
         sidecar_path = Path(session.path)
-        retire_session_sidecar(
+        retired = retire_session_sidecar(
             getattr(session, "session_id", None) or sidecar_path.stem,
             sidecar_path=sidecar_path,
             record_deleted_tombstone=False,
         )
+        if retired:
+            prune_session_from_index(
+                getattr(session, "session_id", None) or sidecar_path.stem
+            )
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+
+
+def _stop_checkpoint_thread(stop_event, checkpoint_thread) -> None:
+    """Stop and fully quiesce a checkpoint writer before lifecycle mutation."""
+    if stop_event is not None:
+        stop_event.set()
+    if (
+        checkpoint_thread is not None
+        and checkpoint_thread is not threading.current_thread()
+    ):
+        # No timeout: retirement must not proceed while an admitted checkpoint
+        # can still publish. The checkpoint never waits for the worker thread;
+        # callers invoke this before taking the agent lock, avoiding deadlock.
+        checkpoint_thread.join()
+
+
+def _run_periodic_checkpoint_loop(
+    session,
+    checkpoint_activity,
+    stop_event,
+    agent_lock,
+    *,
+    interval_seconds: float = 15,
+) -> None:
+    """Persist active-turn checkpoints until teardown revokes admission."""
+    last_saved_activity = 0
+    last_fingerprint = None
+    last_write_at = 0.0
+    while not stop_event.wait(interval_seconds):
+        try:
+            cur = checkpoint_activity[0]
+            if cur > last_saved_activity:
+                with agent_lock:
+                    # The wait admitted this iteration before teardown may have
+                    # set the stop event. Recheck after acquiring the mutation
+                    # lock so an admitted-but-blocked checkpoint cannot publish
+                    # after ephemeral retirement.
+                    if stop_event.is_set():
+                        return
+                    fingerprint = _streaming_checkpoint_fingerprint(session)
+                    now = time.time()
+                    stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
+                    if (
+                        fingerprint is None
+                        or fingerprint != last_fingerprint
+                        or stale
+                    ):
+                        _save_streaming_checkpoint(session)
+                        last_fingerprint = fingerprint
+                        last_write_at = now
+                last_saved_activity = cur
+        except Exception as exc:
+            logger.debug("Periodic checkpoint save failed: %s", exc)
 
 
 def _resolve_current_session_for_write(session):
@@ -11905,37 +11962,12 @@ def _run_agent_streaming(
             # (_checkpoint_activity is already initialised before on_tool().)
 
             def _periodic_checkpoint():
-                last_saved_activity = 0
-                last_fingerprint = None
-                last_write_at = 0.0
-                while not _checkpoint_stop.wait(15):
-                    try:
-                        cur = _checkpoint_activity[0]
-                        if cur > last_saved_activity:
-                            with _agent_lock:
-                                fingerprint = _streaming_checkpoint_fingerprint(s)
-                                # A completed tool call is the trigger, but not
-                                # proof that anything the checkpoint persists
-                                # actually changed. Rewriting a multi-megabyte
-                                # sidecar to re-persist identical bytes stalls
-                                # every concurrent HTTP request behind the GIL,
-                                # so only write when the persisted state moved.
-                                # Fail closed: an unreadable fingerprint (None)
-                                # always writes, and a periodic refresh keeps
-                                # updated_at from going stale on a long turn.
-                                now = time.time()
-                                stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
-                                if (
-                                    fingerprint is None
-                                    or fingerprint != last_fingerprint
-                                    or stale
-                                ):
-                                    _save_streaming_checkpoint(s)
-                                    last_fingerprint = fingerprint
-                                    last_write_at = now
-                            last_saved_activity = cur
-                    except Exception as e:
-                        logger.debug("Periodic checkpoint save failed: %s", e)
+                _run_periodic_checkpoint_loop(
+                    s,
+                    _checkpoint_activity,
+                    _checkpoint_stop,
+                    _agent_lock,
+                )
 
             _checkpoint_stop = threading.Event()
             # Persist the user message BEFORE streaming starts so it's durable even if
@@ -12028,6 +12060,12 @@ def _run_agent_streaming(
             _active_turn_identity['trusted_agent_input_text'] = _agent_msg_text
             _result_partial_pre_call_context = list(_previous_context_messages)
             if not _agent_can_invoke(agent):
+                if ephemeral:
+                    # Checkpointing is already live at this admission boundary.
+                    # Quiesce it before ephemeral finalization can unlink the
+                    # sidecar; otherwise an admitted writer can republish after
+                    # _cleanup_ephemeral_cancelled_turn() returns.
+                    _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
                 with _agent_lock:
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
@@ -12045,10 +12083,7 @@ def _run_agent_streaming(
             # sub-100ms window reaches the live Thinking view before the terminal done event.
             _flush_reasoning_buffer()
             if cancel_event.is_set():
-                if _checkpoint_stop is not None:
-                    _checkpoint_stop.set()
-                if _ckpt_thread is not None:
-                    _ckpt_thread.join(timeout=15)
+                _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
                 if ephemeral:
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=True, stream_id=stream_id)
@@ -12094,18 +12129,28 @@ def _run_agent_streaming(
                     'ephemeral': True,
                     'answer': _answer,
                 })
-                if _checkpoint_stop is not None:
-                    _checkpoint_stop.set()
-                try:
-                    from api.models import retire_session_sidecar
-                    sidecar_path = Path(s.path)
-                    retire_session_sidecar(
-                        s.session_id,
-                        sidecar_path=sidecar_path,
-                        record_deleted_tombstone=False,
-                    )
-                except Exception:
-                    pass
+                # Join BEFORE taking the agent lock: an admitted checkpoint may
+                # already be waiting there. Its post-lock stop check makes it
+                # exit without saving; verified thread termination then makes
+                # sidecar retirement final for this ephemeral run.
+                _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
+                with _agent_lock:
+                    try:
+                        from api.models import prune_session_from_index, retire_session_sidecar
+                        sidecar_path = Path(s.path)
+                        retired = retire_session_sidecar(
+                            s.session_id,
+                            sidecar_path=sidecar_path,
+                            record_deleted_tombstone=False,
+                        )
+                        if retired:
+                            prune_session_from_index(s.session_id)
+                    except Exception:
+                        logger.debug(
+                            "Failed to retire completed ephemeral session %s",
+                            session_id,
+                            exc_info=True,
+                        )
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -14235,10 +14280,7 @@ def _run_agent_streaming(
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
-        if _checkpoint_stop is not None:
-            _checkpoint_stop.set()
-        if _ckpt_thread is not None:
-            _ckpt_thread.join(timeout=15)
+        _stop_checkpoint_thread(_checkpoint_stop, _ckpt_thread)
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):

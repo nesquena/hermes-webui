@@ -256,6 +256,8 @@ def _safe_replace(src: Path, dst: Path) -> None:
 _INDEX_WRITE_LOCK = threading.RLock()
 _SESSION_SIDECAR_AUTHORITIES_LOCK = threading.Lock()
 _SESSION_SIDECAR_AUTHORITIES: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
+_SESSION_LIFECYCLE_GENERATIONS_LOCK = threading.Lock()
+_SESSION_LIFECYCLE_GENERATIONS: dict[str, int] = {}
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
@@ -276,6 +278,27 @@ def _session_sidecar_authority(session_id: str) -> threading.RLock:
             authority = threading.RLock()
             _SESSION_SIDECAR_AUTHORITIES[sid] = authority
         return authority
+
+
+def _session_lifecycle_generation(session_id: str) -> int:
+    """Return the in-process lifecycle generation for one session ID.
+
+    A ``Session`` captures this value at construction. Ordinary deletion bumps
+    it while holding the sidecar authority, so a detached object created before
+    that delete can no longer recreate the sidecar or clear its tombstone.
+    """
+    sid = str(session_id or "")
+    with _SESSION_LIFECYCLE_GENERATIONS_LOCK:
+        return _SESSION_LIFECYCLE_GENERATIONS.get(sid, 0)
+
+
+def _invalidate_session_lifecycle_generation(session_id: str) -> int:
+    """Invalidate every pre-existing ``Session`` object for one session ID."""
+    sid = str(session_id or "")
+    with _SESSION_LIFECYCLE_GENERATIONS_LOCK:
+        generation = _SESSION_LIFECYCLE_GENERATIONS.get(sid, 0) + 1
+        _SESSION_LIFECYCLE_GENERATIONS[sid] = generation
+        return generation
 
 
 # Compatibility alias for downstream private imports. New sidecar mutation
@@ -919,6 +942,7 @@ def retire_session_sidecar(
     sidecar_path: Path | str | None = None,
     remove_backup: bool = True,
     record_deleted_tombstone: bool = False,
+    invalidate_generation: bool = False,
 ) -> bool:
     """Retire one sidecar generation under the shared per-SID authority.
 
@@ -957,7 +981,14 @@ def retire_session_sidecar(
                     path.with_suffix(".json.bak"),
                     exc_info=True,
                 )
-        return not path.exists()
+        retired = not path.exists()
+        if retired and invalidate_generation:
+            # Still under the sidecar authority: no stale save can slip between
+            # the unlink and generation invalidation. New objects constructed
+            # after this point capture the new generation and may intentionally
+            # recreate the SID; pre-delete objects fail closed in save().
+            _invalidate_session_lifecycle_generation(sid)
+        return retired
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
@@ -1509,6 +1540,7 @@ class Session:
                  gateway_run=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        self._lifecycle_generation = _session_lifecycle_generation(self.session_id)
         self.title = title
         self.profile = profile
         self.workspace = str(_resolve_path(workspace, profile=profile))
@@ -1655,6 +1687,12 @@ class Session:
         # alias resolves to the same shared sidecar authority in production.
         authority = _session_save_authority(self.session_id)
         with authority:
+            current_generation = _session_lifecycle_generation(self.session_id)
+            if self._lifecycle_generation != current_generation:
+                raise RuntimeError(
+                    f"Refusing stale save for deleted session {self.session_id!r}: "
+                    "the session lifecycle generation has advanced"
+                )
             self._save_owned_generation(touch_updated_at=touch_updated_at, skip_index=skip_index)
 
     def _save_owned_generation(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:

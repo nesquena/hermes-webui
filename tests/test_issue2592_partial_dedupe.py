@@ -1,8 +1,12 @@
 import copy
 import json
+import queue
+import sys
 import threading
+import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -438,6 +442,284 @@ def test_lifecycle_retirement_cannot_be_republished_by_delayed_load_repair(
     assert retirement_committed.is_set()
     assert not session_path.exists()
     assert sid in models._load_webui_deleted_session_tombstone()
+
+
+def test_ephemeral_retirement_quiesces_admitted_checkpoint(tmp_path, monkeypatch):
+    """An admitted checkpoint cannot recreate /btw persistence after cleanup."""
+    from api import models, streaming
+
+    sid = "ephemeral-checkpoint-race"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "temporary", "timestamp": 1}],
+        active_stream_id="btw-stream",
+        pending_user_message="temporary",
+        pending_started_at=1,
+    )
+    session.save()
+
+    admitted = threading.Event()
+    retirement_committed = threading.Event()
+    agent_lock = threading.Lock()
+
+    class BarrierStopEvent:
+        def __init__(self):
+            self._event = threading.Event()
+
+        def wait(self, _timeout):
+            admitted.set()
+            return self._event.is_set()
+
+        def set(self):
+            self._event.set()
+
+        def is_set(self):
+            return self._event.is_set()
+
+    stop_event = BarrierStopEvent()
+    checkpoint_activity = [1]
+
+    checkpoint_thread = threading.Thread(
+        target=streaming._run_periodic_checkpoint_loop,
+        args=(session, checkpoint_activity, stop_event, agent_lock),
+        kwargs={"interval_seconds": 0},
+        name="admitted-ephemeral-checkpoint",
+    )
+
+    def cleanup():
+        streaming._stop_checkpoint_thread(stop_event, checkpoint_thread)
+        with agent_lock:
+            assert models.retire_session_sidecar(
+                sid,
+                sidecar_path=session.path,
+                record_deleted_tombstone=False,
+            )
+            models.prune_session_from_index(sid)
+        retirement_committed.set()
+
+    agent_lock.acquire()
+    checkpoint_thread.start()
+    assert admitted.wait(timeout=5)
+    cleanup_thread = threading.Thread(target=cleanup, name="ephemeral-cleanup")
+    cleanup_thread.start()
+    assert not retirement_committed.wait(timeout=0.2)
+
+    agent_lock.release()
+    checkpoint_thread.join(timeout=5)
+    cleanup_thread.join(timeout=5)
+
+    assert not checkpoint_thread.is_alive()
+    assert not cleanup_thread.is_alive()
+    assert retirement_committed.is_set()
+    assert not session.path.exists()
+    assert not session.path.with_suffix(".json.bak").exists()
+    index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+    assert all(row.get("session_id") != sid for row in index_rows)
+
+
+def test_ephemeral_preinvoke_cancel_quiesces_checkpoint_before_retirement(
+    tmp_path, monkeypatch
+):
+    """The production worker joins an admitted checkpoint before cancel cleanup."""
+    from api import config, models, run_journal, streaming
+
+    sid = "ephemeral-preinvoke-cancel"
+    stream_id = "ephemeral-preinvoke-stream"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(run_journal, "_default_session_dir", lambda: session_dir)
+
+    session = models.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="anthropic",
+        messages=[{"role": "user", "content": "temporary", "timestamp": 1}],
+        active_stream_id=stream_id,
+        pending_user_message="temporary",
+        pending_started_at=1,
+    )
+    session.save()
+    config.register_session_writeback_owner(sid, stream_id)
+
+    agent_lock = threading.Lock()
+    checkpoint_admitted = threading.Event()
+    checkpoint_may_contend = threading.Event()
+    checkpoint_waiting_on_lock = threading.Event()
+    captured_stop_event = []
+    releaser_threads = []
+
+    def checkpoint_loop(
+        checkpoint_session,
+        _checkpoint_activity,
+        stop_event,
+        checkpoint_agent_lock,
+        **_kwargs,
+    ):
+        captured_stop_event.append(stop_event)
+        checkpoint_admitted.set()
+        assert checkpoint_may_contend.wait(timeout=5)
+        checkpoint_waiting_on_lock.set()
+        with checkpoint_agent_lock:
+            if stop_event.is_set():
+                return
+            streaming._save_streaming_checkpoint(checkpoint_session)
+
+    original_build_run_kwargs = streaming._build_run_conversation_kwargs
+
+    def cancel_before_invoke(*args, **kwargs):
+        assert checkpoint_admitted.wait(timeout=5)
+        agent_lock.acquire()
+        checkpoint_may_contend.set()
+        assert checkpoint_waiting_on_lock.wait(timeout=5)
+
+        def release_after_stop():
+            assert captured_stop_event[0].wait(timeout=5)
+            agent_lock.release()
+
+        releaser = threading.Thread(
+            target=release_after_stop,
+            name="release-agent-lock-after-checkpoint-stop",
+        )
+        releaser.start()
+        releaser_threads.append(releaser)
+        with config.STREAMS_LOCK:
+            streaming.STREAMS.pop(stream_id, None)
+        return original_build_run_kwargs(*args, **kwargs)
+
+    class Agent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            session_id=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            status_callback=None,
+            **_kwargs,
+        ):
+            self.model = model
+            self.provider = provider
+            self.session_id = session_id
+            self.stream_delta_callback = stream_delta_callback
+            self.reasoning_callback = reasoning_callback
+            self.status_callback = status_callback
+            self._provider_fallback_active = False
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **_kwargs):  # pragma: no cover - invocation is denied
+            raise AssertionError("cancelled ephemeral agent must not be invoked")
+
+        def interrupt(self, _message):
+            return None
+
+    runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_module.resolve_runtime_provider = mock.Mock(
+        return_value={
+            "provider": "anthropic",
+            "base_url": None,
+            "api_key": "test-key",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+    )
+    cli_module = types.ModuleType("hermes_cli")
+    cli_module.runtime_provider = runtime_module
+    state_module = types.ModuleType("hermes_state")
+    state_module.SessionDB = mock.Mock(return_value=None)
+    injected = {
+        "hermes_cli": cli_module,
+        "hermes_cli.runtime_provider": runtime_module,
+        "hermes_state": state_module,
+    }
+    missing = object()
+    saved_modules = {name: sys.modules.get(name, missing) for name in injected}
+    sys.modules.update(injected)
+
+    events = queue.Queue()
+    worker_done = threading.Event()
+    worker_errors = []
+
+    def run_worker():
+        try:
+            streaming._run_agent_streaming(
+                sid,
+                "temporary",
+                "test-model",
+                str(tmp_path),
+                stream_id,
+                ephemeral=True,
+                model_provider="anthropic",
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            worker_errors.append(exc)
+        finally:
+            worker_done.set()
+
+    try:
+        config.SESSION_AGENT_CACHE.clear()
+        monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+        monkeypatch.setattr(streaming, "_get_ai_agent", lambda: Agent)
+        monkeypatch.setattr(
+            streaming,
+            "resolve_model_provider",
+            lambda *_args, **_kwargs: ("test-model", "anthropic", None),
+        )
+        monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: agent_lock)
+        monkeypatch.setattr(
+            streaming, "_build_run_conversation_kwargs", cancel_before_invoke
+        )
+        monkeypatch.setattr(streaming, "_run_periodic_checkpoint_loop", checkpoint_loop)
+        monkeypatch.setattr(config, "get_config", lambda: {})
+        monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda _cfg: [])
+        streaming.STREAMS[stream_id] = events
+
+        worker = threading.Thread(target=run_worker, name="ephemeral-production-worker")
+        worker.start()
+        completed_before_fallback = worker_done.wait(timeout=5)
+        if not completed_before_fallback:
+            # Keep a failed ordering regression from leaving blocked test threads.
+            if captured_stop_event:
+                captured_stop_event[0].set()
+        worker.join(timeout=5)
+        for releaser in releaser_threads:
+            releaser.join(timeout=5)
+
+        assert completed_before_fallback
+        assert not worker.is_alive()
+        assert worker_errors == []
+        assert not session.path.exists()
+        assert not session.path.with_suffix(".json.bak").exists()
+        index_rows = json.loads(
+            (session_dir / "_index.json").read_text(encoding="utf-8")
+        )
+        assert all(row.get("session_id") != sid for row in index_rows)
+    finally:
+        streaming.STREAMS.pop(stream_id, None)
+        config.clear_session_writeback_owner_if_owned(sid, stream_id)
+        config.SESSION_AGENT_CACHE.clear()
+        for name, original in saved_modules.items():
+            if original is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
 
 def test_context_dedupe_is_idempotent_for_alternating_incomplete_ids():

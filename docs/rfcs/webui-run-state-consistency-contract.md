@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-09-15
+- **Updated:** 2026-09-26
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -124,6 +124,50 @@ This RFC remains `Proposed` because its broader cross-layer contract also covers
 model-context reconstruction, compression handoff, session metadata, and future
 runtime-adapter migration. Shipped Anchor coverage strengthens invariants 2, 3,
 and 5; it does not mark every run-state boundary implemented.
+
+## Durable incomplete-message normalization
+
+WebUI uses one narrow identity rule for replayed empty assistant results. A row
+is eligible only when all of the following hold:
+
+- `role` is `assistant` and `finish_reason` is `incomplete`;
+- visible content is empty after the same structured-text extraction and
+  thinking-markup stripping used by streaming reconciliation;
+- neither `tool_call_id` nor `tool_calls` is present; and
+- `id` is an exact built-in non-empty `str`, exact built-in `int`, or finite
+  exact built-in `float`.
+
+The identity is the type-tagged pair `(type, id)`. Booleans, containers,
+subclasses, non-finite floats, missing IDs, completed rows, tool-bearing rows,
+and rows with visible content are not eligible. In particular, `1`, `"1"`, and
+`1.0` remain distinct identities. This is deletion authority, so malformed or
+ambiguous values fail closed rather than being stringified.
+
+That same eligibility and identity apply at every collapse boundary: full
+sidecar load/self-heal, the immutable `Session.save()` generation, streaming
+context/display reconciliation, and backup inspection/restoration. Duplicate
+eligible identities collapse across non-adjacent replay rows; when duplicate
+payloads differ, the most information-rich row is retained. All other rows
+preserve their membership and order. Sidecar JSON and its sidebar index row are
+published from the same detached, collapsed save generation.
+
+Recovery compares the normalized message multisets that would actually be
+restored. A readable backup is automatically restorable only when that
+normalized backup is a strict superset of the normalized live transcript and
+contains every live row. Any live-only membership or equal-count divergence is
+`manual_review` and leaves both files untouched. Intentional clear, truncate,
+compression-shrink, and superseded squash-projection generations remain
+authoritative and are not reversed merely because a backup is larger. A restore
+writes the normalized backup payload and recomputes `message_count`; it never
+copies raw replay amplification back into the live sidecar.
+
+All sidecar read/repair/save/recovery/retirement mutations share the per-session
+sidecar authority. If the agent lock is also needed, lock order is agent lock
+then sidecar authority. Ephemeral retirement first revokes checkpoint admission,
+joins the checkpoint thread to termination without holding the agent lock, then
+retires under that lock. Ordinary deletion refuses an active writeback owner and
+advances an in-process lifecycle generation with retirement, so a detached
+pre-delete `Session` object cannot republish the sidecar or clear its tombstone.
 
 ## State Layers
 

@@ -590,6 +590,103 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
     assert routes_module.SESSIONS[sid] is cached_session
 
 
+def test_delete_refuses_active_writeback_owner_without_mutation(
+    models_module, monkeypatch, tmp_path
+):
+    routes_module = pytest.importorskip("api.routes")
+    sid = "delete-owned-session"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sidecar = session_dir / f"{sid}.json"
+    sidecar.write_text(json.dumps({"session_id": sid, "messages": []}), encoding="utf-8")
+    cached_session = SimpleNamespace(session_id=sid, profile=None)
+    mutations = []
+
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: cached_session})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: cached_session)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(routes_module, "session_writeback_owner", lambda _sid: "live-stream")
+    monkeypatch.setattr(
+        routes_module,
+        "retire_session_sidecar",
+        lambda *_a, **_k: mutations.append("retire") or True,
+    )
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    assert handler.status == 503
+    assert json.loads(handler.wfile.getvalue()) == {"error": "Session busy, try again"}
+    assert mutations == []
+    assert sidecar.exists()
+    assert routes_module.SESSIONS[sid] is cached_session
+
+
+def test_delete_invalidates_detached_session_before_stale_save(
+    models_module, monkeypatch, tmp_path
+):
+    """A pre-delete Session object cannot republish or clear the tombstone."""
+    routes_module = pytest.importorskip("api.routes")
+    sid = "delete-stale-generation"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models_module, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
+
+    stale = models_module.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "must stay deleted", "timestamp": 1}],
+    )
+    stale.save()
+    monkeypatch.setattr(routes_module, "SESSIONS", {sid: stale})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "get_session", lambda *_a, **_k: stale)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
+    monkeypatch.setattr(
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+    )
+    monkeypatch.setattr(routes_module, "_get_session_agent_lock", lambda _sid: threading.RLock())
+    monkeypatch.setattr(routes_module, "session_writeback_owner", lambda _sid: None)
+    monkeypatch.setattr(routes_module, "_publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(models_module, "delete_cli_session", lambda _sid: True)
+
+    handler = _DeleteJSONHandler({"session_id": sid})
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/delete"))
+
+    assert handler.status == 200
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+
+    with pytest.raises(RuntimeError, match="lifecycle generation has advanced"):
+        stale.save()
+
+    assert not (session_dir / f"{sid}.json").exists()
+    assert sid in models_module._load_webui_deleted_session_tombstone()
+    index_rows = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+    assert all(row.get("session_id") != sid for row in index_rows)
+
+    fresh = models_module.Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "intentional recreate", "timestamp": 2}],
+    )
+    fresh.save()
+    assert (session_dir / f"{sid}.json").exists()
+    assert sid not in models_module._load_webui_deleted_session_tombstone()
+
+
 @pytest.mark.parametrize("fault", ["tombstone_not_durable", "retire_returns_false"])
 def test_delete_fails_closed_when_sidecar_retirement_does_not_commit(
     fault, models_module, monkeypatch, tmp_path
