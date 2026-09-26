@@ -4830,6 +4830,18 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   }
   const modelHealthHtml = _renderStaticModelHealthTable();
 
+  // Top sessions by tokens
+  let topSessionsHtml = '';
+  if (d.top_sessions && d.top_sessions.length) {
+    topSessionsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_top_sessions'))}</div><div class="insights-table insights-top-sessions-table"><div class="insights-table-head"><span>${esc(t('insights_session_name'))}</span><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
+      d.top_sessions.map(s => {
+        const name = s.title || s.id || '—';
+        const title = `${s.model} · ${fmtTokens(s.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(s.output_tokens)} ${t('insights_output_tokens')}`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(name)}">${esc(name)}</span><span class="insights-model-name" title="${esc(s.model)}">${esc(s.model.split('/').pop())}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(s.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(s.cost)}</span><span>${s.token_share || 0}%</span></div>`;
+      }).join('') +
+      `</div></div>`;
+  }
+
   // Activity by day of week
   let dowHtml = '';
   if (d.activity_by_day) {
@@ -4886,6 +4898,9 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
     <div class="insights-row insights-usage-grid">
       ${tokenCards}
       ${modelsHtml}
+    </div>
+    <div class="insights-row" style="grid-template-columns:1fr">
+      ${topSessionsHtml}
     </div>
     ${dowHtml}
     ${hodHtml}

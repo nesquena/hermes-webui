@@ -12137,6 +12137,8 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
+    import datetime as _dt
+    import math
     import time as _time
 
     from api.usage import prompt_cache_hit_percent
@@ -12175,6 +12177,43 @@ def _handle_insights(handler, parsed) -> bool:
     def _session_usage_ts(session: dict) -> float:
         return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
 
+    def _safe_ts(value) -> float:
+        """Normalize a timestamp to a finite numeric epoch (0.0 when unusable).
+
+        Older state.db rows store text timestamps; sorting applies unary `-` to
+        the raw value, so a str would 500 the whole endpoint.
+        """
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value) if math.isfinite(value) else 0.0
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return 0.0
+            try:
+                return float(s)
+            except ValueError:
+                pass
+            try:
+                return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+        return 0.0
+
+    # Resolve the request profile once and scope every index row to it.
+    # _index.json is GLOBAL (every profile on the box); without this filter the
+    # card ranks and prints other profiles' session titles/IDs — a cross-tenant
+    # disclosure. _profiles_match coerces None/'' -> 'default', so legacy
+    # profile-less rows still surface on the root profile.
+    active_profile = _get_active_profile_name()
+    # Read the redaction setting ONCE and fail closed: titles are auto-derived
+    # from first messages, so a pasted API key would otherwise leak raw here.
+    try:
+        redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    except Exception:
+        redact_enabled = True
+
     # Walk session index (fast, no full JSON parse)
     sessions_data = []
     idx_path = SESSION_DIR / "_index.json"
@@ -12187,6 +12226,10 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
+        # Profile isolation: drop foreign-profile rows BEFORE aggregation so
+        # they never reach the totals, the model breakdown, or top_sessions.
+        if not _profiles_match(entry.get("profile"), active_profile):
+            continue
         created = entry.get("created_at", 0) or 0
         updated = entry.get("updated_at", 0) or 0
         # Session is relevant if it was created or updated within the calendar window.
@@ -12207,6 +12250,8 @@ def _handle_insights(handler, parsed) -> bool:
     dow_activity = collections.Counter()
     # Activity by hour of day (0-23)
     hod_activity = collections.Counter()
+    # Per-session rows for the "Top sessions" card (ranked by tokens).
+    session_rows = []
 
     for s in sessions_data:
         input_tokens = _safe_usage_int(s.get("input_tokens"))
@@ -12232,6 +12277,16 @@ def _handle_insights(handler, parsed) -> bool:
         bucket["output_tokens"] += output_tokens
         bucket["cache_read_tokens"] += cache_read_tokens
         bucket["cost"] += cost_value
+        session_rows.append({
+            "id": s.get("session_id") or s.get("id") or "",
+            "title": s.get("title") or "",
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cost": cost_value,
+            "ts": _session_usage_ts(s),
+        })
 
         # Activity patterns
         ts = _session_usage_ts(s)
@@ -12264,34 +12319,41 @@ def _handle_insights(handler, parsed) -> bool:
             with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                # cache_read_tokens may not exist on older agent state DBs;
-                # fall back to a query without it if the column is missing.
-                try:
-                    cur.execute("""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at
-                        FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
-                except sqlite3.OperationalError:
-                    cur.execute("""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               0 AS cache_read_tokens,
-                               started_at, ended_at
-                        FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                # Detect optional columns per-schema instead of exception-driven
+                # fallback: a partially-migrated table (e.g. title present but
+                # cache_read_tokens absent) degrades predictably instead of
+                # relying on which query throws first.
+                cur.execute("PRAGMA table_info(sessions)")
+                _cols = {r[1] for r in cur.fetchall()}
+                _title_expr = "title" if "title" in _cols else "NULL AS title"
+                _cache_expr = ("COALESCE(cache_read_tokens, 0) AS cache_read_tokens"
+                               if "cache_read_tokens" in _cols else "0 AS cache_read_tokens")
+                cur.execute(f"""
+                    SELECT id, {_title_expr}, model, message_count, input_tokens, output_tokens,
+                           estimated_cost_usd,
+                           {_cache_expr},
+                           started_at, ended_at
+                    FROM sessions
+                    WHERE COALESCE(source, '') != 'webui'
+                """)
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
+                    # Latest activity (ended_at preferred over started_at) so a
+                    # long-running session ranks by recency, not by start time.
+                    _ts = max(_safe_ts(row["ended_at"]), _safe_ts(row["started_at"]))
+                    # Date-window filter in Python (not SQL): a TEXT timestamp
+                    # compared against a numeric epoch in SQLite is always "greater"
+                    # (storage-class ordering), so the SQL predicate would let old
+                    # rows leak into the window. _safe_ts normalizes both shapes.
+                    # ponytail: loads all non-webui rows instead of date-pruning in
+                    # SQL; fine for a local single-profile DB, add a SQL ts filter
+                    # if state.db grows to millions of rows.
+                    if _ts < cutoff:
+                        continue
                     total_sessions += 1
                     total_messages += _msgs
                     total_input_tokens += _input
@@ -12312,11 +12374,24 @@ def _handle_insights(handler, parsed) -> bool:
                     bucket["output_tokens"] += _output
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
+                    session_rows.append({
+                        "id": row["id"] or "",
+                        "title": row["title"] or "",
+                        "model": _model,
+                        "input_tokens": _input,
+                        "output_tokens": _output,
+                        "total_tokens": _input + _output,
+                        "cost": _cost,
+                        "ts": _ts,
+                    })
 
-                    _ts = row["started_at"] or row["ended_at"] or 0
                     if _ts:
-                        _dt = _time.localtime(_ts)
-                        _day_key = _time.strftime("%Y-%m-%d", _dt)
+                        # _dtt (not _dt): the loop must not shadow the `import
+                        # datetime as _dt` module that _safe_ts uses, or a later
+                        # ISO-timestamp row raises AttributeError and the outer
+                        # except silently drops that row and every row after it.
+                        _dtt = _time.localtime(_ts)
+                        _day_key = _time.strftime("%Y-%m-%d", _dtt)
                         _daily = daily_tokens.setdefault(_day_key, {
                             "input_tokens": 0,
                             "output_tokens": 0,
@@ -12329,8 +12404,8 @@ def _handle_insights(handler, parsed) -> bool:
                         _daily["cache_read_tokens"] += _cache_read
                         _daily["sessions"] += 1
                         _daily["cost"] += _cost
-                        dow_activity[_dt.tm_wday] += 1
-                        hod_activity[_dt.tm_hour] += 1
+                        dow_activity[_dtt.tm_wday] += 1
+                        hod_activity[_dtt.tm_hour] += 1
     except Exception:
         logger.debug("Failed to include CLI sessions in insights", exc_info=True)
 
@@ -12363,6 +12438,45 @@ def _handle_insights(handler, parsed) -> bool:
             "cost_share": int(round((row_cost / total_cost) * 100)) if total_cost else 0,
         })
     models_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["model"]))
+
+    # Top sessions by tokens (tie-break: cost, then most recent).
+    # Deduplicate by non-empty session ID so a session present in both the WebUI
+    # index and state.db occupies one ranking slot, not two. The first store seen
+    # (WebUI index) is the base; a duplicate's title/model fill in only if the
+    # base is missing them. ID-less rows stay distinct. Zero-token candidates are
+    # omitted rather than ranked.
+    _deduped: dict[str, dict] = {}
+    _no_id: list[dict] = []
+    for r in session_rows:
+        if r["total_tokens"] <= 0:
+            continue
+        rid = r["id"]
+        if not rid:
+            _no_id.append(r)
+            continue
+        base = _deduped.get(rid)
+        if base is None:
+            _deduped[rid] = r
+        else:
+            if not base["title"] and r["title"]:
+                base["title"] = r["title"]
+            if (not base["model"] or base["model"] == "unknown") and r["model"] not in ("", "unknown"):
+                base["model"] = r["model"]
+    _ranked = list(_deduped.values()) + _no_id
+    top_sessions = [
+        {
+            "id": r["id"],
+            "title": _redact_text(r["title"], _enabled=redact_enabled) if isinstance(r["title"], str) else r["title"],
+            "model": r["model"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "total_tokens": r["total_tokens"],
+            "cost": round(r["cost"], 6),
+            "ts": r["ts"],
+            "token_share": int(round((r["total_tokens"] / total_tokens) * 100)) if total_tokens else 0,
+        }
+        for r in sorted(_ranked, key=lambda r: (-r["total_tokens"], -r["cost"], -r["ts"]))[:10]
+    ]
 
     daily_series = []
     for i in range(days):
@@ -12406,6 +12520,7 @@ def _handle_insights(handler, parsed) -> bool:
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
         "models": models_breakdown,
+        "top_sessions": top_sessions,
         "daily_tokens": daily_series,
         "activity_by_day": dow_data,
         "activity_by_hour": hod_data,

@@ -516,3 +516,240 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
     assert data["models"][0]["cache_hit_percent"] is None
     assert data["total_cache_hit_percent"] is None
 
+
+# ── #7661 CORE: cross-profile isolation + title redaction on top_sessions ──
+def test_insights_top_sessions_isolated_by_profile(monkeypatch, tmp_path):
+    """_index.json is GLOBAL; the card must not rank or leak other profiles' sessions.
+
+    Reproduces the cross-tenant disclosure: profile 'alpha' must not receive
+    profile 'beta''s session title/ID, and foreign rows must not inflate totals.
+    """
+    import api.routes as routes
+
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "mine", "profile": "alpha", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 100, "output_tokens": 10,
+         "estimated_cost": 0.01, "model": "gpt-5.5", "title": "my session"},
+        {"session_id": "theirs", "profile": "beta", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 9999, "output_tokens": 999,
+         "estimated_cost": 0.99, "model": "gpt-5.5", "title": "beta secret session"},
+    ]
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "mine" in ids
+    assert "theirs" not in ids, "foreign-profile session leaked into top_sessions"
+    # Foreign row must not inflate the aggregates either.
+    assert data["total_input_tokens"] == 100
+    assert data["total_sessions"] == 1
+    assert "beta secret session" not in json.dumps(data)
+
+
+def test_insights_top_sessions_titles_are_redacted(monkeypatch, tmp_path):
+    """top_sessions titles pass through _redact_text when api_redact_enabled is on.
+
+    Session titles are auto-derived from first messages, so a pasted API key
+    must not be returned raw from /api/insights.
+    """
+    import api.routes as routes
+
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    secret = "sk-TestCredential1234567890"
+    entries = [
+        {"session_id": "s1", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 100, "output_tokens": 10,
+         "estimated_cost": 0.01, "model": "gpt-5.5",
+         "title": f"please use {secret} now"},
+    ]
+    monkeypatch.setattr(routes, "load_settings", lambda: {"api_redact_enabled": True})
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+
+    titles = [s["title"] for s in data["top_sessions"]]
+    assert titles, "expected at least one top session"
+    for t in titles:
+        assert secret not in t, "secret-bearing title leaked unredacted"
+
+
+# ── #7661 remaining: text ts, cross-store dedup, zero-token, latest-activity ──
+def _call_insights_state_db_schema(monkeypatch, tmp_path, entries, rows, schema, days="7", now=None):
+    """Seed a state.db with a CUSTOM sessions schema (for legacy/partial tables)."""
+    import sqlite3
+    import api.routes as routes
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    if now is not None:
+        monkeypatch.setattr(time, "time", lambda: now)
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(schema)
+    for r in rows:
+        cols = list(r.keys())
+        conn.execute(
+            f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            [r[c] for c in cols],
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    handler = _FakeHandler()
+    parsed = SimpleNamespace(query=f"days={days}")
+    routes._handle_insights(handler, parsed)
+    assert handler.status == 200
+    return handler.json_body()
+
+
+def test_insights_text_timestamps_do_not_500(monkeypatch, tmp_path):
+    """Legacy state.db rows store text timestamps; sorting must not 500 the endpoint."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    iso = "2026-05-30T12:00:00"
+    schema = (
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at TEXT, ended_at TEXT)"
+    )
+    rows = [{"id": "txt1", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+             "input_tokens": 100, "output_tokens": 10, "estimated_cost_usd": 0.01,
+             "started_at": iso, "ended_at": iso}]
+    data = _call_insights_state_db_schema(monkeypatch, tmp_path, [], rows, schema, days="7", now=now)
+    # Endpoint survived (no 500) and the text-ts session is ranked with a numeric ts.
+    assert any(s["id"] == "txt1" for s in data["top_sessions"])
+    ts = next(s["ts"] for s in data["top_sessions"] if s["id"] == "txt1")
+    assert isinstance(ts, (int, float)) and ts > 0
+
+
+def test_insights_top_sessions_dedup_across_stores(monkeypatch, tmp_path):
+    """A session present in both _index.json and state.db occupies one slot, not two."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    webui_entries = [
+        {"session_id": "dup", "updated_at": now, "created_at": now, "message_count": 1,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost": 0.01, "model": "gpt-5.5",
+         "title": "shared session"},
+    ]
+    # Same id in state.db but source='cli' (so the second pass does NOT skip it).
+    state_rows = [
+        {"id": "dup", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost_usd": 0.01,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, webui_entries, state_rows, days="7", now=now)
+    ids = [s["id"] for s in data["top_sessions"]]
+    assert ids.count("dup") == 1, f"session 'dup' ranked twice: {ids}"
+
+
+def test_insights_top_sessions_omits_zero_token(monkeypatch, tmp_path):
+    """Zero-token sessions are counted in totals but not ranked in top_sessions."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "busy", "updated_at": now, "created_at": now, "message_count": 1,
+         "input_tokens": 500, "output_tokens": 50, "estimated_cost": 0.05, "model": "gpt-5.5"},
+        {"session_id": "idle", "updated_at": now, "created_at": now, "message_count": 1,
+         "input_tokens": 0, "output_tokens": 0, "estimated_cost": 0.0, "model": "gpt-5.5"},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "busy" in ids
+    assert "idle" not in ids, "zero-token session should be omitted from top_sessions"
+    assert data["total_sessions"] == 2  # still counted in the aggregate
+
+
+def test_insights_top_sessions_rank_by_latest_activity(monkeypatch, tmp_path):
+    """A long-running session ranks by ended_at (latest activity), not started_at."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    old_start = now - (6 * 86400)
+    rows = [
+        # Started long ago but ended recently -> should rank first (tie on tokens).
+        {"id": "long", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 0, "estimated_cost_usd": 0.01,
+         "started_at": old_start, "ended_at": now},
+        # Started more recently but ended earlier -> should rank second.
+        {"id": "short", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 0, "estimated_cost_usd": 0.01,
+         "started_at": now - (3 * 86400), "ended_at": now - (3 * 86400)},
+    ]
+    data = _call_insights_state_db_schema(
+        monkeypatch, tmp_path, [], rows,
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at REAL, ended_at REAL)",
+        days="7", now=now,
+    )
+    order = [s["id"] for s in data["top_sessions"]]
+    assert order.index("long") < order.index("short"), f"expected 'long' before 'short': {order}"
+
+
+def test_insights_top_sessions_table_has_contained_overflow():
+    """The top-sessions table scrolls inside its card instead of overflowing the panel."""
+    assert "insights-top-sessions-table" in PANELS_JS
+    assert ".insights-top-sessions-table{overflow-x:auto;display:block;}" in STYLE_CSS
+    assert "min-width:420px" in STYLE_CSS
+
+
+def test_insights_text_timestamps_respect_date_window(monkeypatch, tmp_path):
+    """A TEXT-timestamp row older than the window is excluded, not leaked in.
+
+    Regression: comparing a TEXT timestamp to a numeric epoch in the SQL WHERE
+    clause is always "greater" (storage-class ordering), so old rows leaked into
+    the window. The filter must run in Python via _safe_ts.
+    """
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    schema = (
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at TEXT, ended_at TEXT)"
+    )
+    rows = [
+        # Within the 7-day window (relative to `now`).
+        {"id": "recent", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 10, "estimated_cost_usd": 0.01,
+         "started_at": "2026-05-30T12:00:00", "ended_at": "2026-05-30T12:00:00"},
+        # Years old — must be EXCLUDED from the 7-day window.
+        {"id": "ancient", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 5000, "output_tokens": 500, "estimated_cost_usd": 0.5,
+         "started_at": "2020-01-01T00:00:00", "ended_at": "2020-01-01T00:00:00"},
+    ]
+    data = _call_insights_state_db_schema(monkeypatch, tmp_path, [], rows, schema, days="7", now=now)
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "recent" in ids
+    assert "ancient" not in ids, "out-of-window text-ts session leaked into top_sessions"
+    assert data["total_sessions"] == 1  # ancient row not counted in the aggregate either
+
+
+def test_insights_multiple_iso_rows_not_truncated(monkeypatch, tmp_path):
+    """Two in-window ISO-timestamp rows must BOTH be counted.
+
+    Regression (Greptile P1): the state.db loop assigned ``_dt = _time.localtime(_ts)``
+    in its activity block, shadowing the ``import datetime as _dt`` module that
+    ``_safe_ts`` uses. After the first row, a later ISO-timestamp row raised
+    ``AttributeError`` at ``_dt.datetime.fromisoformat(...)``; the outer ``except``
+    stopped the loop and silently dropped that row and every row after it.
+    """
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    schema = (
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at TEXT, ended_at TEXT)"
+    )
+    rows = [
+        # Both within the 7-day window, both ISO-string timestamps.
+        {"id": "iso-a", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 10, "estimated_cost_usd": 0.01,
+         "started_at": "2026-05-30T12:00:00", "ended_at": "2026-05-30T12:00:00"},
+        {"id": "iso-b", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 200, "output_tokens": 20, "estimated_cost_usd": 0.02,
+         "started_at": "2026-05-29T12:00:00", "ended_at": "2026-05-29T12:00:00"},
+    ]
+    data = _call_insights_state_db_schema(monkeypatch, tmp_path, [], rows, schema, days="7", now=now)
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "iso-a" in ids and "iso-b" in ids, (
+        f"second ISO row truncated by _dt shadowing; got {sorted(ids)}")
+    assert data["total_sessions"] == 2
+    assert data["total_input_tokens"] == 300
+
