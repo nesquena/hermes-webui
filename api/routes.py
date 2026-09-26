@@ -24052,7 +24052,7 @@ def _start_chat_stream_for_session(
         # selection and model-capability coercion. The worker cannot resolve
         # config itself — a detached thread has no per-request profile context
         # and would read the process-global profile instead.
-        from api.gateway_chat import _gateway_session_api_key, _gateway_session_owner_cfg
+        from api.gateway_chat import _gateway_session_api_key, _gateway_session_base_url, _gateway_session_owner_cfg
         # #7170 round-7: capture BOTH the session config snapshot AND the
         # session Gateway API key on the request thread. The capture runs
         # AFTER the stream/pending-run are already registered (lines
@@ -24081,6 +24081,16 @@ def _start_chat_stream_for_session(
             # worker prefers the captured ``session_api_key`` and only falls
             # back to the env read for legacy direct callers.
             worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
+            # #7170 round-7 follow-up (greptile 2026-09-26 P1 "Gateway key
+            # crosses endpoints"): capture the session-owning profile's
+            # Gateway base URL on the same request thread. ``_gateway_base_url``
+            # reads ``os.environ`` first which holds the AMBIENT process-active
+            # profile's ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with
+            # the session's captured API key either fails auth or sends the
+            # session profile's bearer token to the wrong gateway. The worker
+            # prefers the captured ``session_base_url`` and only falls back to
+            # ``_gateway_base_url(cfg)`` for legacy direct callers.
+            worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
         except Exception:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting

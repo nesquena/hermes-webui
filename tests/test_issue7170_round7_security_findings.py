@@ -1,6 +1,6 @@
 """Regression coverage for the #7170 round-7 security findings.
 
-Three live findings from the 2026-09-25 / 2026-09-23 re-gate that this file
+Four live findings from the 2026-09-25 / 2026-09-26 re-gate that this file
 pins:
 
 A) [P1 security, 2026-09-25] ``api/gateway_chat.py:1322`` — the gateway worker
@@ -22,6 +22,14 @@ C) [P1, 2026-09-25] ``api/routes.py:24056`` — if ``_gateway_session_owner_cfg`
    handler only covers thread-start failures, so this leaves a registered
    stream with no worker and a pending Gateway-run entry. Subsequent chat
    starts for the session are blocked as though a stream were active.
+
+D) [P1 security, 2026-09-26] greptile "Gateway key crosses endpoints" on
+   ``api/gateway_chat.py:1400`` — the worker pairs the dispatch-captured
+   session API key with a URL that is read from ``os.environ`` (which on a
+   multi-profile instance holds the AMBIENT process-active profile's
+   ``HERMES_WEBUI_GATEWAY_BASE_URL``), so a request can send the session
+   profile's bearer token to the wrong gateway. The Gateway URL must be
+   captured at dispatch from the session-owning profile, alongside the key.
 """
 
 from collections import OrderedDict
@@ -274,6 +282,266 @@ def test_gateway_worker_sends_session_profile_api_key_not_process_env(
         f"Outgoing Authorization header is {auth!r}; expected 'Bearer KEY_FOR_PROFILE_B'. "
         "The worker read the process-env key (KEY_FOR_PROFILE_A) instead of the "
         "session profile's key — finding A is live."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding D: Gateway base URL must come from the session-owning profile
+# ---------------------------------------------------------------------------
+
+
+def _write_profile_env_full(
+    home: Path,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> None:
+    """Write a profile's .env with explicit api_key and/or base_url values."""
+    home.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if api_key is not None:
+        lines.append(f'HERMES_WEBUI_GATEWAY_API_KEY="{api_key}"')
+    if base_url is not None:
+        lines.append(f'HERMES_WEBUI_GATEWAY_BASE_URL="{base_url}"')
+    if not lines:
+        return
+    home.joinpath(".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def two_profiles_with_urls_and_keys(tmp_path, monkeypatch):
+    """Two profiles with DIFFERENT gateway ``HERMES_WEBUI_GATEWAY_BASE_URL``
+    AND ``HERMES_WEBUI_GATEWAY_API_KEY`` values, with the PROCESS env pinned
+    to profile A's URL and key — i.e. the cross-profile leak scenario that
+    greptile 2026-09-26 P1 calls out.
+
+    Ambient process profile A's URL/key are what ``_gateway_base_url()`` /
+    ``_gateway_api_key()`` would return from ``os.environ``. Session
+    profile B's URL/key are the ones the worker SHOULD send.
+    """
+    profile_a_home = tmp_path / "profiles" / "a"
+    profile_b_home = tmp_path / "profiles" / "b"
+    _write_profile_cfg(profile_a_home, provider="lmstudio")
+    _write_profile_cfg(profile_b_home, provider="anthropic")
+    # Profile A .env has its own URL/key (matches what the process env
+    # also holds — the "ambient" case).
+    _write_profile_env_full(
+        profile_a_home,
+        api_key="KEY_FOR_PROFILE_A",
+        base_url="http://profile-a.invalid:8642",
+    )
+    # Profile B .env has DIFFERENT URL/key — the session-owning values.
+    _write_profile_env_full(
+        profile_b_home,
+        api_key="KEY_FOR_PROFILE_B",
+        base_url="http://profile-b.invalid:8642",
+    )
+
+    # Pin ambient resolver to profile A.
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(profile_a_home / "config.yaml"))
+    cfg.reload_config()
+    # Pin process env to profile A's URL and key (the "wrong" values for
+    # a profile-B request). This mirrors the multi-profile deployment
+    # where the operator launches the WebUI with the active profile's
+    # .env already exported to os.environ.
+    monkeypatch.setenv(
+        "HERMES_WEBUI_GATEWAY_BASE_URL", "http://profile-a.invalid:8642"
+    )
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "KEY_FOR_PROFILE_A")
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+
+    # Pin session profile -> home resolution to profile B.
+    import api.models as _models_mod
+    monkeypatch.setattr(
+        _models_mod, "_get_profile_home", lambda profile: profile_b_home
+    )
+
+    yield cfg, profile_a_home, profile_b_home, monkeypatch
+
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    cfg.reload_config()
+
+
+def test_session_profile_base_url_resolves_from_session_home(
+    two_profiles_with_urls_and_keys,
+):
+    """``_gateway_session_base_url`` must read the session profile's
+    ``HERMES_WEBUI_GATEWAY_BASE_URL``, not the process env value. Without
+    the fix, the helper would return the process-env URL
+    (``http://profile-a.invalid:8642``) instead of the session profile's
+    URL (``http://profile-b.invalid:8642``).
+    """
+    _, _, profile_b_home, _ = two_profiles_with_urls_and_keys
+    s = models.new_session(profile="b")
+    s.save()
+    url = gateway_chat._gateway_session_base_url(s)
+    assert url == "http://profile-b.invalid:8642", (
+        f"_gateway_session_base_url returned {url!r}; expected "
+        "'http://profile-b.invalid:8642'. The session profile's .env must "
+        "win over the process env (which holds profile A's URL)."
+    )
+
+
+def test_dispatch_captures_session_profile_base_url_for_gateway_worker(
+    two_profiles_with_urls_and_keys,
+):
+    """``/api/chat/start`` must capture the session profile's gateway
+    base URL on the request thread (where the session profile's env is in
+    scope) and hand it to the detached worker as ``session_base_url`` —
+    the worker must NOT fall back to ``_gateway_base_url(cfg)`` (which
+    reads process env and would return profile A's URL for a profile-B
+    request).
+    """
+    cfg_mod, _, profile_b_home, monkeypatch = two_profiles_with_urls_and_keys
+
+    session_dir = profile_b_home.parent / "sessions_dispatch_url"
+    session_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured_thread: dict = {}
+
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            captured_thread["kwargs"] = kwargs
+            self.args = args
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace, **_kw: None)
+    monkeypatch.setattr(
+        routes, "create_stream_channel", lambda: create_stream_channel()
+    )
+    monkeypatch.setattr(routes.threading, "Thread", ImmediateThread)
+
+    s = models.new_session(profile="b")
+    s.pending_user_message = "hello"
+    s.pending_attachments = []
+    s.pending_started_at = 1.0
+    s.title = "Profile B"
+    s.messages = [{"role": "user", "content": "hello"}]
+    s.save()
+
+    os.environ["HERMES_WEBUI_CHAT_BACKEND"] = "gateway"
+
+    try:
+        response = routes._start_chat_stream_for_session(
+            s,
+            msg="hello",
+            attachments=[],
+            workspace=str(session_dir),
+            model=_GATEWAY_MODEL,
+            model_provider="anthropic",
+            external_runtime_owned=True,
+        )
+    finally:
+        del os.environ["HERMES_WEBUI_CHAT_BACKEND"]
+    assert response and "stream_id" in response
+
+    thread_payload = captured_thread.get("kwargs") or {}
+    worker_kwargs = thread_payload.get("kwargs") or {}
+    session_base_url = worker_kwargs.get("session_base_url")
+    assert session_base_url == "http://profile-b.invalid:8642", (
+        f"Dispatch handed worker session_base_url={session_base_url!r}; "
+        "expected 'http://profile-b.invalid:8642'. The worker must NOT "
+        "fall back to the process env (which holds profile A's URL) — "
+        "finding D is live."
+    )
+
+
+def test_gateway_worker_sends_session_profile_url_not_process_env(
+    two_profiles_with_urls_and_keys,
+):
+    """End-to-end: with dispatch captured, the worker's outgoing
+    ``urllib.request.urlopen`` call must target the SESSION profile's
+    gateway URL (``http://profile-b.invalid:8642``), NOT the
+    process-env URL (``http://profile-a.invalid:8642``).
+
+    This is the "Gateway key crosses endpoints" finding: if the worker
+    paired the session-captured API key (profile B) with the
+    process-env URL (profile A), the outgoing ``Authorization: Bearer
+    KEY_FOR_PROFILE_B`` header would be sent to profile A's gateway.
+    """
+    _, _, profile_b_home, monkeypatch = two_profiles_with_urls_and_keys
+
+    session_dir = profile_b_home.parent / "sessions_e2e_url"
+    session_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["headers"] = dict(req.headers or {})
+        captured["url"] = req.full_url if hasattr(req, "full_url") else req.get_full_url()
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        streaming, "_load_webui_prefill_context", lambda c: {"messages": []}
+    )
+    monkeypatch.setattr(
+        streaming, "_prefill_messages_with_webui_context", lambda ctx, c: []
+    )
+
+    s = models.new_session(profile="b")
+    s.pending_user_message = "hello"
+    s.pending_attachments = []
+    s.pending_started_at = 1.0
+    s.save()
+    stream_id = "stream-url-isolation"
+    s.active_stream_id = stream_id
+    channel = create_stream_channel()
+    STREAMS[stream_id] = channel
+
+    # Resolve cfg/api key/base URL the same way the dispatch would.
+    session_cfg = gateway_chat._gateway_session_owner_cfg(s)
+    session_api_key = gateway_chat._gateway_session_api_key(s)
+    session_base_url = gateway_chat._gateway_session_base_url(s)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "hello",
+        _GATEWAY_MODEL,
+        str(session_dir),
+        stream_id,
+        [],
+        model_provider="anthropic",
+        session_cfg=session_cfg,
+        session_api_key=session_api_key,
+        session_base_url=session_base_url,
+    )
+
+    sent_url = captured.get("url", "")
+    assert sent_url.startswith("http://profile-b.invalid:8642"), (
+        f"Outgoing request URL is {sent_url!r}; expected to start with "
+        "'http://profile-b.invalid:8642' (the session profile's URL). "
+        "The worker read the process-env URL "
+        "(http://profile-a.invalid:8642) instead of the session profile's "
+        "URL — finding D is live: profile B's bearer token is being sent "
+        "to profile A's gateway."
+    )
+    # And the process-env URL MUST NOT have been used.
+    assert not sent_url.startswith("http://profile-a.invalid:8642"), (
+        f"Outgoing request URL is {sent_url!r}; the process-env URL "
+        "(http://profile-a.invalid:8642) leaked into the worker. "
+        "This is the greptile 2026-09-26 P1 cross-endpoint leak."
     )
 
 

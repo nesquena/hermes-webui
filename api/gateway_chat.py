@@ -403,6 +403,62 @@ def _gateway_session_api_key(session) -> str:
     return str(raw).strip()
 
 
+def _gateway_session_base_url(session) -> str:
+    """Resolve the Gateway base URL for the profile owning ``session``.
+
+    Mirrors ``_gateway_session_api_key()``'s profile-isolation guarantee and
+    ``_gateway_endpoint_for_profile()``'s 'never the process-active profile'
+    resolution: the URL is read on the REQUEST thread from the
+    session-owning profile's env (with the loaded profile env stripped so
+    the process-active profile's URL cannot leak in), and the result is
+    handed into the detached gateway worker as ``session_base_url``.
+
+    A bare ``_gateway_base_url(cfg)`` inside the worker reads
+    ``os.environ`` first, and on a multi-profile instance
+    ``os.environ`` holds the AMBIENT process-active profile's
+    ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with the session's
+    captured API key either fails auth or sends the session profile's
+    bearer token to the wrong gateway (greptile 2026-09-26 P1, #7170
+    round-7 follow-up: "Gateway key crosses endpoints").
+
+    Returns the resolved URL (the default ``http://127.0.0.1:8642`` counts
+    as resolved) or ``""`` only when the helper could not determine the
+    session profile's home at all (a defensive failure mode the worker
+    treats identically to "no capture" and falls back to the historical
+    ``_gateway_base_url(cfg)`` path).
+    """
+    try:
+        from api import profiles as _profiles
+        from api.config import get_config_for_profile_home
+        from api.models import _get_profile_home
+        home = _get_profile_home(getattr(session, "profile", None))
+    except Exception:
+        return ""
+    if not home:
+        return ""
+    try:
+        # Never let the loaded profile env keys (process-active profile)
+        # override the session-owning profile's URL.
+        environ = {
+            k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys
+        }
+        environ.update(
+            _profiles.filter_runtime_env_for_gateway_parity(
+                _profiles.get_profile_runtime_env(home)
+            )
+        )
+    except Exception:
+        environ = None
+    try:
+        cfg_data = get_config_for_profile_home(home)
+    except Exception:
+        cfg_data = None
+    try:
+        return _gateway_base_url(cfg_data, environ)
+    except Exception:
+        return ""
+
+
 def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
     """Return True only when the operator has explicitly opted into the runs API path."""
     source = os.environ if environ is None else environ
@@ -1256,6 +1312,7 @@ def _run_gateway_chat_streaming(
     reattach_endpoint=None,
     session_cfg=None,
     session_api_key=None,
+    session_base_url=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -1284,6 +1341,18 @@ def _run_gateway_chat_streaming(
     worker prefers this captured value and only falls back to
     ``_gateway_api_key()`` for legacy direct callers that pre-date the
     capture.
+
+    ``session_base_url`` is the corresponding Gateway base URL the dispatch
+    captured for the session-owning profile (greptile 2026-09-26 P1,
+    #7170 round-7 follow-up "Gateway key crosses endpoints":
+    ``_gateway_base_url(cfg)`` reads ``os.environ`` first, which on a
+    multi-profile instance holds the AMBIENT process-active profile's
+    ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with the session's
+    captured API key either fails auth or sends the session profile's
+    bearer token to the wrong gateway). The worker prefers the captured
+    value and only falls back to ``_gateway_base_url(cfg)`` for legacy
+    direct callers that pre-date the capture (or when the helper returned
+    the empty string on a defensive failure).
     """
     q = peek_stream(stream_id)
     if q is None:
@@ -1397,7 +1466,22 @@ def _run_gateway_chat_streaming(
             _api_key = session_api_key
         else:
             _api_key = _gateway_api_key()
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _api_key)
+        # #7170 round-7 follow-up (greptile 2026-09-26 P1 "Gateway key crosses
+        # endpoints"): prefer the dispatch-captured session base URL (read on
+        # the request thread from the session-owning profile's env, with the
+        # loaded profile env stripped) over ``_gateway_base_url(cfg)``, which
+        # reads ``os.environ`` first and on a multi-profile instance holds the
+        # AMBIENT process-active profile's URL — pairing that with the
+        # session's captured api key either fails auth or sends the session
+        # profile's bearer token to the wrong gateway. Legacy direct callers
+        # that pre-date the capture pass ``session_base_url=None`` (or the
+        # helper returned "" on a defensive failure) and fall through to the
+        # historical ``_gateway_base_url(cfg)`` path.
+        if isinstance(session_base_url, str) and session_base_url:
+            _base_url = session_base_url
+        else:
+            _base_url = _gateway_base_url(cfg)
+        base_url, api_key = reattach_endpoint or (_base_url, _api_key)
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
