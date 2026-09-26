@@ -21,7 +21,7 @@ def _install_fake_hermes_models(monkeypatch, provider_model_ids):
     monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
 
 
-def _configure_codex(monkeypatch, tmp_path, default="gpt-5.3-codex-spark"):
+def _configure_codex(monkeypatch, tmp_path, default="gpt-5.5"):
     monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "cfg", {
@@ -32,22 +32,23 @@ def _configure_codex(monkeypatch, tmp_path, default="gpt-5.3-codex-spark"):
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
     monkeypatch.setattr(config, "_cfg_path", config._get_config_path(), raising=False)
     config.invalidate_models_cache()
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
 
-def test_openai_codex_group_uses_provider_model_ids_for_spark(monkeypatch, tmp_path):
-    """Codex-only models from the Codex catalog must surface in /api/models.
+def test_openai_codex_group_uses_provider_model_ids(monkeypatch, tmp_path):
+    """Models from live Codex discovery must surface in /api/models.
 
-    The static WebUI fallback chronically drifts.  ``gpt-5.3-codex-spark`` is
-    the regression case from #1680: it is discoverable by the Codex provider
-    resolver but was missing from the picker because get_available_models()
-    copied _PROVIDER_MODELS["openai-codex"] without asking hermes_cli.
+    The live account catalog can contain models absent from the static WebUI
+    fallback, so get_available_models() must ask hermes_cli for Codex models.
     """
     calls = []
 
     def provider_model_ids(provider):
         calls.append(provider)
         assert provider == "openai-codex"
-        return ["gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.3-codex"]
+        return ["gpt-6-astra"]
 
     _install_fake_hermes_models(monkeypatch, provider_model_ids)
     _configure_codex(monkeypatch, tmp_path)
@@ -57,34 +58,31 @@ def test_openai_codex_group_uses_provider_model_ids_for_spark(monkeypatch, tmp_p
     codex_groups = [g for g in result["groups"] if g.get("provider_id") == "openai-codex"]
     assert "openai-codex" in calls
     assert codex_groups, "OpenAI Codex group should be present"
-    assert "gpt-5.3-codex-spark" in _flatten_ids(codex_groups)
-    assert codex_groups[0]["models"][0]["label"] == "GPT 5.4"
+    assert "gpt-6-astra" not in [m["id"] for m in config._PROVIDER_MODELS["openai-codex"]]
+    assert any(m["id"] == "gpt-6-astra" and m["label"] == "GPT 6 Astra" for g in codex_groups for m in g["models"])
 
 
 def test_openai_codex_group_merges_visible_codex_cache_models(monkeypatch, tmp_path):
     """Visible Codex CLI cache models should appear even if API-filtered.
 
-    Michael's local Codex cache lists ``gpt-5.3-codex-spark`` with
-    ``supported_in_api: false``.  The agent helper currently filters those IDs
-    out, but the WebUI picker is a Codex-model selection surface and should
-    mirror the visible Codex catalog instead of hiding Spark.
+    A visible cache entry may have ``supported_in_api: false`` and be absent
+    from live discovery; the WebUI picker should still include that entry.
     """
     def provider_model_ids(provider):
         assert provider == "openai-codex"
-        return ["gpt-5.4", "gpt-5.3-codex"]
+        return ["gpt-5.5"]
 
     _install_fake_hermes_models(monkeypatch, provider_model_ids)
-    _configure_codex(monkeypatch, tmp_path, default="gpt-5.4")
+    _configure_codex(monkeypatch, tmp_path)
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir()
     (codex_home / "models_cache.json").write_text(
         json.dumps(
             {
                 "models": [
-                    {"slug": "gpt-5.4", "visibility": "list", "priority": 0},
+                    {"slug": "gpt-5.5", "visibility": "list", "priority": 0},
                     {
-                        "slug": "gpt-5.3-codex-spark",
+                        "slug": "codex-cache-only-test",
                         "visibility": "list",
                         "supported_in_api": False,
                         "priority": 7,
@@ -95,11 +93,9 @@ def test_openai_codex_group_merges_visible_codex_cache_models(monkeypatch, tmp_p
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-
     result = config.get_available_models()
 
     codex_groups = [g for g in result["groups"] if g.get("provider_id") == "openai-codex"]
     ids = _flatten_ids(codex_groups)
-    assert "gpt-5.3-codex-spark" in ids
+    assert "codex-cache-only-test" in ids
     assert "hidden-test-model" not in ids

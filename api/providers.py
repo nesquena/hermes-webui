@@ -2693,14 +2693,11 @@ def get_providers() -> dict[str, Any]:
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)
         # OpenAI Codex account catalogs drift independently from WebUI releases.
-        # The model picker already prefers hermes_cli + Codex local cache for
-        # this provider (the agent's `provider_model_ids("openai-codex")` filters
-        # IDs with `supported_in_api: false`, but Codex CLI still surfaces some
-        # of those — notably `gpt-5.3-codex-spark` from #1680 — in its picker).
-        # Merge both sources here so the providers card matches the picker
-        # exactly. Static entries remain the offline fallback when live
-        # discovery and the local Codex cache are both unavailable. (#1807
-        # follow-up to v0.51.19 #1812.)
+        # The model picker combines hermes_cli discovery with visible local
+        # Codex cache entries. Merge both sources here so the providers card
+        # matches the picker. Static entries are the offline fallback when live
+        # discovery and the local cache are unavailable. (#1807 follow-up to
+        # v0.51.19 #1812.)
         if pid == "openai-codex":
             live_ids = _read_live_provider_model_ids("openai-codex")
             live_id_set = set(live_ids)

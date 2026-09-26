@@ -1798,9 +1798,12 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
-        {"id": "gpt-5.5", "label": "GPT-5.5"},
-        {"id": "gpt-5.4", "label": "GPT-5.4"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
+        {"id": "gpt-6-sol",      "label": "GPT-6 Sol"},
+        {"id": "gpt-6-luna",     "label": "GPT-6 Luna"},
+        {"id": "gpt-5.6-sol",    "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-terra",  "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-luna",   "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.5",        "label": "GPT-5.5"},
     ],
     "google": [
         {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
@@ -8576,9 +8579,9 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
     The agent's provider_model_ids('openai-codex') intentionally filters IDs
-    with ``supported_in_api: false``. Codex CLI still lists some of those models
-    in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
-    merges this visible local catalog to stay in sync with Codex itself.
+    with ``supported_in_api: false``. Codex's visible catalog may still include
+    some of those models, so the WebUI merges this local catalog with live
+    discovery.
     """
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
@@ -9748,12 +9751,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "openai-codex":
-                    # Codex account catalogs drift faster than WebUI releases
-                    # (for example gpt-5.3-codex-spark in #1680). Ask the
-                    # agent's Codex resolver first so /api/models inherits the
-                    # live Codex API / local ~/.codex cache / static fallback
-                    # chain instead of freezing the picker to WebUI's curated
-                    # _PROVIDER_MODELS snapshot.
+                    # Codex account catalogs drift independently from WebUI
+                    # releases, so ask the agent's resolver first and merge the
+                    # visible local cache below before falling back to WebUI's
+                    # static _PROVIDER_MODELS snapshot.
                     raw_models = []
                     codex_ids = []
                     try:
