@@ -3236,21 +3236,16 @@ function _modelStateForSelect(sel, modelId){
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
     // Normally-rendered catalog options only carry the qualified
-    // @custom:<slug>:<model> value — data-model is set solely by the fallback
-    // injection path (_ensureModelOptionInDropdown). When it is missing, strip
-    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
-    // the model id (#6884). The prefix must come from the option metadata's
-    // authoritative provider (routedProvider), NOT from explicitProvider: the
-    // latter re-parses the value at its LAST colon, so a colon-bearing model
-    // id like @custom:backup:model-a:free would otherwise strip to just
-    // "free" (re-gate on the #6221 family). Only custom providers are
-    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
-    // provider namespace and must be preserved (#1771).
+    // @provider:<model> value — data-model is set solely by the fallback
+    // injection path (_ensureModelOptionInDropdown) or when explicitly populated.
+    // When it is missing, strip the @<provider>: prefix instead of sending the raw
+    // dropdown value as the model id (#6884, #7860). Only the synthetic @safe:
+    // namespace is preserved as a model identifier (#1771).
     const effectiveProvider=routedProvider||explicitProvider;
     const effectiveProviderLc=effectiveProvider.toLowerCase();
-    const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
     const explicitPrefix=`@${effectiveProvider}:`;
-    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    const shouldStripPrefix=effectiveProviderLc!=='safe';
+    const strippedModel=shouldStripPrefix&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
       ?value.slice(explicitPrefix.length)
       :value;
     return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
@@ -3285,23 +3280,39 @@ function _captureModelDropdownSelection(sel){
   return {model:String(sel.value||''),model_provider:null};
 }
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
-  if(!model) return null;
-  const explicitProvider=typeof _providerFromModelValue==='function'
-    ? _providerFromModelValue(model)
-    : '';
-  if(explicitProvider) return explicitProvider;
+  const sessionModel=String((S&&S.session&&S.session.model)||'').trim();
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+
+  // 1. Explicit provider embedded in the model value (@provider:model) always wins.
+  if(model){
+    const explicitProvider=typeof _providerFromModelValue==='function'
+      ? _providerFromModelValue(model)
+      : '';
+    if(explicitProvider) return explicitProvider;
+  }
+
+  // 2. Stored session provider: valid when the session's recorded model matches
+  // the outgoing model (or when no session model was recorded yet). A stale sessionProvider
+  // from a different previous model must NOT overwrite a newly selected model (#7860).
+  if(sessionProvider && (!sessionModel || sessionModel===model)){
+    return sessionProvider;
+  }
+
+  // 3. Active dropdown selection if it matches the outgoing model
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+  if(sel&&typeof _modelStateForSelect==='function'){
     try{
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
-        return dropdownState.model_provider||null;
+        if(dropdownState.model_provider) return dropdownState.model_provider;
       }
     }catch(_){}
   }
+
+  if(!model) return sessionProvider;
+
+  // 4. Persisted model state from localStorage
   if(typeof _readPersistedModelState==='function'){
     try{
       const persisted=_readPersistedModelState();
@@ -3310,7 +3321,8 @@ function _modelProviderForSend(modelId){
       }
     }catch(_){}
   }
-  return null;
+
+  return sessionProvider;
 }
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
@@ -3847,6 +3859,13 @@ async function populateModelDropdown(opts={}){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
+        if(g.provider_id){
+          opt.dataset.provider=g.provider_id;
+          const pfx=`@${g.provider_id}:`;
+          if(m.id && m.id.toLowerCase().startsWith(pfx.toLowerCase())){
+            opt.dataset.model=m.id.slice(pfx.length);
+          }
+        }
         if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
           opt.dataset.fast='1';
         }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){

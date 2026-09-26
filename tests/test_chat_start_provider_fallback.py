@@ -75,6 +75,7 @@ function makeSelect(options, initialValue) {
     const group = {tagName: 'OPTGROUP', dataset: {provider: item.provider || ''}};
     const opt = {value: item.value, parentElement: group, dataset: {}};
     if (item.optionProvider) opt.dataset.provider = item.optionProvider;
+    if (item.optionModel) opt.dataset.model = item.optionModel;
     sel.options.push(opt);
   }
   sel.value = initialValue || '';
@@ -102,7 +103,7 @@ for (const name of [
 const args = JSON.parse(process.argv[3]);
 modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
-var S = {session: {model_provider: args.sessionProvider || null}};
+var S = {session: {model: args.sessionModel || null, model_provider: args.sessionProvider || null}};
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -253,3 +254,61 @@ def test_new_session_does_not_fallback_to_stale_named_custom_provider():
     assert "!_familyMismatch" in assignment
     assert "!_fallbackIsNamedCustom" in assignment
     assert "_fallbackProvider||null" in assignment
+
+
+@node_test
+def test_model_state_strips_qualified_non_default_provider_prefix(driver_path):
+    """#7860 Defect 2: non-default providers qualified in catalog as @provider:model
+    must store bare model name and provider, not keep @provider: on the model."""
+    state = _run_model_state_helper(driver_path, {
+        "model": "@claude-subscription-directsdk-experimental:claude-sonnet-5[1m]",
+        "initialValue": "@claude-subscription-directsdk-experimental:claude-sonnet-5[1m]",
+        "options": [{
+            "provider": "claude-subscription-directsdk-experimental",
+            "optionProvider": "claude-subscription-directsdk-experimental",
+            "value": "@claude-subscription-directsdk-experimental:claude-sonnet-5[1m]",
+        }],
+    })
+
+    assert state == {
+        "model": "claude-sonnet-5[1m]",
+        "model_provider": "claude-subscription-directsdk-experimental",
+    }
+
+
+@node_test
+def test_model_state_preserves_safe_provider_prefix(driver_path):
+    """#1771: @safe:gpt-4o-mini is a synthetic namespace and must be preserved."""
+    state = _run_model_state_helper(driver_path, {
+        "model": "@safe:gpt-4o-mini",
+        "initialValue": "@safe:gpt-4o-mini",
+        "options": [{
+            "provider": "safe",
+            "optionProvider": "safe",
+            "value": "@safe:gpt-4o-mini",
+        }],
+    })
+
+    assert state == {
+        "model": "@safe:gpt-4o-mini",
+        "model_provider": "safe",
+    }
+
+
+@node_test
+def test_model_provider_for_send_overrides_stale_session_provider_when_model_changed(driver_path):
+    """#7860 Defect 1: picking a model from a different provider must send to that
+    provider, not be overridden by the stale session provider from the previous model."""
+    provider = _run_helper(driver_path, {
+        "model": "claude-opus-5-5",
+        "sessionModel": "gpt-5.5",
+        "sessionProvider": "openai-codex",
+        "initialValue": "claude-opus-5-5",
+        "options": [
+            {"provider": "openai-codex", "value": "gpt-5.5"},
+            {"provider": "claude-subscription-directsdk-experimental", "value": "claude-opus-5-5"},
+        ],
+    })
+
+    assert provider == "claude-subscription-directsdk-experimental"
+
